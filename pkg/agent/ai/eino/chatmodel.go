@@ -11,81 +11,151 @@
 package eino
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/egress"
 	"github.com/VersusControl/versus-incident/pkg/config"
 )
 
-// BaseURL is overridable for tests. Production code passes "" to use
-// the Eino / go-openai default (https://api.openai.com/v1). The agent
-// admin endpoints never expose this; only the chatmodel test sets it
-// to point at an httptest server.
 type Options struct {
 	HTTPClient *http.Client
 	BaseURL    string
 	Timeout    time.Duration
 
-	// AuthKeyFunc is an OPTIONAL per-request Authorization override. When
-	// non-nil the outbound transport calls it for every request: if it
-	// returns ok the request's Authorization header is replaced with
-	// "Bearer <key>" AFTER the SDK set its YAML-keyed header (so the
-	// override wins); ok=false leaves the YAML-keyed header untouched. When
-	// nil the transport is a plain pass-through and the client is used
-	// exactly as before — this is the OSS byte-for-byte path. The package
-	// stays generic: it knows nothing about who supplies the key (the agent
-	// package injects a function backed by its runtime AISettingsResolver,
-	// which avoids an import cycle because eino never imports agent).
-	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+	// RuntimeKeyFunc is an OPTIONAL per-request provider credential override.
+	// Provider builders apply it using their native authentication scheme.
+	// ok=false leaves the SDK's configured key untouched; ok=true with an
+	// empty key explicitly clears credentials for that request.
+	RuntimeKeyFunc func(ctx context.Context) (key string, ok bool)
+	EgressGuard    egress.Guard
 }
 
-// authRoundTripper injects a runtime Authorization override onto every
-// outbound request. It consults keyFn per request, so a hot-swapped key
-// takes effect without rebuilding the client. Per the http.RoundTripper
-// contract it must not mutate the input request, so it clones the request
-// (which deep-copies the header) before writing the override.
-type authRoundTripper struct {
-	base  http.RoundTripper
-	keyFn func(ctx context.Context) (key string, ok bool)
+type credentialPolicy uint8
+
+const (
+	credentialBearer credentialPolicy = iota
+	credentialClaude
+	credentialGemini
+	credentialNone
+)
+
+var credentialHeaders = []string{"Authorization", "x-api-key", "x-goog-api-key"}
+
+type runtimeKeyRoundTripper struct {
+	base   http.RoundTripper
+	keyFn  func(ctx context.Context) (key string, ok bool)
+	policy credentialPolicy
 }
 
-func (a authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := a.base
+func (t runtimeKeyRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	if a.keyFn == nil {
+	if t.keyFn == nil && t.policy != credentialNone {
 		return base.RoundTrip(req)
 	}
-	key, ok := a.keyFn(req.Context())
-	if !ok {
-		// No opinion: send the request exactly as the SDK built it.
+	key, ok := "", false
+	if t.keyFn != nil {
+		key, ok = t.keyFn(req.Context())
+	}
+	if !ok && t.policy != credentialNone {
 		return base.RoundTrip(req)
 	}
 	clone := req.Clone(req.Context())
-	clone.Header.Set("Authorization", "Bearer "+key)
+	for _, header := range credentialHeaders {
+		clone.Header.Del(header)
+	}
+	if key != "" {
+		switch t.policy {
+		case credentialBearer:
+			clone.Header.Set("Authorization", "Bearer "+key)
+		case credentialClaude:
+			clone.Header.Set("x-api-key", key)
+		case credentialGemini:
+			clone.Header.Set("x-goog-api-key", key)
+		}
+	}
 	return base.RoundTrip(clone)
 }
 
-// withAuthRoundTripper returns an *http.Client whose transport injects the
-// runtime Authorization override. When keyFn is nil the input client is
-// returned unchanged (nil included), so the no-resolver path is byte-for-
-// byte identical to the pre-seam wiring. The input client is never mutated:
-// a shallow copy is wrapped so the caller's client keeps its own transport.
-func withAuthRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool)) *http.Client {
-	if keyFn == nil {
-		return c
-	}
+func (o Options) runtimeKeyFunc() func(context.Context) (string, bool) {
+	return o.RuntimeKeyFunc
+}
+
+func withGuardedRuntimeKeyRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx context.Context) (key string, ok bool), policy credentialPolicy, guard egress.Guard) *http.Client {
 	if c == nil {
 		c = &http.Client{Timeout: timeout}
 	}
+	if guard == nil {
+		guard = egress.NewDefaultGuard()
+	}
 	wrapped := *c
-	wrapped.Transport = authRoundTripper{base: c.Transport, keyFn: keyFn}
+	wrapped.Transport = guardedRoundTripper{base: runtimeKeyRoundTripper{base: c.Transport, keyFn: keyFn, policy: policy}, guard: guard}
+	checkRedirect := c.CheckRedirect
+	wrapped.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if policy != credentialNone && len(via) > 0 && !sameOrigin(request.URL, via[len(via)-1].URL) {
+			return http.ErrUseLastResponse
+		}
+		if checkRedirect != nil {
+			return checkRedirect(request, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return nil
+	}
 	return &wrapped
+}
+
+type guardedRoundTripper struct {
+	base  http.RoundTripper
+	guard egress.Guard
+}
+
+func (transport guardedRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil || request.Body == nil || request.Body == http.NoBody {
+		return nil, egress.ErrEgressBlocked
+	}
+	if err := request.Context().Err(); err != nil {
+		return nil, errors.Join(egress.ErrEgressBlocked, err)
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		return nil, egress.ErrEgressBlocked
+	}
+	_ = request.Body.Close()
+	kind := egress.PartHistory
+	if strings.Contains(strings.ToLower(request.URL.Path), "embed") {
+		kind = egress.PartEmbedding
+	}
+	result, err := egress.Apply(request.Context(), transport.guard, egress.Request{
+		Destination: "model:provider",
+		Parts:       []egress.Part{{Kind: kind, Text: string(body)}},
+	})
+	if err != nil {
+		return nil, egress.ErrEgressBlocked
+	}
+	cleanBody := []byte(result.Parts[0].Text)
+	clone := request.Clone(request.Context())
+	clone.Body = io.NopCloser(bytes.NewReader(cleanBody))
+	clone.ContentLength = int64(len(cleanBody))
+	clone.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(cleanBody)), nil }
+	return transport.base.RoundTrip(clone)
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	return left != nil && right != nil && strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host)
 }
 
 // NewChatModel builds an Eino ChatModel configured for JSON-mode
@@ -100,7 +170,7 @@ func withAuthRoundTripper(c *http.Client, timeout time.Duration, keyFn func(ctx 
 // for tests).
 func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (model.BaseChatModel, error) {
 	if cfg.Model == "" {
-		return nil, fmt.Errorf("eino: model is empty")
+		return nil, emptyModelConfigError(false)
 	}
 
 	timeout := opts.Timeout
@@ -117,17 +187,23 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 		maxCompletionTokens = 2048
 	}
 
-	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
+	provider, baseURL, err := configuredChatEndpoint(cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	return newProviderChatModel(ctx, provider, chatModelRequest{
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
-		baseURL:     resolveBaseURL(opts.BaseURL, cfg.BaseURL),
-		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
+		baseURL:     baseURL,
+		httpClient:  opts.HTTPClient,
+		runtimeKey:  opts.runtimeKeyFunc(),
 		timeout:     timeout,
 		maxTokens:   maxCompletionTokens,
 		temperature: resolveTemperature(cfg.Temperature, 0.2),
 		// Force JSON-mode so ParseFinding can decode the reply with the
 		// same tolerance it had under the raw HTTP client.
-		jsonMode: true,
+		jsonMode:    true,
+		egressGuard: opts.EgressGuard,
 	})
 }
 
@@ -141,7 +217,7 @@ func NewChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (
 // providers to reject the tool-call turns.
 func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts Options) (model.ToolCallingChatModel, error) {
 	if cfg.Model == "" {
-		return nil, fmt.Errorf("eino: model is empty")
+		return nil, emptyModelConfigError(false)
 	}
 
 	timeout := opts.Timeout
@@ -156,16 +232,48 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 		maxCompletionTokens = 4096
 	}
 
-	return newProviderChatModel(ctx, cfg.Provider, chatModelRequest{
+	provider, baseURL, err := configuredChatEndpoint(cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	return newProviderChatModel(ctx, provider, chatModelRequest{
 		apiKey:      cfg.APIKey,
 		model:       cfg.Model,
-		baseURL:     resolveBaseURL(opts.BaseURL, cfg.BaseURL),
-		httpClient:  withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
+		baseURL:     baseURL,
+		httpClient:  opts.HTTPClient,
+		runtimeKey:  opts.runtimeKeyFunc(),
 		timeout:     timeout,
 		maxTokens:   maxCompletionTokens,
 		temperature: resolveTemperature(cfg.Temperature, 0.2),
 		jsonMode:    false,
+		egressGuard: opts.EgressGuard,
 	})
+}
+
+func configuredChatEndpoint(cfg config.AgentAIConfig, opts Options) (string, string, error) {
+	baseURL := strings.TrimSpace(cfg.BaseURL)
+	if baseURL != "" {
+		if err := ValidateBaseURL(baseURL); err != nil {
+			return "", "", err
+		}
+		return DefaultProvider, baseURL, nil
+	}
+	return cfg.Provider, opts.BaseURL, nil
+}
+
+// ValidateBaseURL accepts only absolute HTTP(S) endpoints without userinfo,
+// query parameters, or fragments. The same policy is used at config load and
+// runtime settings write boundaries; the value is never included in errors.
+func ValidateBaseURL(baseURL string) error {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return nil
+	}
+	endpoint, err := url.Parse(baseURL)
+	if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return &ConfigError{message: "eino: base_url must be an absolute HTTP(S) URL without credentials, query, or fragment"}
+	}
+	return nil
 }
 
 // A NEGATIVE value is the explicit "omit temperature" sentinel: it returns nil
@@ -176,18 +284,6 @@ func NewToolCallingChatModel(ctx context.Context, cfg config.AgentAIConfig, opts
 // to set -1 per reasoning deployment; the sentinel remains as a manual override
 // for any model the family list does not yet cover. A zero value inherits the
 // supplied default; any other value is sent verbatim.
-// resolveBaseURL picks the effective endpoint override. The test-only
-// opts.BaseURL seam wins when set (httptest servers in unit tests); otherwise
-// the operator-configured cfg.BaseURL (AGENT_AI_BASE_URL / agent.ai.base_url)
-// is used. When both are empty the provider builder applies its own default
-// (e.g. the local LiteLLM proxy).
-func resolveBaseURL(optsBaseURL, cfgBaseURL string) string {
-	if optsBaseURL != "" {
-		return optsBaseURL
-	}
-	return cfgBaseURL
-}
-
 func resolveTemperature(configured, def float64) *float32 {
 	if configured < 0 {
 		return nil

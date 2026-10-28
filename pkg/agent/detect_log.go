@@ -50,7 +50,14 @@ type DetectEvent struct {
 	// RuleSeverity is the operator-declared severity floor carried from the
 	// source signals (empty for auto-discovered signals). Persisted so the
 	// declared-severity-honoured path is auditable/testable.
-	RuleSeverity string `json:"rule_severity,omitempty"`
+	RuleSeverity        string `json:"rule_severity,omitempty"`
+	EpisodeID           string `json:"episode_id,omitempty"`
+	IncidentID          string `json:"incident_id,omitempty"`
+	OccurrenceDelta     int64  `json:"occurrence_delta,omitempty"`
+	OccurrenceCount     int64  `json:"occurrence_count,omitempty"`
+	EpisodeAction       string `json:"episode_action,omitempty"`
+	NotificationOutcome string `json:"notification_outcome,omitempty"`
+	EpisodeError        string `json:"episode_error,omitempty"`
 
 	// AI call (empty when the model was not invoked — cached and the
 	// "emitted_basic*" templated-alert outcomes carry no model call;

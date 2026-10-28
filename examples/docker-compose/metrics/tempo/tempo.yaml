@@ -1,6 +1,6 @@
 # Minimal single-binary Tempo config for the optional traces overlay.
 # Receives OTLP over HTTP (:4318) from the loadgen and serves the search
-# API on :3200 that the Versus `traces` source / `query_traces` tool query.
+# API on :3200 for a separately configured licensed `traces` source.
 server:
   http_listen_port: 3200
 

@@ -1,13 +1,29 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   Activity,
+  BellOff,
+  Boxes,
+  ChartNoAxesCombined,
   ChevronLeft,
   ChevronRight,
+  CircleGauge,
+  GitBranch,
   Flame,
+  LayoutDashboard,
   Lock,
+  MessageSquare,
+  Route,
+  ScrollText,
+  Search,
+  Settings,
   ShieldCheck,
+  ShipWheel,
+  Siren,
   Sparkles,
+  Target,
+  Users,
+  UserRoundCog,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
@@ -15,6 +31,7 @@ import clsx from "clsx";
 import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
+import { useDeploymentOrg } from "@/lib/useDeploymentOrg";
 
 const COLLAPSE_KEY = "versus.sidebar.collapsed";
 
@@ -51,14 +68,21 @@ interface SideItem {
   // Absent for in-development placeholders — those aren't wired to a route yet.
   to?: string;
   label: string;
+  icon: LucideIcon;
   end?: boolean;
   dim?: boolean;
   dimTitle?: string;
   locked?: boolean;
+  enterpriseOnly?: boolean;
+  requiresAgent?: boolean;
   // A greenlit-but-unbuilt capability: renders as a non-clickable, dimmed row
   // with an "in development" indicator instead of a NavLink. Never navigates
   // and never shows active state, independent of agent/enterprise state.
   inDev?: boolean;
+}
+
+interface AgentSideItem extends SideItem {
+  zone: "Agent" | "AI";
 }
 
 // A nav zone: a job-grouped section with a representative icon (shown beside the
@@ -68,6 +92,19 @@ interface SideZone {
   title: string;
   icon: LucideIcon;
   items: SideItem[];
+}
+
+function partitionAgentItems(items: AgentSideItem[], isOSS: boolean) {
+  const visible = (zone: AgentSideItem["zone"]) =>
+    items.filter(
+      (item) => item.zone === zone && (!isOSS || !item.enterpriseOnly),
+    );
+
+  return {
+    Agent: visible("Agent"),
+    AI: visible("AI"),
+    Enterprise: isOSS ? items.filter((item) => item.enterpriseOnly) : [],
+  };
 }
 
 export function SidebarContent({
@@ -92,16 +129,10 @@ export function SidebarContent({
   });
   const agentOff = configQ.data?.enable === false;
 
-  // The agent status route (/api/agent/status) is only mounted when the agent
-  // is enabled, so skip the poll when it's off — otherwise it 404s and the
-  // runbooks hint flickers. Disabled query → data undefined → runbooks off.
-  const statusQ = useQuery({
-    queryKey: ["status"],
-    queryFn: api.status,
-    enabled: !agentOff,
-    staleTime: 30_000,
-    retry: 1,
-  });
+  const deploymentOrg = useDeploymentOrg();
+  const isOSS =
+    deploymentOrg.error instanceof ApiError &&
+    (deploymentOrg.error.status === 403 || deploymentOrg.error.status === 404);
 
   // Probe the enterprise baselines endpoint once to determine if Metrics/Traces
   // are available. A 403 (no intelligence license) or 404 (OSS binary — route
@@ -125,19 +156,22 @@ export function SidebarContent({
   });
   const enterpriseLocked = baselinesProbe.data === false;
 
-  const runbooksAvailable = statusQ.data?.runbooks_available ?? false;
-
   const respond: SideItem[] = [
-    { to: "/now", label: "Now" },
-    { to: "/incidents", label: "Incidents" },
+    { to: "/now", label: "Now", icon: CircleGauge },
+    { to: "/incidents", label: "Incidents", icon: Siren },
+    { to: "/agent/chat", label: "Chat", icon: MessageSquare, requiresAgent: true },
   ];
-  const agent: SideItem[] = [
-    { to: "/agent", label: "Overview", end: true },
-    { to: "/agent/services", label: "Services" },
-    { to: "/agent/logs", label: "Logs" },
+  const agent: AgentSideItem[] = [
+    { to: "/agent", label: "Overview", icon: LayoutDashboard, end: true, zone: "Agent", requiresAgent: true },
+    { to: "/agent/services", label: "Services", icon: Boxes, zone: "Agent", requiresAgent: true },
+    { to: "/agent/logs", label: "Logs", icon: ScrollText, zone: "Agent", requiresAgent: true },
     {
       to: "/agent/metrics",
       label: "Metrics",
+      icon: ChartNoAxesCombined,
+      zone: "Agent",
+      requiresAgent: true,
+      enterpriseOnly: true,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked
@@ -147,6 +181,10 @@ export function SidebarContent({
     {
       to: "/agent/traces",
       label: "Traces",
+      icon: Route,
+      zone: "Agent",
+      requiresAgent: true,
+      enterpriseOnly: true,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked
@@ -154,72 +192,91 @@ export function SidebarContent({
         : undefined,
     },
   ];
-  // AI groups the agent's reasoning surfaces — the Decisions it makes and
-  // the SLIs/SLOs it recommends — apart from the raw learned-catalog views
-  // above. SLIs/SLOs stays enterprise-gated; Decisions is ungated. Both keep
-  // their existing routes; this is purely a nav regrouping.
-  const ai: SideItem[] = [
-    { to: "/agent/decisions", label: "Decisions" },
-    { to: "/analyses", label: "Analyses" },
-    {
-      to: "/agent/slo",
-      label: "SLIs/SLOs",
-      locked: enterpriseLocked,
-      dim: enterpriseLocked,
-      dimTitle: enterpriseLocked
-        ? "Enterprise feature — requires an intelligence license"
-        : undefined,
-    },
+  // AI groups the agent's tools and reasoning surfaces. Enterprise and
+  // runtime availability gates stay attached to their existing destinations.
+  const ai: AgentSideItem[] = [
+    { to: "/agent/decisions", label: "Decisions", icon: GitBranch, zone: "AI", requiresAgent: true },
+    { to: "/analyses", label: "Analyses", icon: Search, zone: "AI", requiresAgent: true },
     {
       to: "/agent/alert-fatigue",
       label: "Alert fatigue",
+      icon: BellOff,
+      zone: "AI",
+      requiresAgent: true,
+      enterpriseOnly: true,
       locked: enterpriseLocked,
       dim: enterpriseLocked,
       dimTitle: enterpriseLocked
-        ? "Enterprise feature — requires an intelligence license"
-        : undefined,
+      ? "Enterprise feature — requires an intelligence license"
+      : undefined,
     },
-  ];
-
-  const tools: SideItem[] = [
     {
-      to: "/agent/runbooks",
-      label: "Runbooks",
-      // Visible-with-hint instead of vanishing while status loads/fails
-      // (empty-nav-state rule). The page explains the 503 case.
-      dim: !runbooksAvailable,
-      dimTitle: runbooksAvailable
-        ? undefined
-        : "Requires the AI subsystem and a storage backend — open for details",
+      to: "/agent/slo",
+      label: "SLIs/SLOs",
+      icon: Target,
+      zone: "AI",
+      requiresAgent: true,
+      enterpriseOnly: true,
+      locked: enterpriseLocked,
+      dim: enterpriseLocked,
+      dimTitle: enterpriseLocked
+      ? "Enterprise feature — requires an intelligence license"
+      : undefined,
     },
-  ];
-  const manage: SideItem[] = [
-    { to: "/people", label: "People" },
-    { to: "/admin", label: "Admin" },
-    { to: "/settings", label: "Settings" },
+    { to: "/agent/tools", label: "Connectors & Tools", icon: Wrench, zone: "AI", requiresAgent: false },
   ];
 
-  // When the agent is disabled (agent.enable=false) every Agent view and the
-  // agent-backed Runbooks tool are non-functional. Dim + lock them with a
-  // clear hint (visible-with-hint) so they read as disabled instead
-  // of navigating to empty/erroring pages.
+  const manage: SideItem[] = [
+    { to: "/people", label: "People", icon: Users },
+    { to: "/admin", label: "Admin", icon: UserRoundCog },
+    { to: "/settings", label: "Settings", icon: Settings },
+  ];
+
+  // When the agent is disabled, lock only execution-backed destinations. The
+  // Tool catalog remains readable so operators can inspect and configure it.
   const AGENT_OFF_HINT =
     "AI agent is disabled — set agent.enable to use these views";
   const applyAgentOff = (items: SideItem[]): SideItem[] =>
     agentOff
-      ? items.map((it) => ({
-          ...it,
-          dim: true,
-          locked: true,
-          dimTitle: AGENT_OFF_HINT,
-        }))
+      ? items.map((it) =>
+          it.requiresAgent
+            ? {
+                ...it,
+                dim: true,
+                locked: true,
+                dimTitle: AGENT_OFF_HINT,
+              }
+            : it,
+        )
       : items;
 
+  const partitioned = partitionAgentItems([...agent, ...ai], isOSS);
   const zones: SideZone[] = [
-    { title: "Respond", icon: Flame, items: respond },
-    { title: "Agent", icon: Activity, items: applyAgentOff(agent) },
-    { title: "AI", icon: Sparkles, items: applyAgentOff(ai) },
-    { title: "Tools", icon: Wrench, items: applyAgentOff(tools) },
+    { title: "Respond", icon: Flame, items: applyAgentOff(respond) },
+    {
+      title: "Connectors",
+      icon: ShipWheel,
+      items: [{ to: "/agent/kubernetes", label: "Kubernetes", icon: ShipWheel }],
+    },
+    {
+      title: "Agent Learning",
+      icon: Activity,
+      items: applyAgentOff(partitioned.Agent),
+    },
+    {
+      title: "AI",
+      icon: Sparkles,
+      items: applyAgentOff(partitioned.AI),
+    },
+    ...(isOSS
+      ? [
+          {
+            title: "Enterprise",
+            icon: Lock,
+            items: applyAgentOff(partitioned.Enterprise),
+          },
+        ]
+      : []),
     { title: "Manage", icon: ShieldCheck, items: manage },
   ];
 
@@ -308,7 +365,6 @@ export function Sidebar() {
 
 function Zone({
   title,
-  icon: Icon,
   items,
   onNavigate,
 }: SideZone & {
@@ -316,9 +372,8 @@ function Zone({
 }) {
   return (
     <>
-      <div className="mt-2 flex items-center gap-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-300 first:mt-0">
-        <Icon size={13} aria-hidden />
-        <span>{title}</span>
+      <div className="mt-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-300 first:mt-0">
+        {title}
       </div>
       {items.map((item) => (
         <SideLink key={item.to ?? item.label} {...item} onNavigate={onNavigate} />
@@ -327,11 +382,12 @@ function Zone({
   );
 }
 
-// CollapsedZone renders one zone as a single group-icon link in the narrow
-// rail: it points at the zone's primary (first navigable) item and exposes the
-// zone name via the tooltip, so the collapsed rail stays usable with icons
-// alone. Zones with no navigable item (nothing but in-dev placeholders) render
-// a non-interactive icon marker instead of a dead link.
+// CollapsedZone renders one zone in the narrow rail. The icon links to the
+// zone's primary (first navigable) item, and hovering or focusing it opens a
+// flyout listing every item in the zone — without it the other items are
+// unreachable until the rail is expanded. Zones with no navigable item
+// (nothing but in-dev placeholders) render a non-interactive icon marker
+// instead of a dead link, but still list their contents on hover.
 function CollapsedZone({
   title,
   icon: Icon,
@@ -340,44 +396,127 @@ function CollapsedZone({
 }: SideZone & {
   onNavigate?: () => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const closeTimer = useRef<number | null>(null);
   const primary = items.find((it) => it.to && !it.inDev);
 
-  if (!primary?.to) {
-    return (
-      <div
-        title={title}
-        aria-label={title}
-        className="mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control text-ink-500"
-      >
-        <Icon size={18} aria-hidden />
-      </div>
-    );
-  }
+  // The rail's <nav> is overflow-y-auto, which clips an absolutely positioned
+  // panel, so the flyout is fixed and placed from the icon's measured rect.
+  // It starts flush against the rail: the visible gap is transparent padding
+  // INSIDE the flyout, so crossing it never leaves the hover target.
+  const place = () => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const estHeight = 34 + items.length * 36;
+    const top = Math.max(8, Math.min(r.top, window.innerHeight - 8 - estHeight));
+    setPos({ top, left: r.right });
+  };
+
+  const cancelClose = () => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+
+  const show = () => {
+    cancelClose();
+    place();
+    setOpen(true);
+  };
+
+  // Closing is deferred so a pointer that clips a corner on its way to the
+  // panel does not dismiss it mid-travel.
+  const hide = () => {
+    cancelClose();
+    closeTimer.current = window.setTimeout(() => setOpen(false), 200);
+  };
+
+  const hideNow = () => {
+    cancelClose();
+    setOpen(false);
+  };
+
+  useEffect(() => cancelClose, []);
 
   return (
-    <NavLink
-      to={primary.to}
-      end={primary.end}
-      title={title}
-      aria-label={title}
-      onClick={onNavigate}
-      className={({ isActive }) =>
-        clsx(
-          "mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control transition-colors",
-          isActive
-            ? "bg-accent-subtle text-ink-50"
-            : "text-ink-200 hover:bg-ink-800 hover:text-ink-50",
-        )
-      }
+    <div
+      ref={wrapRef}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) hideNow();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") hideNow();
+      }}
     >
-      <Icon size={18} aria-hidden />
-    </NavLink>
+      {primary?.to ? (
+        <NavLink
+          to={primary.to}
+          end={primary.end}
+          aria-label={title}
+          onClick={onNavigate}
+          className={({ isActive }) =>
+            clsx(
+              "mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control transition-colors",
+              isActive
+                ? "bg-accent-subtle text-ink-50"
+                : "text-ink-200 hover:bg-ink-800 hover:text-ink-50",
+            )
+          }
+        >
+          <Icon size={18} aria-hidden />
+        </NavLink>
+      ) : (
+        <div
+          aria-label={title}
+          className="mx-auto my-0.5 flex h-9 w-9 items-center justify-center rounded-control text-ink-500"
+        >
+          <Icon size={18} aria-hidden />
+        </div>
+      )}
+
+      {open && (
+        <div
+          style={{ top: pos.top, left: pos.left }}
+          className="fixed z-50 pl-2"
+        >
+          <div
+            role="group"
+            aria-label={title}
+            data-testid={`nav-flyout-${title.toLowerCase()}`}
+            className="w-52 rounded-control border border-ink-800 bg-ink-950 p-1 shadow-xl"
+          >
+            <div className="flex items-center gap-2 px-3 py-1.5 text-2xs uppercase tracking-wider text-ink-300">
+              <Icon size={13} aria-hidden />
+              <span>{title}</span>
+            </div>
+            {items.map((item) => (
+              <SideLink
+                key={item.to ?? item.label}
+                {...item}
+                onNavigate={() => {
+                  hideNow();
+                  onNavigate?.();
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
 function SideLink({
   to,
   label,
+  icon: Icon,
   end,
   dim,
   dimTitle,
@@ -401,6 +540,7 @@ function SideLink({
         className="group flex min-h-9 cursor-default items-center gap-2 rounded-control px-3 py-2 text-xs text-ink-400"
       >
         <span className="h-4 w-0.5 rounded-full bg-transparent" />
+        <Icon size={16} className="w-4 shrink-0" aria-hidden />
         <span className="flex-1">{label}</span>
         <span
           data-testid="nav-indev-indicator"
@@ -433,10 +573,11 @@ function SideLink({
         <>
           <span
             className={clsx(
-              "h-4 w-0.5 rounded-full",
+              "h-4 w-0.5 shrink-0 rounded-full",
               isActive ? "bg-accent" : "bg-transparent",
             )}
           />
+          <Icon size={16} className="w-4 shrink-0" aria-hidden />
           <span className="flex-1">{label}</span>
           {locked && (
             <Lock size={12} className="text-ink-500" aria-label="Enterprise" />

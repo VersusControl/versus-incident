@@ -2,11 +2,17 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"context"
+
+	"github.com/VersusControl/versus-incident/pkg/agent"
+	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 
@@ -63,6 +69,299 @@ type searcherStorage struct {
 	incidents []*storage.IncidentRecord
 }
 
+// providerOnly deliberately exposes no optional paging capabilities so list
+// requests exercise the materialized fallback path.
+type providerOnly struct {
+	storage.Provider
+}
+
+type resolveStorage struct {
+	storage.Provider
+	checkErr error
+	saveErr  error
+	saves    int
+}
+
+type retryCloseStorage struct {
+	storage.Provider
+	episodes   storage.DetectionEpisodeStore
+	closeCalls int
+}
+
+type unsupportedCloseStorage struct {
+	storage.Provider
+}
+
+func (s *unsupportedCloseStorage) RecordDetectionOccurrence(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+	return storage.DetectionEpisodeDecision{}, storage.ErrUnsupported
+}
+
+func (s *unsupportedCloseStorage) RenewDetectionNotificationClaim(storage.DetectionNotificationRenewal) error {
+	return storage.ErrUnsupported
+}
+
+func (s *unsupportedCloseStorage) CompleteDetectionNotification(storage.DetectionNotificationCompletion) error {
+	return storage.ErrUnsupported
+}
+
+func (s *unsupportedCloseStorage) CloseDetectionEpisodeByIncident(string, time.Time) error {
+	return storage.ErrUnsupported
+}
+
+func (s *retryCloseStorage) RecordDetectionOccurrence(occurrence storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+	return s.episodes.RecordDetectionOccurrence(occurrence)
+}
+
+func (s *retryCloseStorage) RenewDetectionNotificationClaim(renewal storage.DetectionNotificationRenewal) error {
+	return s.episodes.RenewDetectionNotificationClaim(renewal)
+}
+
+func (s *retryCloseStorage) CompleteDetectionNotification(completion storage.DetectionNotificationCompletion) error {
+	return s.episodes.CompleteDetectionNotification(completion)
+}
+
+func (s *retryCloseStorage) CloseDetectionEpisodeByIncident(incidentID string, closedAt time.Time) error {
+	s.closeCalls++
+	if s.closeCalls == 1 {
+		return errors.New("temporary close failure")
+	}
+	return s.episodes.CloseDetectionEpisodeByIncident(incidentID, closedAt)
+}
+
+type analysisDeleteStorage struct {
+	storage.Provider
+	err error
+}
+
+func (s *analysisDeleteStorage) DeleteAnalysis(string) error {
+	return s.err
+}
+
+func (s *resolveStorage) GetIncident(string) (*storage.IncidentRecord, error) {
+	return &storage.IncidentRecord{ID: "inc-1"}, nil
+}
+
+func (s *resolveStorage) CheckIncidentMutable(string) error {
+	return s.checkErr
+}
+
+func (s *resolveStorage) SaveIncident(*storage.IncidentRecord) error {
+	s.saves++
+	return s.saveErr
+}
+
+func TestResolve_CheckerNotFoundReturns404(t *testing.T) {
+	store := &resolveStorage{Provider: storage.NewMemory(), checkErr: storage.ErrNotFound}
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	resp, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusNotFound)
+	}
+	if store.saves != 0 {
+		t.Fatalf("save calls = %d, want 0", store.saves)
+	}
+}
+
+func TestResolve_BackendErrorIsNotDisclosed(t *testing.T) {
+	secret := "postgres failed at /private/db with password=hunter2"
+	store := &resolveStorage{Provider: storage.NewMemory(), checkErr: errors.New(secret)}
+	services.SetStorage(store)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	resp, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+
+	if resp.StatusCode != fiber.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, fiber.StatusInternalServerError)
+	}
+	if strings.Contains(string(body), secret) || !strings.Contains(string(body), internalServerErrorMessage) {
+		t.Fatalf("body = %q, want generic error without backend detail", body)
+	}
+}
+
+func TestResolveClosesDetectionEpisode(t *testing.T) {
+	provider := storage.NewMemory()
+	episodes := provider.(storage.DetectionEpisodeStore)
+	identity := storage.DetectionIdentity{
+		AgentKind: "detect", Source: "loki", Service: "checkout", SignalKind: "logs", ConditionKey: "timeout",
+	}
+	now := time.Date(2026, 9, 3, 18, 0, 0, 0, time.UTC)
+	opened, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("RecordDetectionOccurrence: %v", err)
+	}
+	if err := episodes.CompleteDetectionNotification(storage.DetectionNotificationCompletion{
+		EpisodeID: opened.EpisodeID, ClaimToken: opened.ClaimToken, Outcome: "sent", CompletedAt: now,
+	}); err != nil {
+		t.Fatalf("CompleteDetectionNotification: %v", err)
+	}
+	if err := provider.SaveIncident(&storage.IncidentRecord{
+		ID: opened.IncidentID, DetectionEpisodeID: opened.EpisodeID, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	services.SetStorage(provider)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	response, err := app.Test(httptest.NewRequest("POST", "/incidents/"+opened.IncidentID+"/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d, want %d", response.StatusCode, fiber.StatusOK)
+	}
+
+	recurred, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("RecordDetectionOccurrence(recurred): %v", err)
+	}
+	if recurred.Action != storage.DetectionEpisodeReopened || recurred.EpisodeID == opened.EpisodeID || recurred.IncidentID == opened.IncidentID {
+		t.Fatalf("recurred decision = %+v", recurred)
+	}
+}
+
+func TestResolveRetriesDetectionEpisodeClose(t *testing.T) {
+	provider := storage.NewMemory()
+	episodes := provider.(storage.DetectionEpisodeStore)
+	identity := storage.DetectionIdentity{
+		AgentKind: "detect", Source: "loki", Service: "checkout", SignalKind: "logs", ConditionKey: "retry-close",
+	}
+	now := time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
+	opened, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("RecordDetectionOccurrence: %v", err)
+	}
+	if err := provider.SaveIncident(&storage.IncidentRecord{ID: opened.IncidentID, CreatedAt: now}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	wrapped := &retryCloseStorage{Provider: provider, episodes: episodes}
+	services.SetStorage(wrapped)
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	request := func() int {
+		t.Helper()
+		response, err := app.Test(httptest.NewRequest("POST", "/incidents/"+opened.IncidentID+"/resolve", nil))
+		if err != nil {
+			t.Fatalf("app.Test: %v", err)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	if status := request(); status != fiber.StatusInternalServerError {
+		t.Fatalf("first resolve status=%d, want %d", status, fiber.StatusInternalServerError)
+	}
+	if status := request(); status != fiber.StatusOK {
+		t.Fatalf("retry resolve status=%d, want %d", status, fiber.StatusOK)
+	}
+	if wrapped.closeCalls != 2 {
+		t.Fatalf("close calls=%d, want 2", wrapped.closeCalls)
+	}
+	recurred, err := episodes.RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity: identity, Frequency: 1, Severity: "medium", ReceivedAt: now.Add(time.Second),
+	})
+	if err != nil || recurred.EpisodeID == opened.EpisodeID {
+		t.Fatalf("recurrence after retry = %+v, %v", recurred, err)
+	}
+}
+
+func TestResolveIgnoresUnsupportedDetectionEpisodeClose(t *testing.T) {
+	base := storage.NewMemory()
+	now := time.Now().UTC()
+	if err := base.SaveIncident(&storage.IncidentRecord{ID: "webhook-incident", CreatedAt: now}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	services.SetStorage(&unsupportedCloseStorage{Provider: base})
+	t.Cleanup(func() { services.SetStorage(nil) })
+
+	app := fiber.New()
+	app.Post("/incidents/:id/resolve", NewIncidentAdminController().resolve)
+	response, err := app.Test(httptest.NewRequest("POST", "/incidents/webhook-incident/resolve", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d, want %d", response.StatusCode, fiber.StatusOK)
+	}
+	resolved, err := base.GetIncident("webhook-incident")
+	if err != nil || !resolved.Resolved || resolved.ResolvedAt == nil {
+		t.Fatalf("resolved incident=%+v err=%v", resolved, err)
+	}
+}
+
+func TestDeleteAnalysis_StorageErrorResponses(t *testing.T) {
+	backendDetail := "postgres failed at /private/db with password=hunter2"
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantBody   string
+		hidden     string
+	}{
+		{"read-only archive", storage.ErrReadOnlyAnalysis, fiber.StatusConflict, storage.ErrReadOnlyAnalysis.Error(), ""},
+		{"not found", storage.ErrNotFound, fiber.StatusNotFound, "not found", ""},
+		{"backend error", errors.New(backendDetail), fiber.StatusInternalServerError, internalServerErrorMessage, backendDetail},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			services.SetStorage(&analysisDeleteStorage{Provider: storage.NewMemory(), err: tt.err})
+			t.Cleanup(func() { services.SetStorage(nil) })
+
+			app := fiber.New()
+			app.Delete("/analyses/:analysis_id", NewIncidentAdminController().deleteAnalysis)
+			resp, err := app.Test(httptest.NewRequest("DELETE", "/analyses/a-1", nil))
+			if err != nil {
+				t.Fatalf("app.Test: %v", err)
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.wantStatus)
+			}
+			if !strings.Contains(string(body), tt.wantBody) {
+				t.Fatalf("body = %q, want it to contain %q", body, tt.wantBody)
+			}
+			if tt.hidden != "" && strings.Contains(string(body), tt.hidden) {
+				t.Fatalf("body disclosed backend detail: %q", body)
+			}
+		})
+	}
+}
+
 func (s searcherStorage) SearchIncidents(query string, limit int) ([]*storage.IncidentRecord, error) {
 	return s.incidents, nil
 }
@@ -77,9 +376,9 @@ func (s searcherStorage) SearchAnalyses(string, int) ([]*storage.AnalysisRecord,
 // memory backend (the same path file storage takes).
 func TestCapabilitiesReflectsSearcher(t *testing.T) {
 	t.Cleanup(func() { services.SetStorage(nil) })
-	// capabilities now reads config.GetConfig() for the report block, so the
-	// global config must exist (sync.Once-guarded; safe if a sibling test
-	// already loaded it).
+	// capabilities reads the global config for the report block, so the global
+	// config must exist (sync.Once-guarded; safe if a sibling test already
+	// loaded it).
 	loadGatewayConfig(t, "test-gateway-secret")
 
 	ctrl := NewIncidentAdminController()
@@ -111,6 +410,182 @@ func TestCapabilitiesReflectsSearcher(t *testing.T) {
 			}
 			if got.Search != tc.want {
 				t.Fatalf("search = %v, want %v", got.Search, tc.want)
+			}
+		})
+	}
+}
+
+// fakeReportChannelLister is a controllers.ReportChannelLister that returns a
+// fixed per-org channel list, standing in for the enterprise lister backed by
+// the runtime channel resolver's masked EffectiveEnabled view.
+type fakeReportChannelLister struct {
+	byOrg         map[string][]string
+	disabledByOrg map[string][]string
+}
+
+func (f fakeReportChannelLister) EnabledAlertChannels(_ context.Context, org string) []string {
+	return f.byOrg[org]
+}
+
+func (f fakeReportChannelLister) ConfiguredDisabledChannels(_ context.Context, org string) []string {
+	return f.disabledByOrg[org]
+}
+
+// TestCapabilitiesReportChannelsFallsBackToStatic proves that with NO lister
+// registered (community/OSS), report.channels is the static enabled-channel
+// list from the global config — single-tenant behaviour unchanged.
+func TestCapabilitiesReportChannelsFallsBackToStatic(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	loadGatewayConfig(t, "test-gateway-secret")
+
+	// No lister registered: the handler must use enabledAlertChannels(GetConfig()).
+	SetReportChannelLister(nil)
+	services.SetStorage(storage.NewMemory())
+
+	ctrl := NewIncidentAdminController()
+	app := fiber.New()
+	app.Get("/cap", ctrl.capabilities)
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/cap", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		Report struct {
+			Channels           []string `json:"channels"`
+			ConfiguredDisabled []string `json:"configured_disabled"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+	want := enabledAlertChannels(config.GetConfig().Alert)
+	if len(got.Report.Channels) != len(want) {
+		t.Fatalf("report.channels = %v, want static %v", got.Report.Channels, want)
+	}
+	for idx := range want {
+		if got.Report.Channels[idx] != want[idx] {
+			t.Fatalf("report.channels = %v, want static %v", got.Report.Channels, want)
+		}
+	}
+	// No lister → community has no runtime-override concept, so
+	// configured_disabled is an empty, non-null slice.
+	if got.Report.ConfiguredDisabled == nil {
+		t.Fatalf("report.configured_disabled = null, want [] (non-nil)")
+	}
+	if len(got.Report.ConfiguredDisabled) != 0 {
+		t.Fatalf("report.configured_disabled = %v, want []", got.Report.ConfiguredDisabled)
+	}
+}
+
+// TestCapabilitiesReflectsRuntimeChannels proves the report channel picker is
+// built from the registered ReportChannelLister — the masked runtime-channel
+// view (the SAME source the alert-fatigue picker uses) — not the static YAML
+// config. With Slack disabled in the static floor but the lister reporting a
+// hot-configured Slack for the request org, report.channels must include
+// "slack", exactly as the alert-fatigue picker shows it.
+func TestCapabilitiesReflectsRuntimeChannels(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	loadGatewayConfig(t, "test-gateway-secret")
+
+	// Static YAML floor: Slack disabled. Confirm the pre-condition so the test
+	// proves the lister — not a stale global — is what surfaces.
+	if config.GetConfig().Alert.Slack.Enable {
+		t.Skip("static config unexpectedly has Slack enabled; cannot prove override")
+	}
+
+	// The request org is the default org (no OrgInjector mounted on this app).
+	SetReportChannelLister(fakeReportChannelLister{
+		byOrg:         map[string][]string{storage.DefaultOrgID: {"slack", "email"}},
+		disabledByOrg: map[string][]string{storage.DefaultOrgID: {"telegram"}},
+	})
+	t.Cleanup(func() { SetReportChannelLister(nil) })
+
+	services.SetStorage(storage.NewMemory())
+
+	ctrl := NewIncidentAdminController()
+	app := fiber.New()
+	app.Get("/cap", ctrl.capabilities)
+
+	resp, err := app.Test(httptest.NewRequest("GET", "/cap", nil))
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var got struct {
+		Report struct {
+			Channels           []string `json:"channels"`
+			ConfiguredDisabled []string `json:"configured_disabled"`
+		} `json:"report"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", body, err)
+	}
+	found := false
+	for _, ch := range got.Report.Channels {
+		if ch == "slack" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("report.channels = %v, want it to include the hot-configured \"slack\"", got.Report.Channels)
+	}
+	// The lister's configured-but-disabled list is echoed verbatim into
+	// report.configured_disabled.
+	if len(got.Report.ConfiguredDisabled) != 1 || got.Report.ConfiguredDisabled[0] != "telegram" {
+		t.Fatalf("report.configured_disabled = %v, want [telegram]", got.Report.ConfiguredDisabled)
+	}
+}
+
+// TestEnabledAlertChannelsFromResolvedConfig is a table test proving
+// enabledAlertChannels reflects whatever effective config it is handed —
+// including a runtime-resolved one — in a stable order.
+func TestEnabledAlertChannelsFromResolvedConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  *config.Config
+		want []string
+	}{
+		{
+			name: "none enabled",
+			cfg:  &config.Config{},
+			want: []string{},
+		},
+		{
+			name: "runtime-enabled slack surfaces",
+			cfg: func() *config.Config {
+				c := &config.Config{}
+				c.Alert.Slack.Enable = true
+				return c
+			}(),
+			want: []string{"slack"},
+		},
+		{
+			name: "multiple channels in stable order",
+			cfg: func() *config.Config {
+				c := &config.Config{}
+				c.Alert.Slack.Enable = true
+				c.Alert.Email.Enable = true
+				c.Alert.Lark.Enable = true
+				return c
+			}(),
+			want: []string{"slack", "email", "lark"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := enabledAlertChannels(tc.cfg.Alert)
+			if len(got) != len(tc.want) {
+				t.Fatalf("channels = %v, want %v", got, tc.want)
+			}
+			for idx := range tc.want {
+				if got[idx] != tc.want[idx] {
+					t.Fatalf("channels = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}
@@ -160,7 +635,8 @@ func TestSearchSupportedReturnsResults(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	var got struct {
-		Incidents []struct {
+		CountWindow string `json:"count_window"`
+		Incidents   []struct {
 			ID string `json:"id"`
 		} `json:"incidents"`
 	}
@@ -169,6 +645,9 @@ func TestSearchSupportedReturnsResults(t *testing.T) {
 	}
 	if len(got.Incidents) != 2 || got.Incidents[0].ID != "inc-1" {
 		t.Fatalf("incidents = %+v, want 2 (inc-1 first)", got.Incidents)
+	}
+	if got.CountWindow != "all" {
+		t.Fatalf("count_window = %q, want all for unbounded search", got.CountWindow)
 	}
 }
 
@@ -201,9 +680,10 @@ type incidentListResp struct {
 		Total    int          `json:"total"`
 		ByStatus byStatusJSON `json:"by_status"`
 	} `json:"counts"`
-	Total    int `json:"total"`
-	Page     int `json:"page"`
-	PageSize int `json:"page_size"`
+	CountWindow string `json:"count_window"`
+	Total       int    `json:"total"`
+	Page        int    `json:"page"`
+	PageSize    int    `json:"page_size"`
 }
 
 // seedOriginStore returns a memory store with a mix of ai_detect, webhook,
@@ -212,6 +692,9 @@ type incidentListResp struct {
 func seedOriginStore(t *testing.T) storage.Provider {
 	t.Helper()
 	mem := storage.NewMemory()
+	// Stamped like the ingest path does, so the rows sit inside the default
+	// count window and the counts describe them.
+	now := time.Now().UTC()
 	recs := []*storage.IncidentRecord{
 		{ID: "ai-1", Origin: storage.OriginAIDetect, Source: "agent:elasticsearch:app"},
 		{ID: "ai-2", Origin: storage.OriginAIDetect, Source: "agent:loki:web"},
@@ -222,6 +705,7 @@ func seedOriginStore(t *testing.T) storage.Provider {
 		{ID: "legacy-webhook", Source: "sqs"},          // no Origin → derives webhook
 	}
 	for _, r := range recs {
+		r.CreatedAt = now
 		if err := mem.SaveIncident(r); err != nil {
 			t.Fatalf("SaveIncident: %v", err)
 		}
@@ -258,6 +742,9 @@ func TestListPerOriginCounts(t *testing.T) {
 	ctrl := NewIncidentAdminController()
 
 	got := doList(t, ctrl, "")
+	if got.CountWindow != "7d" {
+		t.Fatalf("count_window = %q, want default 7d", got.CountWindow)
+	}
 	if got.Counts.AIDetect != 4 || got.Counts.Webhook != 3 || got.Counts.Total != 7 {
 		t.Fatalf("counts = %+v, want ai_detect=4 webhook=3 total=7", got.Counts)
 	}
@@ -366,6 +853,9 @@ func seedStatusStore(t *testing.T) storage.Provider {
 	t.Helper()
 	mem := storage.NewMemory()
 	acked := time.Unix(1_700_000_000, 0).UTC()
+	// Stamped like the ingest path does, so the rows sit inside the default
+	// count window and the counts describe them.
+	now := time.Now().UTC()
 	recs := []*storage.IncidentRecord{
 		{ID: "ai-open-1", Origin: storage.OriginAIDetect, Source: "agent"},
 		{ID: "ai-open-2", Origin: storage.OriginAIDetect, Source: "agent"},
@@ -377,6 +867,7 @@ func seedStatusStore(t *testing.T) storage.Provider {
 		{ID: "legacy-resolved", Source: "sqs", Resolved: true}, // derives webhook
 	}
 	for _, r := range recs {
+		r.CreatedAt = now
 		if err := mem.SaveIncident(r); err != nil {
 			t.Fatalf("SaveIncident: %v", err)
 		}
@@ -451,6 +942,9 @@ func TestListCarriesByStatus(t *testing.T) {
 	if got.Counts.ByStatus != wantByStatus() {
 		t.Fatalf("list by_status = %+v, want %+v", got.Counts.ByStatus, wantByStatus())
 	}
+	if got.CountWindow != "7d" {
+		t.Fatalf("list count_window = %q, want default 7d", got.CountWindow)
+	}
 	// Reconciliation invariants: statuses sum to origin total, origins sum to
 	// the status total — the same guarantee every UI surface now relies on.
 	bs := got.Counts.ByStatus
@@ -459,5 +953,50 @@ func TestListCarriesByStatus(t *testing.T) {
 	}
 	if bs.Open.AIDetect+bs.Open.Webhook != bs.Open.Total {
 		t.Errorf("open origins do not sum to open total: %+v", bs.Open)
+	}
+}
+
+func TestListConfiguredWindowCouplesMetadataAndCounts(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	store := storage.NewMemory()
+	now := time.Now().UTC()
+	for _, rec := range []*storage.IncidentRecord{
+		{ID: "recent", Origin: storage.OriginWebhook, Source: "webhook", CreatedAt: now.Add(-time.Hour)},
+		{ID: "older", Origin: storage.OriginWebhook, Source: "webhook", CreatedAt: now.Add(-10 * 24 * time.Hour)},
+	} {
+		if err := store.SaveIncident(rec); err != nil {
+			t.Fatalf("SaveIncident: %v", err)
+		}
+	}
+	if err := agent.SaveCountSettings(store, agent.CountSettings{Window: agent.CountWindow30d}); err != nil {
+		t.Fatalf("SaveCountSettings: %v", err)
+	}
+	services.SetStorage(store)
+
+	got := doList(t, NewIncidentAdminController(), "?page_size=1")
+	if len(got.Incidents) != 1 {
+		t.Fatalf("page rows = %d, want 1", len(got.Incidents))
+	}
+	if got.CountWindow != agent.CountWindow30d || got.Counts.ByStatus.Open.Total != 2 {
+		t.Fatalf("count_window = %q open = %d, want 30d and 2", got.CountWindow, got.Counts.ByStatus.Open.Total)
+	}
+}
+
+func TestListFallbackCarriesEffectiveWindow(t *testing.T) {
+	t.Cleanup(func() { services.SetStorage(nil) })
+	store := storage.NewMemory()
+	if err := store.SaveIncident(&storage.IncidentRecord{
+		ID: "recent", Origin: storage.OriginAIDetect, Source: "agent", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	if err := agent.SaveCountSettings(store, agent.CountSettings{Window: agent.CountWindow24h}); err != nil {
+		t.Fatalf("SaveCountSettings: %v", err)
+	}
+	services.SetStorage(providerOnly{Provider: store})
+
+	got := doList(t, NewIncidentAdminController(), "")
+	if got.CountWindow != agent.CountWindow24h || got.Counts.ByStatus.Open.Total != 1 {
+		t.Fatalf("count_window = %q open = %d, want 24h and 1", got.CountWindow, got.Counts.ByStatus.Open.Total)
 	}
 }

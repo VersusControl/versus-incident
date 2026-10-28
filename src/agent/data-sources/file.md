@@ -19,6 +19,14 @@ sources:
 That's it. The agent tails new lines, parses an optional leading
 timestamp, and feeds each line through the regex pre-filter and miner.
 
+## Agent evidence and tools
+
+Ingested lines can contribute to learned log patterns, incidents, and
+ordinary shared log investigation evidence. File is ingestion-only: it
+does not supply `discover_log_fields`, `read_log_records`, or a
+File-specific toolset for Chat or Analyze. It does not give the model
+direct filesystem access, and there is no planned File Development card.
+
 ## Full reference
 
 ```yaml
@@ -41,7 +49,7 @@ file:
 
 ## Behavior
 
-- **Cursor** — A sidecar `<file>.cursor` file (or `cursor_path`)
+- **Cursor** — A `.versus-cursor-<name>` file next to the log (or `cursor_path`)
   records the byte offset. Survives restarts and handles log rotation:
   if the file shrinks, the source reopens from offset 0.
 - **Backlog pagination** — When `from_beginning: true` on a large
@@ -55,7 +63,7 @@ file:
 
 - Keep `max_lines_per_pull ≤ agent.batch_max`, otherwise the worker's
   hard truncation drops the overflow on every tick (see
-  [Configuration](../configuration.md#max_lines_per_pull-vs-agentbatch_max)
+  [Configuration](../configuration.md#signal-sources)
   for the worked example).
 - For Docker / Kubernetes, mount the container's log directory or
   `/var/lib/docker/containers/<id>/<id>-json.log` (with `format:

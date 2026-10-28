@@ -1,14 +1,78 @@
 package agent
 
 import (
+	"context"
+	"errors"
+	"reflect"
 	"testing"
+	"time"
 
-	analyzetools "github.com/VersusControl/versus-incident/pkg/agent/ai/analyze/tools"
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
+type panicPullSource struct{ name string }
+
+func TestBuildDependencyGraphUsesConfiguredStaticEdges(t *testing.T) {
+	graph := BuildDependencyGraph([]config.ServiceDependency{{Name: "web", DependsOn: []string{"db", "api", "api"}}})
+	if graph == nil {
+		t.Fatal("graph is nil")
+	}
+	want := []core.ServiceTopologyEdge{
+		{Service: "web", DependsOn: "api", Source: "operator_config"},
+		{Service: "web", DependsOn: "db", Source: "operator_config"},
+	}
+	if got := graph.Topology(10, 10).Edges; !reflect.DeepEqual(got, want) {
+		t.Fatalf("edges = %#v, want %#v", got, want)
+	}
+	if BuildDependencyGraph(nil) != nil {
+		t.Fatal("empty configuration should not register a graph")
+	}
+}
+
+func (source panicPullSource) Name() string { return source.name }
+func (panicPullSource) Pull(context.Context, time.Time) ([]core.Signal, time.Time, error) {
+	panic("detection health must not pull sources")
+}
+
+func TestDetectionHealthAdapterIsPassiveAndRedactsBuildErrors(t *testing.T) {
+	reader := newDetectionHealthAdapter(
+		tenancy.DefaultOrgScope(),
+		[]config.AgentSourceConfig{
+			{Name: "connected", Type: "file", Enable: true},
+			{Name: "broken", Type: "loki", Enable: true},
+			{Name: "off", Type: "splunk", Enable: false},
+		},
+		[]core.SignalSource{panicPullSource{name: "connected"}},
+		[]error{errors.New("source broken: https://user:secret@example.invalid failed")},
+	)
+	snapshot := reader.DetectionHealth(tenancy.DefaultOrgScope())
+	if len(snapshot.Sources) != 3 {
+		t.Fatalf("sources = %d, want 3", len(snapshot.Sources))
+	}
+	if got := snapshot.Sources[0]; !got.Configured || got.Observation != "unknown" || got.LastSuccessfulPull != nil {
+		t.Fatalf("configured source = %+v", got)
+	}
+	if got := snapshot.Sources[1]; got.Configured || got.Observation != "unknown" || got.ErrorClass != "configuration" {
+		t.Fatalf("broken source = %+v", got)
+	}
+	if got := snapshot.Sources[2]; got.Configured || got.Observation != "unknown" || got.ErrorClass != "disabled" {
+		t.Fatalf("disabled source = %+v", got)
+	}
+	for _, source := range snapshot.Sources {
+		if source.ErrorClass == "https://user:secret@example.invalid failed" {
+			t.Fatal("raw build error leaked into health snapshot")
+		}
+	}
+	if len(snapshot.Categories) != 3 || !snapshot.Categories[0].Configured || snapshot.Categories[0].Dark || snapshot.Observation != "unknown" {
+		t.Fatalf("categories = %+v", snapshot.Categories)
+	}
+}
+
 // TestBuildGitRepos_EmptyNil asserts an empty repo list yields a nil
-// slice so analyzetools.Default omits the recent_changes tool.
+// slice so buildAnalyzeTools omits the recent_changes tool.
 func TestBuildGitRepos_EmptyNil(t *testing.T) {
 	if got := buildGitRepos(config.RecentChangesGitConfig{}); got != nil {
 		t.Fatalf("empty config should yield nil, got %v", got)
@@ -55,7 +119,7 @@ func TestBuildGitRepos_NoGlobalAuth(t *testing.T) {
 	got := buildGitRepos(config.RecentChangesGitConfig{
 		Repos: []config.RecentChangesGitRepo{{URL: "https://example.com/x.git"}},
 	})
-	want := analyzetools.GitRepo{URL: "https://example.com/x.git"}
+	want := commontools.GitRepo{URL: "https://example.com/x.git"}
 	if len(got) != 1 || got[0] != want {
 		t.Fatalf("got %+v, want single %+v", got, want)
 	}

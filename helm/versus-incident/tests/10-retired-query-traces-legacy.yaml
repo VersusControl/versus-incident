@@ -1,0 +1,4 @@
+agent:
+  tools:
+    query_traces:
+      enable: false

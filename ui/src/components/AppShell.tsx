@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import { X } from "lucide-react";
 import { Sidebar, SidebarContent } from "./Sidebar";
 import { ToastProvider } from "./Toast";
 import { ShortcutOverlay } from "./ShortcutOverlay";
+import { QueryErrorBoundary } from "./ErrorBoundary";
 import { ShellContext } from "./shellContext";
 import { ReauthModal } from "@/lib/auth";
 import { useShortcuts } from "@/lib/hooks";
@@ -14,6 +15,7 @@ export function AppShell() {
   const [drawer, setDrawer] = useState(false);
   const [help, setHelp] = useState(false);
   const mainRef = useRef<HTMLDivElement>(null);
+  const { pathname } = useLocation();
 
   useShortcuts({ onHelp: useCallback(() => setHelp((h) => !h), []) });
 
@@ -46,15 +48,22 @@ export function AppShell() {
           Skip to content
         </a>
 
-        <div className="flex h-full overflow-hidden" data-testid="app-authenticated">
+        {/* overflow-clip (not hidden): a clipped frame can't be scrolled by focus or scrollIntoView. */}
+        <div className="flex h-full min-h-0 overflow-clip" data-testid="app-authenticated">
           <Sidebar />
           <div
             id="main"
             ref={mainRef}
             tabIndex={-1}
-            className="flex min-w-0 flex-1 flex-col overflow-hidden outline-none"
+            style={{ outline: "none" }}
+            className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-clip outline-none focus-visible:outline-none"
           >
-            <Outlet />
+            {/* Keyed by pathname: a page crash keeps the shell navigable and
+                navigating away remounts a clean boundary — and drops the cached
+                payload the crashed page rendered from. */}
+            <QueryErrorBoundary key={pathname} context="Couldn't render this page">
+              <Outlet />
+            </QueryErrorBoundary>
           </div>
         </div>
 

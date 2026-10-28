@@ -14,7 +14,8 @@ import {
 import clsx from "clsx";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel, incidentTitle } from "@/lib/format";
-import { severityFromContent } from "@/lib/severity";
+import { incidentSeverity } from "@/lib/severity";
+import { deliveryErrorLabel, hasDeliveryError, safeIncidentHref } from "@/lib/incidentPresentation";
 import { TopBar } from "@/components/TopBar";
 import { PageHeader } from "@/components/PageHeader";
 import { SeverityBadge } from "@/components/SeverityBadge";
@@ -83,7 +84,11 @@ export function IncidentDetailPage() {
 
   const alertName = pickString(content, "AlertName", "alertname", "alert_name");
   const summary = pickString(content, "Summary", "summary", "description");
-  const severity = severityFromContent(content);
+  const severity = incidentSeverity(
+    content,
+    data?.highest_observed_severity,
+    data?.highest_notified_severity,
+  );
   const category = pickString(content, "Category", "category");
   const confidence = pickNumber(content, "Confidence", "confidence");
   const suggestions = pickList(content, "Suggestions", "suggestions");
@@ -91,8 +96,11 @@ export function IncidentDetailPage() {
   const contentStatus = pickString(content, "Status", "status");
 
   const patternID = pickString(content, "PatternID", "pattern_id");
+  const isKubernetesIssue = pickString(content, "AlertKind", "alert_kind") === "kubernetes_issue";
+  const isKubernetesRule = isKubernetesIssue || patternID.startsWith("kubernetes:");
   const patternTemplate = pickString(content, "PatternTemplate", "pattern_template");
   const frequency = pickNumber(content, "Frequency", "frequency");
+  const occurrenceCount = data?.occurrence_count ?? frequency;
   const baseline = pickNumber(content, "Baseline", "baseline");
   const verdict = pickString(content, "Verdict", "verdict");
   const serviceName = pickString(content, "ServiceName", "Service", "service");
@@ -220,8 +228,33 @@ export function IncidentDetailPage() {
                       <p className="whitespace-pre-wrap leading-relaxed">
                         {summary}
                       </p>
-                    ) : (
+                    ) : !isKubernetesIssue ? (
                       <p className="text-ink-400">No summary provided.</p>
+                    ) : null}
+                    {isKubernetesIssue && (
+                      <div className="space-y-3 break-words">
+                        <dl className="grid grid-cols-2 gap-3">
+                          {["Cluster", "Namespace", "Workload", "Affected"].map((key) => (
+                            <Fact key={key} k={key} v={pickString(content, key) || "—"} />
+                          ))}
+                        </dl>
+                        {["Evidence", "Changes"].map((key) => (
+                          <section key={key} aria-label={key}>
+                            <h3 className="font-semibold">{key}</h3>
+                            <ul className="list-inside list-disc space-y-1">
+                              {pickList(content, key).map((line, index) => <li key={index}>{line}</li>)}
+                            </ul>
+                            {pickList(content, key).length === 0 && <p className="text-ink-400">None recorded.</p>}
+                          </section>
+                        ))}
+                        {content.HistoryIncomplete === true && <p className="text-sev-warn">Change history is incomplete.</p>}
+                        <nav aria-label="Kubernetes issue links" className="flex flex-wrap gap-3">
+                          {(["Timeline", "Agent"] as const).map((label) => {
+                            const href = safeIncidentHref(pickString(content, `${label}URL`));
+                            return href ? <a key={label} href={href} className="text-link hover:underline" target="_blank" rel="noopener noreferrer">{label}</a> : null;
+                          })}
+                        </nav>
+                      </div>
                     )}
                     {(confidence !== undefined || serviceName) && (
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-ink-600 pt-3 text-2xs text-ink-300">
@@ -320,10 +353,10 @@ export function IncidentDetailPage() {
                         label={`notified ${c}`}
                       />
                     ))}
-                    {data.notify_status === "failed" && (
+                    {hasDeliveryError(data) && (
                       <TimelineRow
                         icon={<XCircle size={12} className="text-sev-critical" />}
-                        label="notify failed"
+                        label={deliveryErrorLabel(data.notify_status)}
                         detail={data.notify_error}
                       />
                     )}
@@ -432,6 +465,13 @@ export function IncidentDetailPage() {
                           {fmtRel(data.created_at)}
                         </span>
                       </StateRow>
+                      {data.detection_last_seen && (
+                        <StateRow label="Last seen">
+                          <span title={fmtAbs(data.detection_last_seen)}>
+                            {fmtRel(data.detection_last_seen)}
+                          </span>
+                        </StateRow>
+                      )}
                       <StateRow label="Notified">
                         {data.notify_status === "sent" ? (
                           <span className="inline-flex items-center gap-1 text-sev-ok">
@@ -495,7 +535,7 @@ export function IncidentDetailPage() {
                             <span className="inline-flex items-center gap-1 text-sev-critical">
                               <XCircle size={12} aria-hidden /> failed
                             </span>
-                          ) : data.notify_status === "sent" ? (
+                          ) : data.notify_status === "sent" || data.notify_status === "partial" ? (
                             <span className="inline-flex items-center gap-1 text-sev-ok">
                               <CheckCircle2 size={12} aria-hidden /> sent
                             </span>
@@ -505,7 +545,7 @@ export function IncidentDetailPage() {
                         </li>
                       ))}
                     </ul>
-                    {data.notify_status === "failed" && data.notify_error && (
+                    {hasDeliveryError(data) && data.notify_error && (
                       <p className="mt-2 break-all rounded-md bg-sev-critical/10 p-2 font-mono text-2xs leading-snug text-sev-critical">
                         {data.notify_error}
                       </p>
@@ -567,11 +607,13 @@ export function IncidentDetailPage() {
                   </div>
                   <div className="card-body grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
                     <Fact
-                      k="Pattern"
+                      k={isKubernetesRule ? "Rule" : "Pattern"}
                       v={
-                        patternID ? (
+                        patternID && isKubernetesRule ? (
+                          <span className="break-all font-mono">{patternID}</span>
+                        ) : patternID ? (
                           <Link
-                            to={`/agent/logs/${patternID}`}
+                            to={`/agent/logs/${encodeURIComponent(patternID)}`}
                             className="font-mono text-link hover:underline"
                           >
                             {patternID.slice(0, 12)}
@@ -588,8 +630,8 @@ export function IncidentDetailPage() {
                     <Fact
                       k="Frequency"
                       v={
-                        frequency !== undefined ? (
-                          <span className="font-mono">{frequency}</span>
+                        occurrenceCount !== undefined ? (
+                          <span className="font-mono">{occurrenceCount}</span>
                         ) : (
                           "—"
                         )
@@ -662,9 +704,9 @@ export function IncidentDetailPage() {
 
 function Fact({ k, v }: { k: string; v: React.ReactNode }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-2xs uppercase tracking-wider text-ink-400">{k}</div>
-      <div className="text-ink-100">{v}</div>
+      <div className="min-w-0 [overflow-wrap:anywhere] text-ink-100">{v}</div>
     </div>
   );
 }
@@ -678,9 +720,11 @@ function StateRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3">
+    <div className="flex min-w-0 items-center justify-between gap-3">
       <dt className="text-2xs uppercase tracking-wider text-ink-400">{label}</dt>
-      <dd className="text-right text-ink-100">{children}</dd>
+      <dd className="min-w-0 [overflow-wrap:anywhere] text-right text-ink-100">
+        {children}
+      </dd>
     </div>
   );
 }

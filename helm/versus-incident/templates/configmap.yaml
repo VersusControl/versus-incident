@@ -21,6 +21,14 @@ data:
     # leaves admin routes unregistered (no silent open surface).
     gateway_secret: ${GATEWAY_SECRET}
 
+    # Outbound HTTP proxy used by the channels that opt in via `use_proxy`
+    # (telegram, viber, lark). Values arrive from the chart Secret as env
+    # vars; an unset PROXY_URL expands to empty, which disables the proxy.
+    proxy:
+      url: ${PROXY_URL}
+      username: ${PROXY_USERNAME}
+      password: ${PROXY_PASSWORD}
+
     # Pluggable storage backend. `file` (single-node) or `postgres` (durable,
     # multi-writer). HA (ha.enabled) derives `postgres` automatically — all
     # replicas share ONE Postgres. POSTGRES_DSN is injected from a Secret.
@@ -42,6 +50,7 @@ data:
         token: ${SLACK_TOKEN}
         channel_id: ${SLACK_CHANNEL_ID}
         template_path: "/app/config/slack_message.tmpl"
+        kubernetes_issue_template_path: {{ .Values.alert.slack.kubernetesIssueTemplatePath | default "" | quote }}
         {{- if .Values.alert.slack.messageProperties }}
         message_properties:
           {{- if .Values.alert.slack.messageProperties.buttonText }}
@@ -60,6 +69,8 @@ data:
         bot_token: ${TELEGRAM_BOT_TOKEN}
         chat_id: ${TELEGRAM_CHAT_ID}
         template_path: "/app/config/telegram_message.tmpl"
+        kubernetes_issue_template_path: {{ .Values.alert.telegram.kubernetesIssueTemplatePath | default "" | quote }}
+        use_proxy: {{ .Values.alert.telegram.useProxy | default false }}
 
       viber:
         enable: {{ .Values.alert.viber.enable }}
@@ -68,6 +79,8 @@ data:
         channel_id: ${VIBER_CHANNEL_ID}
         api_type: ${VIBER_API_TYPE}
         template_path: "/app/config/viber_message.tmpl"
+        kubernetes_issue_template_path: {{ .Values.alert.viber.kubernetesIssueTemplatePath | default "" | quote }}
+        use_proxy: {{ .Values.alert.viber.useProxy | default false }}
 
       email:
         enable: {{ .Values.alert.email.enable }}
@@ -78,11 +91,13 @@ data:
         to: ${EMAIL_TO}
         subject: ${EMAIL_SUBJECT}
         template_path: "/app/config/email_message.tmpl"
+        kubernetes_issue_template_path: {{ .Values.alert.email.kubernetesIssueTemplatePath | default "" | quote }}
 
       msteams:
         enable: {{ .Values.alert.msteams.enable }}
         power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL}
         template_path: "/app/config/msteams_message.tmpl"
+        kubernetes_issue_template_path: {{ .Values.alert.msteams.kubernetesIssueTemplatePath | default "" | quote }}
         {{- if .Values.alert.msteams.otherPowerUrls }}
         other_power_urls:
           {{- range $key, $val := .Values.alert.msteams.otherPowerUrls }}
@@ -94,12 +109,22 @@ data:
         enable: {{ .Values.alert.lark.enable }}
         webhook_url: ${LARK_WEBHOOK_URL}
         template_path: "/app/config/lark_message.tmpl"
+        kubernetes_issue_template_path: {{ .Values.alert.lark.kubernetesIssueTemplatePath | default "" | quote }}
+        use_proxy: {{ .Values.alert.lark.useProxy | default false }}
         {{- if .Values.alert.lark.otherWebhookUrls }}
         other_webhook_urls:
           {{- range $key, $val := .Values.alert.lark.otherWebhookUrls }}
           {{ $key }}: ${LARK_OTHER_WEBHOOK_URL_{{ $key | upper }}}
           {{- end }}
         {{- end }}
+
+    # Inbound queue sources. The server reads these from the top-level
+    # `queue` block, not from `alert` — `alert` is outbound channels only.
+    # The sns/sqs toggles stay under `alert.*` in values.yaml for backward
+    # compatibility and are mapped in here.
+    queue:
+      enable: {{ or .Values.alert.sns.enable .Values.alert.sqs.enable }}
+      debug_body: {{ dig "debugBody" true (.Values.queue | default dict) }}
 
       sns:
         enable: {{ .Values.alert.sns.enable }}
@@ -209,41 +234,89 @@ data:
       {{- if .Values.externalRedis.maxRetryBackoff }}
       max_retry_backoff: {{ .Values.externalRedis.maxRetryBackoff }}
       {{- end }}
+      {{- /* RedisConfig.TLS is a scalar flag, so the certificate material
+             cannot nest under it — the paths ride alongside and reach the
+             client through the REDIS_TLS_* env vars. */}}
+      tls: {{ .Values.externalRedis.tls.enabled }}
       {{- if .Values.externalRedis.tls.enabled }}
-      tls:
-        enabled: {{ .Values.externalRedis.tls.enabled }}
-        {{- if .Values.externalRedis.tls.caFile }}
-        ca_file: ${REDIS_TLS_CA_FILE}
-        {{- end }}
-        {{- if .Values.externalRedis.tls.certFile }}
-        cert_file: ${REDIS_TLS_CERT_FILE}
-        {{- end }}
-        {{- if .Values.externalRedis.tls.keyFile }}
-        key_file: ${REDIS_TLS_KEY_FILE}
-        {{- end }}
+      {{- if .Values.externalRedis.tls.caFile }}
+      tls_ca_file: ${REDIS_TLS_CA_FILE}
+      {{- end }}
+      {{- if .Values.externalRedis.tls.certFile }}
+      tls_cert_file: ${REDIS_TLS_CERT_FILE}
+      {{- end }}
+      {{- if .Values.externalRedis.tls.keyFile }}
+      tls_key_file: ${REDIS_TLS_KEY_FILE}
+      {{- end }}
       {{- end }}
       {{- end }}
 
     {{- if .Values.agent.enable }}
+    {{- $agent := .Values.agent }}
+    {{- $redaction := $agent.redaction | default dict }}
+    {{- $catalog := $agent.catalog | default dict }}
+    {{- $miner := $agent.miner | default dict }}
+    {{- $regex := $agent.regex | default dict }}
+    {{- $ai := $agent.ai | default dict }}
     # AI SRE Agent — opt-in. See src/agent/ai-detect-mode.md
     agent:
       enable: true
-      mode: {{ .Values.agent.mode | default "training" }}
-      poll_interval: {{ .Values.agent.pollInterval | default "30s" }}
-      lookback: {{ .Values.agent.lookback | default "5m" }}
-      new_service_grace: {{ .Values.agent.newServiceGrace | default "30m" }}
+      mode: {{ $agent.mode | default "training" }}
+      poll_interval: {{ $agent.pollInterval | default "30s" }}
+      lookback: {{ $agent.lookback | default "5m" }}
+      new_service_grace: {{ $agent.newServiceGrace | default "30m" }}
+      batch_max: {{ $agent.batchMax | default 5000 }}
+      signal_max_bytes: {{ $agent.signalMaxBytes | default 65536 }}
       sources_path: /app/config/agent_sources.yaml
+      service_patterns:
+      {{- if $agent.servicePatterns }}
+{{ toYaml $agent.servicePatterns | indent 8 }}
+      {{- else }}
+        []
+      {{- end }}
+      # Scrubs every message before it is mined, stored, or sent to an LLM.
+      redaction:
+        enable: {{ dig "enable" true $redaction }}
+        redact_ips: {{ dig "redactIps" false $redaction }}
+        extra_patterns:
+        {{- if $redaction.extraPatterns }}
+{{ toYaml $redaction.extraPatterns | indent 10 }}
+        {{- else }}
+          []
+        {{- end }}
+      catalog:
+        persist_interval: {{ $catalog.persistInterval | default "30s" }}
+        auto_promote_after: {{ $catalog.autoPromoteAfter | default 100 }}
+        spike_z: {{ dig "spikeZ" 3.0 $catalog }}
+        spike_abs_ceiling: {{ dig "spikeAbsCeiling" 0 $catalog }}
+        spike_sustain_ticks: {{ dig "spikeSustainTicks" 1 $catalog }}
+        spike_min_frequency: {{ dig "spikeMinFrequency" 5 $catalog }}
+        spike_min_baseline_count: {{ dig "spikeMinBaselineCount" 20 $catalog }}
+      miner:
+        similarity_threshold: {{ dig "similarityThreshold" 0.4 $miner }}
+        tree_depth: {{ dig "treeDepth" 4 $miner }}
+        max_children: {{ dig "maxChildren" 100 $miner }}
+      regex:
+        default_pattern: {{ $regex.defaultPattern | default "(?i).*error.*" | quote }}
+        rules:
+        {{- if $regex.rules }}
+{{ toYaml $regex.rules | indent 10 }}
+        {{- else }}
+          []
+        {{- end }}
       ai:
-        enable: {{ .Values.agent.ai.enable }}
+        enable: {{ $ai.enable }}
+        provider: {{ $ai.provider | default "openai" | quote }}
+        base_url: {{ $ai.baseUrl | default "" | quote }}
         api_key: ${AGENT_AI_API_KEY}
-        model: {{ .Values.agent.ai.model | default "gpt-4o-mini" | quote }}
-        temperature: {{ .Values.agent.ai.temperature | default 0.2 }}
-        max_tokens: {{ .Values.agent.ai.maxTokens | default 512 }}
-        max_calls_per_hour: {{ .Values.agent.ai.maxCallsPerHour | default 60 }}
-        cache_ttl: {{ .Values.agent.ai.cacheTtl | default "1h" | quote }}
-        {{- if .Values.agent.ai.analyze.model }}
+        model: {{ $ai.model | default "gpt-4o-mini" | quote }}
+        temperature: {{ $ai.temperature | default 0.2 }}
+        max_tokens: {{ $ai.maxTokens | default 512 }}
+        max_calls_per_hour: {{ $ai.maxCallsPerHour | default 60 }}
+        cache_ttl: {{ $ai.cacheTtl | default "1h" | quote }}
+        {{- if ($ai.analyze | default dict).model }}
         analyze:
-          model: {{ .Values.agent.ai.analyze.model | quote }}
+          model: {{ $ai.analyze.model | quote }}
         {{- end }}
     {{- end }}
 
@@ -257,31 +330,116 @@ data:
       {{- end }}
   {{- end }}
 
+  {{- if hasKey (.Values.agent.tools | default dict) "kubernetes" }}
+  {{- fail "Kubernetes configuration must use connectors.kubernetes" }}
+  {{- end }}
+  {{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict }}
+  {{- $kubernetesAuth := $kubernetes.auth | default dict }}
+  connectors.yaml: |
+    connectors:
+      kubernetes:
+        {{- if $kubernetes.multiple }}
+        {{- include "versus-incident.validateClusters" $kubernetes }}
+        multiple: true
+        clusters:
+          {{- range $cluster := $kubernetes.clusters }}
+          - {{ include "versus-incident.clusterConnector" $cluster | trim | nindent 12 | trim }}
+          {{- end }}
+        {{- else }}
+        {{- if $kubernetes.clusters }}{{ fail "connectors.kubernetes.clusters requires multiple: true" }}{{ end }}
+        {{- $kubernetesAuthMode := $kubernetesAuth.mode | default "" }}
+        {{- if and (ne $kubernetesAuthMode "in_cluster") (ne $kubernetesAuthMode "kubeconfig") }}
+        endpoint: {{ $kubernetes.endpoint | default "" | quote }}
+        ca_file: {{ $kubernetes.caFile | default "" | quote }}
+        ca_data: "${KUBERNETES_CA_DATA}"
+        server_name: {{ $kubernetes.serverName | default "" | quote }}
+        {{- end }}
+        cluster_id: {{ $kubernetes.clusterID | default "default" | quote }}
+        credential_id: {{ $kubernetes.credentialID | default "" | quote }}
+        timeout: {{ $kubernetes.timeout | default "10s" | quote }}
+        discovery_ttl: {{ $kubernetes.discoveryTTL | default "5m" | quote }}
+        change_capture: {{ $kubernetes.changeCapture | default "continuous" | quote }}
+        allow_private_networks: {{ dig "allowPrivateNetworks" false $kubernetes }}
+        endpoint_cidrs: {{ $kubernetes.endpointCIDRs | default list | toJson }}
+        auth:
+          mode: {{ $kubernetesAuthMode | quote }}
+          {{- if eq $kubernetesAuthMode "token" }}
+          token: "${KUBERNETES_TOKEN}"
+          {{- else if eq $kubernetesAuthMode "token_file" }}
+          token_file: {{ $kubernetesAuth.tokenFile | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "client_certificate" }}
+          client_certificate:
+            certificate_file: {{ ($kubernetesAuth.clientCertificate | default dict).certificateFile | default "" | quote }}
+            key_file: {{ ($kubernetesAuth.clientCertificate | default dict).keyFile | default "" | quote }}
+            certificate_data: "${KUBERNETES_CLIENT_CERTIFICATE_DATA}"
+            key_data: "${KUBERNETES_CLIENT_KEY_DATA}"
+          {{- else if eq $kubernetesAuthMode "kubeconfig" }}
+          kubeconfig:
+            path: {{ ($kubernetesAuth.kubeconfig | default dict).path | default "" | quote }}
+            context: {{ ($kubernetesAuth.kubeconfig | default dict).context | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "eks" }}
+          eks:
+            cluster_name: {{ ($kubernetesAuth.eks | default dict).clusterName | default "" | quote }}
+            region: {{ ($kubernetesAuth.eks | default dict).region | default "" | quote }}
+            role_arn: {{ ($kubernetesAuth.eks | default dict).roleARN | default "" | quote }}
+            profile: {{ ($kubernetesAuth.eks | default dict).profile | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "aks" }}
+          {{- $aksAuth := $kubernetesAuth.aks | default dict }}
+          {{- $aksCredentialMode := $aksAuth.credentialMode | default "" }}
+          aks:
+            credential_mode: {{ $aksCredentialMode | quote }}
+            server_id: {{ $aksAuth.serverID | default "" | quote }}
+            client_id: {{ $aksAuth.clientID | default "" | quote }}
+            {{- if or (eq $aksCredentialMode "workload_identity") (eq $aksCredentialMode "client_secret") }}
+            tenant_id: {{ $aksAuth.tenantID | default "" | quote }}
+            {{- end }}
+            {{- if eq $aksCredentialMode "client_secret" }}
+            client_secret: "${KUBERNETES_AKS_CLIENT_SECRET}"
+            {{- else if eq $aksCredentialMode "workload_identity" }}
+            federated_token_file: {{ $aksAuth.federatedTokenFile | default "" | quote }}
+            {{- end }}
+            environment: {{ $aksAuth.environment | default "" | quote }}
+          {{- else if eq $kubernetesAuthMode "gke" }}
+          gke:
+            credentials_file: {{ ($kubernetesAuth.gke | default dict).credentialsFile | default "" | quote }}
+          {{- end }}
+        {{- $actions := $kubernetes.actions | default dict }}
+        actions:
+          enable: {{ dig "enable" false $actions }}
+          max_replicas: {{ $actions.maxReplicas | default 20 }}
+          timeout: {{ $actions.timeout | default "15s" | quote }}
+          auth:
+            {{- include "versus-incident.connectorAuth" (dict "auth" ($actions.auth | default dict) "prefix" "KUBERNETES_ACTOR") | nindent 12 }}
+          {{- end }}
   {{- if .Values.agent.enable }}
+  {{- $tools := .Values.agent.tools | default dict }}
+  {{- $recentChanges := $tools.recentChanges | default dict }}
+  {{- $git := $recentChanges.git | default dict }}
+  {{- $describeDeps := $tools.describeDependencies | default dict }}
+  {{- $findRunbook := $tools.findRunbook | default dict }}
   tools.yaml: |
-    # Per-tool DATA config for the analyze tools (rendered by Helm).
     tools:
-      tool_timeout: {{ .Values.agent.tools.toolTimeout | default "20s" | quote }}
-      parallel_tools: {{ .Values.agent.tools.parallelTools | default false }}
+      tool_timeout: {{ $tools.toolTimeout | default "20s" | quote }}
+      parallel_tools: {{ dig "parallelTools" false $tools }}
       recent_changes:
         git:
           auth:
-            token: {{ .Values.agent.tools.recentChanges.git.auth.token | default "" | quote }}
-            ssh_key_path: {{ .Values.agent.tools.recentChanges.git.auth.sshKeyPath | default "" | quote }}
+            token: "${GIT_AUTH_TOKEN}"
+            ssh_key_path: {{ ($git.auth | default dict).sshKeyPath | default "" | quote }}
           repos:
-          {{- if .Values.agent.tools.recentChanges.git.repos }}
-          {{- range .Values.agent.tools.recentChanges.git.repos }}
-            - url: {{ .url | quote }}
-              {{- if .branch }}
-              branch: {{ .branch | quote }}
+          {{- if $git.repos }}
+          {{- range $i, $repo := $git.repos }}
+            - url: {{ $repo.url | quote }}
+              {{- if $repo.branch }}
+              branch: {{ $repo.branch | quote }}
               {{- end }}
-              {{- if .service }}
-              service: {{ .service | quote }}
+              {{- if $repo.service }}
+              service: {{ $repo.service | quote }}
               {{- end }}
-              {{- if .auth }}
+              {{- if $repo.auth }}
               auth:
-                token: {{ .auth.token | default "" | quote }}
-                ssh_key_path: {{ .auth.sshKeyPath | default "" | quote }}
+                token: "${GIT_AUTH_TOKEN_{{ $i }}}"
+                ssh_key_path: {{ $repo.auth.sshKeyPath | default "" | quote }}
               {{- end }}
           {{- end }}
           {{- else }}
@@ -289,8 +447,8 @@ data:
           {{- end }}
       describe_dependencies:
         services:
-        {{- if .Values.agent.tools.describeDependencies.services }}
-        {{- range .Values.agent.tools.describeDependencies.services }}
+        {{- if $describeDeps.services }}
+        {{- range $describeDeps.services }}
           - name: {{ .name | quote }}
             depends_on:
             {{- if .dependsOn }}
@@ -305,21 +463,7 @@ data:
           []
         {{- end }}
       find_runbook:
-        embedding_model: {{ .Values.agent.tools.findRunbook.embeddingModel | default "" | quote }}
-      query_metrics:
-        prometheus:
-          address: {{ .Values.agent.tools.queryMetrics.prometheus.address | default "" | quote }}
-          bearer_token: {{ .Values.agent.tools.queryMetrics.prometheus.bearerToken | default "" | quote }}
-          username: {{ .Values.agent.tools.queryMetrics.prometheus.username | default "" | quote }}
-          password: {{ .Values.agent.tools.queryMetrics.prometheus.password | default "" | quote }}
-          insecure_skip_verify: {{ .Values.agent.tools.queryMetrics.prometheus.insecureSkipVerify | default false }}
-      query_traces:
-        tempo:
-          address: {{ .Values.agent.tools.queryTraces.tempo.address | default "" | quote }}
-          bearer_token: {{ .Values.agent.tools.queryTraces.tempo.bearerToken | default "" | quote }}
-          username: {{ .Values.agent.tools.queryTraces.tempo.username | default "" | quote }}
-          password: {{ .Values.agent.tools.queryTraces.tempo.password | default "" | quote }}
-          insecure_skip_verify: {{ .Values.agent.tools.queryTraces.tempo.insecureSkipVerify | default false }}
+        embedding_model: {{ $findRunbook.embeddingModel | default "" | quote }}
   {{- end }}
 
   {{- if .Values.templates.slack }}

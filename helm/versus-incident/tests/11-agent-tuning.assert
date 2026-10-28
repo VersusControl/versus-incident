@@ -1,0 +1,19 @@
+# Every tuning knob must reach the rendered config.yaml, not just the defaults.
+batch_max: 2500
+signal_max_bytes: 32768
+redact_ips: true
+ssn=
+persist_interval: 60s
+auto_promote_after: 250
+spike_z: 4.5
+spike_abs_ceiling: 500
+spike_sustain_ticks: 3
+spike_min_frequency: 10
+spike_min_baseline_count: 50
+similarity_threshold: 0.6
+tree_depth: 6
+max_children: 200
+default_pattern: "\(\?i\)\(error\|fatal\)"
+name: disk-full
+No space left on device
+svc=\(\[A-Za-z0-9._-\]\+\)

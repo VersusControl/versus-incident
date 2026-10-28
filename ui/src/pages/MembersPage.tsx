@@ -1,6 +1,6 @@
 import { useId, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import clsx from "clsx";
 import {
   ApiError,
@@ -28,6 +28,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Pagination } from "@/components/Pagination";
 import { RetryableError } from "@/components/RetryableError";
 import { SkRows } from "@/components/Skeleton";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { useToast } from "@/components/toastContext";
 
 // RbacBinding is what the enterprise RBAC members surface contributes to one
@@ -37,6 +39,7 @@ import { useToast } from "@/components/toastContext";
 interface RbacBinding {
   role?: string;
   subject: string;
+  clusters?: string[] | null;
 }
 
 // MembersPanel is the operator's roster of people that can be assigned
@@ -60,6 +63,8 @@ export function MembersPanel() {
   const rbacActive = access.enterprise && access.hasSession;
   const isAdmin = access.isAdmin;
   const selfEmail = normalizeEmail(access.session.data?.email);
+  const clusterCatalog = useQuery({ queryKey: ["kubernetes-clusters"], queryFn: api.kubernetesClusters, enabled: rbacActive, retry: false });
+  const assignments = useQuery({ queryKey: ["rbac-roles", access.org], queryFn: () => api.listMemberRoles(access.org as string), enabled: rbacActive && isAdmin && Boolean(access.org) && clusterCatalog.data?.multiple === true, retry: false });
 
   const rbacQ = useQuery<MembersEnvelope>({
     queryKey: ["rbac-members", access.org],
@@ -81,7 +86,7 @@ export function MembersPanel() {
     const m = new Map<string, RbacBinding>();
     for (const r of rbacQ.data?.members ?? []) {
       const key = normalizeEmail(r.email);
-      if (key) m.set(key, { role: r.role, subject: r.subject });
+      if (key) m.set(key, { role: r.role, subject: r.subject, clusters: r.clusters });
     }
     return m;
   }, [rbacQ.data]);
@@ -130,11 +135,14 @@ export function MembersPanel() {
   });
 
   const setRole = useMutation({
-    mutationFn: (vars: { subject: string; role: MemberRole }) =>
-      api.setMemberRole(access.org as string, vars.subject, vars.role),
+    mutationFn: (vars: { subject: string; role: MemberRole; clusters?: string[] }) =>
+      api.setMemberRole(access.org as string, vars.subject, vars.role, vars.clusters),
     onMutate: (vars) => setPendingRoleSubject(vars.subject),
     onSuccess: (_res, vars) => {
       qc.invalidateQueries({ queryKey: ["rbac-members", access.org] });
+      qc.invalidateQueries({ queryKey: ["rbac-roles", access.org] });
+      qc.invalidateQueries({ queryKey: ["rbac-me"] });
+      qc.invalidateQueries({ queryKey: ["kubernetes-clusters"] });
       toast.push({ tone: "ok", title: `Role updated to ${roleLabel(vars.role)}` });
     },
     onError: (err) => {
@@ -152,32 +160,27 @@ export function MembersPanel() {
 
   return (
     <>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="relative max-w-md flex-1">
-          <Search
-            size={12}
-            aria-hidden
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-          />
-          <input
-            className="input pl-7"
-            data-page-search
-            aria-label="Search members"
-            placeholder="Search by name, alias, or channel id…"
+      <FilterBar
+        search={
+          <SearchInput
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={setQ}
+            ariaLabel="Search members"
+            placeholder="Search by name, alias, or channel id…"
           />
-        </div>
-        {showAdd && (
-          <button
-            className="btn"
-            data-testid="members-add"
-            onClick={() => setEditing("new")}
-          >
-            <Plus size={12} /> Add member
-          </button>
-        )}
-      </div>
+        }
+        actions={
+          showAdd ? (
+            <button
+              className="btn"
+              data-testid="members-add"
+              onClick={() => setEditing("new")}
+            >
+              <Plus size={12} /> Add member
+            </button>
+          ) : undefined
+        }
+      />
 
       {isError && (
         <div className="mb-3">
@@ -238,6 +241,11 @@ export function MembersPanel() {
                     ? rbacByEmail.get(emailKey)
                     : undefined;
                   const isSelf = !!selfEmail && emailKey === selfEmail;
+                  const direct = assignments.data?.assignments.find((assignment) => assignment.subject === binding?.subject);
+                  const roleClusters = direct ? direct.clusters ?? [] : binding?.clusters;
+                  const canPreserveScope = !clusterCatalog.data?.multiple || Boolean(roleClusters?.length) || binding?.clusters === null || Boolean(direct && binding?.clusters?.length);
+                  const connectorAbsent = clusterCatalog.error instanceof ApiError && clusterCatalog.error.status === 503 && clusterCatalog.error.message === "Kubernetes connector is not configured";
+                  const canManageScope = connectorAbsent || clusterCatalog.isSuccess && (!clusterCatalog.data.multiple || assignments.isSuccess);
                   const aff = memberAffordances({
                     rbacActive,
                     isAdmin,
@@ -297,18 +305,27 @@ export function MembersPanel() {
                         <td>
                           <MemberRoleCell
                             memberId={m.id}
-                            role={binding?.role}
+                            role={direct?.role ?? binding?.role}
                             subject={binding?.subject}
-                            canManage={aff.canManageRole}
+                            canManage={aff.canManageRole && canManageScope && canPreserveScope}
                             pending={
                               !!binding?.subject &&
                               pendingRoleSubject === binding.subject
                             }
                             onChange={(role) =>
                               binding?.subject &&
-                              setRole.mutate({ subject: binding.subject, role })
+                              setRole.mutate({ subject: binding.subject, role, clusters: clusterCatalog.data?.multiple ? roleClusters ?? [] : undefined })
                             }
                           />
+                          {clusterCatalog.data?.multiple && binding?.subject && <MemberClusterPermissions
+                            memberId={m.id}
+                            clusters={clusterCatalog.data.clusters}
+                            selected={direct ? direct.clusters ?? [] : undefined}
+                            effective={binding.clusters}
+                            canManage={aff.canManageRole && assignments.isSuccess && (Boolean(direct) || binding.clusters !== undefined)}
+                            pending={pendingRoleSubject === binding.subject}
+                            onSave={(clusters) => setRole.mutate({ subject: binding.subject, role: direct?.role ?? (binding.role || "viewer") as MemberRole, clusters })}
+                          />}
                         </td>
                       )}
                     </tr>
@@ -354,6 +371,31 @@ export function MembersPanel() {
 // maps to an RBAC subject — a live <select> that reassigns the role through the
 // SAME assignRole path the Admin surface uses. A row with no RBAC subject (a
 // roster member who never signed in via SSO) shows a muted "No SSO role".
+export function MemberClusterPermissions({ memberId, clusters, selected, effective, canManage, pending, onSave }: {
+  memberId: string;
+  clusters: Array<{ id: string; display_name?: string }>;
+  selected?: string[];
+  effective?: string[] | null;
+  canManage: boolean;
+  pending: boolean;
+  onSave: (clusters: string[]) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const initialClusters = selected ?? effective ?? [];
+  const initialAll = selected !== undefined ? !selected.length : effective == null;
+  const [draft, setDraft] = useState<string[]>(initialClusters);
+  const [all, setAll] = useState(initialAll);
+  const summary = effective === null ? "All clusters" : effective === undefined ? "Unavailable" : !effective.length ? "No clusters" : effective.map((id) => clusters.find((cluster) => cluster.id === id)?.display_name || id).join(", ");
+  const options = [...clusters, ...initialClusters.filter((id) => !clusters.some((cluster) => cluster.id === id)).map((id) => ({ id, display_name: `${id} (not in visible catalog)` }))];
+  if (!editing) return <div className="mt-2 min-w-0 text-2xs text-ink-400"><span className="block break-words">Effective access: {summary}</span>{canManage && <button type="button" className="btn mt-1" aria-label={`Cluster permissions for ${memberId}`} disabled={pending} onClick={() => { setDraft(initialClusters); setAll(initialAll); setEditing(true); }}><Pencil size={11} />Clusters</button>}</div>;
+  return <fieldset aria-label={`Cluster permissions for ${memberId}`} className="mt-2 space-y-2 border-t border-ink-600 pt-2 text-xs text-ink-300" disabled={pending}>
+    <legend className="text-2xs text-ink-400">Direct assignment</legend>
+    <label className="flex items-center gap-2"><input type="checkbox" checked={all} onChange={(event) => setAll(event.target.checked)} />All clusters</label>
+    {!all && options.map((cluster) => <label key={cluster.id} className="flex items-start gap-2"><input className="mt-0.5" type="checkbox" checked={draft.includes(cluster.id)} onChange={(event) => setDraft(event.target.checked ? [...draft, cluster.id] : draft.filter((id) => id !== cluster.id))} /><span className="break-words">{cluster.display_name || cluster.id}</span></label>)}
+    <div className="flex gap-2"><button type="button" className="btn btn-primary" disabled={!all && !draft.length} onClick={() => { onSave(all ? [] : draft); setEditing(false); }}>Save</button><button type="button" className="btn" onClick={() => setEditing(false)}>Cancel</button></div>
+  </fieldset>;
+}
+
 function MemberRoleCell({
   memberId,
   role,

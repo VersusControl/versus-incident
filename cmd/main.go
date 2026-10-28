@@ -14,15 +14,23 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
+	"github.com/VersusControl/versus-incident/pkg/agent/act"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	c "github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/report"
 	"github.com/VersusControl/versus-incident/pkg/routes"
+	"github.com/VersusControl/versus-incident/pkg/scheduler"
+	"github.com/VersusControl/versus-incident/pkg/servicehealth"
 	"github.com/VersusControl/versus-incident/pkg/services"
+	"github.com/VersusControl/versus-incident/pkg/servicetopology"
+	"github.com/VersusControl/versus-incident/pkg/signalsources"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/teams"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 	"github.com/redis/go-redis/v9"
@@ -109,6 +117,8 @@ func main() {
 		log.Printf("warn: teams store unavailable: %v", err)
 		teamsStore = nil
 	}
+	healthManager := servicehealth.NewManager(store)
+	topologyManager := servicetopology.NewManager(agent.BuildDependencyGraph(cfg.Agent.Tools.DescribeDependencies.Services), nil)
 
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true, // Disable the default Fiber banner
@@ -122,6 +132,7 @@ func main() {
 	// Defense-in-depth: a panic in any handler is recovered and turned into a
 	// 500 instead of crashing the process.
 	app.Use(recover.New())
+	app.Use(middleware.SecurityHeaders())
 
 	app.Use(middleware.Logger())
 
@@ -131,7 +142,7 @@ func main() {
 	// multi-tenant scoping.
 	app.Use(middleware.OrgInjector())
 
-	routes.SetupRoutes(app, teamsStore)
+	routes.SetupRoutesWithTopology(app, teamsStore, healthManager, topologyManager)
 
 	// Start queue listeners
 	if cfg.Queue.Enable {
@@ -142,6 +153,13 @@ func main() {
 		}
 
 		if cfg.Queue.SNS.Enable {
+			// The endpoint is reachable by anyone, and a valid signature only
+			// proves the message came from some SNS topic. The topic ARN is
+			// what binds it to this deployment, so refuse to expose the route
+			// without one rather than accept another account's traffic.
+			if cfg.Queue.SNS.TopicARN == "" {
+				log.Fatalf("queue.sns.enable is set but queue.sns.topic_arn is empty: set SNS_TOPIC_ARN to the topic this endpoint serves")
+			}
 			app.Post(cfg.Queue.SNS.EndpointPath, controllers.SNS)
 		}
 
@@ -188,6 +206,37 @@ func main() {
 	// default install starts a single idle ticker and sends nothing.
 	services.StartReportScheduler(rootCtx, store)
 
+	// agentDone closes once the worker has finished its shutdown flush. The
+	// process must not exit before then: the catalog only reaches storage on its
+	// flush interval, so racing it away drops everything learned since the last
+	// one.
+	var agentDone <-chan struct{}
+	toolAvailability := agent.NewToolAvailabilityService(cfg.Agent, store, cfg.Connectors)
+	kubernetesService, kubernetesErrors := agent.NewKubernetesRegistry(cfg.Connectors.Kubernetes, tenancy.DefaultOrgScope())
+	for _, kubernetesErr := range kubernetesErrors {
+		log.Printf("kubernetes: connector unavailable: %v", kubernetesErr)
+	}
+	constructed := 0
+	redactor, _ := agent.NewRedactor(cfg.Agent.Redaction.Enable && cfg.Agent.Redaction.RedactIPs, cfg.Agent.Redaction.ExtraPatterns)
+	kubernetesService.Each(func(service *kubernetes.Service) {
+		constructed++
+		service.SetLogStreamContext(rootCtx)
+		service.SetChangeStorage(store)
+		service.SetScrubber(redactor)
+	})
+	agent.ConfigureKubernetesBreakLogs(kubernetesService, cfg.Agent.Sources, redactor, tenancy.DefaultOrgScope().Write)
+	services.ConfigureKubernetesIssueAlerts(kubernetesService)
+	kubernetesService.StartCapture(rootCtx)
+	defer kubernetesService.Close()
+	constructionHealth := ""
+	if constructed > 0 && constructed < len(kubernetesService.Clusters()) {
+		constructionHealth = "partial"
+	}
+	toolAvailability.BindIntegrationConstruction("kubernetes", constructed > 0, constructionHealth)
+	registerToolAvailabilityController(app, toolAvailability, kubernetesService)
+	if err := registerActionHistoryService(store); err != nil {
+		log.Fatalf("action history: failed to start: %v", err)
+	}
 	if cfg.Agent.Enable {
 		// Try to attach to the existing Redis client; if on-call wasn't
 		// enabled but agent is, open one now (best effort — fall back to
@@ -201,11 +250,17 @@ func main() {
 			}
 		}
 
-		cat, err := startAgent(rootCtx, app, cfg.Agent, cfg.GatewaySecret, store, rdb)
+		cat, done, err := startAgent(rootCtx, app, cfg.Agent, cfg.Connectors, cfg.GatewaySecret, store, rdb, toolAvailability, kubernetesService, healthManager)
 		if err != nil {
 			log.Fatalf("agent: failed to start: %v", err)
 		}
+		agentDone = done
 		_ = cat // catalog handle held by goroutine + admin controller
+	} else {
+		if err := startServiceHealth(healthManager, store, nil, cfg.Agent, nil); err != nil {
+			log.Fatalf("service health: failed to start: %v", err)
+		}
+		go scheduler.NewFromRegistry().Run(rootCtx)
 	}
 
 	// Mount the embedded UI LAST so it sits behind every API route. The
@@ -235,12 +290,51 @@ func main() {
 	}
 
 	rootCancel()
+	if !agent.WaitForShutdownFlush(agentDone, agentFlushGrace) {
+		log.Printf("agent: shutdown flush did not finish within %s; learned state may be incomplete", agentFlushGrace)
+	}
+}
+
+// agentFlushGrace bounds how long the process waits for the agent worker to
+// finish its shutdown flush. Long enough for a catalog write plus the commit
+// that follows it, short enough to stay inside a container stop's grace period.
+const agentFlushGrace = 15 * time.Second
+
+func registerActionHistoryService(store storage.Provider) error {
+	scope := tenancy.DefaultOrgScope()
+	service, err := act.NewServiceWithScope(store, scope, ledger.NewBlobWriter(store, scope.Write), nil)
+	if err != nil {
+		return err
+	}
+	controllers.SetAgentApprovalServiceFactory(func(requestScope tenancy.OrgScope) *act.Service {
+		requestScope = requestScope.Normalized()
+		if requestScope.Write != scope.Write || len(requestScope.Read) != 1 || requestScope.Read[0] != scope.Write {
+			return nil
+		}
+		return service
+	})
+	return nil
+}
+
+func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService, services ...*kubernetes.ServiceRegistry) {
+	controllers.NewAgentToolsAdminController(availability.Manager, availability.Snapshot).Register(app.Group("/api"))
+	registry := kubernetes.NewServiceRegistry(nil)
+	if len(services) > 0 {
+		registry = services[0]
+	}
+	controllers.SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service {
+		service, _ := registry.ResolveCluster(orgID, clusterID)
+		return service
+	})
+	controllers.SetChatKubernetesRegistry(registry)
+	controllers.NewKubernetesAdminControllerWithRegistry(registry).Register(app.Group("/api"))
 }
 
 // startAgent constructs the worker, starts it in a goroutine, and registers
 // admin routes on the fiber app. It returns the catalog so the caller can
-// hold a reference (and so future hot-reload code has a handle to it).
-func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient) (*agent.Catalog, error) {
+// hold a reference (and so future hot-reload code has a handle to it), plus a
+// channel that closes when the worker has finished its shutdown flush.
+func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, connectors c.ConnectorsConfig, gatewaySecret string, store storage.Provider, rdb redis.UniversalClient, toolAvailability *agent.ToolAvailabilityService, kubernetesService *kubernetes.ServiceRegistry, healthManager *servicehealth.Manager) (*agent.Catalog, <-chan struct{}, error) {
 	// On the Postgres backend, install the typed signal-table
 	// catalog store so the log catalog reads/writes the explicit
 	// vs_patterns/vs_logs/vs_services tables (searchable, indexed) instead of
@@ -332,7 +426,17 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 
 	cursors := agent.NewCursorStore(rdb)
 
-	aiBundle := agent.BuildAIs(cfg, catalog, store, nil)
+	// The poll cursor is only half of a tailing source's position; the other
+	// half is the set of ids it has already delivered inside the window it
+	// re-reads. Persist both against the same backend, or a restart replays
+	// that window. Without Redis the sets stay in-process, exactly as the
+	// cursors do.
+	if n := signalsources.AttachTailDedupBackend(sources, signalsources.NewRedisTailDedupBackend(rdb)); n > 0 {
+		log.Printf("agent: tailing dedup sets persisted through Redis for %d source(s)", n)
+	}
+
+	aiBundle := agent.BuildAIsWithKubernetes(cfg, catalog, store, nil, kubernetesService, connectors)
+	toolAvailability.BindLiveSnapshot(aiBundle.ToolSnapshot)
 	if aiBundle.Detect != nil {
 		log.Printf("agent: AI SRE enabled provider=%s model=%s rate_limit=%d/hr",
 			aiBundle.Detect.Name(), cfg.AI.Model, cfg.AI.MaxCallsPerHour)
@@ -342,28 +446,33 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 	}
 
 	worker, err := agent.NewWorker(agent.WorkerOptions{
-		Cfg:      cfg,
-		Sources:  sources,
-		Cursors:  cursors,
-		Redactor: redactor,
-		Matcher:  matcher,
-		Miner:    miner,
-		Catalog:  catalog,
-		Shadow:   shadowLog,
-		Detect:   detectLog,
-		Services: serviceMatcher,
-		AI:       aiBundle,
-		Emitter:  services.CreateIncidentFromFinding,
+		Cfg:                      cfg,
+		Sources:                  sources,
+		Cursors:                  cursors,
+		Redactor:                 redactor,
+		Matcher:                  matcher,
+		Miner:                    miner,
+		Catalog:                  catalog,
+		Shadow:                   shadowLog,
+		Detect:                   detectLog,
+		Services:                 serviceMatcher,
+		AI:                       aiBundle,
+		Emitter:                  services.CreateIncidentFromFinding,
+		ContinueDetectionEpisode: services.ContinueDetectionEpisode,
+		HealthRecorder:           healthManager,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if err := startServiceHealth(healthManager, store, catalog, cfg, sources); err != nil {
+		return nil, nil, err
 	}
 
-	go worker.Run(ctx)
+	agentDone := agent.StartWorker(ctx, worker)
 
 	// Admin endpoints (require GATEWAY_SECRET).
 	if gatewaySecret == "" {
-		return nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
+		return nil, nil, fmt.Errorf("agent: gateway_secret is not configured — /api/agent/* admin endpoints require a secret")
 	}
 	api := app.Group("/api")
 	// The worker parses PollInterval with a 30s default (agent.parseDurationOr);
@@ -378,8 +487,52 @@ func startAgent(ctx context.Context, app *fiber.App, cfg c.AgentConfig, gatewayS
 		SetCatalogConfig(cfg.Catalog, pollInterval).
 		Register(api)
 	controllers.NewRunbookAdminController(aiBundle.Runbooks).Register(api)
+	controllers.SetChatServiceFactory(aiBundle.ChatService)
+	controllers.SetAgentApprovalServiceFactory(aiBundle.ActionService)
 
-	return catalog, nil
+	return catalog, agentDone, nil
+}
+
+func startServiceHealth(manager *servicehealth.Manager, store storage.Provider, catalog *agent.Catalog, cfg c.AgentConfig, sources []core.SignalSource) error {
+	serviceReader := func() []servicehealth.ServiceMetadata { return nil }
+	patternReader := func() []servicehealth.PatternMetadata { return nil }
+	if catalog != nil {
+		serviceReader = func() []servicehealth.ServiceMetadata {
+			all := catalog.AllServices()
+			out := make([]servicehealth.ServiceMetadata, 0, len(all))
+			for name, info := range all {
+				out = append(out, servicehealth.ServiceMetadata{OrgID: info.OrgID, Name: name})
+			}
+			return out
+		}
+		patternReader = func() []servicehealth.PatternMetadata {
+			all := catalog.All()
+			out := make([]servicehealth.PatternMetadata, 0, len(all))
+			for _, pattern := range all {
+				out = append(out, servicehealth.PatternMetadata{OrgID: pattern.OrgID, Service: pattern.Service, LastSeen: pattern.LastSeen})
+			}
+			return out
+		}
+	}
+	sourceIDs := serviceHealthLogSourceIDs(cfg, sources)
+	runtime := servicehealth.NewRuntime(servicehealth.RuntimeOptions{Manager: manager, Store: store, Services: serviceReader, Patterns: patternReader, SourceIDs: sourceIDs})
+	if err := scheduler.Register(runtime.Job); err != nil {
+		return fmt.Errorf("register service health collector: %w", err)
+	}
+	return nil
+}
+
+func serviceHealthLogSourceIDs(cfg c.AgentConfig, sources []core.SignalSource) []string {
+	sourceIDs := make([]string, 0, len(sources))
+	for _, source := range sources {
+		for _, configured := range cfg.Sources {
+			if configured.Enable && signalsources.MatchesConfiguredName(source.Name(), configured.Name) && signalsources.KindOf(configured.Type) == signalsources.KindLogs {
+				sourceIDs = append(sourceIDs, source.Name())
+				break
+			}
+		}
+	}
+	return sourceIDs
 }
 
 func printCustomBanner() {
@@ -407,12 +560,8 @@ V       V   EEEEE   RRRRR   SSSSS   U       U   SSSSS
 
 Dashboard UI   -> %s/
 Health check   -> %s/healthz
-Create alert   -> POST %s/api/incidents
-Acknowledge    -> GET  %s/api/ack/:id
-Admin incidents-> GET  %s/api/admin/incidents
-Agent status   -> GET  %s/api/agent/status
 `, cfg.Host, cfg.Port,
-		base, base, base, base, base, base)
+		base, base)
 }
 
 func handleQueueMessage(content *map[string]interface{}) error {

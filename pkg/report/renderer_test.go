@@ -3,6 +3,8 @@ package report
 import (
 	"bytes"
 	"context"
+	"image"
+	"image/color"
 	"image/png"
 	"testing"
 	"time"
@@ -184,6 +186,87 @@ func TestRenderer_ChartsToggle(t *testing.T) {
 	}
 }
 
+// TestRenderer_Title asserts the configured title flows into the drawn header:
+// a custom title changes the pixels versus the default, an empty title falls
+// back to the default (byte-identical to explicitly setting "Incident report"),
+// and every variant still renders a valid PNG of the right dimensions.
+func TestRenderer_Title(t *testing.T) {
+	r, err := NewRenderer()
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	def := fixedModel()
+	def.Title = "Incident report"
+	custom := fixedModel()
+	custom.Title = "Weekly Ops Digest"
+	blank := fixedModel()
+	blank.Title = ""
+
+	dImg, err := r.Render(context.Background(), def)
+	if err != nil {
+		t.Fatalf("render default title: %v", err)
+	}
+	cImg, err := r.Render(context.Background(), custom)
+	if err != nil {
+		t.Fatalf("render custom title: %v", err)
+	}
+	bImg, err := r.Render(context.Background(), blank)
+	if err != nil {
+		t.Fatalf("render blank title: %v", err)
+	}
+	// A custom title changes the header pixels.
+	if bytes.Equal(dImg.Data, cImg.Data) {
+		t.Fatal("custom title produced an identical image to the default")
+	}
+	// A blank title falls back to "Incident report" (identical to default).
+	if !bytes.Equal(dImg.Data, bImg.Data) {
+		t.Fatal("blank title did not fall back to the default header")
+	}
+	if _, err := png.Decode(bytes.NewReader(cImg.Data)); err != nil {
+		t.Fatalf("custom-title png.Decode: %v", err)
+	}
+}
+
+// TestWorstSeverityColor_PicksHighestNonEmptyBand proves the report accent
+// (and BY-SEVERITY bar tint) reflects the worst band that actually has
+// incidents, and only falls back to neutral slate for a genuinely empty
+// window. This is what turns the broadened severity extraction into a visibly
+// colored report.
+func TestWorstSeverityColor_PicksHighestNonEmptyBand(t *testing.T) {
+	slate := color.RGBA{0x64, 0x74, 0x8b, 0xff}
+
+	rows := []core.Bucket{
+		{Label: "critical", Count: 2},
+		{Label: "high", Count: 1},
+		{Label: "medium", Count: 0},
+		{Label: "low", Count: 0},
+		{Label: "unknown", Count: 0},
+	}
+	if got := worstSeverityColor(rows); got == slate {
+		t.Fatal("accent is slate for a window with critical incidents")
+	}
+	if got := worstSeverityColor(rows); got != severityColor("critical") {
+		t.Fatalf("accent = %v, want critical red", got)
+	}
+
+	// When only lower bands have incidents, the accent follows the worst one.
+	high := []core.Bucket{
+		{Label: "critical", Count: 0},
+		{Label: "high", Count: 3},
+		{Label: "medium", Count: 1},
+		{Label: "unknown", Count: 0},
+	}
+	if got := worstSeverityColor(high); got != severityColor("high") {
+		t.Fatalf("accent = %v, want high orange", got)
+	}
+
+	// A truly empty window stays slate.
+	empty := []core.Bucket{{Label: "critical", Count: 0}, {Label: "unknown", Count: 0}}
+	if got := worstSeverityColor(empty); got != slate {
+		t.Fatalf("empty-window accent = %v, want slate", got)
+	}
+}
+
 // TestRenderer_EmptyWindowNoPanic asserts an all-quiet window renders a valid
 // PNG rather than panicking on a divide-by-zero in the chart scaling.
 func TestRenderer_EmptyWindowNoPanic(t *testing.T) {
@@ -232,5 +315,104 @@ func TestRenderer_ContextCancelled(t *testing.T) {
 	cancel()
 	if _, err := r.Render(ctx, fixedModel()); err == nil {
 		t.Fatal("expected error on cancelled context")
+	}
+}
+
+// renderDecoded renders the model and returns the decoded image so a test can
+// inspect individual pixels.
+func renderDecoded(t *testing.T, m core.ReportModel) image.Image {
+	t.Helper()
+	r, err := NewRenderer()
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+	img, err := r.Render(context.Background(), m)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(img.Data))
+	if err != nil {
+		t.Fatalf("png.Decode: %v", err)
+	}
+	return decoded
+}
+
+// countColor tallies how many pixels in the image exactly match c.
+func countColor(img image.Image, c color.RGBA) int {
+	b := img.Bounds()
+	n := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl, a := img.At(x, y).RGBA()
+			if uint8(r>>8) == c.R && uint8(g>>8) == c.G && uint8(bl>>8) == c.B && uint8(a>>8) == c.A {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// TestRenderer_TrendSeriesDistinctColors asserts the stacked trend bars render
+// the two origins in DIFFERENT, vibrant series colors (violet AI-detect on top
+// of emerald Webhook) rather than the old gray/sky pair — the customer's "all
+// charts look the same color" complaint.
+func TestRenderer_TrendSeriesDistinctColors(t *testing.T) {
+	if colSeriesAI == colSeriesWebhook {
+		t.Fatal("the two trend series must be distinct colors")
+	}
+	img := renderDecoded(t, fixedModel())
+
+	aiPixels := countColor(img, colSeriesAI)
+	whPixels := countColor(img, colSeriesWebhook)
+	if aiPixels == 0 {
+		t.Fatal("no AI-detect (violet) series pixels drawn")
+	}
+	if whPixels == 0 {
+		t.Fatal("no Webhook (emerald) series pixels drawn")
+	}
+
+	// The old palette used slate-500 (colTextFaint) for the webhook series and
+	// sky-400 (colAccent) for AI-detect inside the bars. Neither should now be
+	// the dominant series fill.
+	if countColor(img, colSeriesWebhook) < 4 {
+		t.Fatal("emerald webhook series is not rendered as bars")
+	}
+	if countColor(img, colSeriesAI) < 4 {
+		t.Fatal("violet AI-detect series is not rendered as bars")
+	}
+}
+
+// TestRenderer_CriticalHighTileUsesWorstSeverityColor asserts the CRITICAL /
+// HIGH headline tile renders its value in the worst-severity accent (matching
+// the top accent bar) so the key number pops, while a window whose worst band
+// changes moves that tile's color with it.
+func TestRenderer_CriticalHighTileUsesWorstSeverityColor(t *testing.T) {
+	// fixedModel has critical incidents → worst severity is red.
+	m := fixedModel()
+	worst := worstSeverityColor(m.BySeverity)
+	if worst != severityColor("critical") {
+		t.Fatalf("precondition: worst = %v, want critical red", worst)
+	}
+	img := renderDecoded(t, m)
+
+	// The stat value is drawn in fc.stat (34px bold) in the worst-severity
+	// color, so a healthy count of exactly-red pixels must exist.
+	if got := countColor(img, worst); got < 20 {
+		t.Fatalf("critical/high tile value not rendered in worst-severity color (matched %d px)", got)
+	}
+}
+
+// TestRenderer_SeverityLabelsTinted asserts each BY-SEVERITY row label is drawn
+// in its own severity color rather than a single muted slate, so the panel is
+// not monochrome.
+func TestRenderer_SeverityLabelsTinted(t *testing.T) {
+	img := renderDecoded(t, fixedModel())
+	// The critical label text is drawn in red; the high label in orange. At
+	// least one glyph pixel of each must be present.
+	if countColor(img, severityColor("critical")) < 20 {
+		t.Fatal("critical severity label not tinted red")
+	}
+	if countColor(img, severityColor("high")) < 4 {
+		t.Fatal("high severity label not tinted orange")
 	}
 }

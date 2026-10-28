@@ -241,7 +241,7 @@ func TestCreateServiceOverride_ImmediatelyRepointsLogPattern(t *testing.T) {
 
 	// A pattern is already learned and attributed to the wrong service. No
 	// worker is running, so NO fresh matching log line will ever re-cluster it.
-	const patternID = "p-ec7767235887"
+	const patternID = "p-83b3179af1b7"
 	cat.Upsert(patternID, "cache miss for key <*>", "app-logs", 3, 0.2, "", "web")
 	if got := cat.Get(patternID); got == nil || got.Service != "web" {
 		t.Fatalf("seed Service = %v, want web", got)

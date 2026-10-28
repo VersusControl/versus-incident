@@ -1,18 +1,27 @@
-import { useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryResult,
+} from "@tanstack/react-query";
 import {
   AlertTriangle,
   Database,
   Eraser,
   Eye,
   EyeOff,
-  ScrollText,
   Send,
   Timer,
 } from "lucide-react";
 import clsx from "clsx";
-import { api, type DetectEvent, type ShadowEvent } from "@/lib/api";
+import {
+  api,
+  type DetectEvent,
+  type DetectStats,
+  type ShadowEvent,
+} from "@/lib/api";
 import { fmtAbs, fmtRel, truncate } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
 import { buildSpikeRows, type SpikeRow } from "@/lib/spikeRows";
@@ -21,7 +30,8 @@ import { TopBar } from "@/components/TopBar";
 import { Pill, VerdictPill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
-import { ClickableRow } from "@/components/DataTable";
+import { FilterBar } from "@/components/FilterBar";
+import { FilterPanel } from "@/components/FilterPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -37,7 +47,6 @@ import {
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
 import { EmptyState, EmptyValue } from "@/components/feedback";
-import { SYSTEM_PROMPT_PATH } from "@/lib/systemPromptNav";
 
 type Tab = "detect" | "shadow" | "spike";
 
@@ -48,9 +57,14 @@ type Tab = "detect" | "shadow" | "spike";
 // land here via App.tsx redirects with ?tab=.
 export function DecisionsPage() {
   const [params] = useSearchParams();
+  const [outcomeFilter, setOutcomeFilter] = useState<OutcomeFilter>("all");
   const raw = params.get("tab");
   const tab: Tab =
     raw === "shadow" ? "shadow" : raw === "spike" ? "spike" : "detect";
+
+  useEffect(() => {
+    if (tab !== "detect") setOutcomeFilter("all");
+  }, [tab]);
 
   const detectStats = useQuery({
     queryKey: ["detect-stats"],
@@ -87,47 +101,93 @@ export function DecisionsPage() {
       <TopBar
         title="Decisions"
         subtitle={subtitle}
-        actions={
-          <Link to={SYSTEM_PROMPT_PATH} className="btn">
-            <ScrollText size={12} aria-hidden /> System prompt
-          </Link>
-        }
       />
 
       <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <SegmentedControl
-            param="tab"
-            defaultValue="detect"
-            aria-label="Decision log"
-            options={[
-              {
-                value: "detect",
-                label: "Detect",
-                badge: detectStats.data?.events,
-              },
-              {
-                value: "shadow",
-                label: "Shadow",
-                badge: shadowStats.data?.events,
-              },
-              {
-                value: "spike",
-                label: "Spike",
-                badge: spikeReady ? spikeCount : undefined,
-              },
-            ]}
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            {/* key={tab} resets confirm/mutation state when the tab flips so a
-                pending Clear dialog can never target the other log. Spike is a
-                read-only view of shadow data — no clear there. */}
-            {tab !== "spike" && <LogActions key={tab} tab={tab} />}
-          </div>
-        </div>
+        <FilterBar
+          tabs={
+            <SegmentedControl
+              param="tab"
+              defaultValue="detect"
+              aria-label="Decision log"
+              options={[
+                {
+                  value: "detect",
+                  label: "Detect",
+                  badge: detectStats.data?.events,
+                },
+                {
+                  value: "shadow",
+                  label: "Shadow",
+                  badge: shadowStats.data?.events,
+                },
+                {
+                  value: "spike",
+                  label: "Spike",
+                  badge: spikeReady ? spikeCount : undefined,
+                },
+              ]}
+            />
+          }
+          actions={
+            tab === "detect" ? (
+              <>
+                <FilterPanel
+                  facets={[]}
+                  activeCount={outcomeFilter === "all" ? 0 : 1}
+                  onToggle={() => {}}
+                  onClear={() => setOutcomeFilter("all")}
+                  controls={
+                    <div
+                      role="group"
+                      aria-label="Outcome filter"
+                      className="inline-flex flex-wrap gap-0.5 rounded-control border border-ink-500 bg-surface-raised p-0.5 text-xs"
+                    >
+                      {OUTCOMES.map((filter) => {
+                        const count = detectStats.data
+                          ? filter === "all"
+                            ? (detectStats.data.events ?? 0)
+                            : (detectStats.data[`outcome_${filter}`] ?? 0)
+                          : undefined;
+                        return (
+                          <button
+                            key={filter}
+                            onClick={() => setOutcomeFilter(filter)}
+                            aria-pressed={outcomeFilter === filter}
+                            className={clsx(
+                              "rounded px-3 py-1 transition-colors",
+                              outcomeFilter === filter
+                                ? "bg-accent-subtle text-ink-50"
+                                : "text-ink-300 hover:text-ink-100",
+                            )}
+                          >
+                            {OUTCOME_LABELS[filter]}
+                            {count !== undefined && (
+                              <span className="ml-1 text-2xs opacity-70">
+                                ({count})
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  }
+                />
+                <LogActions key={tab} tab={tab} />
+              </>
+            ) : tab !== "spike" ? (
+              // key={tab} resets confirm/mutation state when the tab flips so a
+              // pending Clear dialog can never target the other log.
+              <LogActions key={tab} tab={tab} />
+            ) : undefined
+          }
+        />
 
         {tab === "detect" ? (
-          <DetectTab />
+          <DetectTab
+            filter={outcomeFilter}
+            stats={detectStats}
+          />
         ) : tab === "spike" ? (
           <SpikeTab />
         ) : (
@@ -240,15 +300,15 @@ const OUTCOME_LABELS: Record<OutcomeFilter, string> = {
 
 const DETECT_COLS = 11;
 
-function DetectTab() {
-  const navigate = useNavigate();
+function DetectTab({
+  filter,
+  stats,
+}: {
+  filter: OutcomeFilter;
+  stats: UseQueryResult<DetectStats>;
+}) {
   const events = useQuery({ queryKey: ["detect"], queryFn: api.listDetect });
-  const stats = useQuery({
-    queryKey: ["detect-stats"],
-    queryFn: api.detectStats,
-  });
 
-  const [filter, setFilter] = useState<OutcomeFilter>("all");
   const [peekId, setPeekId] = useState<string | null>(null);
 
   const list = useMemo(() => {
@@ -280,7 +340,7 @@ function DetectTab() {
     size: pg.pageItems.length,
     onOpen: (i) => {
       const e = pg.pageItems[i];
-      if (e) navigate(`/agent/decisions/detect/${encodeURIComponent(e.id)}`);
+      if (e) setPeekId(e.id);
     },
   });
 
@@ -288,38 +348,6 @@ function DetectTab() {
 
   return (
     <>
-      <div
-        role="group"
-        aria-label="Outcome filter"
-        className="mb-3 inline-flex flex-wrap gap-0.5 rounded-control border border-ink-500 bg-surface-raised p-0.5 text-xs"
-      >
-        {OUTCOMES.map((f) => {
-          const count = stats.data
-            ? f === "all"
-              ? (stats.data.events ?? 0)
-              : (stats.data[`outcome_${f}`] ?? 0)
-            : undefined;
-          return (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              aria-pressed={filter === f}
-              className={clsx(
-                "rounded px-3 py-1 transition-colors",
-                filter === f
-                  ? "bg-accent-subtle text-ink-50"
-                  : "text-ink-300 hover:text-ink-100",
-              )}
-            >
-              {OUTCOME_LABELS[f]}
-              {count !== undefined && (
-                <span className="ml-1 text-2xs opacity-70">({count})</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
       {events.isError && (
         <div className="mb-3">
           <RetryableError
@@ -352,7 +380,7 @@ function DetectTab() {
         )}
         <div
           className="max-h-[calc(100vh-260px)] overflow-auto"
-          aria-label="Detect decisions table — j/k to move, Enter to open"
+          aria-label="Detect decisions table — j/k to move, Enter to preview"
           {...keys.containerProps}
         >
           <table className="ddt">
@@ -396,7 +424,7 @@ function DetectTab() {
                         title="No detect events yet"
                         hint="Switch the agent to detect mode and let it call the AI SRE."
                         action={
-                          <Link to="/settings?tab=agent" className="btn">
+                          <Link to="/settings?section=agent-runtime" className="btn">
                             View agent settings
                           </Link>
                         }
@@ -490,11 +518,11 @@ function DetectTab() {
               </PeekField>
             </dl>
             {peek.explanation && (
-              <div>
+              <div className="min-w-0">
                 <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                   Why it tripped
                 </div>
-                <p className="font-mono text-2xs text-ink-100">
+                <p className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere] font-mono text-2xs text-ink-100">
                   {peek.explanation}
                 </p>
               </div>
@@ -503,7 +531,7 @@ function DetectTab() {
               <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                 Sample
               </div>
-              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+              <pre className="max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
                 {peek.samples?.[0] || peek.template || "—"}
               </pre>
             </div>
@@ -540,7 +568,7 @@ function DetectRow({
     "—";
   const href = `/agent/decisions/detect/${encodeURIComponent(e.id)}`;
   return (
-    <ClickableRow to={href} {...rowProps}>
+    <tr {...rowProps}>
       <td className="w-8">
         <RowSelectCheckbox
           checked={selected}
@@ -594,7 +622,7 @@ function DetectRow({
       <td className="text-right tabular-nums text-ink-400">
         {e.duration_ms ?? <EmptyValue />}
       </td>
-    </ClickableRow>
+    </tr>
   );
 }
 
@@ -680,8 +708,6 @@ function ShadowEventsTable({
   resetKey: string;
   empty: React.ReactNode;
 }) {
-  const navigate = useNavigate();
-
   // Click-to-sort on Last seen (by the real last_seen timestamp). Default:
   // most-recently-seen first, matching the incoming order.
   const sorted = useSortableRows(
@@ -708,10 +734,7 @@ function ShadowEventsTable({
     size: pg.pageItems.length,
     onOpen: (i) => {
       const e = pg.pageItems[i];
-      if (e)
-        navigate(
-          `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`,
-        );
+      if (e) setPeekKey(shadowKey(e));
     },
   });
 
@@ -729,7 +752,7 @@ function ShadowEventsTable({
       )}
       <div
         className="max-h-[calc(100vh-260px)] overflow-auto"
-        aria-label="Shadow decisions table — j/k to move, Enter to open"
+        aria-label="Shadow decisions table — j/k to move, Enter to preview"
         {...keys.containerProps}
       >
         <table className="ddt">
@@ -770,7 +793,7 @@ function ShadowEventsTable({
               const href = `/agent/decisions/shadow/${encodeURIComponent(e.pattern_id)}`;
               const key = shadowKey(e);
               return (
-                <ClickableRow key={key} to={href} {...keys.rowProps(i)}>
+                <tr key={key} {...keys.rowProps(i)}>
                   <td className="w-8">
                     <RowSelectCheckbox
                       checked={bulk.isSelected(key)}
@@ -830,7 +853,7 @@ function ShadowEventsTable({
                   >
                     {fmtRel(e.last_seen)}
                   </td>
-                </ClickableRow>
+                </tr>
               );
             })}
           </tbody>
@@ -890,7 +913,7 @@ function ShadowEventsTable({
               <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                 Sample
               </div>
-              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+              <pre className="max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
                 {peek.sample_message || peek.template || "—"}
               </pre>
             </div>
@@ -1044,8 +1067,6 @@ function SpikeTable({
   rows: SpikeRow[];
   isLoading: boolean;
 }) {
-  const navigate = useNavigate();
-
   // Click-to-sort on When (by the real spike timestamp). Default: newest first,
   // matching the merged newest-first order.
   const sorted = useSortableRows(
@@ -1068,7 +1089,7 @@ function SpikeTable({
     size: pg.pageItems.length,
     onOpen: (i) => {
       const r = pg.pageItems[i];
-      if (r) navigate(r.href);
+      if (r) setPeekKey(r.key);
     },
   });
 
@@ -1086,7 +1107,7 @@ function SpikeTable({
       )}
       <div
         className="max-h-[calc(100vh-260px)] overflow-auto"
-        aria-label="Spike signals table — j/k to move, Enter to open"
+        aria-label="Spike signals table — j/k to move, Enter to preview"
         {...keys.containerProps}
       >
         <table className="ddt">
@@ -1127,7 +1148,7 @@ function SpikeTable({
               </tr>
             )}
             {pg.pageItems.map((r, i) => (
-              <ClickableRow key={r.key} to={r.href} {...keys.rowProps(i)}>
+              <tr key={r.key} {...keys.rowProps(i)}>
                 <td className="w-8">
                   <RowSelectCheckbox
                     checked={bulk.isSelected(r.key)}
@@ -1177,7 +1198,7 @@ function SpikeTable({
                 <td className="text-2xs text-ink-300" title={fmtAbs(r.when)}>
                   {fmtRel(r.when)}
                 </td>
-              </ClickableRow>
+              </tr>
             ))}
           </tbody>
         </table>
@@ -1223,7 +1244,7 @@ function SpikeTable({
               <div className="mb-1 text-2xs uppercase tracking-wide text-ink-400">
                 Sample
               </div>
-              <pre className="overflow-auto whitespace-pre-wrap break-words rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
+              <pre className="max-w-full overflow-x-hidden overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-ink-600 bg-surface-sunken p-2 font-mono text-2xs leading-relaxed text-ink-100">
                 {peek.sample || "—"}
               </pre>
             </div>

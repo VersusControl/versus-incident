@@ -1,41 +1,31 @@
 import { useQuery } from "@tanstack/react-query";
-import { Lock, ExternalLink } from "lucide-react";
 import { ChannelIcon } from "@/components/ChannelIcon";
 import { RetryableError } from "@/components/RetryableError";
 import { SkCard } from "@/components/Skeleton";
+import {
+  EnablePill,
+  KV,
+  KVGrid,
+  ReadOnlyCard,
+  SecretField,
+  SubCard,
+} from "@/components/settings/ReadOnlyValues";
 import { api, type ConfigField } from "@/lib/api";
 
-// Read-only view of the live alert / queue / on-call configuration. All
-// secret-bearing fields (tokens, webhook URLs, SMTP password, etc.) are
-// rendered as a "configured" pill — the actual value is never sent to
-// the browser. Operators wanting to inspect a value must look at
-// `config/config.yaml` or the relevant environment variable on the host.
-// Exported as a panel so SettingsPage can compose it as the Incidents tab.
-export function IncidentsConfigPanel() {
-  return (
-    <div className="space-y-6">
-      <IncidentsReadOnlyConfig />
-    </div>
-  );
-}
+export type IncidentsConfigPart = "server" | "channels" | "queues" | "oncall";
 
-// IncidentsReadOnlyConfig renders the live, non-editable alert / queue /
-// on-call configuration.
-function IncidentsReadOnlyConfig() {
+// Read-only view of the live server / alert / queue / on-call configuration,
+// one part per Settings section. Secret-bearing fields (tokens, webhook URLs,
+// SMTP password, etc.) render only as configured / not set — their values are
+// never sent to the browser.
+export function IncidentsConfigSection({ part }: { part: IncidentsConfigPart }) {
   const cfg = useQuery({
     queryKey: ["config-incidents"],
     queryFn: api.getIncidentsConfig,
   });
 
   if (cfg.isLoading) {
-    return (
-      <div className="space-y-6">
-        <SkCard lines={2} />
-        <SkCard lines={5} />
-        <SkCard lines={4} />
-        <SkCard lines={4} />
-      </div>
-    );
+    return <SkCard lines={4} />;
   }
 
   if (cfg.isError) {
@@ -50,165 +40,107 @@ function IncidentsReadOnlyConfig() {
   }
 
   if (!cfg.data) return null;
+  const data = cfg.data;
 
+  if (part === "server") {
+    return (
+      <ReadOnlyCard>
+        <KVGrid>
+          <KV k="Name" v={data.name || "—"} />
+          <KV k="Listen" v={`${data.host}:${data.port}`} />
+          <KV k="Public host" v={data.public_host || "—"} />
+          <KV k="Storage type" v={data.storage.type || "file"} />
+          <KV k="Max incidents" v={String(data.storage.file.max_incidents || 0)} />
+        </KVGrid>
+      </ReadOnlyCard>
+    );
+  }
+
+  if (part === "channels") {
+    return (
+      <div className="space-y-3">
+        <p className="text-2xs text-ink-400">
+          Debug body: <code>{String(data.alert.debug_body)}</code>
+        </p>
+        {data.alert.channels.map((ch) => (
+          <ChannelCard key={ch.id} channel={ch} />
+        ))}
+      </div>
+    );
+  }
+
+  if (part === "queues") {
+    return (
+      <div className="space-y-3">
+        <p className="text-2xs text-ink-400">
+          Top-level enable: <code>{String(data.queue.enable)}</code>
+        </p>
+        {data.queue.providers.length === 0 ? (
+          <p className="text-xs text-ink-400">No queue listeners are configured.</p>
+        ) : (
+          data.queue.providers.map((p) => <ProviderRow key={p.id} provider={p} />)
+        )}
+      </div>
+    );
+  }
+
+  const oncall = data.oncall;
   return (
-    <div className="space-y-6">
-      <SecretBanner />
+    <ReadOnlyCard title="Escalation" aside={<EnablePill enabled={oncall.enable} />}>
+      <KVGrid>
+        <KV k="Provider" v={oncall.provider || "—"} />
+        <KV k="Wait minutes" v={String(oncall.wait_minutes)} />
+        <KV k="Initialized only" v={String(oncall.initialized_only)} />
+      </KVGrid>
 
-      <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">Server</h2>
-        </div>
-        <div className="card-body">
-          <Grid>
-            <KV k="Name" v={cfg.data.name || "—"} />
-            <KV k="Listen" v={`${cfg.data.host}:${cfg.data.port}`} />
-            <KV k="Public host" v={cfg.data.public_host || "—"} />
-            <KV k="Storage type" v={cfg.data.storage.type || "file"} />
-            <KV
-              k="Max incidents"
-              v={String(cfg.data.storage.file.max_incidents || 0)}
-            />
-          </Grid>
-        </div>
-      </div>
+      <SubCard title="AWS Incident Manager">
+        <KVGrid>
+          <SecretField
+            k="Response plan ARN"
+            configured={!!oncall.aws_incident_manager.response_plan_arn}
+          />
+          <KV
+            k="Other plan keys"
+            v={listOrDash(oncall.aws_incident_manager.other_response_plan_keys)}
+          />
+        </KVGrid>
+      </SubCard>
 
-      <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">Alert channels</h2>
-          <span className="text-xs text-ink-400">
-            Debug body: <code>{String(cfg.data.alert.debug_body)}</code>
-          </span>
-        </div>
-        <div className="card-body space-y-3">
-          {cfg.data.alert.channels.map((ch) => (
-            <ChannelCard key={ch.id} channel={ch} />
-          ))}
-        </div>
-      </div>
+      <SubCard title="PagerDuty">
+        <KVGrid>
+          <SecretField k="Routing key" configured={!!oncall.pagerduty.routing_key} />
+          <KV k="Other routing keys" v={listOrDash(oncall.pagerduty.other_routing_keys)} />
+        </KVGrid>
+      </SubCard>
 
-      <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">Queue listeners</h2>
-          <span className="text-xs text-ink-400">
-            Top-level enable: <code>{String(cfg.data.queue.enable)}</code>
-          </span>
-        </div>
-        <div className="card-body space-y-3">
-          {cfg.data.queue.providers.map((p) => (
-            <ProviderRow key={p.id} provider={p} />
-          ))}
-        </div>
-      </div>
+      <SubCard title="ServiceNow">
+        <KVGrid>
+          <SecretField k="Instance URL" configured={!!oncall.servicenow.instance_url} />
+          <SecretField k="Username" configured={!!oncall.servicenow.username} />
+          <KV k="Table" v={oncall.servicenow.table || "incident"} />
+          <KV k="Other instance keys" v={listOrDash(oncall.servicenow.other_instance_keys)} />
+        </KVGrid>
+      </SubCard>
 
-      <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">On-call</h2>
-          <EnablePill enabled={cfg.data.oncall.enable} />
-        </div>
-        <div className="card-body space-y-3">
-          <Grid>
-            <KV k="Provider" v={cfg.data.oncall.provider || "—"} />
-            <KV k="Wait minutes" v={String(cfg.data.oncall.wait_minutes)} />
-            <KV
-              k="Initialized only"
-              v={String(cfg.data.oncall.initialized_only)}
-            />
-          </Grid>
-
-          <SubCard title="AWS Incident Manager">
-            <Grid>
-              <SecretField
-                k="Response plan ARN"
-                configured={
-                  !!cfg.data.oncall.aws_incident_manager.response_plan_arn
-                }
-              />
-              <KV
-                k="Other plan keys"
-                v={
-                  cfg.data.oncall.aws_incident_manager.other_response_plan_keys
-                    .length === 0
-                    ? "—"
-                    : cfg.data.oncall.aws_incident_manager.other_response_plan_keys.join(
-                        ", ",
-                      )
-                }
-              />
-            </Grid>
-          </SubCard>
-
-          <SubCard title="PagerDuty">
-            <Grid>
-              <SecretField
-                k="Routing key"
-                configured={!!cfg.data.oncall.pagerduty.routing_key}
-              />
-              <KV
-                k="Other routing keys"
-                v={
-                  cfg.data.oncall.pagerduty.other_routing_keys.length === 0
-                    ? "—"
-                    : cfg.data.oncall.pagerduty.other_routing_keys.join(", ")
-                }
-              />
-            </Grid>
-          </SubCard>
-
-          <SubCard title="ServiceNow">
-            <Grid>
-              <SecretField
-                k="Instance URL"
-                configured={!!cfg.data.oncall.servicenow.instance_url}
-              />
-              <SecretField
-                k="Username"
-                configured={!!cfg.data.oncall.servicenow.username}
-              />
-              <KV
-                k="Table"
-                v={cfg.data.oncall.servicenow.table || "incident"}
-              />
-              <KV
-                k="Other instance keys"
-                v={
-                  cfg.data.oncall.servicenow.other_instance_keys.length === 0
-                    ? "—"
-                    : cfg.data.oncall.servicenow.other_instance_keys.join(", ")
-                }
-              />
-            </Grid>
-          </SubCard>
-
-          <SubCard title="incident.io">
-            <Grid>
-              <SecretField
-                k="API key"
-                configured={!!cfg.data.oncall.incident_io.api_key}
-              />
-              <SecretField
-                k="Alert source config ID"
-                configured={
-                  !!cfg.data.oncall.incident_io.alert_source_config_id
-                }
-              />
-              <KV
-                k="Other alert source keys"
-                v={
-                  cfg.data.oncall.incident_io.other_alert_source_config_keys
-                    .length === 0
-                    ? "—"
-                    : cfg.data.oncall.incident_io.other_alert_source_config_keys.join(
-                        ", ",
-                      )
-                }
-              />
-            </Grid>
-          </SubCard>
-        </div>
-      </div>
-    </div>
+      <SubCard title="incident.io">
+        <KVGrid>
+          <SecretField k="API key" configured={!!oncall.incident_io.api_key} />
+          <SecretField
+            k="Alert source config ID"
+            configured={!!oncall.incident_io.alert_source_config_id}
+          />
+          <KV
+            k="Other alert source keys"
+            v={listOrDash(oncall.incident_io.other_alert_source_config_keys)}
+          />
+        </KVGrid>
+      </SubCard>
+    </ReadOnlyCard>
   );
+}
+
+function listOrDash(values: string[]): string {
+  return values.length === 0 ? "—" : values.join(", ");
 }
 
 
@@ -227,13 +159,13 @@ function ChannelCard({
         <EnablePill enabled={channel.enable} />
       </div>
       <div className="px-3 py-2">
-        <Grid>
+        <KVGrid>
           {channel.fields
             .filter((f) => f.label !== "Template")
             .map((f) => (
               <FieldRow key={f.label} field={f} />
             ))}
-        </Grid>
+        </KVGrid>
       </div>
     </div>
   );
@@ -251,11 +183,11 @@ function ProviderRow({
         <EnablePill enabled={provider.enable} />
       </div>
       <div className="px-3 py-2">
-        <Grid>
+        <KVGrid>
           {provider.fields.map((f) => (
             <FieldRow key={f.label} field={f} />
           ))}
-        </Grid>
+        </KVGrid>
       </div>
     </div>
   );
@@ -274,91 +206,4 @@ function FieldRow({ field }: { field: ConfigField }) {
     display = String(field.value);
   }
   return <KV k={field.label} v={display} />;
-}
-
-function SecretField({
-  k,
-  configured,
-}: {
-  k: string;
-  configured: boolean;
-}) {
-  return (
-    <div>
-      <div className="text-2xs uppercase tracking-wider text-ink-400">{k}</div>
-      <div className="mt-0.5 flex items-center gap-1.5 text-xs">
-        <Lock size={11} className="text-ink-400" />
-        {configured ? (
-          <span className="pill pill-good">Configured</span>
-        ) : (
-          <span className="pill">Not set</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function KV({ k, v }: { k: string; v: string }) {
-  return (
-    <div>
-      <div className="text-2xs uppercase tracking-wider text-ink-400">{k}</div>
-      <div className="mt-0.5 break-words font-mono text-xs text-ink-100">
-        {v}
-      </div>
-    </div>
-  );
-}
-
-function Grid({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
-      {children}
-    </div>
-  );
-}
-
-function SubCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-md border border-ink-600 bg-surface-sunken px-3 py-2">
-      <div className="mb-2 text-xs font-medium text-ink-200">{title}</div>
-      {children}
-    </div>
-  );
-}
-
-function EnablePill({ enabled }: { enabled: boolean }) {
-  return (
-    <span className={`pill ${enabled ? "pill-good" : ""}`}>
-      {enabled ? "Enabled" : "Disabled"}
-    </span>
-  );
-}
-
-function SecretBanner() {
-  return (
-    <div className="flex items-start gap-2 rounded-md border border-ink-600 bg-surface-raised px-3 py-2 text-xs text-ink-300">
-      <Lock size={13} className="mt-0.5 shrink-0 text-ink-400" />
-      <div>
-        Read-only view. To change any value edit{" "}
-        <code className="rounded bg-ink-700 px-1 py-0.5 font-mono text-ink-200">
-          config/config.yaml
-        </code>{" "}
-        or the corresponding environment variable on the host.
-        <a
-          href="https://docs.versusincident.com/#/configuration/configuration"
-          target="_blank"
-          rel="noreferrer"
-          className="ml-2 inline-flex items-center gap-1 text-link hover:underline"
-        >
-          Configuration reference <ExternalLink size={11} />
-        </a>
-      </div>
-    </div>
-  );
 }

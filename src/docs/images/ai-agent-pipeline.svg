@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="230" viewBox="0 0 760 230" role="img" aria-label="How one log line is processed, in six steps: read it from a source, hide secrets, filter out boring lines, group similar lines into one template, save that group to the catalog, then decide what to do based on the agent's mode. Lines that fail the filter are dropped and skip every later step.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .num  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .drop { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+    </style>
+  </defs>
+
+  <rect width="760" height="230" fill="#FFFFFF"/>
+
+  <rect x="270" y="18" width="92" height="26" rx="13" fill="#FFFFFF" stroke="#000000" stroke-width="1.5"/>
+  <text x="316" y="36" text-anchor="middle" class="drop" font-size="12">dropped</text>
+  <path d="M316,72 V48" stroke="#000000" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+
+  <path d="M80,90 H168"  stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M208,90 H296" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M336,90 H424" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M464,90 H552" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+  <path d="M592,90 H680" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <circle cx="60"  cy="90" r="16" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <circle cx="188" cy="90" r="16" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <circle cx="316" cy="90" r="16" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <circle cx="444" cy="90" r="16" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <circle cx="572" cy="90" r="16" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <circle cx="700" cy="90" r="16" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+
+  <text x="60"  y="96" text-anchor="middle" class="num" font-size="14">1</text>
+  <text x="188" y="96" text-anchor="middle" class="num" font-size="14">2</text>
+  <text x="316" y="96" text-anchor="middle" class="num" font-size="14">3</text>
+  <text x="444" y="96" text-anchor="middle" class="num" font-size="14">4</text>
+  <text x="572" y="96" text-anchor="middle" class="num" font-size="14">5</text>
+  <text x="700" y="96" text-anchor="middle" class="num" font-size="14">6</text>
+
+  <text x="60"  y="132" text-anchor="middle" class="name" font-size="13">Read</text>
+  <text x="188" y="132" text-anchor="middle" class="name" font-size="13">Hide secrets</text>
+  <text x="316" y="132" text-anchor="middle" class="name" font-size="13">Filter</text>
+  <text x="444" y="132" text-anchor="middle" class="name" font-size="13">Group</text>
+  <text x="572" y="132" text-anchor="middle" class="name" font-size="13">Save</text>
+  <text x="700" y="132" text-anchor="middle" class="name" font-size="13">Decide</text>
+
+  <text x="60"  y="151" text-anchor="middle" class="t" font-size="11.5">from a source</text>
+  <text x="188" y="151" text-anchor="middle" class="t" font-size="11.5">tokens, keys</text>
+  <text x="316" y="151" text-anchor="middle" class="t" font-size="11.5">drop the noise</text>
+  <text x="444" y="151" text-anchor="middle" class="t" font-size="11.5">one per shape</text>
+  <text x="572" y="151" text-anchor="middle" class="t" font-size="11.5">to the catalog</text>
+  <text x="700" y="151" text-anchor="middle" class="t" font-size="11.5">by mode</text>
+
+  <text x="190" y="196" text-anchor="middle" class="t" font-size="12">training: learn only</text>
+  <text x="380" y="196" text-anchor="middle" class="t" font-size="12">shadow: would have alerted</text>
+  <text x="570" y="196" text-anchor="middle" class="t" font-size="12">detect: raise an incident</text>
+</svg>

@@ -54,6 +54,7 @@ func TestCloudWatchLogs_SignalFromCWEvent(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected signal, got skip")
 	}
+	assertNormalizedSignal(t, sig, "cloudwatchlogs:test")
 	if sig.Source != "cloudwatchlogs:test" {
 		t.Errorf("unexpected source %q", sig.Source)
 	}
@@ -143,6 +144,7 @@ func TestCloudWatchLogs_Pull(t *testing.T) {
 	if len(signals) != 2 {
 		t.Fatalf("expected 2 signals, got %d", len(signals))
 	}
+	assertNormalizedSignal(t, signals[0], "cloudwatchlogs:test")
 	if signals[0].Message != "ERROR connection refused" {
 		t.Errorf("unexpected message %q", signals[0].Message)
 	}
@@ -176,6 +178,46 @@ func TestCloudWatchLogs_Pull_AdvancesStartByOneMs(t *testing.T) {
 		name:   "t",
 		cfg:    config.AgentCloudWatchLogsSourceConfig{Region: "us-east-1", LogGroupName: "g", PageSize: 50},
 		client: client,
+	}
+	if _, _, err := src.Pull(context.Background(), since); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+}
+
+// TestCloudWatchLogs_Pull_StartsAtTheReplaySpanBelowTheCursor pins the bound a
+// shipped source actually queries. The agent widens every tail by the catalog
+// persist interval, so even a source with no reorder_window re-reads that span
+// below its cursor — which is what stops an abrupt restart dropping the events
+// read since the last flush.
+func TestCloudWatchLogs_Pull_StartsAtTheReplaySpanBelowTheCursor(t *testing.T) {
+	since := time.UnixMilli(1745143200000).UTC()
+	const span = 30 * time.Second
+	wantStart := since.Add(-span).UnixMilli()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(body), `"startTime":`+itoa(wantStart)) {
+			t.Errorf("expected startTime=%d (since-%s), body=%s", wantStart, span, string(body))
+		}
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		w.Write([]byte(`{"events":[],"searchedLogStreams":[]}`))
+	}))
+	defer srv.Close()
+
+	client := cloudwatchlogs.New(cloudwatchlogs.Options{
+		Region:       "us-east-1",
+		Credentials:  credentials.NewStaticCredentialsProvider("AKID", "SECRET", ""),
+		BaseEndpoint: aws.String(srv.URL),
+		HTTPClient:   srv.Client(),
+	})
+	src := &CloudWatchLogsSource{
+		name:   "t",
+		cfg:    config.AgentCloudWatchLogsSourceConfig{Region: "us-east-1", LogGroupName: "g", PageSize: 50},
+		client: client,
+		dedup:  NewTailDedup("cloudwatchlogs:t"),
+	}
+	if _, effective := src.SetTailReplaySpan(span); effective != span {
+		t.Fatalf("effective span = %s, want %s", effective, span)
 	}
 	if _, _, err := src.Pull(context.Background(), since); err != nil {
 		t.Fatalf("pull: %v", err)

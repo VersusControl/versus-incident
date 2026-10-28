@@ -36,15 +36,28 @@ type Entry struct {
 	Rate  *ai.RateLimiter
 }
 
+// ChatEntry is the markdown-native chat route. It intentionally has no cache.
+type ChatEntry struct {
+	Agent core.ChatTurnAgent
+	Rate  *ai.RateLimiter
+}
+
 // Router fans an AITask out to the entry for its kind.
 type Router struct {
 	entries map[core.AITaskKind]Entry
+	chat    ChatEntry
 }
 
 // New builds a Router from the given per-kind entries. nil agents are
 // dropped so callers can pass `Entry{}` for kinds they have not wired
 // up yet (e.g. analyze remains unset until it is added).
 func New(entries map[core.AITaskKind]Entry) *Router {
+	return NewWithChat(entries, ChatEntry{})
+}
+
+// NewWithChat adds a specialized chat route while preserving AIAgent routing
+// for detect and analyze.
+func NewWithChat(entries map[core.AITaskKind]Entry, chat ChatEntry) *Router {
 	out := make(map[core.AITaskKind]Entry, len(entries))
 	for k, e := range entries {
 		if e.Agent == nil {
@@ -52,7 +65,7 @@ func New(entries map[core.AITaskKind]Entry) *Router {
 		}
 		out[k] = e
 	}
-	return &Router{entries: out}
+	return &Router{entries: out, chat: chat}
 }
 
 // Has reports whether an agent is registered for the given kind.
@@ -60,8 +73,22 @@ func (r *Router) Has(kind core.AITaskKind) bool {
 	if r == nil {
 		return false
 	}
+	if kind == core.AITaskChat {
+		return r.chat.Agent != nil
+	}
 	_, ok := r.entries[kind]
 	return ok
+}
+
+// RunChat executes an uncached chat turn with the chat-specific rate limit.
+func (r *Router) RunChat(ctx context.Context, task core.ChatTask) (*core.ChatTurnResult, error) {
+	if r == nil || r.chat.Agent == nil {
+		return nil, fmt.Errorf("%w: %s", ErrNoAgent, core.AITaskChat)
+	}
+	if r.chat.Rate != nil && !r.chat.Rate.AllowKey(task.SessionID) {
+		return nil, ErrRateLimited
+	}
+	return r.chat.Agent.RunChatTurn(ctx, task)
 }
 
 // Run executes the task on the kind-specific agent, wrapped with

@@ -1,0 +1,284 @@
+package tools
+
+import (
+	"net/url"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/VersusControl/versus-incident/pkg/core"
+)
+
+func TestCatalogIsCompleteOrderedAndUnique(t *testing.T) {
+	wantGroups := []Group{
+		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
+		GroupVersus, GroupVersus, GroupVersus, GroupVersus, GroupVersus,
+		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
+		GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon, GroupCommon,
+		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
+		GroupK8s, GroupK8s,
+		GroupK8s,
+		GroupK8s,
+		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
+	}
+	got := Catalog()
+	if len(got) != len(wantGroups) {
+		t.Fatalf("Catalog() has %d tools, want %d", len(got), len(wantGroups))
+	}
+	seen := make(map[string]struct{}, len(got))
+	for i, tool := range got {
+		if tool.Group != wantGroups[i] {
+			t.Errorf("Catalog()[%d].Group = %q, want %q", i, tool.Group, wantGroups[i])
+		}
+		if tool.Name == "" || tool.DisplayName == "" || tool.Description == "" {
+			t.Errorf("Catalog()[%d] has incomplete metadata: %#v", i, tool)
+		}
+		if _, duplicate := seen[tool.Name]; duplicate {
+			t.Errorf("duplicate tool name %q", tool.Name)
+		}
+		seen[tool.Name] = struct{}{}
+	}
+}
+
+func TestCatalogDestinationsAreExactAndSafe(t *testing.T) {
+	want := map[string][2]string{
+		"get_system_overview": {docsVersus, ""}, "list_services": {docsVersus, ""}, "get_service": {docsVersus, ""},
+		"get_incident": {docsVersus, ""}, "search_incidents": {docsVersus, ""}, "list_patterns": {docsVersus, ""},
+		"get_pattern": {docsVersus, ""}, "list_analyses": {docsVersus, "/analyses"}, "get_alert_decision": {docsVersus, "/agent/decisions"},
+		"list_capabilities": {docsVersus, ""}, "get_detection_health": {docsVersus, ""},
+		"get_related_logs":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"discover_log_fields":   {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"read_log_records":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"list_log_indices":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"get_log_mappings":      {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"search_logs":           {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"get_log_shards":        {"https://docs.versusincident.com/#/agent/data-sources", "/agent/logs"},
+		"discover_metrics":      {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/metrics"},
+		"read_metric_series":    {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/metrics"},
+		"discover_trace_fields": {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/traces"},
+		"read_trace_spans":      {"https://docs.versusincident.com/#/agent/data-sources/signoz", "/agent/traces"},
+		"find_runbook":          {"https://docs.versusincident.com/#/agent/tools/find-runbook", "/agent/runbooks"},
+		"recent_changes":        {"https://docs.versusincident.com/#/agent/tools/recent-changes", ""},
+		"describe_dependencies": {docsTools + "?id=describe_dependencies", ""},
+		"describe_baseline":     {docsTools + "?id=describe_baseline", ""},
+		"get_cluster_overview":  {docsKubernetes, ""}, "discover_k8s_resources": {docsKubernetes, ""}, "query_k8s_resources": {docsKubernetes, ""},
+		"get_k8s_resource": {docsKubernetes, ""}, "list_workloads": {docsKubernetes, ""}, "get_workload": {docsKubernetes, ""},
+		"get_k8s_changes": {docsKubernetes, ""}, "get_k8s_neighborhood": {docsKubernetes, ""},
+		"list_k8s_events": {docsKubernetes, ""}, "get_pod_logs": {docsKubernetes, ""},
+		"get_workload_logs": {docsKubernetes, ""}, "list_k8s_issues": {docsKubernetes, ""}, "top_k8s_resources": {docsKubernetes, ""},
+		"list_gitops_apps": {docsKubernetes, ""}, "get_rollout_status": {docsKubernetes, ""}, "list_rollouts": {docsKubernetes, ""},
+		"list_helm_releases": {docsKubernetes, ""}, "get_helm_release": {docsKubernetes, ""},
+		"diagnose_k8s_workload": {docsKubernetes, ""},
+		"propose_action":        {docsKubernetes, ""},
+	}
+	got := make(map[string][2]string, len(want))
+	for _, metadata := range Catalog() {
+		got[metadata.Name] = [2]string{metadata.DocsURL, metadata.UIPath}
+		if safeDocsURL(metadata.DocsURL) != metadata.DocsURL || safeUIPath(metadata.UIPath) != metadata.UIPath {
+			t.Errorf("%s has unsafe destinations: %#v", metadata.Name, metadata)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog destinations = %#v, want %#v", got, want)
+	}
+}
+
+func TestCatalogDocumentationRoutesAreCanonical(t *testing.T) {
+	want := map[string]string{
+		"all":        "https://docs.versusincident.com/#/agent/tools/overview",
+		"versus":     "https://docs.versusincident.com/#/agent/tools/overview?id=versus-tools",
+		"kubernetes": "https://docs.versusincident.com/#/agent/connectors/kubernetes",
+	}
+	got := map[string]string{
+		"all":        docsTools,
+		"versus":     docsVersus,
+		"kubernetes": docsKubernetes,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("catalog documentation routes = %#v, want %#v", got, want)
+	}
+}
+
+func TestCatalogDocumentationTargetsExist(t *testing.T) {
+	docsRoot := filepath.Join("..", "..", "..", "..", "src")
+	sidebar, err := os.ReadFile(filepath.Join(docsRoot, "_sidebar.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorMarkers := map[string]string{
+		"versus-tools":          "## Versus tools",
+		"common-tools":          "## Common tools",
+		"kubernetes-tools":      "## Kubernetes tools",
+		"describe_dependencies": "### Describe dependencies :id=describe_dependencies",
+		"describe_baseline":     "### Describe baseline :id=describe_baseline",
+	}
+	checkedRoutes := make(map[string]struct{})
+	for _, metadata := range Catalog() {
+		destination, err := url.Parse(metadata.DocsURL)
+		if err != nil {
+			t.Errorf("parse %s documentation URL %q: %v", metadata.Name, metadata.DocsURL, err)
+			continue
+		}
+		route, rawQuery, _ := strings.Cut(destination.Fragment, "?")
+		relativePath := filepath.FromSlash(strings.TrimPrefix(route, "/") + ".md")
+		contents, err := os.ReadFile(filepath.Join(docsRoot, relativePath))
+		if err != nil {
+			t.Errorf("%s documentation target %s: %v", metadata.Name, relativePath, err)
+			continue
+		}
+		if _, checked := checkedRoutes[route]; !checked {
+			if !strings.Contains(string(sidebar), "]("+route+")") {
+				t.Errorf("documentation route %s is not active in _sidebar.md", route)
+			}
+			checkedRoutes[route] = struct{}{}
+		}
+		anchorValues, err := url.ParseQuery(rawQuery)
+		if err != nil {
+			t.Errorf("parse %s documentation anchor: %v", metadata.Name, err)
+			continue
+		}
+		if id := anchorValues.Get("id"); id != "" {
+			marker, known := anchorMarkers[id]
+			if !known || !strings.Contains(string(contents), marker) {
+				t.Errorf("%s documentation target %s is missing Docsify anchor %q", metadata.Name, relativePath, id)
+			}
+		}
+	}
+}
+
+func TestCatalogDestinationValidationRejectsUnsafeValues(t *testing.T) {
+	for _, value := range []string{
+		"http://docs.versusincident.com/#/agent/tools/overview",
+		"https://evil.example/#/agent/tools/overview",
+		"https://docs.versusincident.com/agent/tools/overview",
+		"https://docs.versusincident.com:443/#/agent/tools/overview",
+		"https://docs.versusincident.com/#/%2f%2fevil.example",
+		"https://docs.versusincident.com/#/agent%0Atools",
+		"https://docs.versusincident.com/#/agent%5ctools",
+	} {
+		if got := safeDocsURL(value); got != "" {
+			t.Errorf("safeDocsURL(%q) = %q, want empty", value, got)
+		}
+	}
+	for _, value := range []string{"//evil.example/path", "/\\evil", "/%5cevil", "/%2f%2fevil", "/path%0Aname", "/path?next=//evil", "https://evil.example/path"} {
+		if got := safeUIPath(value); got != "" {
+			t.Errorf("safeUIPath(%q) = %q, want empty", value, got)
+		}
+	}
+}
+
+func TestCatalogDeclaresCompoundRunbookCapabilities(t *testing.T) {
+	for _, tool := range Catalog() {
+		if tool.Name != "find_runbook" {
+			continue
+		}
+		if tool.Requirement.Kind != RequirementCapability || len(tool.Requirement.Capabilities) != 2 {
+			t.Fatalf("find_runbook requirement = %#v, want two capabilities", tool.Requirement)
+		}
+		return
+	}
+	t.Fatal("find_runbook missing from catalog")
+}
+
+func TestCatalogCopyIsDetached(t *testing.T) {
+	got := Catalog()
+	got[0].Name = "changed"
+	for index := range got {
+		if got[index].Name == "find_runbook" {
+			got[index].Requirement.Capabilities[0] = "changed"
+		}
+	}
+	if Catalog()[0].Name == "changed" {
+		t.Fatal("Catalog returned mutable backing storage")
+	}
+	for _, metadata := range Catalog() {
+		if metadata.Name == "find_runbook" && metadata.Requirement.Capabilities[0] == "changed" {
+			t.Fatal("Catalog returned mutable requirement capabilities")
+		}
+	}
+}
+
+func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
+	want := []struct {
+		id       string
+		section  CatalogSection
+		icon     string
+		children []string
+	}{
+		{"kubernetes", SectionConnector, "kubernetes", []string{"get_cluster_overview", "discover_k8s_resources", "query_k8s_resources", "get_k8s_resource", "list_workloads", "get_workload", "list_k8s_events", "get_pod_logs", "get_workload_logs", "list_k8s_issues", "get_k8s_changes", "get_k8s_neighborhood", "top_k8s_resources", "list_gitops_apps", "get_rollout_status", "list_rollouts", "list_helm_releases", "get_helm_release", "diagnose_k8s_workload"}},
+		{"kubernetes-actions", SectionConnector, "kubernetes", []string{"propose_action"}},
+		{"source-control", SectionConnector, "git", []string{"recent_changes"}},
+		{"logs", SectionDataSource, "logs", []string{"get_related_logs", "discover_log_fields", "read_log_records"}},
+		{"elasticsearch-logs", SectionDataSource, "elasticsearch", []string{"list_log_indices", "get_log_mappings", "search_logs", "get_log_shards"}},
+		{"metrics", SectionDataSource, "metrics", []string{"discover_metrics", "read_metric_series"}},
+		{"traces", SectionDataSource, "traces", []string{"discover_trace_fields", "read_trace_spans"}},
+		{"find_runbook", SectionCommon, "runbook", []string{"find_runbook"}},
+		{"describe_dependencies", SectionCommon, "dependencies", []string{"describe_dependencies"}},
+		{"describe_baseline", SectionCommon, "activity", []string{"describe_baseline"}},
+	}
+	got := Toolsets()
+	if len(got) != len(want) {
+		t.Fatalf("Toolsets() has %d cards, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index].ID != want[index].id || got[index].Section != want[index].section || got[index].IconKey != want[index].icon || !reflect.DeepEqual(got[index].ToolNames, want[index].children) {
+			t.Errorf("Toolsets()[%d] = %#v, want id=%q section=%q icon=%q children=%v", index, got[index], want[index].id, want[index].section, want[index].icon, want[index].children)
+		}
+		if (got[index].ID == "kubernetes" || got[index].ID == "elasticsearch-logs" || got[index].ID == "describe_baseline") && got[index].Permission != core.PermissionInfrastructureView {
+			t.Errorf("Toolsets()[%d] permission = %q, want %q", index, got[index].Permission, core.PermissionInfrastructureView)
+		}
+		if got[index].ID == "kubernetes-actions" && got[index].Permission != core.PermissionAgentApprove {
+			t.Errorf("Toolsets()[%d] permission = %q, want %q", index, got[index].Permission, core.PermissionAgentApprove)
+		}
+	}
+	if err := validateToolsetCatalog(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestToolsetsCopyIsDetached(t *testing.T) {
+	got := Toolsets()
+	got[0].ToolNames[0] = "changed"
+	for index := range got {
+		if got[index].ID == "find_runbook" {
+			got[index].Requirement.Capabilities[0] = "changed"
+		}
+	}
+	detached := Toolsets()[0].ToolNames[0] != "changed"
+	for _, toolset := range Toolsets() {
+		if toolset.ID == "find_runbook" && toolset.Requirement.Capabilities[0] == "changed" {
+			detached = false
+		}
+	}
+	if !detached {
+		t.Fatal("Toolsets returned mutable backing storage")
+	}
+}
+
+func TestRecentChangesUsesSharedChangeFeedCapability(t *testing.T) {
+	var foundTool, foundToolset bool
+	for _, tool := range Catalog() {
+		if tool.Name == "recent_changes" {
+			foundTool = tool.Requirement.Kind == RequirementCapability && reflect.DeepEqual(tool.Requirement.Capabilities, []string{"change_feed"})
+		}
+	}
+	for _, toolset := range Toolsets() {
+		if toolset.ID == "source-control" {
+			foundToolset = toolset.Requirement.Kind == RequirementCapability && reflect.DeepEqual(toolset.Requirement.Capabilities, []string{"change_feed"})
+		}
+	}
+	if !foundTool || !foundToolset {
+		t.Fatalf("recent changes gates: catalog=%v toolset=%v", foundTool, foundToolset)
+	}
+}
+
+func TestKubernetesChangeCatalogEntriesRequireKubernetesIntegration(t *testing.T) {
+	for _, name := range []string{"get_k8s_changes", "get_k8s_neighborhood"} {
+		metadata, ok := Lookup(name)
+		if !ok || metadata.Group != GroupK8s || metadata.Requirement.Kind != RequirementIntegration || metadata.Requirement.Integration != "kubernetes" {
+			t.Errorf("catalog entry %q = %+v, found=%v", name, metadata, ok)
+		}
+	}
+}

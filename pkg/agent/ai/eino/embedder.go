@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	einogeminiemb "github.com/cloudwego/eino-ext/components/embedding/gemini"
@@ -13,19 +12,21 @@ import (
 	einoopenaiemb "github.com/cloudwego/eino-ext/components/embedding/openai"
 	"github.com/cloudwego/eino/components/embedding"
 
+	"github.com/VersusControl/versus-incident/pkg/agent/egress"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
 // embedderRequest is the normalized input each embedder builder receives. As
-// with the chat path, HTTPClient is already auth-wrapped so a Bearer-keyed
-// provider honours the runtime key override.
+// with the chat path, HTTPClient is wrapped with the effective embedding
+// provider's native credential policy.
 type embedderRequest struct {
-	apiKey     string
-	model      string
-	baseURL    string
-	httpClient *http.Client
-	timeout    time.Duration
+	apiKey      string
+	model       string
+	baseURL     string
+	httpClient  *http.Client
+	timeout     time.Duration
+	egressGuard egress.Guard
 }
 
 // embedderBuilder constructs a provider-specific eino embedding client behind
@@ -41,7 +42,7 @@ type embedderBuilder func(ctx context.Context, req embedderRequest) (embedding.E
 // Gemini IS wired here because
 // eino-ext ships a Gemini embedding component (gemini-embedding-001 /
 // text-embedding-004); it authenticates with the api key via x-goog-api-key, not
-// a Bearer token, so the runtime override does not apply (see buildGeminiEmbedder).
+// a Bearer token; its runtime key uses x-goog-api-key.
 var embedderBuilders = map[string]embedderBuilder{
 	"openai":  buildOpenAIEmbedder,
 	"ollama":  buildOllamaEmbedder,
@@ -58,6 +59,12 @@ func supportedEmbedderProviders() []string {
 	return names
 }
 
+// IsSupportedEmbedderProvider reports whether the normalized provider has a
+// registered embedding implementation.
+func IsSupportedEmbedderProvider(name string) bool {
+	return isEmbedderProvider(resolveProvider(name))
+}
+
 // NewEmbedder builds a core.Embedder for the configured provider. cfg.Provider
 // selects the backend (empty defaults to openai); an unsupported provider fails
 // fast with a clear error. cfg.Model must be set (the embedding model id, e.g.
@@ -69,7 +76,7 @@ func supportedEmbedderProviders() []string {
 // dedicated ollama provider does the same against a native Ollama daemon.
 func NewEmbedder(ctx context.Context, cfg config.AgentAIConfig, opts Options) (core.Embedder, error) {
 	if cfg.Model == "" {
-		return nil, fmt.Errorf("eino: embedding model is empty")
+		return nil, emptyModelConfigError(true)
 	}
 
 	timeout := opts.Timeout
@@ -77,17 +84,26 @@ func NewEmbedder(ctx context.Context, cfg config.AgentAIConfig, opts Options) (c
 		timeout = 30 * time.Second
 	}
 
-	name := resolveProvider(cfg.Provider)
+	provider, baseURL, err := configuredChatEndpoint(cfg, opts)
+	if err != nil {
+		return nil, err
+	}
+	name := resolveProvider(provider)
 	build, ok := embedderBuilders[name]
 	if !ok {
-		return nil, fmt.Errorf("eino: unsupported ai provider %q for embeddings (supported: %s)", name, strings.Join(supportedEmbedderProviders(), ", "))
+		return nil, unsupportedProviderConfigError(name, true, supportedEmbedderProviders())
+	}
+	apiKey := cfg.APIKey
+	runtimeKey := opts.runtimeKeyFunc()
+	if name == "gemini" {
+		apiKey, runtimeKey = geminiCredentials(apiKey, runtimeKey)
 	}
 
 	emb, err := build(ctx, embedderRequest{
-		apiKey:     cfg.APIKey,
+		apiKey:     apiKey,
 		model:      cfg.Model,
-		baseURL:    resolveBaseURL(opts.BaseURL, cfg.BaseURL),
-		httpClient: withAuthRoundTripper(opts.HTTPClient, timeout, opts.AuthKeyFunc),
+		baseURL:    baseURL,
+		httpClient: withGuardedRuntimeKeyRoundTripper(opts.HTTPClient, timeout, runtimeKey, chatCredentialPolicy(name), opts.EgressGuard),
 		timeout:    timeout,
 	})
 	if err != nil {
@@ -142,9 +158,8 @@ func buildOllamaEmbedder(ctx context.Context, req embedderRequest) (embedding.Em
 
 // buildGeminiEmbedder wires Google Gemini embeddings (e.g. gemini-embedding-001
 // or text-embedding-004) via the genai client. Like the Gemini chat path, the
-// api key is sent through the x-goog-api-key header rather than a Bearer token,
-// so the AuthKeyFunc override on req.httpClient does not apply; req.apiKey is
-// passed straight to the client. req.baseURL is the test-only endpoint override.
+// api key is sent through the x-goog-api-key header rather than a Bearer token;
+// the provider transport replaces it per request when a runtime key applies.
 func buildGeminiEmbedder(ctx context.Context, req embedderRequest) (embedding.Embedder, error) {
 	client, err := newGeminiClient(ctx, req.apiKey, req.baseURL, req.httpClient, req.timeout)
 	if err != nil {

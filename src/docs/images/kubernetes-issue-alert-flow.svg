@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="282" viewBox="0 0 760 282" style="max-width:100%;height:auto" role="img" aria-label="From left to right, a newly found Kubernetes issue passes the cluster alert setting, which is off by default, where Critical sends critical issues only and Warning sends warning and critical issues, then your channels deliver the alert and critical issues can page on call, and each alert links to the issue on Timeline or to DevOps Agent with a prefilled question that is not sent, links need public_host, Enterprise alert fatigue is optional, off by default and never holds critical alerts">
+  <title>Kubernetes issue alerts</title>
+  <desc>A newly found Kubernetes issue passes the cluster alert setting, off by default, where Critical sends critical issues only and Warning sends warning and critical issues, your channels such as Slack, Email and Teams deliver the alert and critical issues can page on call, each alert links to the issue on Timeline and to DevOps Agent with a prefilled question that is not sent, links need public_host, Enterprise alert fatigue is optional, off by default and never holds critical alerts</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#A3ACBD"/>
+    </marker>
+  </defs>
+  <style>
+    text{font-family:Inter,'Segoe UI',system-ui,sans-serif;text-anchor:middle}
+    .zone{font-size:11px;font-weight:700;letter-spacing:1.5px;fill:#7B8494}
+    .name{font-size:16px;font-weight:600;fill:#F5F7FA}
+    .detail{font-size:13px;fill:#A3ACBD}
+    .note{font-size:12px;fill:#A3ACBD}
+    .l{text-anchor:start}
+    .accent{fill:#7DB2FC}
+    .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#C9D1DC}
+    .pill{font-size:12px;font-weight:600}
+    .block{fill:#0D1118;stroke:#3A4358;stroke-width:2}
+    .focus{fill:#161C28;stroke:#7DB2FC;stroke-width:2}
+    .flow{fill:none;stroke:#A3ACBD;stroke-width:2.5;marker-end:url(#a)}
+    .leader{fill:none;stroke:#5B6577;stroke-width:1.5;stroke-dasharray:4 4}
+  </style>
+
+  <rect width="760" height="282" rx="14" fill="#07090D"/>
+
+  <rect x="174" y="208" width="372" height="54" rx="12" fill="#0D1118" stroke="#3A4358" stroke-width="1.5" stroke-dasharray="6 5"/>
+
+  <rect class="block" x="18" y="52" width="132" height="132" rx="12"/>
+  <rect class="focus" x="174" y="52" width="200" height="132" rx="12"/>
+  <rect class="block" x="398" y="52" width="148" height="132" rx="12"/>
+  <rect class="focus" x="582" y="52" width="160" height="60" rx="12"/>
+  <rect class="focus" x="582" y="124" width="160" height="60" rx="12"/>
+
+  <rect x="186" y="117" width="70" height="22" rx="11" fill="#2A1417" stroke="#F87171" stroke-width="1.5"/>
+  <rect x="186" y="149" width="70" height="22" rx="11" fill="#2A2210" stroke="#FBBF24" stroke-width="1.5"/>
+
+  <path class="flow" d="M150 118H169"/>
+  <path class="flow" d="M374 118H393"/>
+  <path class="flow" d="M546 118H560V82H577"/>
+  <path class="flow" d="M546 118H560V154H577"/>
+  <path class="leader" d="M380 208V121"/>
+
+  <text class="zone" x="84" y="38">DETECT</text>
+  <text class="zone" x="274" y="38">CHOOSE LEVEL</text>
+  <text class="zone" x="472" y="38">DELIVER</text>
+  <text class="zone" x="662" y="38">INVESTIGATE</text>
+
+  <text class="name" x="84" y="104">Issue found</text>
+  <text class="detail" x="84" y="126">New break</text>
+  <text class="detail" x="84" y="144">in a cluster</text>
+
+  <text class="name" x="274" y="80">Cluster alerts</text>
+  <text class="detail accent" x="274" y="100">Off by default</text>
+  <text class="pill" x="221" y="132" fill="#FCA5A5">Critical</text>
+  <text class="detail l" x="264" y="132">critical only</text>
+  <text class="pill" x="221" y="164" fill="#FCD34D">Warning</text>
+  <text class="detail l" x="264" y="164">warning and up</text>
+
+  <text class="name" x="472" y="92">Channels</text>
+  <text class="detail" x="472" y="114">Slack, Email,</text>
+  <text class="detail" x="472" y="132">Teams and more</text>
+  <text class="detail" x="472" y="156">Critical: on call</text>
+
+  <text class="name" x="662" y="78">Timeline</text>
+  <text class="detail" x="662" y="98">Issue at the break</text>
+  <text class="name" x="662" y="150">DevOps Agent</text>
+  <text class="detail" x="662" y="170">Prefilled, not sent</text>
+  <text class="note" x="662" y="206">Links need <tspan class="c">public_host</tspan></text>
+
+  <text class="name" x="360" y="230" style="font-size:14px">Enterprise alert fatigue</text>
+  <text class="detail" x="360" y="250">Optional, off by default, never holds critical</text>
+</svg>

@@ -1,0 +1,11 @@
+# SQS inbound queue with body debugging turned off.
+alert:
+  sqs:
+    enable: true
+    queueUrl: "https://sqs.us-east-1.amazonaws.com/111122223333/versus"
+
+queue:
+  debugBody: false
+
+aws:
+  region: "us-east-1"

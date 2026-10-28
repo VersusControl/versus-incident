@@ -61,6 +61,7 @@ loki:
   insecure_skip_verify: false       # dev only
 
   query: '{app="api"} |= "error"'   # REQUIRED. LogQL selector + filter.
+  service_label: app                # optional native tool service mapping.
   severity_field: level             # optional; read from stream LABELS, not log line.
   extra_labels:                     # extra stream labels copied to Signal.Fields.
     - app

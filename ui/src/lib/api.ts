@@ -1,9 +1,10 @@
 // Centralized API client for the agent admin endpoints.
 //
-// All requests are authenticated with the X-Gateway-Secret header. The secret
-// is read from localStorage; AuthGate prompts for it on first visit.
+// OSS sign-in exchanges X-Gateway-Secret once for an HttpOnly same-origin
+// session cookie. The secret is never retained after the exchange.
 
 import type { LearnExclusions } from "@/lib/learnExclude";
+import { ANALYSIS_SSE_LIMITS, readEventStream, type ServerSentEvent } from "@/lib/sse";
 
 // LearnExclusionsWire is the raw enterprise learn-exclusion policy shape ON THE
 // WIRE. It differs from the UI's LearnExclusions in ONE field name: the
@@ -17,12 +18,117 @@ interface LearnExclusionsWire {
   log_patterns?: string[];
 }
 
+// fromLearnExclusionsWire is the ONE place the `log_patterns` ⇄ `patterns` seam
+// is crossed, so every read/write of the policy returns the same UI shape.
+function fromLearnExclusionsWire(r: LearnExclusionsWire): LearnExclusions {
+  return {
+    services: r.services ?? [],
+    metrics: r.metrics ?? [],
+    patterns: r.log_patterns ?? [],
+  };
+}
+
 const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
+let secretCache: string | null | undefined;
+
+function removeLegacySecret() {
+  try {
+    sessionStorage.removeItem(SECRET_KEY);
+  } catch {
+    // Storage may be unavailable in a restricted browser context.
+  }
+  try {
+    localStorage.removeItem(SECRET_KEY);
+  } catch {
+    // Storage may be unavailable in a restricted browser context.
+  }
+}
+
+export interface KubernetesPodLogLine {
+  text: string;
+  container: string;
+  timestamp?: string;
+  sequence?: number;
+  ordinal?: number;
+  cursor?: string;
+}
+
+export type KubernetesPodLogEvent = KubernetesPodLogLine & {
+  event: "line" | "heartbeat" | "limit" | "error" | "end";
+  reason?: string;
+  code?: string;
+  message?: string;
+  action?: string;
+  retryable?: boolean;
+  replay_uncertain?: boolean;
+  // The server's own word that the cursor on a terminal limit is behind the
+  // newest retained line and cannot serve as the next resume point.
+  cursor_lagging?: boolean;
+};
+
+export interface KubernetesPodLogOptions {
+  container?: string;
+  previous?: boolean;
+  since_seconds?: number;
+  tail_lines?: number;
+  timestamps?: boolean;
+  cursor?: string;
+  since_time?: string;
+}
+
+// The workload stream resumes from a wall-clock time instead of a cursor: one
+// cursor covering every source Pod grows with the Deployment and overflows the
+// request line, while a timestamp stays small no matter how wide the workload is.
+export type KubernetesWorkloadLogOptions = Omit<KubernetesPodLogOptions, "cursor"> & { pod_uid?: string[] };
+
+export interface KubernetesWorkloadLogSource {
+  source_id: string;
+  pod_uid: string;
+  pod: string;
+  namespace: string;
+  container: string;
+  incarnation: string;
+  admitted: boolean;
+  reason?: string;
+}
+export interface KubernetesWorkloadLogPod {
+  uid: string;
+  name: string;
+  containers: string[];
+  init_containers: string[];
+  admitted: boolean;
+  all_pods_admitted?: boolean;
+  all_pods_reason?: "source_limit" | "container_unavailable";
+  main_container?: string;
+  truncated?: boolean;
+  reason?: string;
+}
+export type KubernetesWorkloadLogEvent = Omit<KubernetesPodLogEvent, "event"> & {
+  event: KubernetesPodLogEvent["event"] | "sources" | "source_status";
+  workload_uid?: string;
+  pod_uid?: string;
+  pod?: string;
+  namespace?: string;
+  incarnation?: string;
+  source_id?: string;
+  sources?: KubernetesWorkloadLogSource[];
+  pods?: KubernetesWorkloadLogPod[];
+  truncated?: boolean;
+};
+export interface KubernetesUsageHistory {
+  observed_at: string;
+  source: "capture";
+  availability: "available" | "unavailable";
+  live_since?: string;
+  samples: Array<{ timestamp: string; cpu_milli: number; memory_bytes: number }>;
+  retention_seconds: number;
+}
 
 export class ApiError extends Error {
   status: number;
   body?: unknown;
+  retryAfterMs?: number;
   constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.status = status;
@@ -30,39 +136,66 @@ export class ApiError extends Error {
   }
 }
 
+async function logStreamError(response: Response, label: string): Promise<ApiError> {
+  const text = await response.text().catch(() => "");
+  let body: unknown = null;
+  try { body = text ? JSON.parse(text) : null; } catch { /* Non-JSON proxy errors use the HTTP fallback. */ }
+  const payload = body && typeof body === "object" && "error" in body ? body.error : undefined;
+  const message = typeof payload === "string" ? payload
+    : payload && typeof payload === "object" && "message" in payload && typeof payload.message === "string" ? payload.message
+    : "";
+  if (response.status === 401) notifyAuthExpired();
+  const failure = new ApiError(response.status, message || `${label} log stream failed (HTTP ${response.status}).`, body);
+  const retryAfter = response.headers.get("Retry-After");
+  // Accept only short delta-second hints; admission retries also have a session budget.
+  if (retryAfter && /^\d+$/.test(retryAfter)) failure.retryAfterMs = Math.min(Number(retryAfter) * 1000, 2000);
+  return failure;
+}
+
 export function getSecret(): string | null {
-  return localStorage.getItem(SECRET_KEY);
+  if (secretCache === undefined) {
+    secretCache = null;
+    removeLegacySecret();
+  }
+  return secretCache;
 }
 
 export function setSecret(value: string) {
-  localStorage.setItem(SECRET_KEY, value);
+  secretCache = value;
 }
 
 export function clearSecret() {
-  localStorage.removeItem(SECRET_KEY);
+  secretCache = null;
+  removeLegacySecret();
 }
 
-// signIn verifies the gateway secret against the data plane and persists it.
-// The gateway secret is the read-only machine/data-plane credential (the OSS
-// path and the enterprise read path). Privileged enterprise management is no
-// longer unlocked by a static token here — it rides the SSO session (the RBAC
-// admin user). Throws ApiError(401) when the secret is rejected; other errors
-// propagate unchanged.
-//
-// We verify against /api/admin/config/agent (getAgentConfig), NOT
-// /api/agent/status: the config endpoint is always mounted and gateway-secret
-// gated, whereas the agent status route only exists when agent.enable=true.
-// Verifying against status coupled sign-in to the agent being on, so an
-// alert-router deployment with a gateway secret but no agent could not log in.
 export async function signIn(value: string): Promise<void> {
-  setSecret(value.trim());
-  await api.getAgentConfig();
+  clearSecret();
+  const res = await fetch(`${API_BASE}/api/auth/gateway-session`, {
+    method: "POST",
+    headers: { "X-Gateway-Secret": value.trim() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, res.status === 401 ? "unauthorized" : `HTTP ${res.status}`);
+  }
 }
 
-// AUTH_EXPIRED_EVENT fires when a request that carried a secret comes back
-// 401 — i.e. the secret was rotated server-side mid-session. AppShell's
-// ReauthModal listens and re-prompts over the current page instead of
-// letting every view collapse into bare "HTTP 401" walls (audit finding).
+// gatewaySessionLogout clears the OSS HttpOnly session cookie. It is always
+// best-effort so local sign-out still completes if the server is unavailable.
+export async function gatewaySessionLogout(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/auth/gateway-session`, {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
+  } catch {
+    // ignore — logout is best-effort
+  }
+}
+
+// AUTH_EXPIRED_EVENT fires when an authenticated request returns 401. The
+// listener distinguishes OSS secret rotation from enterprise session expiry.
 export const AUTH_EXPIRED_EVENT = "versus:auth-expired";
 
 function notifyAuthExpired() {
@@ -109,7 +242,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
   }
   if (!res.ok) {
-    if (res.status === 401 && secret) notifyAuthExpired();
+    if (res.status === 401) notifyAuthExpired();
     const msg =
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
@@ -231,14 +364,98 @@ export interface BaselinesResponse {
 // reason when AI is disabled. Advisory only — adopting an objective is a human
 // action; the page never mutates cluster state.
 
+// SLOErrorBudget is the failure allowance implied by the objective over the
+// window: `ratio` of bad events and `minutes` of downtime, plus how much of it
+// is already spent.
+export interface SLOErrorBudget {
+  ratio: number;
+  minutes: number;
+  consumed_ratio?: number;
+}
+
+// SLOBurnAlert is one multiwindow burn-rate alert the platform would raise for
+// the objective. Windows are Go duration strings ("1h0m0s", "5m0s") — render
+// them through formatGoDuration, never raw.
+export interface SLOBurnAlert {
+  name: string;
+  long_window: string;
+  short_window: string;
+  burn_rate: number;
+  bad_ratio_threshold: number; // ratio in (0,1)
+  budget_pct_per_window: number; // percent of the window's budget
+  // enforced states whether the platform itself raises this alert. Absent on a
+  // server that doesn't mark them; the UI then falls back to adoption state.
+  enforced?: boolean;
+}
+
+// SLOEvidence is the deterministic backing for an SLI: how much signal the
+// platform actually observed, and the derived 0–1 score used as the
+// confidence (preferred over the model's own `confidence`).
+export interface SLOEvidence {
+  observations: number;
+  confident: boolean;
+  incident_count: number;
+  window_days: number;
+  score: number; // 0..1
+}
+
+// SLORecommendationSLI is one recommended indicator. Everything past
+// `confidence` is OPTIONAL platform enrichment — an older server omits it and
+// the page degrades to the name/target/rationale it has always shown.
 export interface SLORecommendationSLI {
   name: string;
   type: string; // availability | latency | error_rate | throughput | saturation
   signal: string;
-  objective: number; // ratio in (0,1), or a latency target in ms
+  objective: number; // ratio in (0,1); an older server sent latency ms here
   window_days: number;
   rationale: string;
   confidence: number; // 0..1
+  query?: string; // the measurable expression (PromQL) when discovered
+  // threshold_ms is the latency ceiling a latency objective's compliance ratio
+  // is measured against — a histogram bucket boundary the platform can
+  // actually query. Absent for every other indicator family.
+  threshold_ms?: number;
+  // objective_ratio is the compliance ratio a LATENCY objective is enforced as:
+  // the fraction of requests that must complete under threshold_ms. The error
+  // budget and burn rungs are derived from it, never from the milliseconds.
+  objective_ratio?: number;
+  good_events?: string; // plain-language numerator
+  valid_events?: string; // plain-language denominator
+  observed?: number; // current attainment as a ratio — for latency, compliance
+  // observed_p99_ms is the measured p99 in milliseconds, supporting evidence
+  // for a latency indicator whose attainment is a ratio.
+  observed_p99_ms?: number;
+  headroom_pp?: number; // observed vs objective, in percentage points
+  breaching?: boolean;
+  error_budget?: SLOErrorBudget;
+  burn_alerts?: SLOBurnAlert[];
+  evidence?: SLOEvidence;
+  adoptable?: boolean;
+  // not_adoptable_reason is the server's plain-language explanation, present
+  // when adoptable === false.
+  not_adoptable_reason?: string;
+  adopted?: boolean;
+}
+
+// SLOAdoptedSLO is the objective an operator adopted for the service — what the
+// burn evaluator enforces right now. Omitted when nothing is adopted.
+export interface SLOAdoptedSLO {
+  sli?: string;
+  sli_type: string;
+  objective: number;
+  window_days: number;
+  threshold_ms?: number; // the enforced latency ceiling; absent for availability
+  // threshold_resync records the last time the platform MOVED this adopted
+  // latency threshold on its own (the objective is re-pinned to the histogram
+  // bucket its query actually measures). to_ms equals threshold_ms. Omitted
+  // when the objective was never re-synced; cleared on adopt and revert.
+  threshold_resync?: {
+    from_ms: number;
+    to_ms: number;
+    at: string;
+  };
+  adopted_at?: string;
+  by?: string;
 }
 
 export interface SLORecommendation {
@@ -250,6 +467,37 @@ export interface SLORecommendation {
   prompt_hash?: string;
   summary: string;
   slis: SLORecommendationSLI[];
+  priority?: number; // 0..1 rank; HIGHER = adopt first
+  // adopted is the AVAILABILITY objective currently enforced; latency_adopted
+  // is the LATENCY one. They are independent slots — adopting one never clears
+  // the other, so a service can carry both.
+  adopted?: SLOAdoptedSLO;
+  latency_adopted?: SLOAdoptedSLO;
+}
+
+// SLOAdoptAdjustment is one number the adopt boundary moved from what the
+// recommendation proposed, with the server's plain-language reason.
+export interface SLOAdoptAdjustment {
+  from?: number;
+  to?: number;
+  reason?: string;
+}
+
+// SLOAdoptResponse is the ack for adopting one objective. Every field is
+// optional so a thin `{}`/`{"ok":true}` server ack still resolves.
+export interface SLOAdoptResponse {
+  ok?: boolean;
+  service?: string;
+  sli?: string;
+  adopted_at?: string;
+  // adjusted is present only when adopting changed something the model
+  // proposed — notably the latency threshold, which is snapped to the
+  // histogram bucket boundary the compliance ratio can be measured against.
+  adjusted?: {
+    objective?: SLOAdoptAdjustment;
+    threshold_ms?: SLOAdoptAdjustment;
+    window_days?: SLOAdoptAdjustment;
+  };
 }
 
 export interface SLOGateStatus {
@@ -364,7 +612,7 @@ export interface ServiceIncidentRecent {
 }
 
 export interface ServiceIncidentSummary {
-  window_days: number;
+  count_window: CountWindow;
   count: number;
   severities: Record<string, number>;
   recent: ServiceIncidentRecent[];
@@ -424,6 +672,13 @@ export interface DetectEvent {
   raw_response?: string;
   duration_ms?: number;
   finding?: AIFinding | null;
+  episode_id?: string;
+  incident_id?: string;
+  occurrence_delta?: number;
+  occurrence_count?: number;
+  episode_action?: "opened" | "coalesced" | "escalated" | "reopened" | "episode_error" | string;
+  notification_outcome?: "sent" | "partial" | "failed" | "suppressed" | "grouped" | "diverted" | "not_applicable" | string;
+  episode_error?: string;
   outcome: string; // emitted | cached | dry | quota | ai_error | send_error
   error?: string;
 }
@@ -453,6 +708,13 @@ export interface IncidentSummary {
   created_at: string;
   acked_at?: string | null;
   resolved_at?: string | null;
+  detection_fingerprint?: string;
+  detection_episode_id?: string;
+  occurrence_count?: number;
+  detection_first_seen?: string | null;
+  detection_last_seen?: string | null;
+  highest_observed_severity?: string;
+  highest_notified_severity?: string;
   assigned_team_id?: string;
   assigned_member_ids?: string[];
 }
@@ -481,11 +743,17 @@ export interface IncidentStatusCounts {
   all: OriginCounts;
 }
 
-// IncidentCounts is the counts object the list / search / counts endpoints
-// return: the back-compat top-level unresolved (open-work) per-origin tally,
-// plus the authoritative per-origin × per-status breakdown under by_status.
-export interface IncidentCounts extends OriginCounts {
+// IncidentCountBreakdown is the numeric counts object nested in list/search
+// responses: the back-compat top-level unresolved per-origin tally plus the
+// authoritative per-origin × per-status breakdown.
+export interface IncidentCountBreakdown extends OriginCounts {
   by_status?: IncidentStatusCounts;
+}
+
+// IncidentCounts is the standalone /counts response. Its count_window is the
+// effective setting used to compute the numeric breakdown in this response.
+export interface IncidentCounts extends IncidentCountBreakdown {
+  count_window: CountWindow;
 }
 
 // IncidentIndex is the full list/search response: one bounded, most-recent
@@ -497,7 +765,8 @@ export interface IncidentCounts extends OriginCounts {
 // when this page reached the end).
 export interface IncidentIndex {
   incidents: IncidentSummary[];
-  counts: IncidentCounts;
+  counts: IncidentCountBreakdown;
+  count_window: CountWindow;
   total: number;
   offset?: number;
   next_offset?: number | null;
@@ -559,6 +828,186 @@ export interface AnalysisRecord {
   raw_response?: string;
   status: "ok" | "error" | "rate_limited" | string;
   error?: string;
+}
+
+// AnalyzeEvent mirrors pkg/core.AnalyzeEvent — one observable step of a live
+// analyze run. The terminal event (run_finished / run_failed) carries the
+// persisted analysis id.
+export type AnalyzeEventKind =
+  | "run_started"
+  | "model_started"
+  | "model_delta"
+  | "model_finished"
+  | "tool_started"
+  | "tool_finished"
+  | "tool_error"
+  | "run_finished"
+  | "run_failed";
+
+export interface AnalyzeEvent {
+  seq: number;
+  at: string;
+  kind: AnalyzeEventKind;
+  tool?: string;
+  tool_display?: string;
+  args?: string;
+  output?: string;
+  duration_ms?: number;
+  error?: string;
+  turn?: number;
+  analysis_id?: string;
+}
+
+export type ChatSessionStatus = "idle" | "running" | "failed";
+export type ChatTurnRole = "user" | "assistant" | "compaction";
+export type ChatEventKind =
+  | "run_started"
+  | "model_delta"
+  | "tool_started"
+  | "tool_finished"
+  | "compacted"
+  | "run_finished"
+  | "run_failed"
+  | "run_cancelled"
+  | "run_throttled"
+  | "events_elided"
+  | "approval_required"
+  | "trace_compacted";
+
+export interface ChatIncidentContext {
+  id: string;
+  title?: string;
+  service?: string;
+  severity?: string;
+  status?: string;
+  created?: string;
+}
+
+export interface ChatTimeRange {
+  start?: string;
+  end?: string;
+}
+
+export interface ChatResourceAttachment {
+  provider: "kubernetes";
+  cluster: string;
+  resource_id: string;
+  namespace?: string;
+  name: string;
+  uid?: string;
+  include_changes?: boolean;
+}
+
+export interface ChatAttachment {
+  incident?: ChatIncidentContext;
+  service?: string;
+  time_range?: ChatTimeRange;
+  resource?: ChatResourceAttachment;
+}
+
+export interface ChatCitation {
+  tool: string;
+  label?: string;
+  locator?: string;
+}
+
+export interface ChatApprovalEvent {
+  id: string;
+  read_only?: boolean;
+  cluster?: string;
+  proposal_id: string;
+  run_id: string;
+  type: string;
+  target: string;
+  effect: string;
+  risk: string;
+  state: string;
+  expires_at: string;
+}
+
+export interface AgentApproval {
+  id: string;
+  read_only?: boolean;
+  proposal: AgentProposal;
+  state: string;
+  approver?: string;
+  expires_at: string;
+  executed_at?: string;
+  verified_at?: string;
+  result?: { summary?: string; metadata?: unknown };
+  verification?: { verified: boolean; summary: string };
+}
+
+export interface AgentProposal {
+  id: string;
+  run_id: string;
+  type: string;
+  target: { cluster?: string; namespace?: string; kind: string; name: string };
+  params: unknown;
+  params_hash: string;
+  binding_hash: string;
+  dry_run: string;
+  risk: string;
+  reason: string;
+  proposed_by: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface AgentProposalResult {
+  proposal?: AgentProposal;
+  approval?: AgentApproval;
+  nonce?: string;
+  guide?: { action: string; command: string; risk: string };
+}
+
+export interface ChatToolCall {
+  call_id?: string;
+  Name: string;
+  Args: string;
+  Output: string;
+  DurationMs: number;
+  Error: string;
+}
+
+export interface ChatEvent {
+  seq: number;
+  at: string;
+  kind: ChatEventKind;
+  delta?: string;
+  tool?: string;
+  call_id?: string;
+  tool_display?: string;
+  args?: string;
+  output?: string;
+  duration_ms?: number;
+  error?: string;
+  citations?: ChatCitation[];
+  approval?: ChatApprovalEvent;
+  approval_nonce?: string;
+}
+
+export interface ChatTurn {
+  id: string;
+  role: ChatTurnRole;
+  content: string;
+  created_at: string;
+  attachment?: ChatAttachment;
+  tool_calls?: ChatToolCall[];
+  citations?: ChatCitation[];
+  events?: ChatEvent[];
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  status: ChatSessionStatus;
+  seeded: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatSession extends ChatSessionSummary {
+  turns: ChatTurn[];
 }
 
 // AnalysisIndex is the paged analyses list response: one bounded, most-recent
@@ -702,7 +1151,7 @@ async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
     }
   }
   if (!res.ok) {
-    if (res.status === 401 && secret) notifyAuthExpired();
+    if (res.status === 401) notifyAuthExpired();
     const msg =
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
@@ -795,6 +1244,9 @@ export interface AgentModeView {
 export interface AISettingsView {
   enabled: boolean;
   provider: string;
+  base_url: string;
+  base_url_inherited: boolean;
+  yaml_base_url: string;
   key_set: boolean;
   last4: string;
   yaml_enabled: boolean;
@@ -832,6 +1284,22 @@ export interface AISettingsInput {
   enabled: boolean;
   provider?: string;
   api_key?: string;
+  base_url?: string;
+}
+
+export function buildAISettingsInput(
+  enabled: boolean,
+  provider?: string,
+  apiKey?: string,
+  baseURL?: string,
+): AISettingsInput {
+  const body: AISettingsInput = { enabled };
+  const prov = provider?.trim() ?? "";
+  const key = apiKey?.trim() ?? "";
+  if (prov) body.provider = prov;
+  if (key) body.api_key = key;
+  if (baseURL !== undefined) body.base_url = baseURL.trim();
+  return body;
 }
 
 // ---------- Runtime notification-channel settings (Enterprise, RBAC runtime:manage) ----------
@@ -1162,6 +1630,7 @@ export type MemberRole = "viewer" | "responder" | "admin" | "owner";
 // derived role). `role` is "" / absent for a member with no resolvable role.
 export interface MemberView {
   subject: string;
+  clusters?: string[] | null;
   email: string;
   name?: string;
   connection?: string;
@@ -1171,6 +1640,56 @@ export interface MemberView {
 export interface MembersEnvelope {
   org: string;
   members: MemberView[];
+}
+
+export interface RbacMe {
+  role: string;
+  permissions: string[];
+  clusters?: string[] | null;
+}
+
+export interface RoleAssignment {
+  subject: string;
+  role: MemberRole;
+  clusters?: string[];
+}
+
+export interface KubernetesClusterSummary {
+  id: string;
+  display_name?: string;
+  provider: string;
+  version?: string;
+  /**
+   * "syncing" marks a cluster whose first sync is still running: its node,
+   * pod and issue numbers are placeholders until the first generation
+   * publishes, so surfaces must present them as pending rather than as facts.
+   */
+  health: "healthy" | "attention" | "partial" | "unreachable" | "unknown" | "syncing";
+  nodes: number;
+  ready_nodes: number;
+  pods: number;
+  running_pods: number;
+  warnings: number;
+  issues?: number;
+  broken?: number;
+  last_change_at?: string;
+  /** Same freshness envelope as every other Kubernetes view, including first-sync progress. */
+  sync: KubernetesSync;
+  observed_at: string;
+  error?: { code: string; message: string };
+}
+
+export interface KubernetesClusters {
+  multiple: boolean;
+  clusters: KubernetesClusterSummary[];
+}
+
+export function kubernetesClusterPath(path: string, cluster?: string): string {
+  if (!cluster) return path;
+  const [pathname, search = ""] = path.split("?");
+  const query = new URLSearchParams(search);
+  query.set("cluster", cluster);
+  return `${pathname}?${query}`;
 }
 
 // BootstrapAdminStatus is the deployment default-admin ("admin user") state.
@@ -1186,14 +1705,12 @@ export interface BootstrapAdminStatus {
 }
 
 // AuthProbe is the set of side-effecting checks resolveInitialAuth depends on,
-// injected so the decision logic is unit-testable without localStorage, fetch,
+// injected so the decision logic is unit-testable without browser storage, fetch,
 // or a DOM. AuthGate wires the real implementations.
 export interface AuthProbe {
-  // hasSecret reports whether a gateway secret is already held.
-  hasSecret: () => boolean;
-  // checkSecret verifies the held secret against the data plane (api.status).
-  // Resolves on success; rejects with ApiError(401) when the secret is bad.
-  checkSecret: () => Promise<unknown>;
+  // probeGatewaySession verifies the ambient OSS or upstream session cookie
+  // against an always-mounted protected endpoint.
+  probeGatewaySession: () => Promise<unknown>;
   // deploymentOrg resolves the SSO deployment org (rejects on a non-enterprise
   // / community binary).
   deploymentOrg: () => Promise<string>;
@@ -1202,38 +1719,50 @@ export interface AuthProbe {
   probeSession: (org: string) => Promise<unknown>;
 }
 
-// resolveInitialAuth is the pure decision the AuthGate runs on mount. It
-// returns "ok" when the console should open and "needs-secret" when the
-// gateway-secret screen should show.
+export type InitialAuthState =
+  | "ok"
+  | "needs-gateway-secret"
+  | "needs-enterprise-login"
+  | "retry";
+
+export function isCommunityDeploymentError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 403 || error.status === 404);
+}
+
+// resolveInitialAuth is the pure decision the AuthGate runs on mount.
 //
 // Order of resolution:
-//   1. A held gateway secret is verified against the data plane.
-//      A 401 means the secret is stale -> needs-secret. A transient/non-401
-//      error deliberately does NOT trap the user -> ok (kept behavior).
-//   2. With no held secret, probe for an established SSO session: resolve the
-//      deployment org, then the session whoami. A live session opens the
-//      console (the cookie now authenticates the data plane). Any failure
-//      (community binary, 401 no-session, network) falls back to needs-secret.
+//   1. Probe the protected config endpoint using ambient cookies. A live OSS or
+//      Enterprise session opens the console without retaining a secret.
+//   2. Resolve deployment mode. An authoritative community response offers
+//      gateway login; transient or ambiguous failures offer retry instead.
+//   3. On Enterprise, a missing session offers only local-admin/SSO login.
 export async function resolveInitialAuth(
   p: AuthProbe,
-): Promise<"ok" | "needs-secret"> {
-  if (p.hasSecret()) {
-    try {
-      await p.checkSecret();
-      return "ok";
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) return "needs-secret";
-      // Transient/network error: don't trap the user behind the secret screen.
-      return "ok";
-    }
-  }
-  // No gateway secret: an established SSO session is a valid console entry.
+): Promise<InitialAuthState> {
   try {
-    const org = await p.deploymentOrg();
-    await p.probeSession(org);
+    await p.probeGatewaySession();
     return "ok";
   } catch {
-    return "needs-secret";
+    // No usable ambient credential; continue to enterprise discovery.
+  }
+  let org: string;
+  try {
+    org = await p.deploymentOrg();
+  } catch (error) {
+    if (isCommunityDeploymentError(error)) {
+      return "needs-gateway-secret";
+    }
+    return "retry";
+  }
+  try {
+    await p.probeSession(org);
+    return "ok";
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      return "needs-enterprise-login";
+    }
+    return "retry";
   }
 }
 
@@ -1248,6 +1777,11 @@ export interface ReportCapabilities {
   default_window: string;
   include_chart: boolean;
   channels: string[];
+  // configured_disabled are channels that ARE configured but currently
+  // disabled, so they are NOT in `channels` (the picker's enabled options).
+  // The picker names them so the operator knows to enable them in Alert
+  // channels. Always an array (never null); empty on older servers.
+  configured_disabled: string[];
   public_host_set: boolean;
 }
 
@@ -1268,6 +1802,7 @@ export interface Capabilities {
 // a 400.
 export interface ReportSettings {
   enable: boolean;
+  title: string;
   default_channel: string;
   include_chart: boolean;
   rate_per_minute: number;
@@ -1290,7 +1825,19 @@ export interface IntakeSettings {
 // "default" | "average" | "time_of_day".
 export interface SpikeSettings {
   baseline_mode: string;
-}// ReportSendResult is the per-channel outcome of POST /reports/incidents.
+}
+
+// CountWindow is how far back every incident-count surface looks. "all" keeps
+// the historical whole-set behaviour.
+export type CountWindow = "24h" | "7d" | "30d" | "90d" | "all";
+
+// CountSettings is the non-secret runtime configuration for the incident-count
+// lookback, exchanged with GET/PUT /api/admin/agent/count-settings.
+export interface CountSettings {
+  window: CountWindow;
+}
+
+// ReportSendResult is the per-channel outcome of POST /reports/incidents.
 // `sent` = image delivered; `fallback` = text summary + note delivered
 // (image-incapable channel); `failed` = channel returned an error (the PNG is
 // still downloadable via GET report.png). `window` echoes the rendered window.
@@ -1307,27 +1854,41 @@ export interface ReportSendResult {
 // AlertFatigueConfig is the per-org alert-fatigue configuration exchanged with
 // GET/PUT /enterprise/api/alert-fatigue/config. `enabled` is the master on/off
 // (default OFF); `pending_review` holds newly-fatigued fingerprints for an
-// operator OK instead of auto-diverting (default OFF = auto-fatigue);
-// `fatigue_channel` is the notification channel diverted ("spam") alerts land
-// on. The PUT is write-through — it takes effect immediately.
+// operator OK instead of auto-suppressing (default OFF = auto-fatigue). The PUT
+// is write-through — it takes effect immediately.
 export interface AlertFatigueConfig {
   enabled: boolean;
   pending_review: boolean;
-  fatigue_channel: string;
-  // fatigue_channel_valid is a DERIVED read-only flag on the GET/PUT echo: false
-  // when the selected fatigue channel is no longer an enabled channel for the
-  // org (so the UI can warn that a diverted channel was later disabled). Absent
-  // on the write body — the server ignores it — and absent when no channel
-  // lister is wired (never a false warning).
-  fatigue_channel_valid?: boolean;
 }
 
-// AlertFatigueChannel is one notification channel eligible to be the fatigue
-// channel, with its effective enabled flag (the runtime channel config the
-// alert path resolves). From GET /enterprise/api/alert-fatigue/channels.
-export interface AlertFatigueChannel {
-  name: string;
+// AlertFatigueCustomChannelField is the non-secret masked view of one custom
+// fatigue-channel field: whether a value is set, plus a masked hint. It NEVER
+// carries a raw secret — the server masks it before it reaches the UI.
+export interface AlertFatigueCustomChannelField {
+  set: boolean;
+  hint: string;
+}
+
+// AlertFatigueCustomChannel is the MASKED fatigue-channel view from
+// GET /enterprise/api/alert-fatigue/custom-channel. `configured` is false when
+// the org has no fatigue channel (fatigued alerts are then suppressed);
+// otherwise it carries the channel type, the enable flag, and a per-field
+// set/hint. It NEVER carries a raw secret.
+export interface AlertFatigueCustomChannel {
+  configured: boolean;
+  channel_type?: string;
+  enabled?: boolean;
+  fields?: Record<string, AlertFatigueCustomChannelField>;
+}
+
+// AlertFatigueCustomChannelPut is the set-body for the custom fatigue channel.
+// `config` is the field map: secret values are included on WRITE only, and a
+// blank/omitted secret preserves the stored one server-side (so an operator can
+// toggle enable or edit a routing field without resubmitting the token).
+export interface AlertFatigueCustomChannelPut {
+  channel_type: string;
   enabled: boolean;
+  config: Record<string, string>;
 }
 
 // AlertFatigueAnalytics is the per-org noise read-model over a bounded window
@@ -1340,6 +1901,12 @@ export interface AlertFatigueAnalytics {
   by_status: Record<string, number>;
   noise_ratio: number;
   diverted: number;
+  // routed / suppressed split the fatigued count into alerts ROUTED to a custom
+  // fatigue channel vs SILENTLY SUPPRESSED (dropped). They are optional: older
+  // read-models only expose the (misleading) `diverted` aggregate, so the UI
+  // falls back gracefully when either field is absent.
+  routed?: number;
+  suppressed?: number;
   reclaim_count: number;
   reclaim_rate: number;
   top_noisy: Array<{ service: string; repeat_total: number; findings: number }>;
@@ -1450,6 +2017,17 @@ export interface AlertFatigueDependencyHoldsResponse {
 // listable and is rejected 400 if requested — it is deliberately absent here.
 export type AlertFatigueStatus = "fatigued" | "reclaimed" | "pending_review";
 
+// AlertFatigueListFilter is what the fingerprint list accepts as `?status=`.
+// It is wider than AlertFatigueStatus: `tracking` lists still-paging rows, and
+// `unreachable` is a PSEUDO-status (no row is ever stored with it) that is the
+// only view returning rows whose fingerprint can no longer match a live alert.
+// Every other view excludes them. An older server rejects `unreachable` with
+// 400 — callers must tolerate that rather than assume the view exists.
+export type AlertFatigueListFilter =
+  | AlertFatigueStatus
+  | "tracking"
+  | "unreachable";
+
 // AlertFatigueFinding is one reviewable fingerprint row. `alert_content` is the
 // ALREADY-REDACTED captured alert map (never a raw secret); the peek renders it
 // verbatim. `status` is one of AlertFatigueStatus on the wire (the server never
@@ -1462,6 +2040,9 @@ export interface AlertFatigueFinding {
   service: string;
   severity: string;
   repeat_count: number;
+  // Cumulative raw signal volume for detection episodes. It is absent/zero for
+  // webhooks and never participates in repeat novelty scoring.
+  detection_occurrence_count?: number;
   first_seen: string;
   last_seen: string;
   status: string;
@@ -1474,6 +2055,16 @@ export interface AlertFatigueFinding {
   // explanation of the terms that contributed.
   priority_score?: number;
   priority_reason?: string;
+  // floor is the interceptor's authoritative page-now flag: when true the
+  // fingerprint always pages (high/critical or a severity-only floor) and can
+  // never be suppressed, so "Mark as spam" would silently lie for the row.
+  floor?: boolean;
+  // unreachable marks a stale key from an older fingerprint format that no
+  // future alert can ever match, so confirm/reclaim on it is a no-op the server
+  // refuses with 409. The server always sends it (false everywhere except the
+  // explicit `?status=unreachable` view); it stays optional here so an older
+  // server that omits the field reads as reachable rather than crashing.
+  unreachable?: boolean;
 }
 
 export interface AlertFatigueFindingsResponse {
@@ -1490,7 +2081,1170 @@ export type AlertFatigueSort = "last_seen" | "repeat_count" | "priority";
 // AlertFatigueSortDir is the sort direction; `desc` is the default.
 export type AlertFatigueSortDir = "asc" | "desc";
 
+export type AgentToolKind = "chat" | "analyze";
+export type AgentToolState =
+  | "needs_license"
+  | "needs_datasource"
+  | "needs_integration"
+  | "needs_capability"
+  | "needs_permission"
+  | "unhealthy"
+  | "disabled_by_operator"
+  | "available";
+
+export interface AgentToolAvailability {
+  group: "versus" | "common" | "k8s";
+  name: string;
+  display_name: string;
+  description: string;
+  docs_url?: string;
+  ui_path?: string;
+  state: AgentToolState;
+  reason: string;
+  action: string;
+  action_label: string;
+  enabled: boolean;
+  requirement: {
+    kind: "none" | "datasource" | "integration" | "capability";
+    signal_kind?: string;
+    integration?: string;
+    capabilities?: string[];
+  };
+  health?: string;
+}
+
+export interface AgentToolsetAvailability {
+  id: string;
+  section: "connector" | "datasource" | "common";
+  display_name: string;
+  description: string;
+  icon_key: string;
+  docs_url?: string;
+  ui_path?: string;
+  visibility: "always" | "non_default";
+  state: AgentToolState;
+  reason: string;
+  action: string;
+  action_label: string;
+  enabled: boolean;
+  child_count: number;
+  requirement: AgentToolAvailability["requirement"];
+  health?: string;
+}
+
+/** First-sync progress; present until the first cluster-wide ready publication. */
+export interface KubernetesSyncProgress {
+  step: "connected" | "listing" | "building" | "metrics";
+  step_index: number;
+  step_total: number;
+  steps_done: string[];
+  /** Records listed so far, keyed by singular Kubernetes Kind ("Pod", "Deployment"). */
+  counts: Record<string, number>;
+  kinds_done: number;
+  kinds_total: number;
+  remaining_kinds?: string[];
+  kind_status?: Record<string, string>;
+  phase_seconds?: Record<string, number>;
+  phase_status?: Record<string, string>;
+  cluster_version?: string;
+  node_count?: number;
+  started_at: string;
+  updated_at: string;
+}
+
+/** Freshness of a Kubernetes view, shared by every explorer response. */
+export interface KubernetesSync {
+  state: string;
+  age_s: number;
+  partial: boolean;
+  progress?: KubernetesSyncProgress;
+  /** Cluster-wide count of resource types still loading after the core set published; omitted when none. */
+  pending_kinds?: number;
+  /** Resource ids this response depends on that are not listed yet; omitted when none. */
+  pending?: string[];
+}
+
+export interface KubernetesOverview {
+  sync?: KubernetesSync;
+  connector: string;
+  cluster_id: string;
+  observed_at: string;
+  nodes: number;
+  ready_nodes: number;
+  pods: number;
+  running_pods: number;
+  namespaces: number;
+  active_namespaces: number;
+  workloads: number;
+  warnings: number;
+  requested_cpu?: string;
+  limited_cpu?: string;
+  allocatable_cpu?: string;
+  requested_memory?: string;
+  limited_memory?: string;
+  allocatable_memory?: string;
+  usage_cpu?: string;
+  usage_memory?: string;
+  usage_source?: "node_metrics" | "pod_metrics" | "unavailable" | null;
+  metrics_status?: "available" | "stale" | "unavailable" | null;
+  metrics_observed_at?: string;
+  metrics_fresh: boolean;
+  truncated: boolean;
+  omitted_categories?: string[] | null;
+  partial_failures?: { resource_id?: string; scope?: string; group_version?: string; class: string }[] | null;
+}
+
+export interface KubernetesResource {
+  resource_id: string;
+  api_version?: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  uid?: string;
+  created_at?: string;
+  owners?: Array<{ api_version?: string; kind: string; namespace?: string; name: string; uid?: string }>;
+  labels?: Record<string, string>;
+  summary?: Record<string, unknown> | null;
+  conditions?: Array<{ type: string; status: string; reason?: string; last_transition_at?: string }> | null;
+  projection_truncated?: string[] | null;
+}
+
+export interface KubernetesResourcePage {
+  items: KubernetesResource[] | null;
+  continue?: string;
+  truncated: boolean;
+  omitted_categories?: string[] | null;
+  partial_failures?: Array<{ resource_id?: string; class: string }> | null;
+}
+
+async function listKubernetesResources(resourceId: string, fields = "", continuation = "", cluster?: string): Promise<KubernetesResourcePage> {
+  const query = new URLSearchParams({ resource_id: resourceId, limit: "20" });
+  if (fields) query.set("fields", fields);
+  if (continuation) query.set("continue", continuation);
+  const page = await request<KubernetesResourcePage>(kubernetesClusterPath(`/api/admin/kubernetes/resources?${query}`, cluster));
+  return { ...page, items: page.items ?? [] };
+}
+
+export interface KubernetesMetricsSourceStatus {
+  availability: "available" | "stale" | "unavailable";
+  fresh: boolean;
+  complete: boolean;
+  total: number;
+  cpu?: string;
+  memory?: string;
+  observed_at?: string;
+}
+
+export interface KubernetesUsage {
+  observed_at: string;
+  availability: "available" | "stale" | "unavailable";
+  fresh: boolean;
+  pod_metrics: KubernetesMetricsSourceStatus;
+  node_metrics: KubernetesMetricsSourceStatus;
+  pods?: Array<{ kind: "Pod"; namespace?: string; name: string; timestamp?: string; window?: string; cpu?: string; memory?: string }> | null;
+  nodes?: Array<{ kind: "Node"; name: string; timestamp?: string; window?: string; cpu?: string; memory?: string }> | null;
+  truncated: boolean;
+  omitted_categories?: string[];
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesWorkload {
+  resource_id: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  desired?: number;
+  current?: number;
+  ready?: number;
+  available?: number;
+  unavailable?: number;
+  succeeded?: number;
+  failed?: number;
+  active?: number;
+  generation?: number;
+  observed_generation?: number;
+  update_strategy?: string;
+  conditions?: Array<{ type: string; status: string; reason?: string; last_transition_at?: string }>;
+  containers?: Array<{ name: string; image?: string; probes?: string[]; requests?: Record<string, string>; limits?: Record<string, string> }>;
+  pods?: Array<{ name: string; uid?: string; phase?: string; node?: string; restart_count: number; started_at?: string }>;
+  usage?: Array<{ kind: "Pod"; namespace?: string; name: string; timestamp?: string; window?: string; cpu?: string; memory?: string }>;
+  nodes?: string[];
+  affinity?: string[];
+  topology_spread?: string[];
+  truncated: boolean;
+  omitted_categories?: string[];
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesWorkloadPage {
+  sync?: KubernetesSync;
+  items: KubernetesResource[];
+  counts?: Record<string, number>;
+  next?: string;
+  truncated: boolean;
+  omitted_categories?: string[];
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesObjectRef {
+  api_version?: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  uid?: string;
+}
+
+export interface KubernetesIssue {
+  root: KubernetesObjectRef;
+  rule: string;
+  severity: "critical" | "warning" | "info";
+  count: number;
+  examples?: KubernetesObjectRef[];
+  first_seen?: string;
+  last_seen?: string;
+  broken?: boolean;
+  of?: number;
+  broke_at?: string;
+  broke_at_source?: string;
+  evidence?: {
+    terminations?: Array<{ reason: string; exit_code: number; signal?: string; exit_hint?: string; count: number; restarts?: number; init?: boolean; last: string }>;
+    waiting?: Array<{ reason: string; count: number; init?: boolean }>;
+    pod_reasons?: Array<{ reason: string; count: number }>;
+    nodes?: Array<{ reason: string; count: number }>;
+    conditions?: Array<{ type: string; reason: string }>;
+    warning_reasons?: Array<{ reason: string; count: number }>;
+    warning_events: number;
+    restarts?: number;
+    partial?: boolean;
+    from: string;
+    to: string;
+  };
+  changes?: Array<{ change: KubernetesChange; relation: string; lead_seconds: number }>;
+  more_changes?: number;
+  history?: "complete" | "gap" | "reconstructed";
+  gaps?: Array<{ from: string; to: string }>;
+  rebuilt?: string[];
+  untracked?: string[];
+  /** True only for real evidence failures, never for evidence that is still loading. */
+  partial?: boolean;
+  /** Evidence resource ids still loading; history and changes may be incomplete for that reason only. */
+  pending?: string[];
+}
+
+export interface KubernetesIssuePage {
+  items: KubernetesIssue[];
+  totals: Record<string, number>;
+  broken?: { total: number; by_severity: Record<string, number> };
+  truncated: boolean;
+  next?: string;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  sync: KubernetesSync;
+}
+
+export type KubernetesChangeType = "created" | "deleted" | "image_changed" | "replicas_changed" | "spec_changed" | "rollout_started" | "rollout_completed" | "rollout_stalled" | "config_ref_changed" | "config_changed" | "warning_burst";
+
+export interface KubernetesChange {
+  id: string;
+  cluster: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  uid: string;
+  type: KubernetesChangeType;
+  fields?: Array<{ path: string; from: string; to: string }>;
+  at: string;
+  service?: string;
+  source?: "observed" | "reconstructed";
+}
+
+export interface KubernetesCrashEvent {
+  id: string;
+  sequence: number;
+  cluster: string;
+  namespace: string;
+  pod: string;
+  pod_uid: string;
+  root_uid: string;
+  root_kind: string;
+  root_name: string;
+  ancestry_partial?: boolean;
+  container: string;
+  init?: boolean;
+  type: "status" | "termination";
+  termination_slot?: "current" | "previous";
+  waiting_reason?: string;
+  reason?: string;
+  exit_code: number;
+  signal?: number;
+  restart_count: number;
+  at: string;
+  time_source: "observed_at" | "finished_at";
+  observed_at: string;
+}
+
+export interface KubernetesCrashQuery {
+  namespace?: string;
+  root_uid?: string;
+  pod_uid?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface KubernetesCrashPage {
+  crash_count?: number;
+  items: KubernetesCrashEvent[];
+  next?: string;
+  since: string;
+  until: string;
+  retention_from: string;
+  retention_basis: string;
+  started_at: string;
+  gaps: Array<{ from: string; to: string }>;
+  capture_gaps: Array<{ from: string; to: string }>;
+  coverage: Record<string, { from: string; to: string }>;
+  limitations: string[];
+  capture: { mode: string; reason?: string; last_cycle_at?: string; behind: boolean; verification?: { stage: string; http_status?: number } };
+  sync: KubernetesSync;
+}
+
+export interface KubernetesChangesPage {
+  items: KubernetesChange[];
+  next?: string;
+  truncated?: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  gaps?: Array<{ from: string; to: string }>;
+  sync: KubernetesSync;
+}
+
+export type KubernetesTimelineEntry =
+  | { type: "change"; id: string; at: string; change: KubernetesChange }
+  | { type: "crash"; id: string; at: string; crash: KubernetesCrashEvent }
+  | { type: "break"; id: string; at: string; issue: KubernetesIssue };
+
+export interface KubernetesTimelinePage {
+  items: KubernetesTimelineEntry[];
+  next?: string;
+  sync: KubernetesSync;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  gaps: Array<{ from: string; to: string }>;
+  crash_count: number;
+  total: number;
+  counts: { change: number; crash: number; break: number };
+  /** Echoed when the server filtered to breaks only. */
+  breaks_only?: boolean;
+  since: string;
+  until: string;
+}
+
+export interface KubernetesTimelineQuery {
+  since: string;
+  until: string;
+  namespace?: string;
+  kind?: string;
+  root_uid?: string;
+  pod_uid?: string;
+  resource_uid?: string;
+  /** 1 returns only break entries; the server filters so paging and counts match. */
+  breaks?: 1;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface KubernetesGraphNode {
+  id: string;
+  kind: string;
+  namespace?: string;
+  name: string;
+  health?: string;
+  group: string;
+}
+
+export interface KubernetesGraphEdge {
+  from: string;
+  to: string;
+  type: "manages" | "exposes" | "routes-to" | "uses" | "configures" | "scales";
+}
+
+export interface KubernetesGraph {
+  nodes: KubernetesGraphNode[];
+  edges: KubernetesGraphEdge[];
+  omitted: Record<string, number>;
+  next?: string;
+  truncated?: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  sync: KubernetesSync;
+}
+
+export interface KubernetesTrafficEdge {
+  from: { namespace: string; kind: string; name: string };
+  to: { namespace: string; kind: string; name: string };
+  rate_per_sec?: number | null;
+  error_rate?: number | null;
+  p95_ms?: number | null;
+  bytes_per_sec?: number | null;
+}
+
+export interface KubernetesTraffic {
+  available: boolean;
+  reason?: string;
+  source?: string;
+  window: string;
+  observed_at?: string;
+  edges?: KubernetesTrafficEdge[];
+  unmapped: number;
+  external?: string[];
+  truncated: boolean;
+}
+
+/**
+ * Index state of one resource kind, exactly as the index reports it.
+ * `observed_at` and `completed_at` are always present, and the zero time
+ * ("0001-01-01T00:00:00Z") means the kind was never observed, so it is never
+ * rendered as a date. `error` is the failure class, present only when the kind
+ * is not clean; `skipped` is the number of records this listing could not keep.
+ * `absent` marks a kind the cluster does not serve; `pending` a known kind that
+ * has no listing yet.
+ */
+export interface KubernetesKindStatus {
+  state: "ready" | "partial" | "error" | "warming" | "stale" | "pending";
+  observed_at?: string;
+  completed_at?: string;
+  last_attempt_at?: string;
+  records: number;
+  partial: boolean;
+  error?: string;
+  skipped?: number;
+  /**
+   * When this kind's failure began, kept until its state or class changes, so
+   * "since" does not move with every retry. Present only on a failing or
+   * unreadable kind.
+   */
+  failing_since?: string;
+  /** The cluster does not serve this kind, so it is known, empty and not failing. */
+  absent?: boolean;
+}
+
+export interface KubernetesIndexStatus {
+  state: string;
+  age_s: number;
+  partial: boolean;
+  kinds?: Record<string, KubernetesKindStatus>;
+}
+
+/**
+ * Cluster-wide sync health: every kind the index knows for this cluster, not
+ * only the kinds one view asked for. This is the single authoritative source
+ * for the blocking gate, the sync health surface and the top bar.
+ */
+/** One kind the index could not use, with the class that explains it. */
+export interface KubernetesFailingKind {
+  kind: string;
+  state?: string;
+  /** Failure class, e.g. "record_rejected" or "forbidden". */
+  class?: string;
+  skipped?: number;
+  records?: number;
+  /** When the failure began; the same time until the kind's state changes. */
+  since?: string;
+  observed_at?: string;
+}
+
+/**
+ * A kind the connector identity is not allowed to read. That is a capability
+ * gap rather than a sync fault, so it is excluded from `failing` and from the
+ * aggregate state and never closes a view. Same row shape as a failing kind.
+ */
+export type KubernetesUnreadableKind = KubernetesFailingKind;
+
+export interface KubernetesSyncHealthReport {
+  progress?: KubernetesSyncProgress;
+  /** ready | syncing | partial | stale | error, worst state first. */
+  state: string;
+  partial: boolean;
+  age_s: number;
+  kinds: Record<string, KubernetesKindStatus>;
+  total_kinds: number;
+  ready_kinds: number;
+  failing_kinds: number;
+  pending_kinds: number;
+  /** Kinds the connector identity may not read; excluded from every other count. */
+  unreadable_kinds?: number;
+  truncated: boolean;
+  omitted_kinds?: string[] | null;
+  /** Rows for the kinds that made the sync unusable, with a stable failure time. */
+  failing?: KubernetesFailingKind[] | null;
+  /** Kinds the connector identity may not read; never part of `failing`. */
+  unreadable?: KubernetesUnreadableKind[] | null;
+  /**
+   * When this cluster first published a ready generation, as RFC3339. A
+   * property of the cluster rather than of the process: it is absent until the
+   * first publication and is never cleared by a later failure or restart, so
+   * the UI can tell a first boot from a background resync.
+   */
+  first_ready_at?: string;
+}
+
+/**
+ * The body a failed sync-health answer carries. The request itself could not be
+ * served — a revoked credential, a gateway failure — but when this cluster first
+ * published and how old its last snapshot is describe the cluster, not the
+ * request, so they are sent with the failure and the UI can keep naming what is
+ * on screen instead of going blank.
+ */
+export interface KubernetesSyncFailureReport {
+  error: string;
+  first_ready_at?: string;
+  age_s?: number;
+}
+
+export interface KubernetesTopPage {
+  items: Array<{
+    kind: string;
+    namespace?: string;
+    name: string;
+    timestamp?: string;
+    window?: string;
+    cpu?: string;
+    memory?: string;
+    request_cpu?: string;
+    request_memory?: string;
+    owner?: KubernetesObjectRef;
+  }>;
+  items_available?: boolean;
+  total: number;
+  truncated: boolean;
+  availability: "available" | "stale" | "unavailable";
+  fresh: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  sync: KubernetesSync;
+}
+
+type KubernetesTopPageDto = Omit<KubernetesTopPage, "items" | "items_available"> & {
+  items: KubernetesTopPage["items"] | null;
+};
+
+export interface KubernetesPodLogs {
+  cluster_id: string;
+  namespace: string;
+  pod: string;
+  container: string;
+  previous: boolean;
+  since_seconds: number;
+  tail_lines: number;
+  text: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }>;
+}
+
+export interface KubernetesWorkloadLogs {
+  pods: string[];
+  lines: Array<{ pod: string; container?: string; at?: string; text: string }>;
+  truncated: boolean;
+  omitted_pods?: string[];
+  partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }>;
+}
+
+export interface KubernetesEventsPage {
+  items: KubernetesResource[];
+  next?: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesDiagnosis {
+  workload: KubernetesWorkload;
+  warning_events?: KubernetesResource[];
+  worst_pod_logs?: KubernetesPodLogs;
+  changes: KubernetesChange[];
+  neighborhood: KubernetesGraph;
+  partial_failures?: Array<{ resource_id?: string; scope?: string; class: string }>;
+  omitted_categories?: string[];
+  truncated: boolean;
+  sync: KubernetesSync;
+}
+
+export interface KubernetesHelmRevision {
+  revision: number;
+  status: string;
+  created?: string;
+}
+
+export interface KubernetesHelmRelease {
+  namespace: string;
+  name: string;
+  current: KubernetesHelmRevision;
+  history: KubernetesHelmRevision[];
+  health: string;
+}
+
+export interface KubernetesGitOpsApp {
+  tool: string;
+  kind: string;
+  namespace: string;
+  name: string;
+  sync: string;
+  health: string;
+  revision?: string;
+  last_sync_at?: string;
+  message?: string;
+  source?: string;
+  suspended: boolean;
+}
+
+export interface KubernetesGitOpsPage {
+  items: KubernetesGitOpsApp[];
+  available: boolean;
+  reason?: string;
+  next?: string;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  truncated: boolean;
+}
+
+export interface KubernetesRolloutPage {
+  items: KubernetesRollout[];
+  available: boolean;
+  reason?: string;
+  next?: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+}
+
+export interface KubernetesRollout {
+  namespace: string;
+  name: string;
+  phase: string;
+  strategy?: string;
+  step: number;
+  total_steps: number;
+  stable_rs?: string;
+  canary_rs?: string;
+  weight?: number;
+  message?: string;
+}
+
+export type ServiceHealthState =
+  | "ready"
+  | "partial"
+  | "not_configured"
+  | "collecting"
+  | "no_data"
+  | "unsupported"
+  | "error"
+  | "stale"
+  | "restricted";
+
+export interface ServiceHealthAvailability {
+  state: ServiceHealthState;
+  reason_code?: string;
+  action_id?: string;
+}
+
+export interface ServiceHealthLogEvidence {
+  service: string;
+  source_id: string;
+  matched_logs: number;
+  unique_patterns: number;
+  new_patterns: number;
+  unknown_patterns: number;
+  spiking_patterns: number;
+  severity_counts: Record<string, number>;
+  latest_observation?: string;
+  estimated: boolean;
+}
+
+export interface ServiceHealthSignalEvidence {
+  org_id: string;
+  service: string;
+  operation?: string;
+  family: string;
+  measure: string;
+  value: number | null;
+  unit?: string;
+  numerator?: number;
+  denominator?: number;
+  availability: ServiceHealthAvailability;
+  source_ref: string;
+  signal_ref?: string;
+  observed_at: string;
+  window_start: string;
+  window_end: string;
+  fresh_until?: string;
+  provenance?: string;
+}
+
+export interface ServiceHealthAssessmentDriver {
+  family: string;
+  measure: string;
+  operation?: string;
+  weight?: number;
+}
+
+export interface ServiceHealthAssessment {
+  org_id: string;
+  service: string;
+  regression_score?: number | null;
+  regressing?: boolean;
+  silent?: boolean | null;
+  confidence: number;
+  reason_code?: string;
+  drivers?: ServiceHealthAssessmentDriver[];
+  included_families?: string[];
+  algorithm_version: string;
+  baseline_reference?: string;
+  assessed_at: string;
+  fresh_until?: string;
+  severity?: string;
+  raise_severity?: boolean;
+  alert_state_known?: boolean;
+}
+
+export interface ServiceHealthService {
+  org_id: string;
+  service: string;
+  domain: string;
+  kind: string;
+  severity: string;
+  base_severity?: string;
+  assessment_basis: string;
+  logs: ServiceHealthLogEvidence;
+  availability: Record<string, ServiceHealthAvailability>;
+  active_incidents: number | null;
+  evidence?: ServiceHealthSignalEvidence[];
+  assessment?: ServiceHealthAssessment;
+}
+
+export interface ServiceHealthDomain {
+  name: string;
+  severity: string;
+  service_count: number;
+  observed_count: number;
+  affected_count: number;
+}
+
+export interface ServiceHealthCapability {
+  family: string;
+  measures: Record<string, ServiceHealthAvailability>;
+}
+
+export interface ServiceHealthSettings {
+  interval_seconds: number;
+  window_seconds: number;
+  revision: number;
+  diagnostic?: string;
+}
+
+export interface ServiceHealthSnapshot {
+  snapshot_id: string;
+  generated_at: string;
+  latest_attempt: string;
+  latest_success?: string;
+  next_collection_at: string;
+  settings_revision: number;
+  window_seconds: number;
+  services: ServiceHealthService[];
+  domains: ServiceHealthDomain[];
+  facets: Record<string, number>;
+  coverage: {
+    total_services: number;
+    observed_services: number;
+    partial: boolean;
+  };
+  capabilities: ServiceHealthCapability[];
+  pending_settings?: ServiceHealthSettings;
+}
+
+export interface ServiceTopologyNode {
+  service: string;
+}
+
+export interface ServiceTopologyEdge {
+  service: string;
+  depends_on: string;
+  source: string;
+}
+
+export interface ServiceTopology {
+  availability: ServiceHealthState;
+  extensions?: {
+    availability: ServiceHealthState;
+  };
+  provenance: string[];
+  nodes: ServiceTopologyNode[];
+  edges: ServiceTopologyEdge[];
+  omitted_nodes?: number;
+  omitted_edges?: number;
+}
+
+const agentCapabilitiesApi = {
+  listAgentTools: (agent: AgentToolKind) =>
+    request<AgentToolAvailability[]>(`/api/admin/agent/tools?agent=${agent}`),
+  setAgentToolEnabled: (agent: AgentToolKind, name: string, enabled: boolean) =>
+    request<{ agent: AgentToolKind; name: string; enabled: boolean; changed: boolean }>(
+      `/api/admin/agent/tools/${agent}/${encodeURIComponent(name)}`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+  listAgentToolsets: (agent: AgentToolKind) =>
+    request<AgentToolsetAvailability[]>(`/api/admin/agent/toolsets?agent=${agent}`),
+  proposeAgentAction: (proposal: { type: string; target: AgentProposal["target"]; params: unknown; reason: string }) =>
+    request<AgentProposalResult>("/api/v1/agent/proposals", {
+      method: "POST",
+      body: JSON.stringify(proposal),
+    }),
+  setAgentToolsetEnabled: (agent: AgentToolKind, id: string, enabled: boolean) =>
+    request<{ agent: AgentToolKind; id: string; enabled: boolean; changed: boolean }>(
+      `/api/admin/agent/toolsets/${agent}/${encodeURIComponent(id)}`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+    ),
+};
+
+const unscopedRequest = request;
+
+export type KubernetesLogSourceType = "loki" | "elasticsearch" | "cloudwatchlogs" | "graylog" | "splunk" | "signoz";
+export interface KubernetesLogFields { namespace: string; pod: string; container: string; time?: string; message?: string }
+export interface KubernetesAgentSettingsInput {
+  learning: { logs: boolean; metrics: boolean; traces: boolean; scope: { include: string[]; exclude: string[] } };
+  break_logs: { linked_source: string; fields: Record<KubernetesLogSourceType, KubernetesLogFields> };
+}
+export interface KubernetesAgentSettings extends KubernetesAgentSettingsInput {
+  sources: Array<{ name: string; type: KubernetesLogSourceType; scope: string; health: "healthy" | "slow" | "failing" | "not_checked"; checked_at?: string }>;
+  detected: { metrics_server: boolean; traces: { kind: string; namespace: string } | null; workloads: number; namespaces: number };
+  linked_source_missing: boolean;
+  can_write: boolean;
+}
+export interface KubernetesTestLinkResult { lines: number; namespace: string; workload: string; duration_ms: number; preview: string; truncated: boolean }
+export interface KubernetesIssueAlertsInput {
+  enabled: boolean;
+  level: "critical" | "warning";
+}
+export interface KubernetesIssueAlertsSettings extends KubernetesIssueAlertsInput {
+  enabled_at?: string;
+  can_write: boolean;
+  available: boolean;
+  reason: "" | "demand_capture";
+  links_ready: boolean;
+  channels_enabled: boolean;
+}
+export interface KubernetesBreakLogQuery {
+  namespace: string; root_uid: string; since: string; until: string; pods?: string[];
+  mode?: "merged" | "previous" | "current"; level?: "error" | "warning" | "info" | "debug"; q?: string; cursor?: string; limit?: number;
+  /** One container name, or `kubernetesAllContainers`; omitted lets the server pick the main container. */
+  container?: string;
+}
+export const kubernetesAllContainers = "*";
+export interface KubernetesBreakLogPage {
+  window: { from: string; to: string };
+  pods: Array<{ name: string; uid: string; state: string; short: string }>;
+  lines: Array<{ at: string; pod?: string; pod_uid: string; container: string; init: boolean; slot: string; level: string; text: string; source: string }>;
+  markers: Array<{ type: string; at: string; label: string }>;
+  counts: { errors: number; warnings: number; all: number };
+  rate: Array<{ minute: string; total: number; errors: number }>;
+  patterns: Array<{ template: string; level: string; count: number }>;
+  sources: Array<{ kind: string; name: string; type?: string; at: string }>;
+  coverage: { state: "complete" | "partial" | "none"; gaps: Array<{ from: string; to: string }>; reason: string; tip: boolean };
+  next?: string;
+  /** Applied container filter: a name, or `kubernetesAllContainers`. */
+  container?: string;
+  main_container?: string;
+  /** Every container seen for the break, independent of the filter. */
+  containers?: Array<{ name: string; init?: boolean; main?: boolean }>;
+}
+
+export function createKubernetesApi(cluster?: string) {
+  const request: typeof unscopedRequest = (path, options) => unscopedRequest(kubernetesClusterPath(path, cluster), options);
+  return {
+  kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
+  /**
+   * Every kind the index knows, with its own state. The per-view `sync`
+   * envelope cannot answer "is anything failing anywhere", so the gate, the
+   * surface and the top bar read this instead.
+   */
+  kubernetesSyncHealth: () => request<KubernetesSyncHealthReport>("/api/admin/kubernetes/sync"),
+  kubernetesBreakLogs: (options: KubernetesBreakLogQuery, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (Array.isArray(value)) value.forEach((pod) => query.append("pods[]", pod));
+      else if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesBreakLogPage>(`/api/admin/kubernetes/break-logs?${query}`, { signal });
+  },
+  kubernetesAgentSettings: () => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings"),
+  kubernetesIssueAlerts: (signal?: AbortSignal) => request<KubernetesIssueAlertsSettings>("/api/admin/kubernetes/issue-alerts", { signal }),
+  kubernetesSaveIssueAlerts: (settings: KubernetesIssueAlertsInput) => request<KubernetesIssueAlertsSettings>("/api/admin/kubernetes/issue-alerts", { method: "PUT", body: JSON.stringify({ enabled: settings.enabled, level: settings.level }) }),
+  kubernetesSaveAgentSettings: (settings: KubernetesAgentSettingsInput) => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings", { method: "PUT", body: JSON.stringify({ learning: settings.learning, break_logs: settings.break_logs }) }),
+  kubernetesTestLink: (source: string, fields: KubernetesLogFields) => request<KubernetesTestLinkResult>("/api/admin/kubernetes/agent-settings/test-link", { method: "POST", body: JSON.stringify({ source, fields }) }),
+  kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),
+  kubernetesIssues: (options: { namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string; broken?: boolean; include?: "changes"; root_uid?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesIssuePage>(`/api/admin/kubernetes/issues?${query}`);
+  },
+  kubernetesChanges: (options: { since?: string; until?: string; namespace?: string; kind?: string; name?: string; root_uid?: string; type?: KubernetesChangeType; limit?: number; cursor?: string } = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesChangesPage>(`/api/admin/kubernetes/changes?${query}`, { signal });
+  },
+  kubernetesCrashes: (options: KubernetesCrashQuery = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesCrashPage>(`/api/admin/kubernetes/crashes?${query}`, { signal });
+  },
+  kubernetesTimeline: (options: KubernetesTimelineQuery, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesTimelinePage>(`/api/admin/kubernetes/timeline?${query}`, { signal });
+  },
+  kubernetesGraph: (options: { namespace?: string; group_by?: "namespace" | "app"; max_nodes?: number; connected_only?: boolean; complete?: boolean; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesGraph>(`/api/admin/kubernetes/graph?${query}`);
+  },
+  kubernetesNeighborhood: (options: { resource_id?: string; kind?: string; namespace?: string; name?: string; hops?: number; max_nodes?: number }) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesGraph>(`/api/admin/kubernetes/graph/neighborhood?${query}`);
+  },
+  kubernetesRelated: (options: { resource_id: string; namespace?: string; name: string }, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ resource_id: options.resource_id, name: options.name });
+    if (options.namespace) query.set("namespace", options.namespace);
+    return request<KubernetesGraph>(`/api/admin/kubernetes/graph/related?${query}`, { signal });
+  },
+  kubernetesTraffic: (options: { namespace?: string; source?: string; window?: "5m" | "15m" | "1h" } = {}) => {
+    const query = new URLSearchParams({ window: options.window ?? "15m" });
+    if (options.namespace) query.set("namespace", options.namespace);
+    if (options.source) query.set("source", options.source);
+    return request<KubernetesTraffic>(`/api/admin/kubernetes/traffic?${query}`);
+  },
+  kubernetesTop: (options: { kind: "pod" | "node"; namespace?: string; sort?: "cpu" | "memory"; limit?: number }): Promise<KubernetesTopPage> => {
+    const query = new URLSearchParams({ kind: options.kind });
+    if (options.namespace) query.set("namespace", options.namespace);
+    if (options.sort) query.set("sort", options.sort);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return request<KubernetesTopPageDto>(`/api/admin/kubernetes/top?${query}`)
+      .then((page): KubernetesTopPage => ({
+        ...page,
+        items: page.items ?? [],
+        items_available: Array.isArray(page.items),
+      }));
+  },
+  kubernetesNodes: (cursor?: string) => listKubernetesResources("core~v1~nodes", "", cursor, cluster),
+  kubernetesNamespaces: (namespace?: string) => request<{ items: string[]; sync: KubernetesSync; partial_failures?: Array<{ resource_id?: string; class: string }> }>(`/api/admin/kubernetes/namespaces${namespace ? `?${new URLSearchParams({ namespace })}` : ""}`),
+  kubernetesNodePods: (node: string, cursor?: string) => listKubernetesResources("core~v1~pods", "spec.nodeName=" + node, cursor, cluster),
+  kubernetesUsage: (namespace = "") => request<KubernetesUsage>(`/api/admin/kubernetes/usage?namespace=${encodeURIComponent(namespace)}`),
+  kubernetesUsageHistory: (namespace: string, pod: string, signal?: AbortSignal) =>
+    request<KubernetesUsageHistory>(`/api/admin/kubernetes/usage-history?${new URLSearchParams({ namespace, pod })}`, { signal }),
+  kubernetesWorkloads: async (options: { namespace?: string; kind?: string; q?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const page = await request<Omit<KubernetesWorkloadPage, "items"> & { items: KubernetesResource[] | null }>(`/api/admin/kubernetes/workloads?${query}`);
+    return { ...page, items: Array.isArray(page.items) ? page.items : [] };
+  },
+  kubernetesWorkload: (kind: string, namespace: string, name: string) =>
+    request<KubernetesWorkload>(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}?namespace=${encodeURIComponent(namespace)}`),
+  kubernetesWorkloadLogs: async (kind: string, namespace: string, name: string, options: { container?: string; previous?: boolean; since_seconds?: number; tail_lines?: number; grep?: string } = {}) => {
+    const query = new URLSearchParams({ namespace });
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const response = await request<Omit<KubernetesWorkloadLogs, "pods" | "lines"> & { pods?: string[] | null; lines?: KubernetesWorkloadLogs["lines"] | null }>(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/logs?${query}`);
+    return { ...response, pods: Array.isArray(response.pods) ? response.pods : [], lines: Array.isArray(response.lines) ? response.lines : [] };
+  },
+  kubernetesPodLogs: (namespace: string, name: string, options: { container?: string; previous?: boolean; since_seconds?: number; tail_lines?: number } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesPodLogs>(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs?${query}`);
+  },
+  kubernetesPodLogStream: async (namespace: string, name: string, options: KubernetesPodLogOptions, onEvent: (event: KubernetesPodLogEvent) => void, signal: AbortSignal): Promise<void> => {
+    const query = new URLSearchParams({ timestamps: "true" });
+    for (const [key, value] of Object.entries(options)) {
+      if (options.cursor && (key === "since_seconds" || key === "tail_lines")) continue;
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const secret = getSecret();
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
+    if (!response.ok || !response.body) {
+      throw await logStreamError(response, "Pod");
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "Pod log stream returned an invalid content type.");
+    }
+    await readEventStream(response.body, ({ event, data }) => {
+      if (!["line", "heartbeat", "limit", "error", "end"].includes(event)) return;
+      let value: unknown;
+      try { value = JSON.parse(data); } catch { throw new ApiError(502, "Invalid Pod log stream event."); }
+      if (!value || typeof value !== "object") throw new Error("Invalid Pod log stream event.");
+      const payload = value as Record<string, unknown>;
+      if (event === "line" && (typeof payload.text !== "string" || new TextEncoder().encode(payload.text).byteLength > 16 << 10 || typeof payload.container !== "string")) throw new ApiError(502, "Invalid Pod log line.");
+      for (const field of ["text", "container", "timestamp", "cursor", "reason", "code", "message", "action"]) {
+        if (payload[field] !== undefined && typeof payload[field] !== "string") throw new ApiError(502, "Invalid Pod log stream event.");
+      }
+      for (const field of ["sequence", "ordinal"]) {
+        if (payload[field] !== undefined && (typeof payload[field] !== "number" || !Number.isSafeInteger(payload[field]) || Number(payload[field]) < 1)) throw new ApiError(502, "Invalid Pod log ordering.");
+      }
+      if (typeof payload.cursor === "string" && payload.cursor.length > 16 << 10 || typeof payload.timestamp === "string" && payload.timestamp.length > 64 || ["retryable", "replay_uncertain", "cursor_lagging"].some((field) => payload[field] !== undefined && typeof payload[field] !== "boolean")) throw new ApiError(502, "Invalid Pod log stream event.");
+      onEvent({ event, text: payload.text ?? "", container: payload.container ?? "", timestamp: payload.timestamp, sequence: payload.sequence, ordinal: payload.ordinal, cursor: payload.cursor, reason: payload.reason, code: payload.code, message: payload.message, action: payload.action, retryable: payload.retryable, replay_uncertain: payload.replay_uncertain ?? false, cursor_lagging: payload.cursor_lagging ?? false } as KubernetesPodLogEvent);
+    }, { maxLineBytes: 128 << 10, maxFrameBytes: 132 << 10, maxTotalBytes: 128 << 20, maxEvents: 1_000_000, maxDurationMs: 31 * 60 * 1000 });
+  },
+  kubernetesWorkloadLogStream: async (kind: string, namespace: string, name: string, uid: string, options: KubernetesWorkloadLogOptions, onEvent: (event: KubernetesWorkloadLogEvent) => void, signal: AbortSignal): Promise<void> => {
+    const query = new URLSearchParams({ namespace, uid });
+    for (const [key, value] of Object.entries(options)) {
+      // A resume reads forward from the newest line the reader holds, so the
+      // opening tail and the wall-clock window are mutually exclusive.
+      if (options.since_time && (key === "since_seconds" || key === "tail_lines")) continue;
+      if (Array.isArray(value)) value.forEach((item) => query.append(key, item));
+      else if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const secret = getSecret();
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
+    if (!response.ok || !response.body) {
+      throw await logStreamError(response, "Workload");
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "Workload log stream returned an invalid content type.");
+    }
+    await readEventStream(response.body, ({ event, data }) => {
+      if (!["line", "sources", "source_status", "heartbeat", "limit", "error", "end"].includes(event)) return;
+      let value: unknown;
+      try { value = JSON.parse(data); } catch { throw new ApiError(502, "Invalid workload log stream event."); }
+      if (!value || typeof value !== "object") throw new ApiError(502, "Invalid workload log stream event.");
+      const payload = value as Record<string, unknown>;
+      for (const field of ["text", "container", "timestamp", "reason", "code", "message", "action", "workload_uid", "pod_uid", "pod", "namespace", "incarnation", "source_id"]) {
+        if (payload[field] !== undefined && (typeof payload[field] !== "string" || String(payload[field]).length > (field === "text" ? 16384 : 4096))) throw new ApiError(502, "Invalid workload log stream field.");
+      }
+      if (event === "line" && (typeof payload.text !== "string" || new TextEncoder().encode(payload.text).byteLength > 16 << 10 || typeof payload.container !== "string" || typeof payload.pod !== "string" || typeof payload.pod_uid !== "string" || typeof payload.source_id !== "string")) throw new ApiError(502, "Invalid workload log line.");
+      for (const field of ["sequence", "ordinal"]) {
+        if (payload[field] !== undefined && (typeof payload[field] !== "number" || !Number.isSafeInteger(payload[field]) || Number(payload[field]) < 1)) throw new ApiError(502, "Invalid workload log ordering.");
+      }
+      for (const field of ["retryable", "replay_uncertain", "truncated", "cursor_lagging"]) {
+        if (payload[field] !== undefined && typeof payload[field] !== "boolean") throw new ApiError(502, "Invalid workload log flag.");
+      }
+      if (event === "sources") {
+        for (const field of ["sources", "pods"]) {
+          payload[field] ??= [];
+          if (!Array.isArray(payload[field]) || payload[field].length > (field === "pods" ? 200 : 40)) throw new ApiError(502, "Invalid workload source list.");
+          for (const raw of payload[field] as unknown[]) {
+            if (!raw || typeof raw !== "object") throw new ApiError(502, "Invalid workload source.");
+            const item = raw as Record<string, unknown>;
+            const keys = field === "pods" ? ["uid", "name"] : ["source_id", "pod_uid", "pod", "namespace", "container", "incarnation"];
+            if (keys.some((key) => typeof item[key] !== "string" || String(item[key]).length > 512) || typeof item.admitted !== "boolean") throw new ApiError(502, "Invalid workload source identity.");
+            if (field === "pods" && ["containers", "init_containers"].some((key) => {
+              const names = item[key];
+              return !Array.isArray(names) || names.length > 128 || names.some((name: unknown) => typeof name !== "string" || name.length > 63);
+            })) throw new ApiError(502, "Invalid workload containers.");
+            if (field === "pods" && (item.all_pods_admitted !== undefined && typeof item.all_pods_admitted !== "boolean" || item.all_pods_reason !== undefined && (typeof item.all_pods_reason !== "string" || item.all_pods_reason.length > 256))) throw new ApiError(502, "Invalid workload capacity metadata.");
+          }
+        }
+      }
+      // No cursor crosses this boundary: a workload read resumes from a time.
+      delete payload.cursor;
+      onEvent({ ...payload, event, text: payload.text ?? "", container: payload.container ?? "" } as KubernetesWorkloadLogEvent);
+    }, { maxLineBytes: 1 << 20, maxFrameBytes: (1 << 20) + 4096, maxTotalBytes: 128 << 20, maxEvents: 1_000_000, maxDurationMs: 31 * 60 * 1000 });
+  },
+  kubernetesDiagnose: (resourceId: string, namespace: string, name: string, logTail = 40) => {
+    const query = new URLSearchParams({ namespace, log_tail: String(logTail) });
+    return request<KubernetesDiagnosis>(`/api/admin/kubernetes/diagnose/${encodeURIComponent(resourceId)}/${encodeURIComponent(name)}?${query}`);
+  },
+  kubernetesReleases: (options: { namespace?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> }>(`/api/admin/kubernetes/releases?${query}`);
+  },
+  kubernetesRelease: (namespace: string, name: string) =>
+    request<KubernetesHelmRelease>(`/api/admin/kubernetes/releases/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
+  kubernetesGitOpsApps: (options: { namespace?: string; tool?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesGitOpsPage>(`/api/admin/kubernetes/gitops/apps?${query}`);
+  },
+  kubernetesStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal): Promise<void> => {
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const secret = getSecret() ?? "";
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    // The record feed for the pods, deployments and nodes views. Its `sync`
+    // envelope only covers the kinds this request names, so nothing here
+    // decides whether a cluster is healthy: sync health reads the cluster-wide
+    // report.
+    const response = await fetch(`${API_BASE}${kubernetesClusterPath("/api/admin/kubernetes/stream?kinds=Node,Pod,Deployment", cluster)}`, {
+      headers,
+      credentials: "same-origin",
+      cache: "no-store",
+      signal,
+    });
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => "");
+      if (response.status === 401) notifyAuthExpired();
+      throw new ApiError(response.status, text || `stream failed (${response.status})`);
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "stream returned an invalid content type");
+    }
+    await readEventStream(response.body, onEvent, { ...ANALYSIS_SSE_LIMITS, maxLineBytes: 66 << 10, maxFrameBytes: 66 << 10, maxTotalBytes: 16 << 20, maxEvents: 10_000 });
+  },
+  kubernetesRollout: (namespace: string, name: string) =>
+    request<KubernetesRollout>(`/api/admin/kubernetes/rollouts/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
+  kubernetesRollouts: (options: { namespace?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    return request<KubernetesRolloutPage>(`/api/admin/kubernetes/rollouts?${query}`);
+  },
+  kubernetesSearch: (namespace: string, query: string, totalLimit = 500) =>
+    request<{ items: KubernetesResource[] | null; truncated: boolean; omitted_categories?: string[] | null; partial_failures?: Array<{ resource_id?: string; class: string }> | null }>(
+      `/api/admin/kubernetes/resources/search?namespace=${encodeURIComponent(namespace)}&q=${encodeURIComponent(query)}&per_kind_limit=${Math.min(totalLimit, 100)}&limit=${Math.min(totalLimit, 500)}`,
+    ),
+  kubernetesEvents: async (options: { namespace?: string; limit?: number; cursor?: string } = {}) => {
+    const query = new URLSearchParams({ type: "Warning" });
+    for (const [key, value] of Object.entries(options)) {
+      if (value !== undefined && value !== "") query.set(key, String(value));
+    }
+    const response = await request<Omit<KubernetesEventsPage, "items"> & { items: KubernetesResource[] | null }>(`/api/admin/kubernetes/events?${query}`);
+    return { ...response, items: response.items ?? [] };
+  },
+  kubernetesDescribe: (resourceId: string, namespace: string, name: string) =>
+    request<{ resource: KubernetesResource; related_resources?: Array<{ kind: string; namespace?: string; name: string }>; events?: KubernetesResource[]; partial_failures?: Array<{ resource_id?: string; class: string }> }>(
+      `/api/admin/kubernetes/resources/${encodeURIComponent(resourceId)}/${encodeURIComponent(name)}/describe?namespace=${encodeURIComponent(namespace)}`,
+    ),
+  };
+}
+
 export const api = {
+  ...agentCapabilitiesApi,
+  ...createKubernetesApi(),
+  kubernetesClusters: () => request<KubernetesClusters>("/api/admin/kubernetes/clusters"),
+  /**
+   * The cluster-wide sync report for one named cluster, for surfaces that show
+   * several clusters at once and therefore cannot use the scoped client.
+   */
+  kubernetesClusterSyncHealth: (cluster: string) => request<KubernetesSyncHealthReport>(kubernetesClusterPath("/api/admin/kubernetes/sync", cluster)),
   status: () => request<Status>("/api/agent/status"),
   listPatterns: () =>
     request<{ patterns: Pattern[] }>("/api/agent/patterns").then(
@@ -1582,6 +3336,30 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ enabled }) },
     ),
 
+  // adoptSLORecommendation adopts one recommended objective for a service: the
+  // platform starts tracking it and raises a burn-rate alert when the error
+  // budget is at risk. Enterprise + RBAC-gated like the cadence config, so it
+  // rides the SSO session cookie.
+  adoptSLORecommendation: (service: string, sli: string) =>
+    sessionRequest<SLOAdoptResponse>(
+      `/enterprise/api/agent/slo/recommendations/${encodeURIComponent(service)}/adopt`,
+      { method: "POST", body: JSON.stringify({ sli }) },
+    ),
+
+  // unadoptSLORecommendation reverts the service to the platform's
+  // auto-derived objective. `type` names which of the two independent
+  // objectives to revert; omitted means availability, matching the server's
+  // default. 409 not_adopted (nothing was adopted) and 422 cannot_revert (no
+  // observed attainment to re-derive from) both arrive as an ApiError carrying
+  // the server's plain-language message.
+  unadoptSLORecommendation: (service: string, type?: "latency") =>
+    sessionRequest<SLOAdoptResponse>(
+      `/enterprise/api/agent/slo/recommendations/${encodeURIComponent(service)}/adopt${
+        type ? `?type=${encodeURIComponent(type)}` : ""
+      }`,
+      { method: "DELETE" },
+    ),
+
   // Alert fatigue config + fingerprint review (Enterprise, RBAC
   // runtime:manage). These ride the SSO session cookie via sessionRequest; the
   // org and role are derived server-side. Community / unlicensed → 403 (the
@@ -1597,13 +3375,18 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   // listAlertFatigueFingerprints reads one page of the review table. `status`
-  // filters by review state (omit for all listable rows); the internal
-  // `tracking` state is rejected 400 by the server, so never request it. `sort`
-  // (last_seen default / repeat_count / priority) and `dir` (asc / desc,
-  // default desc) drive the server-side ordering; an unknown sort is 400.
-  // Paged with page/page_size; the response carries the whole-set `total`.
+  // filters by review state (omit for all listable rows, see
+  // AlertFatigueListFilter); passing `tracking` lists the still-paging rows the
+  // operator can suppress from the Tracking tab, and `unreachable` is the only
+  // view that returns dead keys (400 on an older server).
+  // `service` is an optional exact-match filter applied WITHIN the active status
+  // (used by the top-noisy drill-down). `sort` (last_seen default /
+  // repeat_count / priority) and `dir` (asc / desc, default desc) drive the
+  // server-side ordering; an unknown sort is 400. Paged with page/page_size; the
+  // response carries the whole-set `total`.
   listAlertFatigueFingerprints: (opts?: {
     status?: string;
+    service?: string;
     sort?: AlertFatigueSort;
     dir?: AlertFatigueSortDir;
     page?: number;
@@ -1611,6 +3394,7 @@ export const api = {
   }) => {
     const p = new URLSearchParams();
     if (opts?.status) p.set("status", opts.status);
+    if (opts?.service) p.set("service", opts.service);
     if (opts?.sort) p.set("sort", opts.sort);
     if (opts?.dir) p.set("dir", opts.dir);
     if (opts?.page) p.set("page", String(opts.page));
@@ -1622,7 +3406,9 @@ export const api = {
   },
   // confirmAlertFatigueFingerprint marks a fingerprint as spam (status →
   // fatigued); reclaimAlertFatigueFingerprint marks it NOT spam (status →
-  // reclaimed, pages forever). Both 404 when the id is not this org's.
+  // reclaimed, pages forever). Both 404 when the id is not this org's, and 409
+  // with `{ error, unreachable: true }` when the row is a dead key — the write
+  // is refused rather than silently applied to something nothing can match.
   confirmAlertFatigueFingerprint: (id: string) =>
     sessionRequest<AlertFatigueFinding>(
       `/enterprise/api/alert-fatigue/fingerprints/${encodeURIComponent(id)}/confirm`,
@@ -1634,16 +3420,27 @@ export const api = {
       { method: "POST" },
     ),
 
-  // listAlertFatigueChannels reads the org's notification channels eligible to
-  // be the fatigue channel, each with its EFFECTIVE enabled flag (the same
-  // runtime channel config the alert path resolves). Preferred over the generic
-  // channel-settings map for the fatigue picker because it also reports whether
-  // each channel is currently enabled — so the UI can warn when a diverted
-  // channel was later disabled. 503 in community mode.
-  listAlertFatigueChannels: () =>
-    sessionRequest<{ channels: AlertFatigueChannel[] }>(
-      "/enterprise/api/alert-fatigue/channels",
-    ).then((r) => r.channels ?? []),
+  // Fatigue channel (Enterprise, RBAC runtime:manage). The GET returns a MASKED
+  // view (channel type, enable flag, per-field set/hint) — NEVER a raw secret.
+  // The PUT sets the channel fatigued alerts are sent to: a blank/omitted secret
+  // preserves the stored one (write-only), so an operator can toggle enable or
+  // edit a routing field without resubmitting the token. DELETE clears the
+  // channel, so fatigued alerts are suppressed again. All three 503 on a
+  // non-Postgres backend.
+  getAlertFatigueCustomChannel: () =>
+    sessionRequest<AlertFatigueCustomChannel>(
+      "/enterprise/api/alert-fatigue/custom-channel",
+    ),
+  setAlertFatigueCustomChannel: (body: AlertFatigueCustomChannelPut) =>
+    sessionRequest<AlertFatigueCustomChannel>(
+      "/enterprise/api/alert-fatigue/custom-channel",
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+  deleteAlertFatigueCustomChannel: () =>
+    sessionRequest<{ cleared: boolean }>(
+      "/enterprise/api/alert-fatigue/custom-channel",
+      { method: "DELETE" },
+    ),
 
   // getAlertFatigueAnalytics reads the per-org noise read-model over the given
   // window (7d default, 30d optional). Read-only; every figure is org-scoped.
@@ -1769,16 +3566,17 @@ export const api = {
   // plumbing as the mode control — the SSO session cookie, never a static
   // token. getAISettings returns the MASKED view (no key, ever). setAISettings
   // omits api_key when blank so the caller can toggle `enabled` without
-  // resubmitting the key; the key is passed straight through to the single PUT
-  // and never persisted client-side.
+  // resubmitting the key. An omitted base_url preserves the current endpoint;
+  // an explicit empty string selects the provider's native endpoint.
   getAISettings: () =>
     sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings"),
-  setAISettings: (enabled: boolean, provider?: string, apiKey?: string) => {
-    const key = apiKey?.trim() ?? "";
-    const prov = provider?.trim() ?? "";
-    const body: AISettingsInput = { enabled };
-    if (prov) body.provider = prov;
-    if (key) body.api_key = key;
+  setAISettings: (
+    enabled: boolean,
+    provider?: string,
+    apiKey?: string,
+    baseURL?: string,
+  ) => {
+    const body = buildAISettingsInput(enabled, provider, apiKey, baseURL);
     return sessionRequest<AISettingsView>("/enterprise/api/agent/ai-settings", {
       method: "PUT",
       body: JSON.stringify(body),
@@ -1822,7 +3620,9 @@ export const api = {
   // cookie, never a static token; the org and role are derived server-side. The
   // GET is the single state source the toggle + per-metric checkboxes read;
   // setServiceLearnExclusion toggles ONE service (POST add / DELETE remove);
-  // setLearnExclusions PUTs the whole list (read-modify-write off the GET),
+  // setServiceLearnExclusions posts an intent for MANY services at once, merged
+  // server-side under a per-org lock; setLearnExclusions PUTs the whole list
+  // (read-modify-write off the GET),
   // which is ALSO how a per-log-pattern exclusion is toggled (the server has no
   // per-pattern POST/DELETE convenience route — the whole-list PUT is the sole
   // write path for the `patterns` grain, same as metric/trace signals). All
@@ -1839,11 +3639,7 @@ export const api = {
   getLearnExclusions: () =>
     sessionRequest<LearnExclusionsWire>(
       "/enterprise/api/agent/learn-exclusions",
-    ).then((r) => ({
-      services: r.services ?? [],
-      metrics: r.metrics ?? [],
-      patterns: r.log_patterns ?? [],
-    })),
+    ).then(fromLearnExclusionsWire),
   setLearnExclusions: (input: LearnExclusions) =>
     sessionRequest<LearnExclusionsWire>("/enterprise/api/agent/learn-exclusions", {
       method: "PUT",
@@ -1852,20 +3648,22 @@ export const api = {
         metrics: input.metrics,
         log_patterns: input.patterns,
       }),
-    }).then((r) => ({
-      services: r.services ?? [],
-      metrics: r.metrics ?? [],
-      patterns: r.log_patterns ?? [],
-    })),
+    }).then(fromLearnExclusionsWire),
   setServiceLearnExclusion: (name: string, excluded: boolean) =>
     sessionRequest<LearnExclusionsWire>(
       `/enterprise/api/agent/learn-exclusions/services/${encodeURIComponent(name)}`,
       { method: excluded ? "POST" : "DELETE" },
-    ).then((r) => ({
-      services: r.services ?? [],
-      metrics: r.metrics ?? [],
-      patterns: r.log_patterns ?? [],
-    })),
+    ).then(fromLearnExclusionsWire),
+  // setServiceLearnExclusions is the BULK service write. It sends INTENT — the
+  // selected names + the direction — and NOT a resulting list, so a stale page
+  // can never revert a concurrent change or clobber another grain: the server
+  // merges against the current stored policy under a per-org lock and keeps
+  // metrics / includes / log patterns, which are never taken from the client.
+  setServiceLearnExclusions: (services: string[], exclude: boolean) =>
+    sessionRequest<LearnExclusionsWire>(
+      "/enterprise/api/agent/learn-exclusions/services/batch",
+      { method: "POST", body: JSON.stringify({ services, exclude }) },
+    ).then(fromLearnExclusionsWire),
 
   // getSSODeployment reads the license-issued single-tenant deployment org so
   // the admin controls drive SSO/connections/policy under it (not "default").
@@ -1925,10 +3723,17 @@ export const api = {
     sessionRequest<MembersEnvelope>(
       `/enterprise/api/rbac/${encodeURIComponent(org)}/members`,
     ),
-  setMemberRole: (org: string, subject: string, role: MemberRole) =>
-    sessionRequest<{ org: string; subject: string; role: string }>(
+  listMemberRoles: (org: string) => sessionRequest<{ assignments: RoleAssignment[] }>(`/enterprise/api/rbac/${encodeURIComponent(org)}/roles`),
+  rbacMe: () => sessionRequest<RbacMe>("/enterprise/api/rbac/me"),
+  setTeamRole: (org: string, team: string, role: MemberRole, clusters?: string[]) =>
+    sessionRequest<{ org: string; team: string; role: string; clusters?: string[] }>(
+      `/enterprise/api/rbac/${encodeURIComponent(org)}/team-roles/${encodeURIComponent(team)}`,
+      { method: "PUT", body: JSON.stringify({ role, ...(clusters === undefined ? {} : { clusters }) }) },
+    ),
+  setMemberRole: (org: string, subject: string, role: MemberRole, clusters?: string[]) =>
+    sessionRequest<{ org: string; subject: string; role: string; clusters?: string[] }>(
       `/enterprise/api/rbac/${encodeURIComponent(org)}/roles/${encodeURIComponent(subject)}`,
-      { method: "PUT", body: JSON.stringify({ role }) },
+      { method: "PUT", body: JSON.stringify({ role, ...(clusters === undefined ? {} : { clusters }) }) },
     ),
 
   // Deployment default-admin ("admin user") status + disable (roles:manage).
@@ -1972,6 +3777,21 @@ export const api = {
     request<{ services: Record<string, ServiceInfo> }>(
       "/api/agent/services",
     ).then((r) => r.services ?? {}),
+  getServiceHealth: () =>
+    request<ServiceHealthSnapshot>("/api/agent/service-health"),
+  getServiceTopology: () =>
+    request<ServiceTopology>("/api/agent/service-topology"),
+  getServiceHealthSettings: () =>
+    request<ServiceHealthSettings>("/api/agent/service-health/settings"),
+  updateServiceHealthSettings: (settings: ServiceHealthSettings) =>
+    request<ServiceHealthSettings>("/api/agent/service-health/settings", {
+      method: "PATCH",
+      body: JSON.stringify({
+        interval_seconds: settings.interval_seconds,
+        window_seconds: settings.window_seconds,
+        revision: settings.revision,
+      }),
+    }),
   // listServicesIndex is the Services-page variant: it returns one bounded page
   // of services (the back-compat name→facts MAP) PLUS the whole-set total in a
   // single request. Pass `offset` to load the next chunk; `next_offset` is
@@ -2160,6 +3980,147 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ requested_by: requestedBy ?? "" }),
     }),
+
+  // streamAnalysis runs an analysis and reports each step as it happens.
+  //
+  // It uses fetch + a stream reader rather than EventSource, because
+  // EventSource is GET-only and cannot carry the gateway-secret header. The
+  // returned promise resolves with the terminal event; callers that want the
+  // full record fetch it by `analysis_id`.
+  //
+  // Aborting only stops the STREAM — the server finishes and persists the run
+  // regardless, so a closed tab never discards an expensive analysis.
+  streamAnalysis: async (
+    incidentID: string,
+    onEvent: (ev: AnalyzeEvent) => void,
+    opts: { requestedBy?: string; signal?: AbortSignal } = {},
+  ): Promise<AnalyzeEvent | null> => {
+    const secret = getSecret() ?? "";
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (secret) headers.set("X-Gateway-Secret", secret);
+
+    const res = await fetch(
+      `${API_BASE}/api/admin/incidents/${incidentID}/analyze/stream`,
+      {
+        method: "POST",
+        headers,
+        credentials: "same-origin",
+        cache: "no-store",
+        body: JSON.stringify({ requested_by: opts.requestedBy ?? "" }),
+        signal: opts.signal,
+      },
+    );
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 401) notifyAuthExpired();
+      throw new ApiError(res.status, text || `stream failed (${res.status})`);
+    }
+    if (!res.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await res.body.cancel();
+      throw new ApiError(502, "stream returned an invalid content type");
+    }
+
+    let last: AnalyzeEvent | null = null;
+    await readEventStream(res.body, ({ data }) => {
+      try {
+        const event = JSON.parse(data) as AnalyzeEvent;
+        last = event;
+        onEvent(event);
+      } catch {
+        // The persisted analysis remains the source of truth.
+      }
+    }, ANALYSIS_SSE_LIMITS);
+    return last;
+  },
+
+  createChatSession: () =>
+    request<ChatSession>("/api/admin/chat/sessions", { method: "POST" }),
+  listChatSessions: () =>
+    request<{ sessions: ChatSessionSummary[] }>("/api/admin/chat/sessions").then(
+      (response) => response.sessions ?? [],
+    ),
+  getChatSession: (id: string) =>
+    request<ChatSession>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`),
+  listAgentApprovals: (state: "pending" | "all" = "pending") =>
+    request<{ approvals: AgentApproval[] }>(`/api/v1/agent/approvals?state=${state}`),
+  approveAgentApproval: (id: string, nonce: string) =>
+    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ nonce }),
+    }),
+  rejectAgentApproval: (id: string, reason: string) =>
+    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  deleteChatSession: (id: string) =>
+    request<void>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  cancelChatRun: (id: string) =>
+    request<void>(`/api/admin/chat/sessions/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+    }),
+  streamChatMessage: async (
+    id: string,
+    message: string,
+    attachment: ChatAttachment | undefined,
+    onEvent: (event: ChatEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatEvent | null> => {
+    const secret = getSecret() ?? "";
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    const response = await fetch(
+      `${API_BASE}/api/admin/chat/sessions/${encodeURIComponent(id)}/messages`,
+      {
+        method: "POST",
+        headers,
+        credentials: "same-origin",
+        cache: "no-store",
+        body: JSON.stringify({ message, attachment }),
+        signal,
+      },
+    );
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => "");
+      let body: unknown = text;
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        // Keep the safe plain-text response.
+      }
+      if (response.status === 401) notifyAuthExpired();
+      const errorMessage =
+        body && typeof body === "object" && "error" in body
+          ? String((body as { error: unknown }).error)
+          : `stream failed (${response.status})`;
+      throw new ApiError(response.status, errorMessage, body);
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "stream returned an invalid content type");
+    }
+
+    let last: ChatEvent | null = null;
+    await readEventStream(response.body, ({ event: eventType, data }) => {
+      try {
+        const chatEvent = JSON.parse(data) as ChatEvent;
+        if (!chatEvent.kind && eventType !== "message") {
+          chatEvent.kind = eventType as ChatEventKind;
+        }
+        last = chatEvent;
+        onEvent(chatEvent);
+      } catch {
+        // A malformed frame cannot invalidate the durable session transcript.
+      }
+    });
+    const terminal = last as ChatEvent | null;
+    if (!terminal || !["run_finished", "run_failed", "run_cancelled", "run_throttled"].includes(terminal.kind)) {
+      throw new ApiError(502, "Live stream was interrupted before completion. Refresh the conversation to resync.");
+    }
+    return terminal;
+  },
   listAnalyses: (incidentID: string, limit?: number) => {
     const qs = limit ? `?limit=${limit}` : "";
     return request<{ analyses: AnalysisRecord[] }>(
@@ -2301,7 +4262,7 @@ export const api = {
       { headers, credentials: "same-origin", cache: "no-store" },
     );
     if (!res.ok) {
-      if (res.status === 401 && secret) notifyAuthExpired();
+      if (res.status === 401) notifyAuthExpired();
       let msg = `HTTP ${res.status}`;
       try {
         const b = await res.json();
@@ -2345,6 +4306,19 @@ export const api = {
   // getSpikeSettings reads the global spike-detector baseline mode setting.
   getSpikeSettings: () =>
     request<SpikeSettings>("/api/admin/agent/spike-settings"),
+
+  // getCountSettings reads the incident-count window — how far back every
+  // count surface (header badge, Now tiles, Incidents tabs) looks.
+  getCountSettings: () =>
+    request<CountSettings>("/api/admin/agent/count-settings"),
+
+  // updateCountSettings replaces the count window and returns the effective
+  // value. An unknown window is rejected with a 400.
+  updateCountSettings: (s: CountSettings) =>
+    request<CountSettings>("/api/admin/agent/count-settings", {
+      method: "PUT",
+      body: JSON.stringify(s),
+    }),
 
   // updateSpikeSettings replaces the global spike baseline mode and returns the
   // effective value. An unknown mode is rejected with a 400.
@@ -2472,6 +4446,7 @@ export interface AgentConfigView {
   };
   ai: {
     enable: boolean;
+    provider?: string;
     model: string;
     temperature: number;
     max_tokens: number;

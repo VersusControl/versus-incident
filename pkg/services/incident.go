@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -11,12 +12,44 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
 func CreateIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) error {
+	return createIncident(teamID, content, incidentCreateOptions{}, params...).Err
+}
+
+type incidentCreateOptions struct {
+	Context    context.Context
+	OrgID      string
+	IncidentID string
+	Detection  *storage.DetectionEpisodeDecision
+	SkipOnCall bool
+}
+
+type incidentCreateResult struct {
+	IncidentID   string
+	Decision     EmitDecision
+	NotifyStatus string
+	Err          error
+}
+
+func createIncident(teamID string, content *map[string]interface{}, options incidentCreateOptions, params ...*map[string]string) incidentCreateResult {
+	result := incidentCreateResult{}
+	ctx := options.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if options.OrgID != "" {
+		ctx = tenancy.WithOrgScope(ctx, tenancy.NewOrgScope(options.OrgID))
+	}
+	if err := ctx.Err(); err != nil {
+		result.Err = err
+		return result
+	}
 	// Emit interception — the alert-fatigue choke point. It runs FIRST so a
 	// held-back finding never touches config or provider building. A nil
 	// interceptor (community mode) or a panic fails open to EmitProceed, so an
@@ -26,9 +59,23 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// returns without error. EmitDivert restricts the fan-out to the named
 	// channels below.
 	decision := resolveEmitDecision(*content, teamID)
+	result.Decision = decision
 	switch decision.Action {
-	case EmitSuppress, EmitGroup, EmitDelay:
-		return nil
+	case EmitSuppress, EmitGroup:
+		if options.Detection != nil && store != nil {
+			persistTerminalDetectionIncident(&result, teamID, *content, options, decision)
+		}
+		return result
+	case EmitDelay:
+		return result
+	case EmitDivert:
+		if decision.DeliveryHandled && options.Detection != nil {
+			result.Err = decision.DeliveryError
+			if store != nil {
+				persistTerminalDetectionIncident(&result, teamID, *content, options, decision)
+			}
+			return result
+		}
 	}
 
 	var cfg *config.Config
@@ -46,13 +93,15 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	if len(params) > 0 {
 		p = params[0]
 	}
-	cfg = config.GetConfigForAlert(context.Background(), p)
+	cfg = config.GetConfigForAlert(ctx, p)
 
 	// Initialization of providers and alert
 	factory := common.NewAlertProviderFactory(cfg)
+	factory.SetContext(ctx)
 	providers, err := factory.CreateProviders()
 	if err != nil {
-		return fmt.Errorf("failed to create providers: %v", err)
+		result.Err = fmt.Errorf("failed to create providers: %v", err)
+		return result
 	}
 
 	// EmitDivert restricts the fan-out to the interceptor's channels; every
@@ -81,6 +130,10 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	autoResolve := shouldAutoResolveWebhook(resolved, resolveSource(*content, hint), LoadIntakeSettings(store))
 
 	incident := m.NewIncident(teamID, content, resolved)
+	if options.IncidentID != "" {
+		incident.ID = options.IncidentID
+	}
+	result.IncidentID = incident.ID
 
 	// Dereference the Pointer and add AckURL if needed. Auto-resolve does NOT
 	// gate this: only a payload-resolved incident skips the AckURL, exactly as
@@ -96,7 +149,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// applied during config resolution above). When that window is zero on-call
 	// triggers immediately, so an ack can never forestall escalation — a
 	// dead/instantly-expired link is worse than none, so we emit no AckURL.
-	if !resolved && cfg.OnCall.Enable && cfg.OnCall.WaitMinutes > 0 {
+	if !resolved && cfg.OnCall.Enable && !options.SkipOnCall && cfg.OnCall.WaitMinutes > 0 && (!utils.IsKubernetesIssueIncident(contentClone) || cfg.PublicHost != "") {
 		ttl := time.Duration(cfg.OnCall.WaitMinutes) * time.Minute
 		ackURL := AckURL(cfg, incident.ID, ttl)
 		contentClone["AckURL"] = ackURL
@@ -110,12 +163,39 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// webhook auto-resolve is applied as a follow-up write AFTER fan-out and
 	// on-call, so it never gates them.
 	var rec *storage.IncidentRecord
+	var persistErr error
 	if store != nil {
 		rec = buildIncidentRecord(incident, cfg, contentClone, resolved, hint)
+		rec.OrgID = storage.NormalizeOrgID(options.OrgID)
+		if options.Detection != nil {
+			if existing, err := store.GetIncident(incident.ID); err == nil {
+				rec = existing
+				rec.Title = ExtractTitle(contentClone)
+				rec.Service = ExtractService(contentClone)
+				rec.Source = resolveSource(contentClone, hint)
+				merged := make(map[string]interface{}, len(rec.Content)+len(contentClone))
+				for key, value := range rec.Content {
+					merged[key] = value
+				}
+				for key, value := range contentClone {
+					merged[key] = value
+				}
+				rec.Content = merged
+			}
+			applyDetectionDecision(rec, *options.Detection)
+		}
+		if !options.SkipOnCall {
+			rec.OnCallTriggered = !resolved && cfg.OnCall.Enable
+		}
 		rec.NotifyStatus = "pending"
-		if err := store.SaveIncident(rec); err != nil {
+		if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
+			if utils.IsKubernetesIssueIncident(contentClone) {
+				result.Err = fmt.Errorf("persist detection incident: %w", err)
+				return result
+			}
 			log.Printf("incident: persist warning: %v", err)
 		}
+		result.NotifyStatus = rec.NotifyStatus
 	}
 
 	// Fan out to every enabled channel. SendAllAlerts (unlike the
@@ -129,6 +209,11 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// the list of providers that SUCCEEDED, not the list of providers
 	// that were enabled in config.
 	if store != nil && rec != nil {
+		if options.Detection != nil {
+			if latest, err := store.GetIncident(rec.ID); err == nil {
+				rec = latest
+			}
+		}
 		rec.ChannelsNotified = fanOut.Succeeded
 		switch {
 		case sendErr == nil:
@@ -141,9 +226,13 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 			rec.NotifyStatus = "partial"
 			rec.NotifyError = sendErr.Error()
 		}
-		if err := store.SaveIncident(rec); err != nil {
+		if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
+			if utils.IsKubernetesIssueIncident(contentClone) {
+				persistErr = err
+			}
 			log.Printf("incident: persist status warning: %v", err)
 		}
+		result.NotifyStatus = rec.NotifyStatus
 	}
 
 	// On-call escalation. We still kick this off even when *some*
@@ -152,7 +241,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 	// AND there are no channels configured at all (nothing to escalate
 	// off of).
 	var oncallErr error
-	if !resolved && cfg.OnCall.Enable {
+	if !resolved && cfg.OnCall.Enable && !options.SkipOnCall && (rec == nil || !rec.Resolved) {
 		if !core.IsOnCallWorkflowInitialized() {
 			// On-call was requested (globally or via a per-incident
 			// override) but the workflow singleton was never initialized
@@ -161,13 +250,13 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 			log.Printf("incident: on-call requested for %s but workflow not initialized; skipping on-call", incident.ID)
 			if store != nil && rec != nil && rec.OnCallTriggered {
 				rec.OnCallTriggered = false
-				if err := store.SaveIncident(rec); err != nil {
+				if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
 					log.Printf("incident: persist oncall status warning: %v", err)
 				}
 			}
 		} else {
 			workflow := core.GetOnCallWorkflow()
-			if err := workflow.Start(incident.ID, cfg.OnCall); err != nil {
+			if err := workflow.StartContext(ctx, incident.ID, cfg.OnCall); err != nil {
 				oncallErr = err
 				// Walk back the optimistic OnCallTriggered flag set at
 				// build time so the UI does not lie. Best-effort
@@ -176,7 +265,7 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 				if store != nil && rec != nil {
 					rec.OnCallTriggered = false
 					rec.OnCallError = err.Error()
-					if err := store.SaveIncident(rec); err != nil {
+					if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
 						log.Printf("incident: persist oncall status warning: %v", err)
 					}
 				}
@@ -193,20 +282,113 @@ func CreateIncident(teamID string, content *map[string]interface{}, params ...*m
 		now := time.Now().UTC()
 		rec.Resolved = true
 		rec.ResolvedAt = &now
-		if err := store.SaveIncident(rec); err != nil {
+		if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
 			log.Printf("incident: persist auto-resolve warning: %v", err)
 		}
 	}
 
 	switch {
 	case sendErr != nil && oncallErr != nil:
-		return fmt.Errorf("send: %w; oncall: %v", sendErr, oncallErr)
+		result.Err = fmt.Errorf("send: %w; oncall: %v", sendErr, oncallErr)
 	case sendErr != nil:
-		return sendErr
+		result.Err = sendErr
 	case oncallErr != nil:
-		return oncallErr
+		result.Err = oncallErr
 	}
-	return nil
+	result.Err = errors.Join(result.Err, persistErr)
+	return result
+}
+
+func saveIncidentRecord(rec *storage.IncidentRecord, detection bool) error {
+	if detection {
+		if detectionStore, ok := store.(storage.DetectionIncidentStore); ok {
+			return detectionStore.SaveDetectionIncident(rec)
+		}
+	}
+	return store.SaveIncident(rec)
+}
+
+func persistTerminalDetectionIncident(result *incidentCreateResult, teamID string, content map[string]interface{}, options incidentCreateOptions, decision EmitDecision) {
+	rec, err := buildHandledDetectionIncident(teamID, content, options, decision)
+	if err != nil {
+		result.NotifyStatus = "failed"
+		result.Err = errors.Join(result.Err, err)
+		return
+	}
+	result.IncidentID = rec.ID
+	result.NotifyStatus = rec.NotifyStatus
+	if err := saveIncidentRecord(rec, true); err != nil {
+		result.NotifyStatus = "failed"
+		result.Err = errors.Join(result.Err, err)
+	}
+}
+
+func buildHandledDetectionIncident(teamID string, content map[string]interface{}, options incidentCreateOptions, decision EmitDecision) (*storage.IncidentRecord, error) {
+	contentClone := make(map[string]interface{}, len(content))
+	for key, value := range content {
+		contentClone[key] = value
+	}
+	notifyStatus := "diverted"
+	switch decision.Action {
+	case EmitSuppress:
+		notifyStatus = "suppressed"
+	case EmitGroup:
+		notifyStatus = "grouped"
+	}
+	notifyError := ""
+	if decision.DeliveryError != nil {
+		notifyStatus = "failed"
+		notifyError = decision.DeliveryError.Error()
+	}
+	rec, err := store.GetIncident(options.IncidentID)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+	if rec == nil {
+		rec = &storage.IncidentRecord{
+			ID: options.IncidentID, OrgID: storage.NormalizeOrgID(options.OrgID), TeamID: teamID,
+			Origin: storage.OriginAIDetect, CreatedAt: time.Now().UTC(),
+			Content: make(map[string]interface{}),
+		}
+	}
+	if rec.Content == nil {
+		rec.Content = make(map[string]interface{})
+	}
+	for key, value := range contentClone {
+		rec.Content[key] = value
+	}
+	rec.Title = ExtractTitle(rec.Content)
+	rec.Service = ExtractService(rec.Content)
+	rec.Source = resolveSource(rec.Content, "")
+	rec.NotifyStatus = notifyStatus
+	rec.NotifyError = notifyError
+	applyDetectionDecision(rec, *options.Detection)
+	return rec, nil
+}
+
+func applyDetectionDecision(rec *storage.IncidentRecord, decision storage.DetectionEpisodeDecision) {
+	firstSeen := decision.FirstSeen.UTC()
+	lastSeen := decision.LastSeen.UTC()
+	rec.DetectionFingerprint = decision.Fingerprint
+	rec.DetectionEpisodeID = decision.EpisodeID
+	rec.OccurrenceCount = decision.OccurrenceCount
+	rec.DetectionFirstSeen = &firstSeen
+	rec.DetectionLastSeen = &lastSeen
+	rec.HighestObservedSeverity = decision.HighestObservedSeverity
+	if decision.HighestNotifiedSeverity != "" {
+		rec.HighestNotifiedSeverity = decision.HighestNotifiedSeverity
+	}
+	if rec.Content == nil {
+		rec.Content = make(map[string]interface{})
+	}
+	rec.Content["Frequency"] = decision.OccurrenceCount
+	severity := utils.NormalizeSeverity(decision.HighestObservedSeverity)
+	if utils.SeverityRank(decision.HighestNotifiedSeverity) > utils.SeverityRank(severity) {
+		severity = utils.NormalizeSeverity(decision.HighestNotifiedSeverity)
+	}
+	if severity != "" {
+		rec.Content["Severity"] = severity
+	}
 }
 
 // buildIncidentRecord copies the alert into a durable IncidentRecord.
@@ -231,8 +413,8 @@ func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[s
 		ID:              incident.ID,
 		OrgID:           storage.DefaultOrgID,
 		TeamID:          incident.TeamID,
-		Title:           firstString(content, "title", "alertname", "summary", "subject", "name"),
-		Service:         firstString(content, "service", "service_name", "app", "component"),
+		Title:           ExtractTitle(content),
+		Service:         ExtractService(content),
 		Source:          resolveSource(content, hint),
 		Origin:          origin,
 		Resolved:        resolved,
@@ -271,10 +453,14 @@ const webhookSource = "webhook"
 // like "agent:elasticsearch:prod-app" in their content, so that value
 // wins. Otherwise the ingress hint ("sns"/"sqs") is used, falling back
 // to "webhook" for the standard webhook path.
+//
+// The content lookup goes through the shared extraction — the same accessor the
+// dedup fingerprint's source component reads — so the durable column and the
+// fingerprint can never resolve one payload's source two different ways.
 func resolveSource(content map[string]interface{}, hint string) string {
 	if utils.IsAgentIncident(content) {
-		if s, ok := content["Source"].(string); ok && strings.TrimSpace(s) != "" {
-			return strings.TrimSpace(s)
+		if s := utils.ExtractSource(content); s != "" {
+			return s
 		}
 		return "agent"
 	}
@@ -323,24 +509,6 @@ func enabledChannels(cfg *config.Config) []string {
 		out = append(out, "lark")
 	}
 	return out
-}
-
-// firstString returns the first non-empty string value found at any of
-// the given keys (case-insensitive on the key match). Used to derive a
-// human-friendly title from a free-form alert payload.
-func firstString(content map[string]interface{}, keys ...string) string {
-	lower := make(map[string]interface{}, len(content))
-	for k, v := range content {
-		lower[strings.ToLower(k)] = v
-	}
-	for _, k := range keys {
-		if v, ok := lower[strings.ToLower(k)]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
 }
 
 // isResolved checks if the alert is resolved by checking common status fields

@@ -1,0 +1,839 @@
+/* Resource drawers share the application palette, with a denser inspection layout. */
+[data-resource-detail] {
+  --resource-padding: 24px;
+  background: rgb(var(--surface));
+}
+
+/* The drawer allocates a real remaining-height viewport to each tab. Lists scroll
+   inside that viewport; toolbars and log footers never depend on guessed vh offsets. */
+[data-resource-detail] > .overlay-body { display: flex; flex-direction: column; padding-bottom: 12px; }
+.resource-detail-content { display: flex; flex-direction: column; flex: 1; height: 100%; min-height: 0; }
+.resource-navigation { position: relative; flex: none; }
+.resource-more-tabs { display: none; }
+.resource-tabpanel { flex: 1; min-height: 0; overflow: auto; padding-top: 16px; }
+[data-resource-detail] .resource-tabpanel > :first-child { margin-top: 0; }
+.resource-tabpanel[data-view="overview"], .resource-tabpanel[data-view="logs"] { display: flex; flex-direction: column; gap: 16px; }
+.resource-overview:not([hidden]) { display: contents; }
+
+/* Data tools belong to a single optional inspector rather than the chart's axis. */
+[data-resource-detail] .metric-tile { position: relative; flex: none; }
+[data-resource-detail] .metric-tile > p:first-of-type { margin-top: 10px; }
+[data-resource-detail] .metric-allocation { position: static; display: inline; margin-left: 5px; font-size: 10px; font-weight: 400; color: rgb(var(--ink-400)); }
+[data-resource-detail] .metric-corner { position: absolute; right: 12px; top: 12px; font-size: 11px; line-height: 12px; }
+[data-resource-detail] .metric-restart-description { font-size: 10px; font-weight: 400; color: rgb(var(--ink-400)); margin-left: 5px; }
+[data-resource-detail] .metric-tile > svg { margin-top: 8px; }
+[data-resource-detail] .resource-usage-chart { height: auto; min-height: 180px; }
+.metric-inspector { position: relative; margin-top: 8px; font-size: 10px; }
+.metric-inspector > summary { cursor: pointer; color: rgb(var(--link)); list-style: none; }
+.metric-inspector > div { margin-top: 8px; width: 100%; max-height: 240px; overflow: auto; padding: 12px; border: 1px solid rgb(var(--ink-500)); border-radius: 6px; background: rgb(var(--surface)); }
+[data-resource-detail] .metric-inspector .usage-samples,
+[data-resource-detail] .metric-inspector .resource-container-resources { position: static; display: block; margin: 8px 0; font-size: 11px; }
+[data-resource-detail] .metric-inspector .resource-container-resources > p { margin-top: 6px; }
+[data-resource-detail] .resource-facts { flex: none; margin: 0; }
+[data-resource-detail] .resource-facts .resource-owner { position: static; display: inline-flex; align-items: center; max-width: 100%; margin: 0; font-size: 11px; }
+[data-resource-detail] .resource-facts dl > div:last-child { grid-column: auto; }
+[data-resource-detail] .resource-facts .condition-grid { grid-template-rows: auto; }
+[data-resource-detail] .resource-facts > section > p:last-child { font-size: 10px; line-height: 14px; }
+
+/* YAML is a bounded editor, with its find count inside the toolbar. */
+[data-resource-detail] .resource-yaml { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+[data-resource-detail] .yaml-toolbar { padding: 0; flex-wrap: nowrap; flex: none; gap: 8px; }
+[data-resource-detail] .yaml-toolbar > span { order: 0; }
+[data-resource-detail] .yaml-toolbar > button:nth-of-type(1) { order: 1; }
+[data-resource-detail] .yaml-toolbar > button:nth-of-type(2) { order: 2; }
+[data-resource-detail] .yaml-toolbar > button:nth-of-type(3) { order: 4; }
+[data-resource-detail] .yaml-toolbar > button:nth-of-type(4) { order: 5; }
+[data-resource-detail] .yaml-find { position: static; flex: 1; order: 3; width: auto; min-width: 120px; border: 1px solid rgb(var(--ink-500)); border-radius: 6px; background: rgb(var(--surface-sunken)); padding-left: 8px; }
+[data-resource-detail] .yaml-find input { width: 80px; background: transparent; border: 0; padding: 4px; }
+[data-resource-detail] .yaml-find > .yaml-find-count { position: static; flex: none; min-width: 16px; font-size: 10px; color: rgb(var(--ink-400)); }
+[data-resource-detail] .yaml-find button { border: 0; background: transparent; padding: 2px 6px; }
+.yaml-workspace { flex: 1; min-height: 0; margin-top: 12px; }
+[data-resource-detail] .yaml-editor { height: auto; min-height: 0; max-height: none; }
+[data-resource-detail] .resource-yaml > p:empty { display: none; }
+[data-resource-detail] .resource-yaml nav { width: 156px; font-size: 11px; }
+.yaml-fold-pill { display: inline-block; border: 1px solid rgb(var(--ink-600)); border-radius: 4px; background: rgb(var(--ink-800)); color: rgb(var(--ink-300)); padding: 0 8px; font-size: 11px; line-height: 18px; }
+.yaml-redacted { border: 1px solid rgb(var(--ink-500)); border-radius: 4px; padding: 0 6px; color: rgb(var(--ink-300)); background: rgb(var(--surface)); }
+.yaml-outline-item { border-left: 3px solid transparent; padding-left: 9px; color: rgb(var(--ink-200)); }
+.yaml-outline-item > span { float: right; }
+.yaml-outline-item[aria-current="location"] { border-left-color: rgb(var(--accent)); color: rgb(var(--link)); background: rgb(var(--accent) / .05); }
+
+.relationship-canvas { overflow: auto; }
+.relationship-canvas svg { width: 100%; display: block; }
+.relationship-canvas svg g > path { stroke: rgb(var(--ink-500)); stroke-width: 1; fill: none; }
+.relationship-canvas svg g > text { fill: rgb(var(--ink-400)); font-size: 9px; }
+.relationship-canvas .relationship-node > rect { stroke: rgb(var(--ink-500)); fill: rgb(var(--surface)); }
+.relationship-canvas .relationship-node > .relationship-kind { font-size: 9px; letter-spacing: .08em; fill: rgb(var(--ink-400)); }
+.relationship-canvas .relationship-node > .relationship-name { font-size: 11px; fill: rgb(var(--ink-100)); }
+.relationship-canvas .relationship-node[role="button"] { cursor: pointer; }
+.relationship-canvas .relationship-node[role="button"]:focus-visible { outline: none; }
+.relationship-canvas .relationship-node:focus-visible > rect,
+.relationship-canvas .relationship-current > rect { stroke: rgb(var(--accent)); stroke-width: 1.5; }
+[data-resource-detail] .resource-related section > h3 { border: 0; padding-bottom: 6px; font-size: 10px; letter-spacing: .08em; }
+[data-resource-detail] .resource-related section > div { min-height: 29px; padding-block: 3px; }
+.relationship-status { display: flex; align-items: center; gap: 6px; font-size: 10px; color: rgb(var(--ink-300)); margin-left: auto; }
+[data-resource-detail] .resource-related > section { margin-top: 12px; }
+[data-resource-detail] .resource-related > .relationship-map { padding: 12px 16px; }
+[data-resource-detail] .resource-related > .relationship-map > header { margin-bottom: 0; }
+[data-resource-detail] .resource-events { display: flex; flex-direction: column; gap: 10px; }
+[data-resource-detail] .resource-events > * { margin-top: 0; }
+[data-resource-detail] .resource-events .event-warning-filter { background: rgb(var(--sev-warn) / .1); border-color: rgb(var(--sev-warn) / .45); color: rgb(var(--sev-warn)); }
+[data-resource-detail] .resource-events .event-histogram { padding: 12px; }
+[data-resource-detail] .resource-events .event-histogram figcaption { font-size: 11px; line-height: 14px; margin-bottom: 4px; }
+[data-resource-detail] .resource-events .event-histogram > div[role="img"] { height: 42px; }
+[data-resource-detail] .resource-events .event-histogram > div:last-child { margin-top: 4px; line-height: 12px; }
+[data-resource-detail] .resource-events article { padding: 10px 16px; }
+[data-resource-detail] .resource-events article > div > .pill { padding: 0 7px; min-height: 18px; font-size: 10px; }
+[data-resource-detail] .resource-events article > div > span:last-child { font-family: ui-monospace, monospace; font-size: 10px; }
+[data-resource-detail] .resource-events article > .mt-2 { margin-top: 4px; }
+[data-resource-detail] .resource-events article p { line-height: 18px; }
+[data-resource-detail] .resource-events article > .mt-2 > div { font-size: 10px; line-height: 12px; }
+.history-range { display: inline-flex; border: 1px solid rgb(var(--ink-600)); border-radius: 6px; padding: 2px; background: rgb(var(--surface-sunken)); }
+.resource-history .history-range .btn { min-height: 22px; border: 0; padding: 2px 10px; font-size: 11px; background: transparent; }
+.resource-history .history-range .btn[aria-pressed="true"] { background: rgb(var(--accent-subtle)); color: rgb(var(--link)); }
+.history-uncaptured { position: absolute; top: 35px; bottom: 12px; left: 16px; background: rgb(var(--ink-400) / .06); border-right: 1px dashed rgb(var(--ink-500)); }
+.history-uncaptured > span { position: absolute; bottom: 2px; left: 5px; font-size: 9px; color: rgb(var(--ink-400)); white-space: nowrap; }
+.resource-history .pill.text-sev-critical { border-color: rgb(var(--sev-critical) / .55); background: rgb(var(--sev-critical) / .14); }
+.history-diff-from { color: rgb(var(--sev-critical)); background: rgb(var(--sev-critical) / .14); padding: 1px 5px; border-radius: 3px; }
+.history-diff-to { color: rgb(var(--sev-ok)); background: rgb(var(--sev-ok) / .12); padding: 1px 5px; border-radius: 3px; }
+[data-resource-detail] .resource-history li > button { padding: 0; border: 0; background: none; min-height: 18px; font-size: 11px; }
+.resource-history > p.border-dashed { display: flex; align-items: center; gap: 5px; }
+
+@media (max-width: 639px) {
+  .resource-tabpanel { padding-top: 16px; }
+  [data-resource-detail] .resource-tabs > button { font-size: 12px; }
+  [data-resource-detail] .resource-detail-content[data-workload="true"] .resource-tabs > button:nth-child(n+4) { display: none; }
+  [data-resource-detail] .resource-detail-content[data-workload="true"] .resource-tabs { padding-right: 106px; }
+  [data-resource-detail] .resource-detail-content[data-workload="true"] .resource-tabs > button { flex: none; padding: 11px 12px; font-size: 13px; }
+  .resource-more-tabs { display: block; position: absolute; right: 0; top: 0; font-size: 13px; }
+  .resource-more-tabs > summary { display: flex; align-items: center; gap: 4px; min-height: 42px; list-style: none; cursor: pointer; }
+  .resource-more-tabs > div { position: absolute; top: 100%; right: 0; width: 140px; z-index: 5; padding: 8px; border: 1px solid rgb(var(--ink-500)); border-radius: 6px; background: rgb(var(--surface)); }
+  .resource-more-tabs button { display: block; width: 100%; min-height: 44px; text-align: left; padding: 8px; }
+  [data-resource-detail] .resource-tabpanel[data-view="overview"] { gap: 12px; }
+  [data-resource-detail] .resource-facts-toggle { min-height: 24px; line-height: 20px; flex: none; }
+  [data-resource-detail] .resource-facts { flex: none; }
+  [data-resource-detail] .metric-tile > p:first-of-type { margin-top: 10px; }
+  [data-resource-detail] .metric-tile:nth-child(-n+2) .metric-allocation { display: none; }
+  [data-resource-detail] .metric-restart-description { font-size: 9px; margin-left: 4px; }
+  [data-resource-detail] .metric-tile:nth-child(3) > p:first-of-type { float: none; margin-right: 0; }
+  [data-resource-detail] .metric-tile:nth-child(3) > .relative { margin-top: 4px; }
+  [data-resource-detail] .metric-corner { font-size: 10px; }
+  [data-resource-detail] .yaml-toolbar { flex-wrap: wrap; gap: 6px; }
+  [data-resource-detail] .yaml-find { flex-basis: 100%; order: 6; }
+  [data-resource-detail] .yaml-workspace { overflow: auto; }
+  [data-resource-detail] .yaml-editor { min-height: 300px; flex: 1; }
+  [data-resource-detail] .resource-yaml nav { width: 100%; flex: none; }
+  [data-resource-detail] .resource-usage-chart figure > figcaption { position: static; }
+}
+[data-resource-detail] > .peek-heading {
+  min-height: 104px;
+  padding: 22px var(--resource-padding) 12px;
+  border-bottom: 0;
+}
+[data-resource-detail] > .peek-heading h2 {
+  width: 100%;
+}
+[data-resource-detail] > .peek-heading > div {
+  position: absolute;
+  top: 24px;
+  right: 18px;
+}
+[data-resource-detail] .resource-identity {
+  padding-right: 180px;
+}
+[data-resource-detail] .resource-name {
+  margin-top: 2px;
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+}
+[data-resource-detail] .resource-identity > span:first-child {
+  gap: 12px;
+}
+[data-resource-detail] .resource-status {
+  margin: 4px -180px 0 56px;
+}
+[data-resource-detail] .resource-status .pill {
+  padding: 2px 9px;
+  min-height: 22px;
+  font-size: 11px;
+}
+[data-resource-detail] .resource-location {
+  margin-left: 4px;
+}
+[data-resource-detail] > .overlay-body {
+  padding: 0 var(--resource-padding) 24px;
+}
+[data-resource-detail] .resource-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin-inline: calc(-1 * var(--resource-padding));
+  padding-inline: var(--resource-padding);
+  background: rgb(var(--surface));
+}
+[data-resource-detail] .resource-tabs > button {
+  flex: 0 0 auto;
+  padding: 9px 0 10px;
+  margin-right: 24px;
+  font-size: 13px;
+  line-height: 18px;
+}
+[data-resource-detail] .resource-tabs > button[aria-selected="true"] {
+  color: rgb(var(--link));
+  border-bottom-width: 3px;
+}
+[data-resource-detail] [role="tabpanel"] > :first-child {
+  margin-top: 16px;
+}
+[data-resource-detail] .metric-tile {
+  height: auto;
+  min-height: 100px;
+  overflow: hidden;
+}
+[data-resource-detail] .metric-tile[class*="border-sev-warning"] {
+  border-color: rgb(var(--sev-warn) / .5);
+}
+[data-resource-detail] .metric-tile[class*="border-sev-critical"] {
+  border-color: rgb(var(--sev-critical) / .5);
+}
+[data-resource-detail] .metric-tile h3 {
+  line-height: 12px;
+}
+[data-resource-detail] .metric-tile > p:first-of-type {
+  margin-top: 4px;
+  font-size: 22px;
+  line-height: 26px;
+  color: rgb(var(--ink-50));
+}
+[data-resource-detail] .metric-tile > p.text-sev-warning:first-of-type {
+  color: rgb(var(--sev-warn));
+}
+[data-resource-detail] .metric-tile > p.text-sev-critical:first-of-type {
+  color: rgb(var(--sev-critical));
+}
+[data-resource-detail] .metric-tile > p.text-ink-400:first-of-type {
+  font-size: 16px;
+  color: rgb(var(--ink-400));
+}
+[data-resource-detail] .metric-tile > p:nth-of-type(2) {
+  font-size: 10px;
+  line-height: 12px;
+}
+[data-resource-detail] .metric-tile > p:nth-of-type(2) > span:not(.metric-allocation) {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+[data-resource-detail] .metric-tile > svg {
+  height: 18px;
+  margin-top: 4px;
+}
+[data-resource-detail] .metric-tile > .relative {
+  margin-top: 4px;
+  height: 14px;
+}
+[data-resource-detail] .metric-tile > p:last-child.mt-1.text-ink-500 {
+  display: none;
+}
+[data-resource-detail] .metric-history-toggle:focus-visible,
+[data-resource-detail] button:focus-visible,
+[data-resource-detail] select:focus-visible,
+[data-resource-detail] input:focus-visible,
+[data-resource-detail] summary:focus-visible {
+  outline: 2px solid rgb(var(--link));
+  outline-offset: 3px;
+}
+[data-resource-detail] .resource-usage-chart {
+  position: relative;
+  min-height: 180px;
+}
+[data-resource-detail] .resource-usage-chart > div.mt-2 {
+  margin-top: 0;
+}
+[data-resource-detail] .resource-usage-chart > div:first-child {
+  min-height: 20px;
+}
+[data-resource-detail] .resource-usage-chart .btn {
+  min-height: 22px;
+  padding: 1px 9px;
+  font-size: 10px;
+}
+[data-resource-detail] .resource-usage-chart .btn[aria-pressed="true"] {
+  background: rgb(var(--accent-subtle));
+  color: rgb(var(--link));
+}
+[data-resource-detail] .resource-usage-chart figure > figcaption {
+  position: static;
+  margin: 0;
+  min-height: 20px;
+  font-size: 10px;
+}
+[data-resource-detail] .resource-usage-chart figure > div > svg {
+  height: 126px;
+  max-height: none;
+}
+[data-resource-detail] .resource-container-resources:not([open]) {
+  position: absolute;
+  bottom: 10px;
+  right: 12px;
+}
+[data-resource-detail] .resource-container-resources[open] {
+  margin-top: 10px;
+}
+[data-resource-detail] .usage-samples {
+  display: inline-block;
+  margin: 0 12px 0 0;
+  font-size: 10px;
+}
+[data-resource-detail] .usage-samples:not([open]) {
+  position: absolute;
+  bottom: 6px;
+  left: 12px;
+}
+[data-resource-detail] .usage-samples:not([open]) + .usage-samples:not([open]) {
+  left: 132px;
+}
+[data-resource-detail] .usage-samples[open] {
+  display: block;
+}
+[data-resource-detail] .resource-facts h3 {
+  margin-bottom: 10px;
+}
+[data-resource-detail] .resource-facts > section {
+  min-height: 120px;
+}
+[data-resource-detail] .resource-facts dl > div:last-child {
+  grid-column: 2;
+}
+[data-resource-detail] .resource-owner {
+  position: absolute;
+  bottom: 14px;
+  left: 12px;
+  max-width: 58%;
+}
+[data-resource-detail] .resource-facts dl > div {
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 6px;
+}
+[data-resource-detail] .resource-facts time {
+  font-size: 10px;
+}
+[data-resource-detail] .resource-events .event-histogram > div[role="img"] {
+  height: 48px;
+}
+[data-resource-detail] .resource-events .btn[aria-pressed="true"] {
+  background: rgb(var(--accent-subtle));
+  color: rgb(var(--link));
+}
+[data-resource-detail] .resource-events article {
+  padding: 12px 16px;
+}
+[data-resource-detail] .resource-events article[class*="border-l-sev-warning"] {
+  border-left-color: rgb(var(--sev-warn));
+}
+[data-resource-detail] .resource-events article[class*="border-l-ink-500"] {
+  border-left-color: rgb(var(--ink-500));
+}
+[data-resource-detail] .resource-related .relationship-map button {
+  background: rgb(var(--surface));
+}
+[data-resource-detail] .relationship-map button {
+  font-size: 11px;
+}
+[data-resource-detail] .relationship-map button > span:first-child {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+[data-resource-detail] .relationship-map button > span:last-child {
+  font-size: 10px;
+}
+[data-resource-detail] .resource-related section > div > .btn {
+  border: 0;
+  background: transparent;
+  min-height: 22px;
+  padding: 2px 0 2px 8px;
+  font-size: 11px;
+}
+[data-resource-detail] .resource-related section > div > .pill {
+  min-width: 88px;
+  padding: 1px 8px;
+  font-size: 10px;
+  text-align: center;
+}
+[data-resource-detail] .resource-history {
+  position: relative;
+}
+[data-resource-detail] .resource-history > [aria-label="History legend"] {
+  position: absolute;
+  right: 0;
+  top: 8px;
+  margin: 0;
+}
+[data-resource-detail] .relationship-dependencies > span {
+  position: relative;
+}
+[data-resource-detail] .relationship-dependencies > span::before {
+  content: "";
+  position: absolute;
+  top: -24px;
+  left: 50%;
+  height: 24px;
+  border-left: 1px solid rgb(var(--ink-600));
+}
+[data-resource-detail] .relationship-dependencies > span > span {
+  display: none;
+}
+[data-resource-detail] .relationship-dependencies button {
+  width: 100%;
+  min-height: 54px;
+  padding: 8px;
+}
+[data-resource-detail] .resource-yaml {
+  position: relative;
+}
+[data-resource-detail] .yaml-toolbar {
+  padding-right: 236px;
+  min-height: 30px;
+}
+[data-resource-detail] .yaml-toolbar .btn {
+  padding: 4px 6px;
+  font-size: 11px;
+}
+[data-resource-detail] .yaml-find {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 228px;
+  margin: 0 !important;
+  gap: 4px;
+}
+[data-resource-detail] .yaml-find input {
+  width: 100px;
+}
+[data-resource-detail] .yaml-find button {
+  padding-inline: 6px;
+  font-size: 10px;
+}
+[data-resource-detail] .yaml-find > span {
+  position: absolute;
+  top: 35px;
+  right: 144px;
+}
+[data-resource-detail] .yaml-editor {
+  height: calc(100dvh - 220px);
+}
+@media (min-width: 640px) {
+  [data-resource-detail] .condition-grid {
+    grid-auto-flow: column;
+  }
+}
+@media (max-width: 639px) {
+  [data-resource-detail] {
+    --resource-padding: 16px;
+  }
+  [data-resource-detail] > .peek-heading {
+    padding: 10px 16px 6px 40px;
+    min-height: 80px;
+  }
+  [data-resource-detail] > .peek-heading > div {
+    top: 18px;
+    right: 10px;
+  }
+  [data-resource-detail] .resource-kind-icon {
+    display: none;
+  }
+  [data-resource-detail] .resource-identity {
+    padding-right: 24px;
+  }
+  [data-resource-detail] .resource-name {
+    margin-top: 0;
+    font-size: 14px;
+    line-height: 20px;
+  }
+  [data-resource-detail] .resource-status {
+    margin: 4px -24px 0 0;
+  }
+  [data-resource-detail] .resource-location {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  [data-resource-detail] .resource-tabs > button {
+    margin-right: 0;
+    padding: 11px 8px;
+    flex: 1 0 auto;
+    font-size: 11px;
+  }
+  [data-resource-detail] .resource-tabs {
+    padding-inline: 8px;
+  }
+  [data-resource-detail] .metric-tile {
+    height: auto;
+    min-height: 84px;
+  }
+  [data-resource-detail] .metric-tile > p:first-of-type {
+    font-size: 17px;
+    line-height: 24px;
+  }
+  [data-resource-detail] .metric-tile:nth-child(-n+2) .metric-allocation {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+  [data-resource-detail] .metric-tile:nth-child(-n+2) > p:nth-of-type(2) {
+    line-height: 0;
+  }
+  [data-resource-detail] .metric-tile:nth-child(n+3) {
+    height: auto;
+    min-height: 84px;
+    position: relative;
+  }
+  [data-resource-detail] .metric-tile:nth-child(3) > p:first-of-type {
+    float: left;
+    margin-right: 6px;
+  }
+  [data-resource-detail] .metric-tile:nth-child(3) > p:nth-of-type(2) {
+    padding-top: 10px;
+  }
+  [data-resource-detail] .metric-tile:nth-child(3) > .relative {
+    clear: both;
+    height: 10px;
+  }
+  [data-resource-detail] .metric-tile:nth-child(3) > .relative > button {
+    height: 10px;
+  }
+  [data-resource-detail] [role="tabpanel"]:has(.resource-overview:not([hidden])) {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  [data-resource-detail] .resource-overview:not([hidden]) {
+    display: contents;
+  }
+  [data-resource-detail] [role="tabpanel"] > .resource-overview:not([hidden]) ~ div {
+    order: 1;
+    margin-top: 0;
+  }
+  [data-resource-detail] .resource-facts-toggle {
+    order: 2;
+    margin-top: 0;
+    text-align: left;
+  }
+  [data-resource-detail] .resource-facts {
+    order: 3;
+    margin-top: 0;
+  }
+  [data-resource-detail] .resource-usage-chart[data-mobile-open="false"],
+  [data-resource-detail] .resource-facts[data-mobile-open="false"] {
+    display: none;
+  }
+  [data-resource-detail] .resource-usage-chart figure > figcaption {
+    position: static;
+    margin: 8px 0;
+  }
+  [data-resource-detail] .resource-usage-chart {
+    padding-bottom: 30px;
+  }
+  [data-resource-detail] .usage-samples:not([open]) {
+    bottom: 18px;
+  }
+  [data-resource-detail] .resource-yaml .yaml-toolbar {
+    padding: 0;
+  }
+  [data-resource-detail] .yaml-find {
+    position: static;
+    width: 100%;
+    margin-top: 8px;
+  }
+  [data-resource-detail] .resource-facts dl > div:last-child {
+    grid-column: auto;
+  }
+  [data-resource-detail] .resource-owner {
+    position: static;
+    max-width: 100%;
+  }
+  [data-resource-detail] .yaml-find > span {
+    position: static;
+  }
+  [data-resource-detail] .yaml-editor {
+    min-height: 50vh;
+    height: 60vh;
+  }
+  [data-resource-detail] .resource-history > div:first-child {
+    flex-wrap: wrap;
+  }
+  [data-resource-detail] .resource-history > [aria-label="History legend"] {
+    position: static;
+    margin-top: 8px;
+  }
+}
+
+[data-resource-detail] > .overlay-body { display: flex; flex-direction: column; padding-bottom: 12px; }
+[data-resource-detail] .resource-tabpanel > :first-child { margin-top: 0; }
+[data-resource-detail] .resource-tabpanel[data-view="overview"],
+[data-resource-detail] .resource-tabpanel[data-view="logs"] { display: flex; flex-direction: column; gap: 16px; }
+[data-resource-detail] .resource-metrics .metric-tile > p:first-of-type { margin-top: 10px; }
+[data-resource-detail] .resource-metrics .metric-tile > svg { margin-top: 8px; }
+[data-resource-detail] .resource-yaml .yaml-toolbar { padding: 0; flex-wrap: nowrap; gap: 8px; }
+[data-resource-detail] .resource-yaml .yaml-find { position: static; flex: 1; order: 3; width: auto; min-width: 120px; border: 1px solid rgb(var(--ink-500)); border-radius: 6px; padding-left: 8px; background: rgb(var(--surface-sunken)); }
+[data-resource-detail] .resource-yaml .yaml-find input { width: 80px; padding: 4px; border: 0; background: transparent; }
+[data-resource-detail] .resource-yaml .yaml-find > span { position: static; flex: none; min-width: 16px; }
+[data-resource-detail] .resource-yaml .yaml-editor { height: auto; min-height: 0; max-height: none; }
+[data-resource-detail] .resource-yaml nav { width: 156px; }
+[data-resource-detail] .resource-events article { padding: 10px 16px; }
+[data-resource-detail] .resource-events .event-histogram > div[role="img"] { height: 42px; }
+@media (max-width: 639px) {
+  [data-resource-detail] .resource-tabpanel[data-view="overview"] { gap: 12px; }
+  [data-resource-detail] .resource-facts-toggle { min-height: 24px; flex: none; }
+  [data-resource-detail] .resource-tabpanel .resource-facts { margin-top: 0; }
+  [data-resource-detail] .resource-metrics .metric-tile:nth-child(3) > p:first-of-type { float: none; margin-right: 0; }
+  [data-resource-detail] .resource-usage-chart figure > figcaption { position: static; }
+  [data-resource-detail] .resource-yaml .yaml-toolbar { flex-wrap: wrap; gap: 6px; }
+  [data-resource-detail] .resource-yaml .yaml-find { flex-basis: 100%; order: 6; }
+  [data-resource-detail] .resource-yaml .yaml-editor { min-height: 300px; }
+  [data-resource-detail] .resource-yaml nav { width: 100%; }
+}
+[data-resource-detail] .resource-tabpanel .resource-overview .resource-facts { margin-top: 0; }
+[data-resource-detail] .resource-facts .resource-owner { width: 100%; min-width: 0; white-space: nowrap; }
+[data-resource-detail] .resource-owner > span { overflow: hidden; text-overflow: ellipsis; }
+[data-resource-detail] .resource-owner > svg { flex: none; }
+[data-resource-detail] .resource-tabpanel .resource-events > * { margin-top: 0; }
+.history-uncaptured > span { top: -12px; bottom: auto; }
+@media (max-width: 639px) {
+  .resource-more-tabs { z-index: 2; }
+  [data-resource-detail] .resource-metrics .metric-tile:nth-child(-n+2) > p:first-of-type { margin-top: 4px; }
+  [data-resource-detail] .resource-metrics .metric-tile:nth-child(-n+2) > svg { height: 16px; margin-top: 4px; }
+  [data-resource-detail] .resource-metrics .metric-tile:nth-child(n+3) > p:first-of-type { margin-top: 4px; line-height: 22px; }
+  [data-resource-detail] .resource-metrics .metric-tile:nth-child(4) > p:last-child { margin-top: 0; font-size: 9px; line-height: 10px; }
+  [data-resource-detail] .resource-metrics .metric-tile:nth-child(3) > .relative { height: 8px; margin-top: 0; }
+}
+
+/* Kubernetes list rows re-flow on the width of their own card, not the window:
+   the detail drawer narrows the card while the viewport stays wide, so a
+   viewport breakpoint kept the full column set and painted the trailing columns
+   under the drawer. Below the card width that fits every column, a row keeps
+   its name and status and folds the rest onto a second line. */
+.kubernetes-list-surface {
+  container-type: inline-size;
+}
+/* The name filter and the namespace select sit side by side only on a card wide
+   enough for both; on a narrowed card they stack instead of squeezing the
+   search box down to a few characters. */
+.kubernetes-list-toolbar {
+  grid-template-columns: minmax(0, 1fr);
+}
+.kubernetes-list-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+.kubernetes-list-head {
+  display: none;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 7rem minmax(7rem, 1fr) 1.5rem;
+  align-items: center;
+  gap: 12px;
+}
+.kubernetes-list-namespace,
+.kubernetes-list-chevron,
+.kubernetes-list-metric {
+  display: none;
+}
+.kubernetes-list-status {
+  grid-column: span 2;
+}
+/* Two equal columns so a long Pod or Node name ellipsizes instead of widening
+   the track past the card. */
+.kubernetes-list-row--pods {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+@container (min-width: 34rem) {
+  .kubernetes-list-head { display: grid; }
+  .kubernetes-list-toolbar { grid-template-columns: minmax(0, 1fr) 14rem; }
+  .kubernetes-list-row--workload { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 7rem minmax(7rem, 1fr) 1.5rem; }
+  .kubernetes-list-row--nodes { grid-template-columns: minmax(0, 1.4fr) minmax(7rem, 0.7fr) minmax(8rem, 1fr) minmax(8rem, 1fr) 1rem; }
+  .kubernetes-list-row--pods { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) 7rem 6rem; }
+  .kubernetes-list-namespace,
+  .kubernetes-list-chevron,
+  .kubernetes-list-metric { display: block; }
+  .kubernetes-list-inline-meta { display: none; }
+  .kubernetes-list-status { grid-column: auto; }
+}
+
+/* ---- Live logs -----------------------------------------------------------
+   The panel is a column: one header box, then the body. Nothing in the header
+   is positioned outside it, so no line of output can ever be painted over the
+   header, and every box in the column may shrink, so the body cannot push the
+   panel sideways at any width.
+   The full panel's header is two rows. Row one is the read itself — connection
+   word, container, instance, one bounded history read — and row two is the
+   reading aid: levels on the left, the line filter and the icon actions on the
+   right. Both rows begin at the toolbar's own left edge, which carries no
+   padding or offset of its own, so the two rows line up exactly. */
+.resource-log-viewer {
+  --log-control-height: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.resource-log-viewer > * { min-width: 0; }
+
+.resource-log-slot:not([hidden]) { display: flex; flex-direction: column; align-items: stretch; grid-column: 1 / -1; flex: 1; min-width: 0; min-height: 0; }
+.resource-log-slot > .resource-log-viewer { flex: 1; min-height: 0; }
+/* In the Overview the compact panel is sized by what it holds. A flexible slot
+   is the one item a cramped column shrinks, and a slot shorter than the fixed
+   128px body is exactly how the body and the footer were painted outside the
+   card. The tab itself scrolls, so nothing is ever left outside the panel. */
+.resource-log-slot[data-full="false"] { flex: 0 0 auto; min-height: auto; }
+.resource-log-slot[data-full="false"] > .resource-log-viewer { flex: 0 0 auto; min-height: auto; }
+
+/* The compact card is the Overview panel: a title, the connection word and one
+   container selector, on one line, and a body that scrolls inside its own box. */
+.log-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: var(--log-control-height);
+}
+.log-heading-title { flex: none; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.log-heading .log-status { flex: none; }
+.log-heading .log-container { flex: 0 1 auto; min-width: 0; max-width: min(10rem, 40%); }
+
+.log-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+}
+.log-primary { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: nowrap; }
+.log-secondary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; flex-wrap: nowrap; }
+
+/* A select narrower than the value it shows renders a fragment of it, and one
+   wider than its share of the row pushes the row past the panel; both ends are
+   bounded and the middle is free to shrink. */
+.resource-log-viewer .log-pod { flex: 0 1 9rem; min-width: 0; max-width: 9rem; }
+.resource-log-viewer .log-container { flex: 0 1 10rem; min-width: 0; max-width: min(10rem, 40%); }
+.resource-log-viewer .log-pod select,
+.resource-log-viewer .log-container select { width: 100%; min-width: 0; }
+
+.log-status { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; flex: none; }
+.log-dot { width: 6px; height: 6px; flex: none; border-radius: 9999px; background: rgb(var(--ink-400)); }
+.log-status[data-log-status="is-live"] .log-dot { background: rgb(var(--sev-ok)); animation: log-dot-pulse 1.8s ease-in-out infinite; }
+.log-status[data-log-status="is-waiting"] .log-dot { background: rgb(var(--sev-warn)); }
+.log-status[data-log-status="is-paused"] .log-dot { background: rgb(var(--ink-400)); }
+@keyframes log-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .3; }
+}
+
+/* Current and Previous are one control: two segments of the same border, so the
+   group starts exactly where a single button would. */
+.log-instance {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid rgb(var(--ink-500));
+  border-radius: 6px;
+  padding: 2px;
+  background: rgb(var(--surface-sunken));
+  font-size: 11px;
+}
+.log-instance button { border-radius: 4px; padding: 2px 10px; white-space: nowrap; color: rgb(var(--ink-300)); }
+.log-instance button[aria-pressed="true"] { background: rgb(var(--accent-subtle)); color: rgb(var(--link)); }
+
+/* One bounded history read: the window it covers, then the action that loads
+   it. It never restarts the live read. */
+.log-since { display: inline-flex; align-items: center; gap: 6px; flex: none; white-space: nowrap; font-size: 11px; color: rgb(var(--ink-400)); }
+.log-since-field { display: inline-flex; align-items: center; gap: 4px; }
+.log-since select { width: auto; min-width: 58px; }
+.log-load-earlier { min-height: 24px; padding: 2px 10px; font-size: 11px; }
+
+.log-levels { display: flex; align-items: center; gap: 6px; flex: none; }
+.log-level { border-radius: 14px; padding: 3px 10px; font-size: 11px; }
+.log-level[aria-pressed="true"] { color: rgb(var(--link)); background: rgb(var(--accent-subtle)); }
+.resource-log-viewer .log-error-level { color: rgb(var(--sev-critical)); border-color: rgb(var(--sev-critical) / .45); background: rgb(var(--sev-critical) / .1); }
+.resource-log-viewer .log-warning-level { color: rgb(var(--sev-warn)); border-color: rgb(var(--sev-warn) / .45); background: rgb(var(--sev-warn) / .1); }
+
+.log-filter-group { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: 1 1 auto; min-width: 0; }
+.log-filter-wrap { position: relative; display: flex; align-items: center; flex: 1 1 12rem; min-width: 6rem; max-width: 22rem; }
+.log-filter-group-workload { justify-content: flex-start; }
+.log-filter-group-workload .log-filter-wrap { max-width: none; }
+.log-filter-wrap > svg { position: absolute; left: 8px; color: rgb(var(--ink-400)); pointer-events: none; }
+.resource-log-viewer .log-filter-wrap input { width: 100%; min-width: 0; padding-left: 27px; }
+
+.log-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.resource-log-viewer .log-actions .btn-icon { width: 22px; height: 24px; padding: 3px; }
+.resource-log-viewer .log-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: rgb(var(--ink-200)); white-space: nowrap; }
+.log-action-menu { position: relative; font-size: 11px; }
+.log-action-menu > summary { display: flex; align-items: center; justify-content: center; width: 20px; height: 24px; cursor: pointer; list-style: none; }
+.log-action-menu > div { position: absolute; right: 0; top: 100%; z-index: 5; min-width: 140px; display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid rgb(var(--ink-500)); border-radius: 6px; background: rgb(var(--surface)); }
+
+/* The body is a fixed box in the compact card and a flexible one in the tab,
+   and it always scrolls inside itself. */
+.resource-log-viewer .log-output { font-size: 12px; line-height: 19px; min-width: 0; overflow: auto; }
+.resource-log-slot .log-output { height: auto; min-height: 120px; flex: 1; }
+.resource-log-viewer[data-compact="true"] .log-output { flex: none; height: 128px; min-height: 0; }
+.resource-log-viewer .log-footer { line-height: 16px; min-height: 20px; }
+.resource-log-viewer .log-footer .btn { min-height: 26px; padding: 3px 12px; }
+
+.resource-log-viewer .log-neutral { position: relative; padding: 0; border-bottom: 0; min-height: 18px; white-space: nowrap; }
+.resource-log-viewer .log-neutral::before { content: ""; position: absolute; inset: 50% 0 auto; border-top: 1px dashed rgb(var(--ink-600)); }
+.resource-log-viewer .log-note { position: relative; display: inline-block; font-size: 10px; line-height: 14px; vertical-align: middle; border: 1px solid rgb(var(--ink-600)); border-radius: 12px; padding: 1px 8px; background: rgb(var(--ink-800)); }
+.resource-log-viewer[data-workload="true"] .log-neutral { text-align: center; }
+.resource-log-viewer .log-source-status { opacity: .6; background: transparent; }
+
+.log-pod-tone-0 { color: #8FB3EA; }
+.log-pod-tone-1 { color: #6CC4B4; }
+.log-pod-tone-2 { color: #B4A0EE; }
+.log-pod-tone-3 { color: #D79FBC; }
+[data-theme="light"] .log-pod-tone-0 { color: color-mix(in srgb, #8FB3EA 55%, rgb(var(--ink-50))); }
+[data-theme="light"] .log-pod-tone-1 { color: color-mix(in srgb, #6CC4B4 55%, rgb(var(--ink-50))); }
+[data-theme="light"] .log-pod-tone-2 { color: color-mix(in srgb, #B4A0EE 55%, rgb(var(--ink-50))); }
+[data-theme="light"] .log-pod-tone-3 { color: color-mix(in srgb, #D79FBC 55%, rgb(var(--ink-50))); }
+
+/* A gap in coverage is stated next to the lines it affects, never in place of
+   them and never as a failed read. */
+.log-gap { font-size: 10px; line-height: 14px; color: rgb(var(--sev-warn)); }
+
+/* Below the drawer's two-column width the row wraps instead of compressing the
+   selects below their own value; from the width the two rows were designed for
+   it stays on one line. */
+@media (max-width: 1023px) {
+  .log-primary { flex-wrap: wrap; row-gap: 8px; }
+  .log-filter-wrap { max-width: none; }
+}
+@media (max-width: 639px) {
+  .resource-log-viewer { --log-control-height: 44px; }
+  .resource-log-viewer select { min-height: 44px; }
+  .log-primary > .log-pod,
+  .log-primary > .log-container { flex: 1 1 8rem; max-width: none; }
+  .log-heading .log-container { max-width: min(10rem, 40%); }
+  .log-instance { flex: 1 1 100%; }
+  .log-instance button { flex: 1; min-height: 44px; }
+  .log-since { flex: 1 1 100%; min-height: 44px; }
+  .log-load-earlier { min-height: 44px; }
+  .log-secondary { flex-wrap: wrap; }
+  .log-levels { flex: 1 1 100%; flex-wrap: wrap; }
+  /* The filter takes its own line and the icon actions follow it, so neither
+     box can spill past the edge it starts at. */
+  .log-filter-group { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; row-gap: 8px; }
+  .log-filter-wrap { flex: 1 1 100%; max-width: none; }
+  .log-actions { margin-left: auto; }
+  .resource-log-viewer .log-actions .btn-icon { width: 32px; height: 32px; padding: 8px; }
+  .resource-log-viewer .log-footer .btn { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* The pulse is declared on the live status itself, so the stop has to match
+     that selector: a plain .log-dot rule loses to it and the dot keeps pulsing. */
+  .resource-log-viewer .log-status[data-log-status="is-live"] .log-dot { animation: none; }
+}

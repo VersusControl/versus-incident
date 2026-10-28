@@ -40,6 +40,28 @@ export function hasReportChannel(cap: Capabilities | undefined): boolean {
   return reportChannels(cap).length > 0;
 }
 
+// configuredDisabledChannels returns the channels that are configured but
+// currently disabled — present in the runtime channel store yet not enabled,
+// so they are NOT offered in the picker. Empty when the server omits the field
+// (older server). The operator must enable them in Alert channels first.
+export function configuredDisabledChannels(
+  cap: Capabilities | undefined,
+): string[] {
+  return cap?.report?.configured_disabled ?? [];
+}
+
+// configuredDisabledHint builds the operator-facing note naming the
+// configured-but-disabled channels, or "" when there are none. Grammatical
+// number matches the count so it reads naturally for one or many channels.
+export function configuredDisabledHint(cap: Capabilities | undefined): string {
+  const names = configuredDisabledChannels(cap);
+  if (names.length === 0) return "";
+  const isOne = names.length === 1;
+  return `${names.join(", ")} ${isOne ? "is" : "are"} configured but disabled — enable ${
+    isOne ? "it" : "them"
+  } in Alert channels to use ${isOne ? "it" : "them"} here.`;
+}
+
 // defaultReportChannel picks the initial picker selection: the configured
 // default_channel when it is actually enabled, else the first enabled channel,
 // else "".

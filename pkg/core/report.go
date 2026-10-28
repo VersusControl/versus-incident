@@ -59,6 +59,11 @@ type ReportModel struct {
 	// the wall-clock zone. Empty is treated as "UTC".
 	TZLabel string
 
+	// Title is the header/caption heading. It is operator-configurable via
+	// the report settings; an empty value is treated as "Incident report" so a
+	// directly-constructed model still renders a title.
+	Title string
+
 	// Headline stats.
 	Total        int            // incidents in the window
 	ByOrigin     map[string]int // ai_detect / webhook counts (primary category axis)

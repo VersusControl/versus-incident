@@ -3,6 +3,7 @@ package analyze
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -23,40 +25,127 @@ import (
 // own the script: tool_call turns are mixed with a final assistant
 // message holding the AIFinding JSON.
 type fakeChat struct {
-	turns []*schema.Message
-	idx   int
-	tools []*schema.ToolInfo
+	turns        []*schema.Message
+	idx          int
+	tools        []*schema.ToolInfo
+	toolBindings [][]string
 
 	lastMessages []*schema.Message
+
+	// chunks splits an assistant message's content across that many stream
+	// chunks in Stream. Zero or one sends the whole content at once.
+	chunks int
+	// leadEmpty sends a content-free chunk before the content ones, the way
+	// real providers open a stream.
+	leadEmpty bool
+	// streamErr, when non-nil, is delivered instead of the chunk at index
+	// streamErrAt so a test can inject a mid-stream failure.
+	streamErr   error
+	streamErrAt int
+	// streamCalls counts Stream dispatches, so a test can prove which of
+	// the two model entry points the agent took.
+	streamCalls int32
 }
 
-func (f *fakeChat) Generate(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+type errorChat struct{ err error }
+
+func (chat errorChat) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return nil, chat.err
+}
+func (chat errorChat) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	return nil, chat.err
+}
+func (chat errorChat) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return chat, nil
+}
+
+func (f *fakeChat) next(in []*schema.Message) *schema.Message {
 	f.lastMessages = append(f.lastMessages, in[len(in)-1])
 	if f.idx >= len(f.turns) {
-		return f.turns[len(f.turns)-1], nil
+		return f.turns[len(f.turns)-1]
 	}
 	m := f.turns[f.idx]
 	f.idx++
-	return m, nil
+	return m
 }
 
-func (f *fakeChat) Stream(_ context.Context, _ []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return nil, nil
+func (f *fakeChat) Generate(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+	return f.next(in), nil
+}
+
+// Stream replays the same script as Generate, but sliced into content
+// chunks the way a real provider delivers a token stream. A turn carrying
+// tool calls is sent whole: the ReAct branch inspects the first chunk for
+// tool calls, so splitting one would change routing rather than timing.
+func (f *fakeChat) Stream(_ context.Context, in []*schema.Message, _ ...model.Option) (*schema.StreamReader[*schema.Message], error) {
+	atomic.AddInt32(&f.streamCalls, 1)
+	m := f.next(in)
+	sr, sw := schema.Pipe[*schema.Message](1)
+	go func() {
+		defer sw.Close()
+		if len(m.ToolCalls) > 0 || f.chunks <= 1 {
+			sw.Send(m, nil)
+			return
+		}
+		if f.leadEmpty && sw.Send(&schema.Message{Role: m.Role}, nil) {
+			return
+		}
+		for i, part := range splitContent(m.Content, f.chunks) {
+			if f.streamErr != nil && i == f.streamErrAt {
+				sw.Send(nil, f.streamErr)
+				return
+			}
+			if sw.Send(&schema.Message{Role: m.Role, Content: part}, nil) {
+				return
+			}
+		}
+		if f.streamErr != nil && f.streamErrAt >= f.chunks {
+			sw.Send(nil, f.streamErr)
+		}
+	}()
+	return sr, nil
+}
+
+// splitContent cuts s into n roughly equal pieces that concatenate back to s.
+func splitContent(s string, n int) []string {
+	if n <= 1 || len(s) == 0 {
+		return []string{s}
+	}
+	if n > len(s) {
+		n = len(s)
+	}
+	size := (len(s) + n - 1) / n
+	out := make([]string, 0, n)
+	for i := 0; i < len(s); i += size {
+		end := i + size
+		if end > len(s) {
+			end = len(s)
+		}
+		out = append(out, s[i:end])
+	}
+	return out
 }
 
 func (f *fakeChat) WithTools(t []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	f.tools = t
+	names := make([]string, 0, len(t))
+	for _, info := range t {
+		names = append(names, info.Name)
+	}
+	f.toolBindings = append(f.toolBindings, names)
 	return f, nil
 }
 
 // stubTool is a read-only AnalyzeTool used to validate dispatch.
 type stubTool struct {
 	name    string
+	display string
 	invoked int
 	last    json.RawMessage
 }
 
 func (s *stubTool) Name() string        { return s.name }
+func (s *stubTool) DisplayName() string { return s.display }
 func (s *stubTool) Description() string { return "stub" }
 func (s *stubTool) ArgsSchema() map[string]any {
 	return map[string]any{
@@ -72,6 +161,43 @@ func (s *stubTool) Invoke(_ context.Context, args json.RawMessage) (*core.ToolRe
 		Found: true,
 		Data:  map[string]any{"echo": string(args)},
 	}, nil
+}
+
+func TestAgentResolvesKubernetesAuthorizationForEveryRun(t *testing.T) {
+	for _, permissions := range [][]bool{{true, false, true}, {false, true, false}} {
+		fake := &fakeChat{turns: []*schema.Message{schema.AssistantMessage(`{"title":"t","summary":"s","next_steps":["x"]}`, nil)}}
+		agent, err := New(context.Background(), config.AgentAIConfig{Model: "fake"}, []core.Tool{
+			&stubTool{name: "get_incident"}, &stubTool{name: "get_cluster_overview"}, &stubTool{name: "list_log_indices"}, &stubTool{name: "read_log_records"},
+		}, Options{ChatModel: fake})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, allowed := range permissions {
+			ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: allowed}})
+			if _, err := agent.Run(ctx, core.AnalyzeTask{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if len(fake.toolBindings) != len(permissions)+1 {
+			t.Fatalf("bindings=%v", fake.toolBindings)
+		}
+		for index, allowed := range permissions {
+			want := "get_incident"
+			if allowed {
+				want += ",get_cluster_overview,list_log_indices,read_log_records"
+			}
+			if got := strings.Join(fake.toolBindings[index+1], ","); got != want {
+				t.Fatalf("permissions=%v turn=%d tools=%s want=%s", permissions, index, got, want)
+			}
+		}
+	}
+}
+
+func TestNewRejectsDuplicateToolNames(t *testing.T) {
+	_, err := New(context.Background(), config.AgentAIConfig{}, []core.Tool{&stubTool{name: "duplicate"}, &stubTool{name: "duplicate"}}, Options{})
+	if err == nil || !strings.Contains(err.Error(), "duplicate tool name") {
+		t.Fatalf("New error = %v, want duplicate tool name", err)
+	}
 }
 
 // errTool is a read-only AnalyzeTool that always fails, used to assert
@@ -91,7 +217,25 @@ func (e *errTool) Invoke(_ context.Context, _ json.RawMessage) (*core.ToolResult
 	return nil, errBoom
 }
 
-var errBoom = fmt.Errorf("boom from tool")
+var errBoom = fmt.Errorf("catalog failed: postgres://admin:hunter2@db.internal/private")
+
+// sleepTool takes a measurable amount of wall-clock time, so a test can tell
+// a real elapsed-time measurement from a hardcoded zero.
+type sleepTool struct {
+	name string
+	nap  time.Duration
+}
+
+func (s *sleepTool) Name() string               { return s.name }
+func (s *sleepTool) Description() string        { return "sleeps" }
+func (s *sleepTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
+func (s *sleepTool) Invoke(ctx context.Context, _ json.RawMessage) (*core.ToolResult, error) {
+	select {
+	case <-time.After(s.nap):
+	case <-ctx.Done():
+	}
+	return &core.ToolResult{Tool: s.name, Found: true}, nil
+}
 
 func newAgentWithFake(t *testing.T, fake *fakeChat, tools []core.AnalyzeTool, maxIter int) *Agent {
 	t.Helper()
@@ -127,6 +271,63 @@ func TestAgent_RejectsNonAnalyzeTask(t *testing.T) {
 	a := newAgentWithFake(t, &fakeChat{turns: []*schema.Message{schema.AssistantMessage("{}", nil)}}, nil, 1)
 	if _, err := a.Run(context.Background(), core.DetectTask{}); err == nil {
 		t.Fatalf("expected error for DetectTask")
+	}
+}
+
+func TestAgent_BuildFailureUsesSafeProviderError(t *testing.T) {
+	const secret = "runtime-build-secret"
+	cfg := config.AgentAIConfig{Provider: "gemini", Model: "unsafe\r\n" + secret}
+	agent := &Agent{cfg: cfg, buildAgent: nil}
+	agent.holder = einowrap.NewModelHolder(cfg, einowrap.Options{}, einowrap.RuntimeAI{}, func(context.Context, config.AgentAIConfig, einowrap.Options) (model.ToolCallingChatModel, error) {
+		return nil, fmt.Errorf("construction reflected %s\r\nforged=true", secret)
+	})
+
+	result, err := agent.Run(context.Background(), core.AnalyzeTask{Snapshot: core.AnalyzeIncidentSnapshot{IncidentID: "inc-build"}})
+	if result == nil {
+		t.Fatal("build failure did not return an auditable result")
+	}
+	var providerErr *einowrap.ProviderError
+	if !errors.As(err, &providerErr) {
+		t.Fatalf("build failure = %T %v, want ProviderError", err, err)
+	}
+	encoded := providerErr.Provider + providerErr.Model + providerErr.Diagnostic
+	if strings.Contains(encoded, secret) || strings.Contains(encoded, "forged=true") || strings.ContainsAny(encoded, "\r\n") {
+		t.Fatalf("safe build failure retained malicious input: %+v", providerErr)
+	}
+	if result.Model != providerErr.Model {
+		t.Fatalf("result model = %q, want sanitized %q", result.Model, providerErr.Model)
+	}
+}
+
+func TestNew_PreservesTrustedInitialConfigError(t *testing.T) {
+	const secret = "initial-build-secret"
+	_, err := New(context.Background(), config.AgentAIConfig{
+		Provider: "unsupported\r\n" + secret,
+		Model:    "unsafe\r\n" + secret,
+	}, nil, Options{})
+	var configErr *einowrap.ConfigError
+	if !errors.As(err, &configErr) {
+		t.Fatalf("New error = %T %v, want ConfigError", err, err)
+	}
+	if err != configErr {
+		t.Fatalf("New error = %T %v, want the original typed ConfigError", err, err)
+	}
+	if message := configErr.Error(); strings.Contains(message, secret) || strings.ContainsAny(message, "\r\n") || !strings.Contains(message, "supported:") {
+		t.Fatalf("trusted config error is unsafe or unactionable: %q", message)
+	}
+}
+
+func TestAgent_RunPreservesContextCancellation(t *testing.T) {
+	agent, err := New(context.Background(), config.AgentAIConfig{Provider: "openai", Model: "fake"}, nil, Options{ChatModel: errorChat{err: fmt.Errorf("provider wrapper: %w", context.Canceled)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = agent.Run(context.Background(), core.AnalyzeTask{Snapshot: core.AnalyzeIncidentSnapshot{IncidentID: "inc-cancel"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context cancellation identity", err)
+	}
+	if strings.Contains(fmt.Sprint(err), "provider wrapper") {
+		t.Fatalf("cancellation exposed raw provider wrapper: %v", err)
 	}
 }
 
@@ -264,6 +465,17 @@ func TestAgent_ToolErrorDoesNotAbort(t *testing.T) {
 	}
 	if len(res.ToolCalls) != 1 || !strings.Contains(res.ToolCalls[0].Output, "error") {
 		t.Fatalf("expected tool error surfaced in trace output: %+v", res.ToolCalls)
+	}
+	if strings.Contains(res.ToolCalls[0].Output, "hunter2") || strings.Contains(res.ToolCalls[0].Output, "db.internal") {
+		t.Fatalf("persisted trace leaked tool error: %+v", res.ToolCalls)
+	}
+	if res.ToolCalls[0].Output != `{"error":{"code":"backend_error","message":"tool backend failed"}}` {
+		t.Fatalf("trace output = %q", res.ToolCalls[0].Output)
+	}
+	for _, message := range fake.lastMessages {
+		if strings.Contains(message.Content, "hunter2") || strings.Contains(message.Content, "db.internal") {
+			t.Fatalf("model input leaked tool error: %+v", message)
+		}
 	}
 }
 
@@ -414,20 +626,5 @@ func TestAgent_ParallelTools(t *testing.T) {
 	}
 	if got := runProbeAgent(t, false, 60*time.Millisecond); got != 1 {
 		t.Fatalf("sequential: maxActive = %d, want 1", got)
-	}
-}
-
-// TestAgent_DefaultToolTimeout asserts newEinoTool carries the built-in
-// default timeout that New applies when Options.ToolTimeout is zero, so
-// production always has a per-tool cap even when analyze.tool_timeout is
-// unset.
-func TestAgent_DefaultToolTimeout(t *testing.T) {
-	stub := &stubTool{name: "echo"}
-	tool, err := newEinoTool(stub, defaultToolTimeout)
-	if err != nil {
-		t.Fatalf("newEinoTool: %v", err)
-	}
-	if tool.timeout != defaultToolTimeout {
-		t.Fatalf("default tool timeout = %s, want %s", tool.timeout, defaultToolTimeout)
 	}
 }

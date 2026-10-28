@@ -1,0 +1,40 @@
+# Maximal render — every block the chart can express must appear, and no
+# credential may be rendered into the ConfigMap as a literal.
+proxy:
+url: \$\{PROXY_URL\}
+username: \$\{PROXY_USERNAME\}
+password: \$\{PROXY_PASSWORD\}
+use_proxy: true
+debug_body: true
+public_host: https://versus.example.com
+disable_button: true
+other_power_urls:
+other_webhook_urls:
+other_response_plan_arns:
+batch_max: 5000
+signal_max_bytes: 65536
+service_patterns:
+redaction:
+redact_ips: false
+extra_patterns:
+catalog:
+auto_promote_after: 100
+spike_z: 3
+spike_abs_ceiling: 0
+spike_sustain_ticks: 1
+spike_min_frequency: 5
+spike_min_baseline_count: 20
+miner:
+similarity_threshold: 0.4
+tree_depth: 4
+max_children: 100
+regex:
+default_pattern:
+provider: "openai"
+analyze:
+# Secrets must reach the process through env indirection, never as literals.
+!proxy-pass
+!sk-test-key
+!xoxb-test
+!smtp-pass
+!snow-pass

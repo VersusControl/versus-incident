@@ -5,6 +5,7 @@ package storage_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -37,6 +38,55 @@ func TestModelStore_RoundTrip(t *testing.T) {
 	}
 	if got.UpdatedAt.IsZero() {
 		t.Fatal("UpdatedAt must be stamped")
+	}
+}
+
+func TestModelStoreListPageBoundsDecodeAndCancellation(t *testing.T) {
+	providers := map[string]func(t *testing.T) storage.Provider{
+		"memory": func(*testing.T) storage.Provider { return storage.NewMemory() },
+		"file": func(t *testing.T) storage.Provider {
+			provider, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = provider.Close() })
+			return provider
+		},
+	}
+	for name, build := range providers {
+		t.Run(name, func(t *testing.T) {
+			provider := build(t)
+			models := storage.NewModelStore(provider)
+			if err := models.Put("acme", "health", "a-valid", 1, []byte("safe")); err != nil {
+				t.Fatal(err)
+			}
+			if err := models.Put("acme", "health", "z-corrupt", 1, []byte("before-corruption")); err != nil {
+				t.Fatal(err)
+			}
+			if err := provider.WriteBlob("models/acme/health/z-corrupt", []byte("not-json")); err != nil {
+				t.Fatal(err)
+			}
+			page, cursor, err := models.ListPage(context.Background(), "acme", "health", "", 1)
+			if err != nil || len(page) != 1 || page[0].Key != "a-valid" || cursor == "" {
+				t.Fatalf("first page=%+v cursor=%q err=%v", page, cursor, err)
+			}
+			second, next, err := models.ListPage(context.Background(), "acme", "health", cursor, 1)
+			if err != nil || len(second) != 0 || next == cursor {
+				t.Fatalf("corrupt artifact did not advance safely: page=%v next=%q err=%v", second, next, err)
+			}
+			canceled, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, _, err := models.ListPage(canceled, "acme", "health", "", 1); !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled page error=%v", err)
+			}
+		})
+	}
+}
+
+func TestModelStoreListPageFailsClosedWithoutBoundedLister(t *testing.T) {
+	models := storage.NewModelStore(purgeUnsupportedProvider{storage.NewMemory()})
+	if _, _, err := models.ListPage(context.Background(), "acme", "health", "", 1); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("ListPage error=%v, want ErrUnsupported", err)
 	}
 }
 

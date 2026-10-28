@@ -1,5 +1,7 @@
 package config
 
+import "crypto/x509"
+
 // -----------------------------------------------------------------------------
 // Agent mode (AI incident detection)
 // -----------------------------------------------------------------------------
@@ -43,9 +45,9 @@ type AgentConfig struct {
 	// in the file are expanded against the process environment.
 	Sources []AgentSourceConfig `mapstructure:"sources"`
 
-	// Tools holds per-tool configuration for analyze-mode tools that need
-	// external data (e.g. the `recent_changes` tool's git repository and
-	// the `describe_dependencies` tool's service-dependency graph).
+	// Tools holds per-tool configuration for agent tools that need external
+	// data (e.g. `recent_changes` git repositories and the `describe_dependencies`
+	// service-dependency graph).
 	// Versus loads it from the file `tools.yaml` sitting next to the main
 	// config file (path is hardcoded; missing file is OK — tools needing
 	// config then simply degrade to a clean "nothing found"). The file's
@@ -138,15 +140,17 @@ type AgentRegexConfig struct {
 }
 
 type AgentSourceConfig struct {
-	Name           string                          `mapstructure:"name"`
-	Type           string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | <registered type, e.g. "prometheus"/"traces" via Versus Enterprise>
-	Enable         bool                            `mapstructure:"enable"`
-	Elasticsearch  AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
-	File           AgentFileSourceConfig           `mapstructure:"file"`
-	Loki           AgentLokiSourceConfig           `mapstructure:"loki"`
-	CloudWatchLogs AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
-	Graylog        AgentGraylogSourceConfig        `mapstructure:"graylog"`
-	Splunk         AgentSplunkSourceConfig         `mapstructure:"splunk"`
+	Name              string                          `mapstructure:"name"`
+	Type              string                          `mapstructure:"type"` // "elasticsearch" | "file" | "loki" | "cloudwatchlogs" | "graylog" | "splunk" | "signoz" | <registered type, e.g. "prometheus"/"traces" via Versus Enterprise>
+	Enable            bool                            `mapstructure:"enable"`
+	KubernetesCluster string                          `mapstructure:"kubernetes_cluster"`
+	Elasticsearch     AgentElasticsearchSourceConfig  `mapstructure:"elasticsearch"`
+	File              AgentFileSourceConfig           `mapstructure:"file"`
+	Loki              AgentLokiSourceConfig           `mapstructure:"loki"`
+	CloudWatchLogs    AgentCloudWatchLogsSourceConfig `mapstructure:"cloudwatchlogs"`
+	Graylog           AgentGraylogSourceConfig        `mapstructure:"graylog"`
+	Splunk            AgentSplunkSourceConfig         `mapstructure:"splunk"`
+	Signoz            AgentSignozSourceConfig         `mapstructure:"signoz"`
 	// Options is a generic per-source settings block consumed by source
 	// types resolved through the runtime registration hook
 	// (signalsources.Register) rather than built into OSS — e.g. the
@@ -208,8 +212,10 @@ type AgentElasticsearchSourceConfig struct {
 	Password           string   `mapstructure:"password"`
 	APIKey             string   `mapstructure:"api_key"`
 	InsecureSkipVerify bool     `mapstructure:"insecure_skip_verify"`
+	AllowLoopback      bool     `mapstructure:"allow_loopback"`
 	Index              string   `mapstructure:"index"`
 	TimeField          string   `mapstructure:"time_field"`
+	TieBreakerField    string   `mapstructure:"tie_breaker_field"`
 	Query              string   `mapstructure:"query"` // Lucene-style query string
 	MessageField       string   `mapstructure:"message_field"`
 	SeverityField      string   `mapstructure:"severity_field"`
@@ -246,6 +252,8 @@ type AgentLokiSourceConfig struct {
 	// Query is a LogQL selector, e.g. `{app="api",env="prod"} |= "error"`.
 	// Required.
 	Query string `mapstructure:"query"`
+	// ServiceLabel maps native tool service filters to a stream label. Empty defaults to "service".
+	ServiceLabel string `mapstructure:"service_label"`
 	// SeverityField, when set, is read from each entry's stream labels
 	// (e.g. "level") to populate Signal.Severity.
 	SeverityField string `mapstructure:"severity_field"`
@@ -275,6 +283,18 @@ type AgentCloudWatchLogsSourceConfig struct {
 	FilterPattern string `mapstructure:"filter_pattern"`
 	// PageSize is the per-call limit (max 10000). Default 500.
 	PageSize int `mapstructure:"page_size"`
+	// ReorderWindow opts this source into the shared tailing convention: each
+	// tick re-reads an INCLUSIVE window this far below the poll cursor and
+	// suppresses what it already delivered with a persisted event-id set.
+	//
+	// Unset (the default) keeps the strict `startTime = cursor + 1ms` scan,
+	// which never re-reads anything and so never duplicates, but drops an event
+	// that shares the cursor's millisecond — CloudWatch timestamps are
+	// millisecond-precision and bursty, so that is a real, if rare, loss. Set a
+	// window (e.g. "1m") to trade the re-read for exactly-once delivery at the
+	// boundary. Events arriving more than ReorderWindow late are still not
+	// recovered.
+	ReorderWindow string `mapstructure:"reorder_window"`
 }
 
 // AgentGraylogSourceConfig drives the Graylog SignalSource.
@@ -324,6 +344,8 @@ type AgentGraylogSourceConfig struct {
 type AgentSplunkSourceConfig struct {
 	// Address is the Splunk REST base URL, e.g. "https://splunk:8089".
 	Address string `mapstructure:"address"`
+	Owner   string `mapstructure:"owner"`
+	App     string `mapstructure:"app"`
 	// Token is sent as `Authorization: Bearer <token>` and takes
 	// priority over Username/Password when set.
 	Token string `mapstructure:"token"`
@@ -349,6 +371,86 @@ type AgentSplunkSourceConfig struct {
 	PageSize int `mapstructure:"page_size"`
 }
 
+// AgentSignozSourceConfig drives the SigNoz logs SignalSource.
+//
+// The source reads SigNoz's v5 query API — `POST /api/v5/query_range` with
+// `requestType: raw` and `signal: logs` — which is the same endpoint and the
+// same `SIGNOZ-API-KEY` header on SigNoz Cloud and on self-hosted. The endpoint
+// first ships in SigNoz v0.87.0 (verified against the tagged sources: absent in
+// v0.86.0, registered in v0.87.0), so that is the compatibility floor.
+//
+// SigNoz paginates with offset+limit rather than a server cursor, and its
+// request bounds are MILLISECOND precision, so a bare-timestamp cursor would
+// drop rows that share the boundary millisecond. This source therefore uses the
+// Elasticsearch tailing model instead: each tick re-scans a bounded
+// ReorderWindow below the poll cursor with `order: [timestamp asc, id asc]` and
+// de-duplicates on the log row `id`.
+type AgentSignozSourceConfig struct {
+	// Address is the SigNoz base URL, e.g. "https://signoz.example.internal" (self-hosted,
+	// the UI/API port) or "https://<region>.signoz.cloud" (Cloud). Required.
+	Address string `mapstructure:"address"`
+	// APIKey is sent as the `SIGNOZ-API-KEY` header. Required. This is the
+	// QUERY api key issued from Settings → API Keys — not the
+	// `signoz-ingestion-key` that shippers use to write telemetry.
+	//
+	// It is delivered as a header, never as a query parameter, so a SigNoz URL
+	// appearing in a log line or an error string cannot leak it.
+	APIKey string `mapstructure:"api_key"`
+	// InsecureSkipVerify disables certificate verification for HTTPS. It has no
+	// effect when Address uses HTTP.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify"`
+	// AllowLoopback permits a loopback destination for local testing.
+	AllowLoopback bool `mapstructure:"allow_loopback"`
+	// RootCAs optionally supplies additional trust roots for programmatic source
+	// construction. It is not loaded from or exposed through operator config.
+	RootCAs *x509.CertPool `mapstructure:"-" json:"-" yaml:"-"`
+	// AllowPrivateNetworks permits RFC1918 and unique-local destinations for
+	// explicitly trusted self-hosted SigNoz deployments.
+	AllowPrivateNetworks bool `mapstructure:"allow_private_networks"`
+	// Query is a SigNoz v5 filter EXPRESSION (the same syntax the Logs
+	// Explorer filter bar takes), e.g.
+	// `severity_text = 'ERROR' AND service.name = 'api'`.
+	// Empty matches every log in the window.
+	Query string `mapstructure:"query"`
+	// MessageField is the row attribute copied into Signal.Message.
+	// Default "body".
+	MessageField string `mapstructure:"message_field"`
+	// SeverityField is the row attribute copied into Signal.Severity.
+	// Default "severity_text".
+	SeverityField string `mapstructure:"severity_field"`
+	// ExtraFields are additional row attributes copied into Signal.Fields.
+	//
+	// SigNoz nests OTLP attributes in per-type maps whose KEYS carry the dots
+	// (`resources_string: {"service.name": "checkout"}`), so a name is resolved
+	// against a top-level column first ("body", "severity_text"), then as a
+	// container-qualified path ("resources_string.service.name"), then as a
+	// bare attribute searched across the attribute containers in a fixed order
+	// — resource attributes first, then log-record, then scope — and finally as
+	// a nested JSON path.
+	//
+	// "service.name" and "resources_string.service.name" therefore both work
+	// and both land in Signal.Fields under "service.name": the container names
+	// SigNoz's storage column, not the attribute, so it is stripped from the
+	// emitted key.
+	ExtraFields []string `mapstructure:"extra_fields"`
+	// PageSize is the per-request `limit`; the source walks `offset` within a
+	// tick until a short page arrives. Default 500, clamped to 1000 so one
+	// misconfigured source cannot ask SigNoz for an unbounded result set.
+	PageSize int `mapstructure:"page_size"`
+	// ReorderWindow is how far back (a Go duration, e.g. "2m") each tick
+	// re-scans below the cursor to catch rows that became queryable after the
+	// cursor passed their timestamp — collector batching, ClickHouse insert
+	// lag, clock skew. Rows arriving more than ReorderWindow late are NOT
+	// recovered; that bound is what keeps the per-tick dedup set small.
+	// Empty/invalid → 2m default.
+	//
+	// The 2m default is an INFERENCE from the collector-plus-ClickHouse ingest
+	// path, not a measured ingest-to-queryable delay — SigNoz documents no
+	// ordering or visibility guarantee. Lower it if you have measured your own
+	// pipeline.
+	ReorderWindow string `mapstructure:"reorder_window"`
+}
+
 // The struct and env overrides are wired today; the concrete HTTP client
 // and prompt builder land alongside detect-mode emission.
 type AgentAIConfig struct {
@@ -364,15 +466,9 @@ type AgentAIConfig struct {
 	// when they switch provider (for "litellm" it is the proxy virtual key).
 	// An unsupported value fails fast at model construction.
 	Provider string `mapstructure:"provider"`
+	BaseURL  string `mapstructure:"base_url"`
 	// APIKey is the bearer token sent in the Authorization header.
 	APIKey string `mapstructure:"api_key"`
-	// BaseURL overrides the provider endpoint. It is the operator knob for
-	// pointing an OpenAI-compatible provider ("litellm", "openai", vLLM /
-	// LocalAI, ...) at a shared/remote gateway (e.g.
-	// "https://litellm.internal.corp/v1") instead of the provider default.
-	// Empty keeps the provider's built-in default (for "litellm" that is the
-	// local proxy at http://localhost:4000/v1). Env: AGENT_AI_BASE_URL.
-	BaseURL string `mapstructure:"base_url"`
 	// Model is the model identifier, e.g. "gpt-4o-mini".
 	Model string `mapstructure:"model"`
 	// Temperature controls randomness (0.0–2.0). Default 0.2.
@@ -385,7 +481,7 @@ type AgentAIConfig struct {
 	// avoid re-asking about the same pattern. Default "1h".
 	CacheTTL string `mapstructure:"cache_ttl"`
 
-	// Detect and Analyze are per-task overrides. Empty fields fall back
+	// Detect, Analyze, and Chat are per-task overrides. Empty fields fall back
 	// to the top-level defaults above, so a single shared block keeps
 	// working unchanged. Detect is used by the worker for unknown /
 	// spiking pattern classification; Analyze is used by the on-demand
@@ -394,6 +490,7 @@ type AgentAIConfig struct {
 	// There is no `framework` knob: Eino is the only LLM path.
 	Detect  AgentAITaskConfig    `mapstructure:"detect"`
 	Analyze AgentAIAnalyzeConfig `mapstructure:"analyze"`
+	Chat    AgentAITaskConfig    `mapstructure:"chat"`
 }
 
 // AgentAIAnalyzeConfig is the analyze-agent override block. The model
@@ -434,6 +531,7 @@ func (c AgentAIConfig) Resolve(task AgentAITaskConfig) AgentAIConfig {
 	// receive a flat AgentAIConfig.
 	out.Detect = AgentAITaskConfig{}
 	out.Analyze = AgentAIAnalyzeConfig{}
+	out.Chat = AgentAITaskConfig{}
 
 	if task.Model != "" {
 		out.Model = task.Model

@@ -1,0 +1,7 @@
+provider: "ollama"
+- name: AGENT_AI_PROVIDER
+value: "ollama"
+model: "llama3.1"
+model: "llama3.1:70b"
+max_tokens: 4096
+!provider: "openai"

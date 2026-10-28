@@ -6,7 +6,9 @@ import {
   SYSTEM_PROMPT_PATH,
 } from "./lib/systemPromptNav";
 import { AppShell } from "./components/AppShell";
+import { AgentRequiredRoute } from "./components/AgentRequiredRoute";
 import { SkCard } from "./components/Skeleton";
+import { loadLazyModule } from "./lib/lazyModule";
 // Hot paths (the 3am set) stay in the main chunk:
 import { NowPage } from "./pages/NowPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
@@ -40,6 +42,15 @@ const SystemPromptPage = lazyPage(
   "SystemPromptPage",
 );
 const RunbooksPage = lazyPage(() => import("./pages/RunbooksPage"), "RunbooksPage");
+const ChatPage = lazyPage(() => import("./pages/ChatPage"), "ChatPage");
+const AgentToolsPage = lazyPage(
+  () => import("./pages/AgentToolsPage"),
+  "AgentToolsPage",
+);
+const KubernetesPage = lazyPage(
+  () => import("./pages/KubernetesPage"),
+  "KubernetesPage",
+);
 const ServiceDetailPage = lazyPage(
   () => import("./pages/ServiceDetailPage"),
   "ServiceDetailPage",
@@ -71,7 +82,7 @@ function lazyPage(
   name: string,
 ) {
   const L = lazy(async () => {
-    const m = await loader();
+    const m = await loadLazyModule(loader, name);
     return { default: m[name] as React.ComponentType };
   });
   return function LazyRoute() {
@@ -103,41 +114,44 @@ export default function App() {
           <Route path="/now" element={<NowPage />} />
           <Route path="/incidents" element={<IncidentsPage />} />
           <Route path="/incidents/:id" element={<IncidentDetailPage />} />
-          <Route path="/analyses" element={<AnalysesListPage />} />
+          <Route path="/analyses" element={<AgentRequiredRoute title="Analyses"><AnalysesListPage /></AgentRequiredRoute>} />
           <Route
             path="/incidents/:id/analyses/:analysisId"
-            element={<AnalysisDetailPage />}
+            element={<AgentRequiredRoute title="Analysis"><AnalysisDetailPage /></AgentRequiredRoute>}
           />
 
           {/* Agent */}
-          <Route path="/agent" element={<AgentOverviewPage />} />
-          <Route path="/agent/logs" element={<PatternsPage />} />
-          <Route path="/agent/logs/:id" element={<PatternDetailPage />} />
-          <Route path="/agent/patterns/:id" element={<PatternDetailPage />} />
-          <Route path="/agent/metrics" element={<MetricsPage />} />
-          <Route path="/agent/traces" element={<TracesPage />} />
-          <Route path="/agent/slo" element={<SLORecommendationsPage />} />
+          <Route path="/agent" element={<AgentRequiredRoute title="Agent Overview"><AgentOverviewPage /></AgentRequiredRoute>} />
+          <Route path="/agent/chat" element={<AgentRequiredRoute title="DevOps Agent"><ChatPage /></AgentRequiredRoute>} />
+          <Route path="/agent/tools" element={<AgentToolsPage />} />
+          <Route path="/agent/kubernetes" element={<KubernetesPage />} />
+          <Route path="/agent/logs" element={<AgentRequiredRoute title="Logs"><PatternsPage /></AgentRequiredRoute>} />
+          <Route path="/agent/logs/:id" element={<AgentRequiredRoute title="Log Pattern"><PatternDetailPage /></AgentRequiredRoute>} />
+          <Route path="/agent/patterns/:id" element={<AgentRequiredRoute title="Log Pattern"><PatternDetailPage /></AgentRequiredRoute>} />
+          <Route path="/agent/metrics" element={<AgentRequiredRoute title="Metrics"><MetricsPage /></AgentRequiredRoute>} />
+          <Route path="/agent/traces" element={<AgentRequiredRoute title="Traces"><TracesPage /></AgentRequiredRoute>} />
+          <Route path="/agent/slo" element={<AgentRequiredRoute title="SLIs / SLOs"><SLORecommendationsPage /></AgentRequiredRoute>} />
           <Route
             path="/agent/alert-fatigue"
-            element={<AlertFatiguePage />}
+            element={<AgentRequiredRoute title="Alert Fatigue"><AlertFatiguePage /></AgentRequiredRoute>}
           />
-          <Route path="/agent/decisions" element={<DecisionsPage />} />
+          <Route path="/agent/decisions" element={<AgentRequiredRoute title="Decisions"><DecisionsPage /></AgentRequiredRoute>} />
           <Route
             path={SYSTEM_PROMPT_PATH}
-            element={<SystemPromptPage />}
+            element={<AgentRequiredRoute title="System Prompt"><SystemPromptPage /></AgentRequiredRoute>}
           />
           <Route
             path="/agent/decisions/detect/:id"
-            element={<DetectDetailPage />}
+            element={<AgentRequiredRoute title="Detection"><DetectDetailPage /></AgentRequiredRoute>}
           />
           <Route
             path="/agent/decisions/shadow/:patternId"
-            element={<ShadowDetailPage />}
+            element={<AgentRequiredRoute title="Preview Decision"><ShadowDetailPage /></AgentRequiredRoute>}
           />
-          <Route path="/agent/services" element={<ServicesPage />} />
+          <Route path="/agent/services" element={<AgentRequiredRoute title="Services"><ServicesPage /></AgentRequiredRoute>} />
           <Route
             path="/agent/services/:name"
-            element={<ServiceDetailPage />}
+            element={<AgentRequiredRoute title="Service"><ServiceDetailPage /></AgentRequiredRoute>}
           />
           <Route path="/agent/runbooks" element={<RunbooksPage />} />
 
@@ -198,7 +212,7 @@ export default function App() {
           />
           <Route
             path="/config/agent"
-            element={<Navigate to="/settings?tab=agent" replace />}
+            element={<Navigate to="/settings?section=agent-runtime" replace />}
           />
           <Route
             path="/postmortems"

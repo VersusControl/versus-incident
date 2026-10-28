@@ -208,7 +208,7 @@ describe("countByOrigin (client-split whole-set tally)", () => {
     });
   });
 
-  it("feeds formatOriginCounts so the Now top-bar shows both feeds", () => {
+  it("feeds formatOriginCounts so the header badge shows both feeds", () => {
     const counts = countByOrigin([
       inc({ origin: "ai_detect" }),
       inc({ origin: "webhook" }),
@@ -221,7 +221,8 @@ describe("countByOrigin (client-split whole-set tally)", () => {
 describe("Now page origin split (default-to-AI, client-side scope)", () => {
   // The Now feed fetches the whole set once (shared with the TopBar/Sidebar
   // badges) and splits it client-side: the active tab scopes the feed while
-  // the whole-set counts keep both feeds visible.
+  // the per-origin counts keep both feeds visible. The Now tab badges
+  // themselves show the server's OPEN bucket (see NowPage.test.tsx).
   const sorted: IncidentSummary[] = [
     inc({ id: "ai-open", origin: "ai_detect", resolved: false, acked_at: null }),
     inc({ id: "wh-1", origin: "webhook", resolved: false, acked_at: null }),

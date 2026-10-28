@@ -1,0 +1,350 @@
+import { useState, type ElementType } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
+import { Activity, AlertCircle, ArrowUpRight, BookOpenText, Check, CircleOff, ExternalLink, FileText, GitBranch, Loader2, Network, RefreshCw, Settings, ShipWheel, Wrench } from "lucide-react";
+import { FaAws } from "react-icons/fa6";
+import { api, type AgentToolsetAvailability, type AgentToolKind, type AgentToolState } from "@/lib/api";
+import { Modal } from "@/components/Modal";
+import { TopBar } from "@/components/TopBar";
+import { RetryableError } from "@/components/RetryableError";
+import { SkCard } from "@/components/Skeleton";
+
+const SECTIONS = ["connector", "datasource", "common"] as const;
+const SECTION_LABELS = { connector: "Connectors", datasource: "Data Source Tools", common: "Common" };
+type CatalogToolState = AgentToolState | "configured" | "development" | "shared_unknown";
+type CatalogToolset = Omit<AgentToolsetAvailability, "state"> & {
+  state: CatalogToolState;
+  shared_state?: AgentToolState;
+  policy_id?: string;
+  provider_type?: string;
+  provider_configured?: boolean;
+  configured_source_names?: string[];
+  config_known?: boolean;
+  shared_capability?: string;
+};
+
+export function ToolIcon({ iconKey }: { iconKey: string }) {
+  const logo = PROVIDER_LOGOS[iconKey];
+  if (logo) {
+    return <img src={logo} alt="" width="24" height="24" className="size-6 object-contain" aria-hidden="true" />;
+  }
+  const Icon = ICONS[iconKey] ?? Wrench;
+  const iconColor = ICON_COLORS[iconKey] ?? ICON_COLORS.common;
+  return <Icon size={24} className={`tool-brand-icon ${iconColor}`} strokeWidth={2.2} aria-hidden="true" />;
+}
+
+const ICONS: Record<string, ElementType> = {
+  kubernetes: ShipWheel,
+  git: GitBranch,
+  logs: FileText,
+  metrics: Activity,
+  traces: Network,
+  cloudwatch: FaAws,
+  runbook: BookOpenText,
+  dependencies: Network,
+  activity: Activity,
+  common: Wrench,
+};
+const PROVIDER_LOGOS: Record<string, string> = {
+  elasticsearch: "/elasticsearch.svg",
+  loki: "/loki.svg",
+  graylog: "/graylog.svg",
+  splunk: "/splunk.svg",
+  signoz: "/signoz.svg",
+  prometheus: "/prometheus.svg",
+  tempo: "/tempo.svg",
+};
+const ICON_COLORS: Record<string, string> = {
+  kubernetes: "tool-brand-kubernetes",
+  git: "tool-brand-git",
+  cloudwatch: "tool-brand-common",
+  runbook: "tool-brand-runbook",
+  dependencies: "tool-brand-dependencies",
+  common: "tool-brand-common",
+};
+
+const SHARED_TOOL_NAMES: Record<string, string> = {
+  logs: "Logs tools",
+  metrics: "Metrics tools",
+  traces: "Trace tools",
+};
+
+const PROVIDERS = [
+  { base_id: "logs", type: "loki", name: "Loki", description: "Query logs stored in Grafana Loki.", icon_key: "loki", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/loki" },
+  { base_id: "logs", type: "cloudwatchlogs", name: "CloudWatch Logs", description: "Query logs stored in Amazon CloudWatch.", icon_key: "cloudwatch", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-logs" },
+  { base_id: "logs", type: "graylog", name: "Graylog", description: "Search logs stored in Graylog.", icon_key: "graylog", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/graylog" },
+  { base_id: "logs", type: "splunk", name: "Splunk", description: "Search logs stored in Splunk.", icon_key: "splunk", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/splunk" },
+  { base_id: "logs", type: "signoz", name: "SigNoz Logs", description: "Query logs stored in SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/signoz" },
+  { base_id: "metrics", type: "prometheus", name: "Prometheus", description: "Query metrics from Prometheus.", icon_key: "prometheus", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/prometheus" },
+  { base_id: "metrics", type: "cloudwatch_metrics", name: "CloudWatch Metrics", description: "Query metrics from Amazon CloudWatch.", icon_key: "cloudwatch", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/cloudwatch-metrics" },
+  { base_id: "metrics", type: "signoz_metrics", name: "SigNoz Metrics", description: "Query metrics from SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/enterprise/metrics/signoz" },
+  { base_id: "traces", type: "traces", name: "Grafana Tempo", description: "Inspect distributed traces in Grafana Tempo.", icon_key: "tempo", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces" },
+  { base_id: "traces", type: "signoz_traces", name: "SigNoz Traces", description: "Inspect distributed traces in SigNoz.", icon_key: "signoz", developed: true, docs_url: "https://docs.versusincident.com/#/agent/data-sources/traces?id=signoz-backend" },
+] as const;
+
+function buildCatalog(toolsets: AgentToolsetAvailability[], sources: Awaited<ReturnType<typeof api.getAgentConfig>>["sources"] | undefined, configKnown: boolean): CatalogToolset[] {
+  const baseByID = new Map(toolsets.map((toolset) => [toolset.id, toolset]));
+  const providers = PROVIDERS.flatMap((provider) => {
+    const base = baseByID.get(provider.base_id);
+    if (!base) return [];
+    const configuredSourceNames = sources
+      ?.filter((source) => source.enable && source.type === provider.type)
+      .map((source) => source.name) ?? [];
+    const providerAvailable = configKnown && configuredSourceNames.length > 0;
+    const authoritative = base.state === "needs_license" || base.state === "needs_permission";
+    const state: CatalogToolState = !provider.developed
+      ? "development"
+      : authoritative
+        ? base.state
+      : !configKnown
+        ? "shared_unknown"
+        : providerAvailable
+          ? base.state === "unhealthy" ? "unhealthy" : "configured"
+          : "needs_datasource";
+    const reason = !provider.developed
+      ? "Provider-native agent tools are in development."
+      : authoritative
+        ? base.reason
+      : !configKnown
+        ? `Provider configuration is unavailable. This provider uses the shared ${base.display_name} agent capability.`
+        : providerAvailable
+          ? base.state === "unhealthy" ? `The shared ${base.display_name} agent capability is unhealthy.` : `${provider.name} is configured.`
+          : `${provider.name} is not configured.`;
+    const baseAllowsUI = base.ui_path && !["needs_license", "needs_permission"].includes(base.state);
+    return [{
+      ...base,
+      id: `provider:${provider.type}`,
+      policy_id: base.id,
+      shared_state: base.state,
+      provider_type: provider.type,
+      provider_configured: providerAvailable,
+      configured_source_names: configuredSourceNames,
+      config_known: configKnown,
+      shared_capability: base.display_name,
+      display_name: provider.name,
+      description: provider.description,
+      icon_key: provider.icon_key,
+      docs_url: provider.docs_url,
+      ui_path: provider.developed && providerAvailable && baseAllowsUI ? base.ui_path : undefined,
+      state,
+      reason,
+    }];
+  });
+  return [
+    ...toolsets
+      .map((toolset) => toolset.id === "elasticsearch-logs"
+        ? { ...toolset, display_name: "Elasticsearch" }
+        : SHARED_TOOL_NAMES[toolset.id]
+          ? { ...toolset, display_name: SHARED_TOOL_NAMES[toolset.id], icon_key: toolset.id, ui_path: undefined }
+          : toolset),
+    ...providers,
+  ];
+}
+
+function detailsDescriptionID(toolsetID: string): string {
+  return `toolset-${toolsetID.replace(/[^a-zA-Z0-9_-]/g, "-")}-setup-required`;
+}
+
+export function AgentToolsPage() {
+  const [agent, setAgent] = useState<AgentToolKind>("chat");
+  const [selectedID, setSelectedID] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const toolsets = useQuery({
+    queryKey: ["agent-toolsets", agent],
+    queryFn: () => api.listAgentToolsets(agent),
+    retry: false,
+  });
+  const config = useQuery({
+    queryKey: ["agent-config"],
+    queryFn: () => api.getAgentConfig(),
+    retry: false,
+  });
+  const catalog = buildCatalog(toolsets.data ?? [], config.data?.sources, config.isSuccess);
+  const actionsToolset = toolsets.data?.find((toolset) => toolset.id === "kubernetes-actions");
+  const toggle = useMutation({
+    mutationFn: (input: { agent: AgentToolKind; toolset: CatalogToolset; enabled: boolean }) =>
+      api.setAgentToolsetEnabled(input.agent, input.toolset.policy_id ?? input.toolset.id, input.enabled),
+    onSuccess: (_result, input) => queryClient.invalidateQueries({ queryKey: ["agent-toolsets", input.agent] }),
+  });
+  const selected = catalog.find((toolset) => toolset.id === selectedID) ?? null;
+  const toggleError = toggle.isError
+    && toggle.variables?.agent === agent
+    && selected !== null
+    && ((toggle.variables.toolset.policy_id ?? toggle.variables.toolset.id) === (selected.policy_id ?? selected.id)
+      || (selected.id === "kubernetes" && toggle.variables.toolset.id === actionsToolset?.id))
+    ? toggle.error
+    : null;
+
+  return (
+    <main className="min-w-0 flex-1 overflow-auto">
+      <TopBar title="Connectors & Tools" />
+      <div className="mx-auto max-w-6xl space-y-5 p-4 sm:p-6">
+        <div className="flex flex-col justify-between gap-4 border-ink-700 pb-5 sm:flex-row sm:items-end">
+          <div>
+            <h1 className="text-xl font-semibold text-ink-50">Connectors &amp; Tools</h1>
+            <p className="mt-1 max-w-2xl text-sm text-ink-300">
+              Set up and activate tools
+            </p>
+          </div>
+          <div className="inline-flex w-fit rounded border border-ink-600 p-1" role="group" aria-label="Agent">
+            {(["chat", "analyze"] as const).map((value) => (
+              <button
+                key={value}
+                aria-pressed={agent === value}
+                className={`px-3 py-1.5 text-xs font-medium capitalize ${agent === value ? "bg-ink-600 text-ink-50" : "text-ink-300"}`}
+                onClick={() => setAgent(value)}
+              >
+                {value}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {toolsets.isPending && <div className="space-y-4" aria-label="Loading tools"><SkCard lines={3} /><SkCard lines={3} /></div>}
+        {toolsets.isError && <RetryableError error={toolsets.error} onRetry={() => toolsets.refetch()} retrying={toolsets.isRefetching} context="Couldn't load agent tools" />}
+        {config.isError && <RetryableError error={config.error} onRetry={() => config.refetch()} retrying={config.isRefetching} context="Couldn't verify configured data sources" />}
+        {toolsets.data?.length === 0 && (
+          <div className="card p-8 text-center text-sm text-ink-300">
+            <Wrench className="mx-auto mb-3" aria-hidden="true" />
+            No tools are known to this build.
+          </div>
+        )}
+        {SECTIONS.map((section) => {
+          const rows = catalog.filter((toolset) => toolset.section === section && toolset.id !== "kubernetes-actions");
+          if (rows.length === 0) return null;
+          return <section key={section} aria-labelledby={`tools-${section}`}>
+            <h2 id={`tools-${section}`} className="mb-3 text-sm font-semibold text-ink-100">{SECTION_LABELS[section]}</h2>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {rows.map((toolset) => <ToolsetCard key={toolset.id} toolset={toolset} onDetails={() => setSelectedID(toolset.id)} />)}
+            </div>
+          </section>;
+        })}
+      </div>
+      {selected && <ToolsetDetails
+        toolset={selected}
+        agent={agent}
+        toggleError={toggleError}
+        onDismissToggleError={() => toggle.reset()}
+        saving={toggle.isPending}
+        actionsToolset={selected.id === "kubernetes" ? actionsToolset : undefined}
+        pending={toggle.isPending && toggle.variables?.agent === agent && toggle.variables.toolset.id === selected.id}
+        actionsPending={toggle.isPending && toggle.variables?.agent === agent && toggle.variables.toolset.id === actionsToolset?.id}
+        onClose={() => setSelectedID(null)}
+        onToggle={(enabled) => toggle.mutate({ agent, toolset: selected, enabled })}
+        onToggleActions={(enabled) => actionsToolset && toggle.mutate({ agent, toolset: actionsToolset, enabled })}
+      />}
+    </main>
+  );
+}
+
+function ToolsetCard({ toolset, onDetails }: { toolset: CatalogToolset; onDetails: () => void }) {
+  const development = toolset.state === "development";
+  return (
+    <article className="flex min-h-22 items-center gap-4 rounded-card border border-transparent bg-transparent p-4 transition-colors hover:border-ink-500/60 hover:bg-surface hover:shadow-card">
+      <div className="flex size-12 shrink-0 items-center justify-center rounded-xl border border-ink-600 bg-ink-800"><ToolIcon iconKey={toolset.icon_key} /></div>
+      <div className="min-w-0 flex-1">
+        <h3 className="text-base font-medium text-ink-50">{toolset.display_name}</h3>
+        <StateBadge state={toolset.state} />
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link to={toolset.ui_path} aria-label={`Open ${toolset.display_name}`} title={`Open ${toolset.display_name}`} className="inline-flex size-11 items-center justify-center rounded-full text-ink-200 hover:bg-ink-700 hover:text-ink-50"><ArrowUpRight size={20} /></Link>}
+        <button type="button" onClick={onDetails} aria-label={`${toolset.display_name} ${development ? "details" : "settings"}`} title={development ? `About ${toolset.display_name}` : `${toolset.display_name} settings`} className="inline-flex size-11 items-center justify-center rounded-full text-ink-300 hover:bg-ink-700 hover:text-ink-50"><Settings size={19} /></button>
+      </div>
+    </article>
+  );
+}
+
+export function StateBadge({ state }: { state: CatalogToolState }) {
+  const labels: Record<CatalogToolState, string> = {
+    available: "Ready",
+    disabled_by_operator: "Off",
+    needs_license: "Enterprise",
+    needs_datasource: "Data source needed",
+    needs_integration: "Connection needed",
+    needs_capability: "Setup needed",
+    needs_permission: "No access",
+    unhealthy: "Unhealthy",
+    shared_unknown: "Shared status unknown",
+    configured: "Configured",
+    development: "Development",
+  };
+  const ready = state === "available" || state === "configured";
+  const off = state === "disabled_by_operator";
+  return <span className={`mt-1 inline-flex items-center gap-1 text-2xs ${ready ? "text-sev-ok" : off ? "text-ink-400" : state === "unhealthy" ? "text-sev-critical" : ""}`}>{ready ? <Check size={11} /> : off ? <CircleOff size={11} /> : <AlertCircle size={11} />}{labels[state]}</span>;
+}
+
+function PolicySwitch({ checked, label, stateLabel, description, disabled, pending, onToggle }: {
+  checked: boolean;
+  label: string;
+  stateLabel: string;
+  description: string;
+  disabled: boolean;
+  pending: boolean;
+  onToggle: (enabled: boolean) => void;
+}) {
+  return <div className="flex items-start gap-3">
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled || pending}
+      onClick={() => onToggle(!checked)}
+      className={`relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-150 motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-60 ${checked ? "bg-link" : "bg-ink-600"}`}
+    >
+      <span className={`inline-block size-4 rounded-full bg-white transition-transform duration-150 motion-reduce:transition-none ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
+    </button>
+    <span className="min-w-0 flex-1">
+      <span className="flex flex-wrap items-center gap-2 text-xs font-medium text-ink-100">
+        {stateLabel}
+        <span className={`rounded-full px-1.5 py-0.5 text-2xs ${checked ? "bg-link/15 text-link" : "bg-ink-600 text-ink-300"}`}>{checked ? "Enabled" : "Disabled"}</span>
+        {pending && <Loader2 size={13} className="animate-spin text-link" aria-label="Saving" />}
+      </span>
+      <span className="mt-1 block text-2xs leading-5 text-ink-400">{description}</span>
+    </span>
+  </div>;
+}
+
+function ToolsetDetails({ toolset, agent, toggleError, onDismissToggleError, saving, pending, actionsToolset, actionsPending, onClose, onToggle, onToggleActions }: {
+  toolset: CatalogToolset;
+  agent: AgentToolKind;
+  toggleError: Error | null;
+  onDismissToggleError: () => void;
+  saving: boolean;
+  pending: boolean;
+  actionsToolset?: AgentToolsetAvailability;
+  actionsPending: boolean;
+  onClose: () => void;
+  onToggle: (enabled: boolean) => void;
+  onToggleActions: (enabled: boolean) => void;
+}) {
+  const development = toolset.state === "development";
+  const provider = Boolean(toolset.provider_type);
+  const baseSatisfied = toolset.provider_type ? toolset.config_known === true && toolset.state === "configured" && (toolset.shared_state === "available" || toolset.shared_state === "disabled_by_operator") : toolset.state === "available" || toolset.state === "disabled_by_operator";
+  const providerConfigured = !toolset.provider_type || Boolean(toolset.provider_configured);
+  const satisfied = baseSatisfied && providerConfigured;
+  const actionsSatisfied = actionsToolset?.state === "available" || actionsToolset?.state === "disabled_by_operator";
+  const hiddenInternalAction = toolset.action.startsWith("/") && (toolset.id === "source-control" || toolset.section === "datasource" || toolset.section === "common");
+  const showAvailabilityAction = !development && toolset.action && !hiddenInternalAction;
+  return <Modal title={toolset.display_name} onClose={onClose} size="lg" footer={<>{toolset.docs_url && <a className="btn" href={toolset.docs_url} target="_blank" rel="noopener noreferrer">Documentation <ExternalLink size={13} /></a>}{!development && toolset.ui_path && !["needs_license", "needs_permission"].includes(toolset.state) && <Link className="btn btn-primary" to={toolset.ui_path} onClick={onClose}>Open tool <ArrowUpRight size={13} /></Link>}{showAvailabilityAction && (toolset.action.startsWith("/") ? <Link className="btn btn-primary" to={toolset.action}>{toolset.action_label}</Link> : <a className="btn btn-primary" href={toolset.action} target="_blank" rel="noopener noreferrer">{toolset.action_label} <ExternalLink size={13} /></a>)}</>}>
+    {toggleError && <div role="alert" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-sev-critical/40 bg-sev-critical/10 p-3 text-sm text-sev-critical">
+      <span className="flex items-center gap-2"><AlertCircle size={16} />{toggleError.message}</span>
+      <button className="btn" onClick={onDismissToggleError}><RefreshCw size={14} /> Dismiss</button>
+    </div>}
+    <div className="flex items-start gap-3"><div className="flex size-12 shrink-0 items-center justify-center rounded-control border border-ink-600 bg-ink-800"><ToolIcon iconKey={toolset.icon_key} /></div><div className="min-w-0"><p className="text-sm leading-6 text-ink-200">{toolset.description}</p><StateBadge state={toolset.state} /></div></div>
+    <dl className="mt-5 divide-y divide-ink-700 border-y border-ink-700 text-xs"><div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Availability</dt><dd className="text-ink-100">{toolset.reason}</dd></div>{!development && provider && toolset.configured_source_names && toolset.configured_source_names.length > 0 && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Configured sources</dt><dd className="text-ink-100">{toolset.configured_source_names.join(", ")}</dd></div>}{!development && !provider && toolset.health && <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-3 py-3"><dt className="text-ink-400">Health</dt><dd className="text-ink-100">{toolset.health}</dd></div>}{!development && !provider && <div className="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3 py-3"><dt className="text-ink-400">{agent === "chat" ? "Chat agent" : "Analyze agent"}</dt><dd><PolicySwitch checked={toolset.enabled && satisfied} label={`Enable ${toolset.display_name} for ${agent}`} stateLabel={agent === "chat" ? "Chat agent" : "Analyze agent"} description={toolset.reason} disabled={!satisfied || saving} pending={pending} onToggle={onToggle} /></dd></div>}</dl>
+    {!development && toolset.id === "kubernetes" && actionsToolset && <section aria-labelledby="kubernetes-actions-policy" className="mt-4 rounded-control border border-ink-600/60 bg-ink-700/20 p-3">
+      <div className="flex flex-wrap items-center gap-2"><h3 id="kubernetes-actions-policy" className="text-xs font-semibold text-ink-100">Actions</h3><StateBadge state={actionsToolset.state} /></div>
+      <div className="mt-3"><PolicySwitch
+        checked={actionsToolset.enabled && actionsSatisfied}
+        label={`Enable Kubernetes actions for ${agent}`}
+        stateLabel={`${agent === "chat" ? "Chat" : "Analyze"} agent`}
+        description={actionsSatisfied ? actionsToolset.reason : `Setup required. ${actionsToolset.reason}`}
+        disabled={!actionsSatisfied || saving}
+        pending={actionsPending}
+        onToggle={onToggleActions}
+      /></div>
+    </section>}
+    {!development && !satisfied && <div id={detailsDescriptionID(toolset.id)} className="mt-4 rounded-control border border-sev-warning/30 bg-sev-warning/10 p-3 text-xs leading-5 text-ink-200"><span className="font-medium">Setup required.</span> {toolset.reason}</div>}
+  </Modal>;
+}

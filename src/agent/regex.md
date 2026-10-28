@@ -1,4 +1,4 @@
-# AI Agent — Regex
+# Regex
 
 A **regex** (regular expression) is a small pattern language for matching text. The agent uses regexes in three different places, and this page is the one-stop guide to writing them: what flavor to use, how capture groups and ordering work, and how to test a pattern before you ship it.
 

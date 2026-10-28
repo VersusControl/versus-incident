@@ -2,7 +2,7 @@
 
 A Datadog-style admin console for the Versus AI agent. Built with Vite +
 React + TypeScript + Tailwind. Talks to the Go backend's `/api/agent/*`
-endpoints using the `X-Gateway-Secret` header.
+endpoints using an HttpOnly gateway-session cookie.
 
 ## Screens
 
@@ -30,9 +30,10 @@ The Vite dev server proxies `/api/*` to `http://localhost:3000` (the agent).
 Override the target with `VITE_API_PROXY_TARGET=http://other:3000 npm run dev`.
 
 On first load the app prompts for the gateway secret you configured at the
-root of `config.yaml` as `gateway_secret` (env `GATEWAY_SECRET`). The value is stored in
-`localStorage` under `versus.gatewaySecret`. Click **Sign out** in the
-sidebar to clear it.
+root of `config.yaml` as `gateway_secret` (env `GATEWAY_SECRET`). The value is
+sent once to the gateway-session exchange and is not retained by the UI. The
+opaque cookie lasts up to eight hours, so reloads and new tabs on the same
+origin remain signed in. Click **Sign out** to revoke it.
 
 ## Build for production
 
@@ -95,10 +96,20 @@ Reusable components are declared as `@layer components` in `index.css`:
 
 ## Auth
 
-Every API call attaches `X-Gateway-Secret: <stored value>`. A 401 response
-clears the gate and re-prompts the user.
+Browser sign-in sends `X-Gateway-Secret` only to
+`POST /api/auth/gateway-session`. Subsequent calls use the opaque
+`versus_gateway_session` cookie with `credentials: "same-origin"`; JavaScript
+cannot read it. A 401 response re-prompts the user after expiry or gateway
+secret rotation. Unsafe cookie-authenticated requests require an exact
+same-origin `Origin` or `Referer`; direct API clients using the header remain
+compatible and are not subject to this browser-cookie check.
 
-> **Heads up:** the secret is stored in `localStorage`. Anyone with browser
-> access on this machine can read it. The agent admin endpoints are admin-
-> level — host the UI behind your usual operator auth (VPN, SSO proxy,
-> etc.) rather than exposing it to the public internet.
+For a TLS-terminating or Host-rewriting proxy, configure the backend's
+root `public_host` to the exact browser-visible HTTP(S) origin. It also owns
+external links and secure-cookie derivation. The backend does not implicitly
+trust `X-Forwarded-Proto` or `X-Forwarded-Host`. Invalid configured origins fail
+startup.
+
+> **Heads up:** the agent admin endpoints are admin-level. Host the UI behind
+> your usual operator auth (VPN, SSO proxy, etc.) rather than exposing it
+> publicly.

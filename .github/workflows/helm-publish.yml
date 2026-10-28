@@ -2,8 +2,7 @@ name: PROD - Release Helm Chart as OCI
 
 on:
   push:
-    branches:
-      - main
+    tags: [ "v*" ]
     paths:
       - 'helm/versus-incident/**'
       - '.github/workflows/helm-publish.yml'

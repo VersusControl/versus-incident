@@ -1,0 +1,7 @@
+# SNS enabled with no aws.* block at all — the IRSA / Pod Identity path. This
+# used to nil-deref at render time; it must now render cleanly and emit no
+# static credentials.
+alert:
+  sns:
+    enable: true
+    topicArn: "arn:aws:sns:us-east-1:111122223333:versus-alerts"

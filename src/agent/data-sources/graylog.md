@@ -14,7 +14,7 @@ sources:
     graylog:
       address: https://graylog:9000
       api_token: ${GRAYLOG_API_TOKEN}
-      query: 'level:(3 OR 4) AND service:api'
+      query: 'level:3 AND service:api'
       page_size: 500
 ```
 

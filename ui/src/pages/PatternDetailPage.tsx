@@ -380,11 +380,13 @@ export function PatternDetailPage() {
 
 function Fact({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div>
+    <div className="min-w-0">
       <dt className="text-2xs uppercase tracking-wider text-ink-300">
         {label}
       </dt>
-      <dd className="font-mono text-xs text-ink-100">{value}</dd>
+      <dd className="min-w-0 [overflow-wrap:anywhere] font-mono text-xs text-ink-100">
+        {value}
+      </dd>
     </div>
   );
 }

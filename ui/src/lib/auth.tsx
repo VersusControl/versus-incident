@@ -1,16 +1,18 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
+import { ssoLoginWithReturn } from "@/lib/ssoReturn";
 import {
   AUTH_EXPIRED_EVENT,
   ApiError,
   api,
-  getSecret,
   getSsoSession,
   getSsoStatus,
+  isCommunityDeploymentError,
   localLogin,
   resolveInitialAuth,
   signIn,
+  type InitialAuthState,
   type SSOStatus,
 } from "./api";
 import { classifyLocalLoginError } from "./localAdmin";
@@ -30,19 +32,16 @@ interface Props {
 //    against /api/admin/config/agent (always mounted + secret-gated, so it
 //    works whether or not the agent is enabled). The gateway secret is OSS-only
 //    — a licensed binary never offers it; its sign-in is the built-in admin / SSO.
-//    A bad/absent credential AND no session fall through to the sign-in screen.
-//    Transient network errors deliberately do NOT trap the user (kept
-//    behavior). Mid-session OSS secret rotation is handled by <ReauthModal>.
+//    Community and Enterprise login are authoritative, separate states;
+//    transient discovery failures show retry and never expose gateway login.
 export function AuthGate({ children }: Props) {
-  const [ready, setReady] = useState<"checking" | "needs-secret" | "ok">(
-    "checking",
-  );
+  const [ready, setReady] = useState<"checking" | InitialAuthState>("checking");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let alive = true;
     resolveInitialAuth({
-      hasSecret: () => Boolean(getSecret()),
-      checkSecret: () => api.getAgentConfig(),
+      probeGatewaySession: () => api.getAgentConfig(),
       deploymentOrg: () => api.getSSODeployment().then((d) => d.org),
       probeSession: (org) => getSsoSession(org),
     }).then((state) => {
@@ -51,7 +50,7 @@ export function AuthGate({ children }: Props) {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [attempt]);
 
   if (ready === "checking") {
     return (
@@ -65,13 +64,38 @@ export function AuthGate({ children }: Props) {
     );
   }
 
-  if (ready === "needs-secret") {
+  if (ready === "retry") {
+    return (
+      <div className="flex h-full items-center justify-center p-4">
+        <div className="card w-full max-w-[380px] p-6 text-center">
+          <AlertCircle className="mx-auto mb-3 text-sev-critical" size={20} aria-hidden />
+          <h1 className="text-base font-semibold text-ink-50">Unable to verify sign-in</h1>
+          <p className="mt-2 text-xs text-ink-300">
+            Check the connection and try again.
+          </p>
+          <button
+            type="button"
+            className="btn btn-primary mt-5 h-10 w-full justify-center text-sm"
+            onClick={() => {
+              setReady("checking");
+              setAttempt((value) => value + 1);
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (ready === "needs-gateway-secret" || ready === "needs-enterprise-login") {
     return (
       // No bg here — body paints surface-sunken + the accent page glow,
       // which this screen wants more than any other.
       <div className="flex h-full items-center justify-center p-4">
         <SecretForm
           standalone
+          enterpriseLogin={ready === "needs-enterprise-login"}
           onSuccess={() => setReady("ok")}
         />
       </div>
@@ -83,7 +107,7 @@ export function AuthGate({ children }: Props) {
 
 // ReauthModal — mounted once in AppShell. The gateway-secret rotation reauth
 // it offers is an OSS-only concern: on an OSS/community binary, when a request
-// 401s with a stored secret (rotation), it opens OVER the current page and a
+// 401s after the signing secret rotates, it opens OVER the current page and a
 // successful re-entry invalidates every query so the page recovers in place.
 // On a LICENSED binary the gateway secret is not a human credential — an
 // expired session must return the user to the enterprise sign-in (built-in
@@ -103,9 +127,14 @@ export function ReauthModal() {
           // enterprise sign-in (built-in admin / SSO) by re-entering AuthGate.
           window.location.assign("/");
         })
-        .catch(() => {
-          // OSS/community: the gateway secret was rotated — re-prompt in place.
-          setOpen(true);
+        .catch((error) => {
+          if (isCommunityDeploymentError(error)) {
+            // OSS/community: the gateway secret was rotated — re-prompt in place.
+            setOpen(true);
+            return;
+          }
+          // Ambiguous discovery failures return through AuthGate's retry state.
+          window.location.assign("/");
         });
     };
     window.addEventListener(AUTH_EXPIRED_EVENT, onExpired);
@@ -133,9 +162,11 @@ export function ReauthModal() {
 function SecretForm({
   onSuccess,
   standalone,
+  enterpriseLogin,
 }: {
   onSuccess: () => void;
   standalone?: boolean;
+  enterpriseLogin?: boolean;
 }) {
   const [input, setInput] = useState("");
   const [show, setShow] = useState(false);
@@ -145,13 +176,10 @@ function SecretForm({
   // Login-screen SSO option: only the standalone screen probes whether the
   // deployment has SSO configured, and only then offers the provider button.
   const [sso, setSso] = useState<SSOStatus | null>(null);
-  // enterprise is true once the license-issued deployment org resolves (the
-  // /deployment route 200s only on a licensed binary; community 403s). It gates
-  // the built-in default-admin login form — community never sees it (G1).
-  const [enterprise, setEnterprise] = useState(false);
+  const enterprise = Boolean(enterpriseLogin);
 
   useEffect(() => {
-    if (!standalone) return;
+    if (!standalone || !enterprise) return;
     let alive = true;
     // Source the org from the license-issued deployment org, not a
     // hardcoded "default": ask the pre-auth /deployment route first, then probe
@@ -161,19 +189,18 @@ function SecretForm({
     api
       .getSSODeployment()
       .then((d) => {
-        if (alive) setEnterprise(true);
         return getSsoStatus(d.org);
       })
       .then((s) => {
         if (alive) setSso(s);
       })
       .catch(() => {
-        // No enterprise / no SSO — OSS falls back to the gateway-secret form.
+        // Enterprise remains authoritative; local admin stays available.
       });
     return () => {
       alive = false;
     };
-  }, [standalone]);
+  }, [enterprise, standalone]);
 
   const form = (
     <form
@@ -263,16 +290,15 @@ function SecretForm({
   // When the deployment has SSO configured, offer the IdP connection button(s).
   // On enterprise the built-in admin form sits above them; on OSS the
   // gateway-secret form drops below an "or" divider. The SSO flow round-trips to
-  // the IdP and returns to "/" with the enterprise session cookie set. SSO is
+  // the IdP and returns to the current page with the enterprise session cookie set. SSO is
   // offered SOLELY through named multi-IdP connections — one button per enabled
   // connection.
-  const returnTo = `?return_to=${encodeURIComponent("/")}`;
   const ssoButtons: { key: string; label: string; url: string }[] =
     sso?.enabled && sso.connections
       ? sso.connections.map((c) => ({
           key: c.id,
           label: c.display_name || "SSO",
-          url: `${c.login_url}${returnTo}`,
+          url: ssoLoginWithReturn(c.login_url, window.location),
         }))
       : [];
   const hasSso = ssoButtons.length > 0;

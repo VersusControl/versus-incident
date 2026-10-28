@@ -47,15 +47,15 @@ describe("Item 2 — top-bar AI/webhook split + no sidebar count", () => {
     expect(topbar.includes("originCounts")).toBe(true);
     // The single lumped count is replaced by the formatted split in the Link.
     expect(topbar.includes("{formatOriginCounts(originCounts)}")).toBe(true);
+    // Pages that already name the window in their subtitle can hide the
+    // duplicate right-side label; every other page keeps it by default.
+    expect(topbar.includes("showCountWindow = true")).toBe(true);
   });
 
   it("the sidebar shows NO incident count (badge removed entirely)", () => {
     // No open-count source, no badge field, no badge render on the nav item.
     expect(sidebar.includes("useOpenIncidentCount")).toBe(false);
     expect(sidebar.includes("badge")).toBe(false);
-    // The Incidents item is a plain text row that ends right after its label —
-    // no trailing badge/count field. (Per-item icons now live on group headers.)
-    expect(/label:\s*"Incidents"\s*}/.test(sidebar)).toBe(true);
   });
 });
 

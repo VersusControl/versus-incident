@@ -91,6 +91,7 @@ sources:
     enable: true
     options:
       address: http://prometheus:9090
+      allow_private_networks: true  # deliberate opt-in for this trusted Docker network
 ```
 
 With auth and TLS:
@@ -106,6 +107,7 @@ sources:
       # username: ${PROM_USERNAME}         # fallback HTTP Basic
       # password: ${PROM_PASSWORD}
       insecure_skip_verify: false          # default false; dev only — never prod
+      # allow_private_networks: true       # only if this trusted origin resolves privately
 ```
 
 | Key | Default | Meaning |
@@ -114,6 +116,8 @@ sources:
 | `bearer_token` | unset | `Authorization: Bearer <token>` auth. |
 | `username` / `password` | unset | HTTP Basic auth — used when no `bearer_token` is set. |
 | `insecure_skip_verify` | `false` | Skip TLS verification — **local dev only**, never production. |
+| `allow_loopback` | `false` | Deliberately allow the bounded native AI read client to reach a loopback origin, for local testing only. |
+| `allow_private_networks` | `false` | Deliberately allow the bounded native AI read client to reach a trusted RFC1918 or ULA private-network origin. |
 | `step` | `60s` | Range-query step (sampling resolution). |
 | `filter` | unset (watch all) | PromQL label-matcher selector that scopes **both** discovery and sampling to a subset of series. See [Scope discovery with `filter`](#scope-discovery-with-filter). |
 | `discovery_interval` | `1h` | How often the watched set is refreshed (cadence ceiling). |
@@ -122,8 +126,16 @@ sources:
 | `max_signals` | `200` | Discovery cap on total watched signals (per tenant). |
 | `queries` | unset | Optional pinned PromQL signals appended to auto-discovery — see [Advanced: custom signals](#advanced-custom-signals). |
 
-Only `address` is required; every other field defaults, so the documented path is
-connection-only. That is the whole operator surface for the auto flow.
+For a public destination, only `address` is required; every other field defaults.
+Private or loopback destinations additionally require the corresponding deliberate
+bounded-read opt-in below. Standing-source setup remains connection-only.
+
+Prefer a verified HTTPS origin. `allow_loopback` and `allow_private_networks` are
+independent, explicit destination opt-ins for the **bounded native AI read client
+only**; they do not change standing-source discovery, sampling, or polling
+semantics. Metadata and link-local destinations remain blocked even when an
+opt-in is enabled, and every resolved address is validated again when the client
+connects.
 
 ### What it watches
 
@@ -167,6 +179,7 @@ sources:
     enable: true
     options:
       address: http://prometheus:9090
+      allow_private_networks: true  # deliberate opt-in for this trusted Docker network
       filter: '{namespace="prod"}'        # discover + sample only prod series
 ```
 
@@ -204,6 +217,7 @@ sources:
     enable: true
     options:
       address: http://prometheus:9090
+      allow_private_networks: true          # deliberate opt-in for this trusted Docker network
       queries:                              # added alongside auto-discovered signals
         - query: 'rate(orders_failed_total[5m]) > 0.1'
           severity: critical

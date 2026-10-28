@@ -1,0 +1,76 @@
+.resource-timeline {
+  min-width: 0;
+  padding: 0 16px 12px;
+  font: 12px/16px Inter, sans-serif;
+  letter-spacing: 0;
+}
+.resource-timeline-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+.resource-timeline-grid { min-width: 820px; }
+.resource-timeline-head, .resource-timeline-axis { padding-left: 200px; }
+.resource-timeline-head { height: 34px; padding-top: 8px; }
+.resource-timeline-head .resource-timeline-plot { height: 26px; }
+.resource-timeline-body { position: relative; min-height: 40px; }
+.resource-timeline-row { display: grid; grid-template-columns: 200px minmax(0, 1fr); height: 40px; border-top: 1px solid rgb(var(--ink-600)); }
+.resource-timeline-row:last-child { border-bottom: 1px solid rgb(var(--ink-600)); }
+.resource-timeline-label { position: sticky; left: 0; z-index: 3; display: flex; min-width: 0; flex-direction: column; justify-content: center; padding-right: 14px; background: rgb(var(--surface)); }
+.resource-timeline-label strong, .resource-timeline-label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resource-timeline-label strong { color: rgb(var(--ink-100)); font-weight: 600; }
+.resource-timeline-label span { color: rgb(var(--ink-300)); }
+.resource-timeline-plot { position: relative; min-width: 0; }
+.resource-timeline-row .resource-timeline-plot { overflow: clip; }
+.resource-timeline-overlay { position: absolute; inset: 0 0 0 200px; pointer-events: none; }
+.resource-timeline-window { position: absolute; inset-block: 0; background: rgb(var(--accent) / .07); }
+.resource-timeline-window > span { position: absolute; bottom: -1px; left: 4px; max-width: calc(100% - 8px); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: rgb(var(--ink-300)); background: rgb(var(--surface) / .9); }
+.resource-timeline-gridline, .resource-timeline-break-line, .resource-timeline-now-line { position: absolute; inset-block: 0; border-left: 1px solid rgb(var(--ink-600)); }
+.resource-timeline-break-line { border-left: 2px solid rgb(var(--sev-critical-solid)); z-index: 1; }
+.resource-timeline-now-line { border-left: 1px dashed rgb(var(--ink-400)); }
+.resource-timeline-break-pill, .resource-timeline-now-label { position: absolute; top: 0; transform: translateX(-50%); white-space: nowrap; }
+.resource-timeline-break-pill { padding: 0 8px; border: 1px solid rgb(var(--sev-critical-solid) / .3); border-radius: 12px; color: rgb(var(--sev-critical)); background: rgb(var(--sev-critical-solid) / .12); }
+.resource-timeline-now-label { color: rgb(var(--ink-300)); }
+.resource-timeline-marker { position: absolute; z-index: 2; width: 20px; height: 20px; transform: translateX(-50%); display: grid; place-items: center; }
+.resource-timeline-change span, .resource-timeline-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: rgb(var(--accent)); box-shadow: 0 0 0 2px rgb(var(--surface)); }
+.resource-timeline-crash { color: rgb(var(--sev-critical)); font: 20px/20px Inter, sans-serif; font-weight: 600; }
+.resource-timeline-event-label { position: absolute; top: 12px; transform: translateX(calc(-100% - 10px)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 12px/16px "JetBrains Mono", monospace; }
+.resource-timeline-crash-label { transform: translateX(12px); font-family: Inter, sans-serif; }
+.resource-timeline-config-label { font-family: Inter, sans-serif; }
+.resource-timeline-marker:focus-visible, .resource-timeline-event-label:focus-visible { outline: 2px solid rgb(var(--link)); outline-offset: -2px; }
+.resource-timeline-axis { height: 30px; }
+.resource-timeline-axis time { position: absolute; top: 6px; transform: translateX(-50%); color: rgb(var(--ink-300)); font: 12px/16px "JetBrains Mono", monospace; }
+.resource-timeline-axis time:first-child { transform: none; }
+.resource-timeline-axis time:last-child { transform: translateX(-100%); }
+.resource-timeline-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; padding-top: 8px; color: rgb(var(--ink-200)); }
+.resource-timeline-legend > span { display: inline-flex; align-items: center; gap: 8px; }
+.resource-timeline-legend i { display: inline-block; flex-shrink: 0; font-style: normal; }
+.resource-timeline-break-key { height: 14px; border-left: 2px solid rgb(var(--sev-critical-solid)); }
+.resource-timeline-crash-key { color: rgb(var(--sev-critical)); font-size: 18px; }
+.resource-timeline-now-key { height: 14px; border-left: 1px dashed rgb(var(--ink-400)); }
+.resource-timeline-window-key { width: 14px; height: 12px; background: rgb(var(--accent) / .18); }
+.resource-timeline-detail { max-height: 220px; overflow: auto; margin-top: 12px; padding: 12px; border: 1px solid rgb(var(--ink-500)); border-radius: 6px; background: rgb(var(--surface-raised)); color: rgb(var(--ink-100)); }
+.resource-timeline-axis::before { content: ""; position: sticky; left: 0; z-index: 3; display: block; width: 200px; height: 30px; margin-left: -200px; margin-bottom: -30px; background: rgb(var(--surface)); }
+.break-log-bracket-plot { position: absolute; inset: 0 0 0 200px; pointer-events: none; }
+.resource-timeline, #kubernetes-break-logs { --break-log-tone: 45 212 191; }
+:root[data-theme="light"] .resource-timeline, :root[data-theme="light"] #kubernetes-break-logs { --break-log-tone: 15 118 110; }
+.break-log-bracket { position: absolute; inset-block: 0; border: 1px dashed rgb(var(--break-log-tone)); background: rgb(var(--break-log-tone) / .08); }
+.break-log-window-caption { position: absolute; bottom: calc(100% + 2px); box-sizing: border-box; width: 220px; max-width: 100%; padding: 2px 6px; overflow-wrap: anywhere; border: 1px solid rgb(var(--break-log-tone)); border-radius: 6px; background: rgb(var(--surface)); color: rgb(var(--break-log-tone)); }
+.break-log-handle { position: absolute; bottom: -5px; z-index: 4; width: 24px; height: 30px; transform: translateX(-50%); pointer-events: auto; cursor: ew-resize; touch-action: none; }
+.break-log-handle::after { content: ""; display: block; width: 6px; height: 20px; margin: auto; border-radius: 3px; background: rgb(var(--break-log-tone)); }
+.break-log-handle:focus-visible { outline: 2px solid rgb(var(--link)); outline-offset: 2px; }
+.break-log-window-chip { border: 1px solid rgb(var(--break-log-tone)); border-radius: 6px; padding: 2px 6px; color: rgb(var(--break-log-tone)); }
+.break-log-rate { height: 48px; }
+.break-log-rate-bar { position: absolute; bottom: 0; min-width: 1px; background: rgb(var(--accent) / .45); }
+.break-log-rate-bar > span { position: absolute; inset-inline: 0; bottom: 0; background: rgb(var(--sev-critical)); }
+section[aria-label="Kubernetes Agent"] input[role="switch"] { appearance: none; width: 34px; height: 20px; flex-shrink: 0; border: 1px solid rgb(var(--ink-400)); border-radius: 12px; background: rgb(var(--ink-600)); cursor: pointer; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]::before { content: ""; display: block; width: 14px; height: 14px; margin: 2px; border-radius: 50%; background: rgb(var(--ink-100)); transition: transform 120ms ease; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:checked { background: rgb(var(--accent)); border-color: rgb(var(--accent)); }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:checked::before { transform: translateX(14px); background: white; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:focus-visible { outline: 2px solid rgb(var(--link)); outline-offset: 3px; }
+section[aria-label="Kubernetes Agent"] input[role="switch"]:disabled { cursor: default; opacity: .6; }
+@media (prefers-reduced-motion: reduce) { section[aria-label="Kubernetes Agent"] input[role="switch"]::before { transition: none; } }
+@media (max-width: 640px) {
+  .resource-timeline-grid { min-width: 752px; }
+  .resource-timeline-row { grid-template-columns: 132px minmax(0, 1fr); }
+  .resource-timeline-head, .resource-timeline-axis { padding-left: 132px; }
+  .resource-timeline-overlay { left: 132px; }
+  .break-log-bracket-plot { left: 132px; }
+  .resource-timeline-axis::before { width: 132px; margin-left: -132px; }
+}

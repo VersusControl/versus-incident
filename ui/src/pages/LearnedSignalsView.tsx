@@ -5,7 +5,6 @@ import {
   Eye,
   LineChart,
   Lock,
-  Search,
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
@@ -25,6 +24,8 @@ import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { PeekPanel } from "@/components/PeekPanel";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -47,6 +48,18 @@ import { Pagination } from "@/components/Pagination";
 import { usePagination } from "@/lib/pagination";
 import { SortHeader } from "@/components/SortHeader";
 import { tsValue, useSortableRows, type SortAccessor } from "@/lib/sortRows";
+import { ActiveFilterChips, FilterPanel } from "@/components/FilterPanel";
+import { ServiceGroupedRows } from "@/components/ServiceGroupRows";
+import {
+  applyFacets,
+  facetChips,
+  facetViews,
+  type FacetDef,
+  withoutFacets,
+} from "@/lib/listFilters";
+import { useFacetFilters } from "@/lib/useFacetFilters";
+import { GROUP_BY_SERVICE, GROUP_PARAM } from "@/lib/serviceGroups";
+import { useServiceGrouping } from "@/lib/useServiceGrouping";
 
 // LearnedSignalsView — the read-only "what the agent knows right now" view for
 // ONE telemetry type (Metrics or Traces). It makes the Enterprise metric/trace
@@ -109,7 +122,6 @@ function unitLabel(unit: string): string {
 type Variant = {
   kind: "metric" | "trace";
   icon: LucideIcon;
-  subtitle: string;
   hasOperation: boolean;
   searchPlaceholder: string;
   lockedTitle: string;
@@ -117,32 +129,67 @@ type Variant = {
   // sampleLabel is the per-type wording for the peek's raw-example field — the
   // metric/trace parity of the logs page's "Example log line".
   sampleLabel: string;
+  facets: readonly FacetDef<BaselineRow>[];
 };
+
+const SERVICE_FACET: FacetDef<BaselineRow> = {
+  id: "service",
+  label: "Service",
+  values: (r) => r.service,
+  format: displayService,
+};
+const SIGNAL_FACET: FacetDef<BaselineRow> = {
+  id: "signal",
+  label: "Signal",
+  values: (r) => r.signal,
+  format: humanSignal,
+};
+const SOURCE_FACET: FacetDef<BaselineRow> = {
+  id: "source",
+  label: "Source",
+  values: (r) => r.source,
+  format: sourceLabel,
+};
+
+const baselineService = (r: BaselineRow) => r.service;
 
 const METRIC: Variant = {
   kind: "metric",
   icon: LineChart,
-  subtitle:
-    "The agent is learning what's normal for each service's numbers — request rate, errors, latency — so it can catch a value that suddenly looks wrong.",
   hasOperation: false,
-  searchPlaceholder: "Search service or signal…  ( / )",
+  searchPlaceholder: "Search service or signal…",
   lockedTitle: "Metrics learning is an Enterprise capability",
   lockedBody:
     "Metrics learning is an Enterprise capability — the agent learns what's normal for each service's request rate, errors and latency so it can catch problems automatically.",
   sampleLabel: "Example metric",
+  facets: [
+    SERVICE_FACET,
+    SIGNAL_FACET,
+    SOURCE_FACET,
+    { id: "unit", label: "Unit", values: (r) => r.unit ?? "", format: unitLabel },
+  ],
 };
 
 const TRACE: Variant = {
   kind: "trace",
   icon: Waypoints,
-  subtitle:
-    "The agent is learning the normal speed and error rate of each service operation, so it can catch requests that suddenly get slow or start failing.",
   hasOperation: true,
-  searchPlaceholder: "Search service, operation or signal…  ( / )",
+  searchPlaceholder: "Search service, operation or signal…",
   lockedTitle: "Traces learning is an Enterprise capability",
   lockedBody:
     "Traces learning is an Enterprise capability — the agent learns the normal speed and error rate of each operation so it can catch slow or failing requests automatically.",
   sampleLabel: "Example trace",
+  facets: [
+    SERVICE_FACET,
+    {
+      id: "operation",
+      label: "Operation",
+      values: (r) => r.operation ?? "",
+      format: (v) => v || "—",
+    },
+    SIGNAL_FACET,
+    SOURCE_FACET,
+  ],
 };
 
 const STATUS_PARAM = "status";
@@ -188,7 +235,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     },
   });
 
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const statusFilter = params.get(STATUS_PARAM) ?? "all";
   const scope = isExclusionScope(params.get(SCOPE_PARAM));
   const [q, setQ] = useState("");
@@ -212,10 +259,11 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
   const excl = useLearnExclusions(data !== undefined);
 
   const rows = useMemo(() => data?.baselines ?? [], [data]);
+  const facets = useFacetFilters(variant.facets);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return rows.filter((r) => {
+    return applyFacets(rows, variant.facets, facets.selection).filter((r) => {
       const ready = r.readiness?.ready ?? r.confident;
       if (statusFilter === "ready" && !ready) return false;
       if (statusFilter === "learning" && ready) return false;
@@ -227,7 +275,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
         (r.operation ?? "").toLowerCase().includes(needle)
       );
     });
-  }, [rows, q, statusFilter]);
+  }, [rows, q, statusFilter, variant.facets, facets.selection]);
 
   // ----- Active | Ignored scope --------------------------------------
   // A metric/trace row is "ignored" when its SIGNAL is held out of learning
@@ -271,9 +319,11 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
   // Paginate at 100/page; reset to page 1 when the status filter, scope tab,
   // search, or sort changes so a filter never lands the operator on an empty
   // page.
-  const pg = usePagination(sorted.rows, {
-    resetKey: `${statusFilter}|${scope}|${q}|${sorted.signature}`,
-  });
+  const listKey = `${statusFilter}|${scope}|${q}|${facets.signature}|${sorted.signature}`;
+  const pg = usePagination(sorted.rows, { resetKey: listKey });
+  const grouping = useServiceGrouping(sorted.rows, baselineService, listKey);
+  // The rows actually on screen, in display order, for selection.
+  const visibleRows = grouping.grouped ? grouping.visibleRows : pg.pageItems;
 
   // ----- selection + action bar -------------------------------------------
   // The SAME checkbox action model the logs page uses. For metrics/traces every
@@ -286,10 +336,10 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
     excludeVisible: excl.visible,
   });
   const bulkEnabled = bulkActions.length > 0;
-  const pageKeys = useMemo(() => pg.pageItems.map(rowKey), [pg.pageItems]);
+  const pageKeys = useMemo(() => visibleRows.map(rowKey), [visibleRows]);
   const bulk = useBulkSelection(
     pageKeys,
-    `${statusFilter}|${scope}|${q}|${sorted.signature}|${pg.page}`,
+    `${listKey}|${grouping.grouped}|${pg.page}|${grouping.pagination.page}`,
   );
 
   // A metric/trace action operates on SIGNAL names (deduped — a signal is
@@ -356,52 +406,77 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <p className="mb-3 max-w-3xl text-xs text-ink-300">{variant.subtitle}</p>
-
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <SegmentedControl
-            param={STATUS_PARAM}
-            defaultValue="all"
-            aria-label="Status filter"
-            options={[
-              { value: "all", label: "All" },
-              { value: "ready", label: "Ready" },
-              { value: "learning", label: "Still learning" },
-            ]}
-          />
-
-          {excl.visible && (
+        <FilterBar
+          tabs={
             <SegmentedControl
-              param={SCOPE_PARAM}
-              defaultValue="active"
-              aria-label="Learning scope"
+              param={STATUS_PARAM}
+              defaultValue="all"
+              aria-label="Status filter"
               options={[
-                { value: "active", label: "Active", badge: scopeCounts.active },
-                {
-                  value: "ignored",
-                  label: "Ignored",
-                  badge: scopeCounts.ignored,
-                },
+                { value: "all", label: "All" },
+                { value: "ready", label: "Ready" },
+                { value: "learning", label: "Still learning" },
               ]}
             />
-          )}
-
-          <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              className="input pl-7"
-              placeholder={variant.searchPlaceholder}
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-          </div>
-
-          <AutoRefreshControl state={refresh} />
-        </div>
+          }
+          search={
+            <>
+              <SearchInput
+                value={q}
+                onChange={setQ}
+                className="w-full max-w-md sm:w-auto sm:flex-1"
+                placeholder={variant.searchPlaceholder}
+              />
+              <FilterPanel
+                facets={facetViews(rows, variant.facets, facets.selection)}
+                activeCount={facets.activeCount + (excl.visible && scope === "ignored" ? 1 : 0)}
+                onToggle={facets.toggle}
+                onClear={() =>
+                  setParams(
+                    (prev) => {
+                      const next = withoutFacets(prev, variant.facets);
+                      if (excl.visible) next.delete(SCOPE_PARAM);
+                      return next;
+                    },
+                    { replace: true },
+                  )
+                }
+                controls={
+                  excl.visible ? (
+                    <SegmentedControl
+                      param={SCOPE_PARAM}
+                      defaultValue="active"
+                      aria-label="Learning scope"
+                      options={[
+                        { value: "active", label: "Active", badge: scopeCounts.active },
+                        { value: "ignored", label: "Ignored", badge: scopeCounts.ignored },
+                      ]}
+                    />
+                  ) : undefined
+                }
+              />
+            </>
+          }
+          actions={
+            <>
+              <SegmentedControl
+                param={GROUP_PARAM}
+                defaultValue={GROUP_BY_SERVICE}
+                aria-label="List view"
+                options={[
+                  { value: GROUP_BY_SERVICE, label: "By service" },
+                  { value: "flat", label: "Flat" },
+                ]}
+              />
+              <AutoRefreshControl state={refresh} />
+            </>
+          }
+        />
+        <ActiveFilterChips
+          chips={facetChips(variant.facets, facets.selection)}
+          onRemove={facets.toggle}
+          onClear={facets.clear}
+        />
 
         {isError && !locked ? (
           <RetryableError
@@ -421,7 +496,7 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                 busy={excl.busy}
               />
             )}
-            <div className="max-h-[calc(100vh-260px)] overflow-auto">
+            <div className="max-h-[calc(100vh-210px)] overflow-auto">
               <table className="ddt">
                 <thead>
                   <tr>
@@ -530,7 +605,14 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                       </td>
                     </tr>
                   )}
-                  {pg.pageItems.map((r) => (
+                  <ServiceGroupedRows
+                    grouped={grouping.grouped}
+                    views={grouping.views}
+                    flatRows={pg.pageItems}
+                    colSpan={cols}
+                    onToggle={grouping.toggle}
+                    onShowMore={grouping.showMore}
+                    renderRow={(r) => (
                     <tr key={rowKey(r)}>
                       {bulkEnabled && (
                         <td className="w-8">
@@ -590,11 +672,16 @@ export function LearnedSignalsView({ variant }: { variant: Variant }) {
                         {fmtRel(r.last_updated)}
                       </td>
                     </tr>
-                  ))}
+                    )}
+                  />
                 </tbody>
               </table>
             </div>
-            <Pagination state={pg} />
+            {grouping.grouped ? (
+              <Pagination state={grouping.pagination} noun="services" />
+            ) : (
+              <Pagination state={pg} />
+            )}
           </div>
         )}
       </main>
@@ -674,9 +761,11 @@ function Field({
   children: React.ReactNode;
 }) {
   return (
-    <div>
+    <div className="min-w-0">
       <dt className="text-2xs uppercase tracking-wide text-ink-400">{label}</dt>
-      <dd className="mt-0.5 text-ink-100">{children}</dd>
+      <dd className="mt-0.5 min-w-0 [overflow-wrap:anywhere] text-ink-100">
+        {children}
+      </dd>
     </div>
   );
 }

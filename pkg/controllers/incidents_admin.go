@@ -1,18 +1,23 @@
 package controllers
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -29,6 +34,13 @@ func NewIncidentAdminController() *IncidentAdminController {
 	return &IncidentAdminController{}
 }
 
+const internalServerErrorMessage = "internal server error"
+
+func incidentStorageError(c *fiber.Ctx, operation string, err error) error {
+	log.Printf("incident admin storage failure: operation=%q error=%v", operation, err)
+	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": internalServerErrorMessage})
+}
+
 // Register attaches the admin endpoints under /api/admin/incidents.
 //
 //	GET  /api/admin/incidents                 list (newest first; ?limit=NN)
@@ -41,9 +53,9 @@ func NewIncidentAdminController() *IncidentAdminController {
 func (i *IncidentAdminController) Register(router fiber.Router) {
 	// Capabilities probe — lets the UI enable/disable search depending on
 	// whether the active storage backend implements storage.Searcher.
-	router.Group("/admin/capabilities", i.authMiddleware).Get("/", i.capabilities)
+	router.Group("/admin/capabilities", adminGatewayGuard).Get("/", i.capabilities)
 
-	g := router.Group("/admin/incidents", i.authMiddleware)
+	g := router.Group("/admin/incidents", adminGatewayGuard)
 	g.Get("/", i.list)
 	// /search MUST be registered before /:id so the literal path is not
 	// swallowed by the :id parameter route.
@@ -59,35 +71,20 @@ func (i *IncidentAdminController) Register(router fiber.Router) {
 	g.Get("/:id", i.get)
 	g.Post("/:id/resolve", i.resolve)
 	g.Post("/:id/analyze", i.analyze)
+	g.Post("/:id/analyze/stream", i.analyzeStream)
 	g.Get("/:id/analyses", i.listAnalyses)
 
-	a := router.Group("/admin/analyses", i.authMiddleware)
+	a := router.Group("/admin/analyses", adminGatewayGuard)
 	a.Get("/", i.listAllAnalyses)
 	a.Get("/:analysis_id", i.getAnalysis)
 	a.Delete("/:analysis_id", i.deleteAnalysis)
 }
 
-// authMiddleware reuses the agent gateway secret. Keeping the same
-// header name (X-Gateway-Secret) means the UI only manages one secret.
-// Comparison is constant-time (see secureEqual in agent.go) to avoid
-// header-length / prefix-match timing oracles.
-func (i *IncidentAdminController) authMiddleware(c *fiber.Ctx) error {
-	if middleware.RequestAuthorized(c) {
-		return c.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := c.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-	return c.Next()
-}
-
 func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	store := services.Storage()
+	countWindow := resolveCountWindow(store)
 	if store == nil {
-		return c.JSON(fiber.Map{"incidents": []any{}, "counts": originCounts(nil), "total": 0})
+		return c.JSON(fiber.Map{"incidents": []any{}, "counts": originCounts(nil), "count_window": countWindow.window, "total": 0})
 	}
 	origin := c.Query("origin")
 	// Preferred path: the backend implements the pager capability, so we
@@ -95,26 +92,26 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	// never load the whole table. Postgres (unbounded history) and the
 	// file/memory backends (already capped) all implement it.
 	if pager, ok := store.(storage.IncidentPager); ok {
-		counts, err := pager.CountIncidentsByStatus()
+		counts, err := windowedStatusCounts(store, countWindow)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "list incident counts", err)
 		}
 		size := parsePageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
 		recs, err := pager.ListIncidentsPage(origin, offset, size)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "list incidents page", err)
 		}
-		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page))
+		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page, countWindow.window))
 	}
 	// Fallback for backends without the pager capability (the redis stub):
 	// the legacy full-window read + in-memory pagination. Correct but
 	// unbounded — only reached by a backend that has no bounded read.
 	recs, err := store.ListIncidents(0)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "list incidents", err)
 	}
-	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit"))))
+	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit")), countWindow))
 }
 
 // capabilities reports which optional storage features the running
@@ -138,33 +135,72 @@ func (i *IncidentAdminController) capabilities(c *fiber.Ctx) error {
 			"default_channel": settings.DefaultChannel,
 			"default_window":  settings.DefaultWindow,
 			"include_chart":   settings.IncludeChart,
-			"channels":        enabledAlertChannels(cfg),
-			"public_host_set": strings.TrimSpace(cfg.PublicHost) != "",
+			"channels":        i.reportChannels(c),
+			// configured_disabled lists channels that are set up (a runtime
+			// override exists) but currently turned OFF, so absent from
+			// channels — lets the report UI hint "configured but disabled"
+			// instead of silently dropping them. Always a non-null [].
+			"configured_disabled": i.reportConfiguredDisabledChannels(c),
+			"public_host_set":     strings.TrimSpace(cfg.PublicHost) != "",
 		},
 	})
 }
 
-// enabledAlertChannels lists the notification channels currently enabled in
-// config, in a stable order, for the report channel picker. Returns an empty
+// reportChannels returns the notification channels to offer in the report
+// channel picker. When a ReportChannelLister is registered (enterprise) it lists
+// the effective (hot-configured) enabled channels for the REQUEST org from the
+// masked runtime-channel view — the SAME source the alert-fatigue picker uses —
+// so the two pickers stay consistent. OSS registers none, so it falls back to
+// the static enabled channels from the global config (single-tenant behaviour
+// byte-for-byte unchanged).
+func (i *IncidentAdminController) reportChannels(c *fiber.Ctx) []string {
+	if l := reportChannelLister(); l != nil {
+		if channels := l.EnabledAlertChannels(c.UserContext(), middleware.OrgFromContext(c)); channels != nil {
+			return channels
+		}
+	}
+	return enabledAlertChannels(config.EffectiveAlertConfig(c.UserContext()))
+}
+
+// reportConfiguredDisabledChannels returns the channels that are configured (a
+// runtime override exists) but currently disabled for the REQUEST org, so they
+// are absent from reportChannels. When a ReportChannelLister is registered
+// (enterprise) it sources them from the masked runtime-channel view. OSS
+// registers none — community mode has no runtime-override concept — so this is
+// always an empty (non-nil) slice, serialized as [] not null.
+func (i *IncidentAdminController) reportConfiguredDisabledChannels(c *fiber.Ctx) []string {
+	if l := reportChannelLister(); l != nil {
+		if names := l.ConfiguredDisabledChannels(c.UserContext(), middleware.OrgFromContext(c)); names != nil {
+			return names
+		}
+	}
+	return []string{}
+}
+
+// enabledAlertChannels lists the notification channels currently enabled in the
+// EFFECTIVE channel config, in a stable order, for the report channel picker.
+// It is handed the resolved config rather than the global one so the fallback
+// path — a runtime channel resolver registered but no channel lister — still
+// offers the channels the emission path will actually use. Returns an empty
 // (non-nil) slice so it serializes as [] not null.
-func enabledAlertChannels(cfg *config.Config) []string {
+func enabledAlertChannels(alert config.AlertConfig) []string {
 	out := []string{}
-	if cfg.Alert.Slack.Enable {
+	if alert.Slack.Enable {
 		out = append(out, "slack")
 	}
-	if cfg.Alert.Telegram.Enable {
+	if alert.Telegram.Enable {
 		out = append(out, "telegram")
 	}
-	if cfg.Alert.Viber.Enable {
+	if alert.Viber.Enable {
 		out = append(out, "viber")
 	}
-	if cfg.Alert.Email.Enable {
+	if alert.Email.Enable {
 		out = append(out, "email")
 	}
-	if cfg.Alert.MSTeams.Enable {
+	if alert.MSTeams.Enable {
 		out = append(out, "msteams")
 	}
-	if cfg.Alert.Lark.Enable {
+	if alert.Lark.Enable {
 		out = append(out, "lark")
 	}
 	return out
@@ -177,7 +213,7 @@ func enabledAlertChannels(cfg *config.Config) []string {
 func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 	store := services.Storage()
 	if store == nil {
-		return c.JSON(fiber.Map{"incidents": []any{}})
+		return c.JSON(fiber.Map{"incidents": []any{}, "count_window": agent.CountWindowAll})
 	}
 	searcher, ok := store.(storage.Searcher)
 	if !ok {
@@ -195,49 +231,77 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 	if sp, ok := store.(storage.IncidentSearchPager); ok {
 		counts, err := sp.CountIncidentsMatchingByStatus(query)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "count incident search results", err)
 		}
 		size := parsePageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
 		recs, err := sp.SearchIncidentsPage(query, origin, offset, size)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "search incidents page", err)
 		}
-		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page))
+		return c.JSON(pagedIncidentResponse(recs, counts, origin, offset, size, page, agent.CountWindowAll))
 	}
 	// Fallback: a Searcher without the pager capability. Bound the read to
 	// one page so it can never load the whole match set; counts are computed
 	// over that bounded page.
 	recs, err := searcher.SearchIncidents(query, storage.DefaultIncidentPageSize)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "search incidents", err)
 	}
-	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit"))))
+	// Search is an explicit unbounded lookup — a row found by id must be
+	// counted even when it predates the count window, and the pager search
+	// path above is unbounded too, so pass no window here.
+	return c.JSON(incidentListResponse(recs, origin, c.Query("page"), c.Query("page_size"), parseLimit(c.Query("limit")), countWindow{window: agent.CountWindowAll}))
 }
 
-// counts returns the whole-set per-origin × per-status incident tally in one
-// cheap, rows-free response so the Now page and the header badge can show
-// authoritative numbers WITHOUT loading a page of rows. Preferred path is the
-// bounded pager's single COUNT query; the fallback (a backend with no pager)
-// tallies a materialized window. The shape matches the list response's counts
-// object (top-level unresolved + by_status), so both surfaces read one type.
-func (i *IncidentAdminController) counts(c *fiber.Ctx) error {
-	store := services.Storage()
-	if store == nil {
-		return c.JSON(countsMap(storage.IncidentStatusCounts{}))
+// countWindow carries the effective sanitized setting together with the
+// cutoff derived from it. Handlers resolve it once per request and pass it to
+// count and response helpers, keeping settings I/O out of formatting code.
+type countWindow struct {
+	window string
+	since  time.Time
+}
+
+func resolveCountWindow(store storage.Provider) countWindow {
+	settings := agent.LoadCountSettings(store)
+	return countWindow{
+		window: settings.Window,
+		since:  settings.Since(time.Now().UTC()),
 	}
-	if pager, ok := store.(storage.IncidentPager); ok {
-		sc, err := pager.CountIncidentsByStatus()
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-		}
-		return c.JSON(countsMap(sc))
+}
+
+// windowedStatusCounts is the ONE count path every surface goes through, so the
+// header badge, the Now tiles and the Incidents tabs can never disagree about
+// either the numbers or the window they cover. Backends without the windowed
+// capability materialize their provider-bounded history and apply the cutoff
+// locally so the response metadata never labels an unbounded tally as bounded.
+func windowedStatusCounts(store storage.Provider, countWindow countWindow) (storage.IncidentStatusCounts, error) {
+	if wc, ok := store.(storage.IncidentWindowCounter); ok {
+		return wc.CountIncidentsByStatusSince(countWindow.since)
 	}
 	recs, err := store.ListIncidents(0)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return storage.IncidentStatusCounts{}, err
 	}
-	return c.JSON(countsMap(storage.StatusCountsOf(recs)))
+	return storage.StatusCountsSince(recs, countWindow.since), nil
+}
+
+// counts returns the per-origin × per-status incident tally for the active
+// count window in one cheap, rows-free response, so the Now page and the header
+// badge can show authoritative numbers WITHOUT loading a page of rows. The
+// shape matches the list response's counts object (top-level unresolved +
+// by_status), so both surfaces read one type.
+func (i *IncidentAdminController) counts(c *fiber.Ctx) error {
+	store := services.Storage()
+	countWindow := resolveCountWindow(store)
+	if store == nil {
+		return c.JSON(countsResponse(storage.IncidentStatusCounts{}, countWindow.window))
+	}
+	sc, err := windowedStatusCounts(store, countWindow)
+	if err != nil {
+		return incidentStorageError(c, "count incidents", err)
+	}
+	return c.JSON(countsResponse(sc, countWindow.window))
 }
 
 func (i *IncidentAdminController) get(c *fiber.Ctx) error {
@@ -250,7 +314,7 @@ func (i *IncidentAdminController) get(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get incident", err)
 	}
 	return c.JSON(rec)
 }
@@ -258,22 +322,29 @@ func (i *IncidentAdminController) get(c *fiber.Ctx) error {
 // summarize drops the heavy Content map from a record for list views.
 func summarize(r *storage.IncidentRecord) fiber.Map {
 	return fiber.Map{
-		"id":                  r.ID,
-		"team_id":             r.TeamID,
-		"title":               r.Title,
-		"source":              r.Source,
-		"origin":              r.EffectiveOrigin(),
-		"service":             r.Service,
-		"resolved":            r.Resolved,
-		"channels_notified":   r.ChannelsNotified,
-		"oncall_triggered":    r.OnCallTriggered,
-		"notify_status":       r.NotifyStatus,
-		"notify_error":        r.NotifyError,
-		"created_at":          r.CreatedAt,
-		"acked_at":            r.AckedAt,
-		"resolved_at":         r.ResolvedAt,
-		"assigned_team_id":    r.AssignedTeamID,
-		"assigned_member_ids": r.AssignedMemberIDs,
+		"id":                        r.ID,
+		"team_id":                   r.TeamID,
+		"title":                     r.Title,
+		"source":                    r.Source,
+		"origin":                    r.EffectiveOrigin(),
+		"service":                   services.ServiceLabel(r),
+		"resolved":                  r.Resolved,
+		"channels_notified":         r.ChannelsNotified,
+		"oncall_triggered":          r.OnCallTriggered,
+		"notify_status":             r.NotifyStatus,
+		"notify_error":              r.NotifyError,
+		"created_at":                r.CreatedAt,
+		"acked_at":                  r.AckedAt,
+		"resolved_at":               r.ResolvedAt,
+		"detection_fingerprint":     r.DetectionFingerprint,
+		"detection_episode_id":      r.DetectionEpisodeID,
+		"occurrence_count":          r.OccurrenceCount,
+		"detection_first_seen":      r.DetectionFirstSeen,
+		"detection_last_seen":       r.DetectionLastSeen,
+		"highest_observed_severity": r.HighestObservedSeverity,
+		"highest_notified_severity": r.HighestNotifiedSeverity,
+		"assigned_team_id":          r.AssignedTeamID,
+		"assigned_member_ids":       r.AssignedMemberIDs,
 	}
 }
 
@@ -460,6 +531,12 @@ func countsMap(c storage.IncidentStatusCounts) fiber.Map {
 	return m
 }
 
+func countsResponse(c storage.IncidentStatusCounts, countWindow string) fiber.Map {
+	m := countsMap(c)
+	m["count_window"] = countWindow
+	return m
+}
+
 // filteredTotal returns the unresolved count that matches the active origin
 // filter, derived from the whole-set breakdown so the badge for the active
 // tab shows that tab's open count, while the counts object stays the full
@@ -490,19 +567,20 @@ func filteredTotal(c storage.IncidentCounts, origin string) int {
 // driven off PAGE-FULLNESS: a full page (len == size) implies at least one
 // more page, an underfull page is the last one. This lets the operator page
 // past the unresolved count — and past row 1000 — through the entire history.
-func pagedIncidentResponse(recs []*storage.IncidentRecord, counts storage.IncidentStatusCounts, origin string, offset, size, page int) fiber.Map {
+func pagedIncidentResponse(recs []*storage.IncidentRecord, counts storage.IncidentStatusCounts, origin string, offset, size, page int, countWindow string) fiber.Map {
 	total := filteredTotal(unresolvedCounts(counts), origin)
 	out := make([]fiber.Map, 0, len(recs))
 	for _, r := range recs {
 		out = append(out, summarize(r))
 	}
 	resp := fiber.Map{
-		"counts":    countsMap(counts),
-		"total":     total,
-		"incidents": out,
-		"offset":    offset,
-		"page":      page,
-		"page_size": size,
+		"counts":       countsMap(counts),
+		"count_window": countWindow,
+		"total":        total,
+		"incidents":    out,
+		"offset":       offset,
+		"page":         page,
+		"page_size":    size,
 	}
 	// A full page implies the backend may hold more rows; the caller resumes
 	// from the row just past this page. An underfull page is the last one.
@@ -541,22 +619,26 @@ func pagedAnalysisResponse(recs []*storage.AnalysisRecord, total, offset, size, 
 	return resp
 }
 
+// incidentListResponse builds the shared response shape for the list and
 // search endpoints. It computes per-origin counts over the FULL result
 // set (so the top-bar shows both feeds regardless of the active tab),
 // applies the optional origin filter, then paginates. pageParam /
 // pageSizeParam are the raw query strings; when pageParam is empty the
 // endpoint returns the full origin-filtered window capped at limit — the
-// back-compat shape existing callers depend on.
-func incidentListResponse(recs []*storage.IncidentRecord, origin, pageParam, pageSizeParam string, limit int) fiber.Map {
+// back-compat shape existing callers depend on. countWindow bounds the
+// by_status tally and carries the matching response metadata; search passes
+// the explicit unbounded "all" value with a zero cutoff.
+func incidentListResponse(recs []*storage.IncidentRecord, origin, pageParam, pageSizeParam string, limit int, countWindow countWindow) fiber.Map {
 	counts := originCounts(recs)
 	// by_status is the authoritative per-origin × per-status breakdown; on this
 	// fallback path (a backend with no bounded pager) it is tallied over the
-	// materialized window so the count surfaces still read the same shape.
-	counts["by_status"] = statusCountsMap(storage.StatusCountsOf(recs))
+	// materialized window, bounded by the same operator-configured count window
+	// the pager path applies so the two never report different numbers.
+	counts["by_status"] = statusCountsMap(storage.StatusCountsSince(recs, countWindow.since))
 	recs = filterByOrigin(recs, origin)
 	total := len(recs)
 
-	resp := fiber.Map{"counts": counts, "total": total}
+	resp := fiber.Map{"counts": counts, "count_window": countWindow.window, "total": total}
 
 	if pageParam != "" {
 		page := 1
@@ -592,8 +674,8 @@ func incidentListResponse(recs []*storage.IncidentRecord, origin, pageParam, pag
 	return resp
 }
 
-// resolve marks an incident as resolved. Idempotent: re-resolving an
-// already-resolved record is a no-op (no error, no timestamp drift).
+// resolve marks an incident as resolved. Re-resolving preserves the original
+// timestamp and retries idempotent detection-episode closure.
 func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 	store := services.Storage()
 	if store == nil {
@@ -604,14 +686,36 @@ func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get incident for resolve", err)
 	}
+	if checker, ok := store.(storage.IncidentMutationChecker); ok {
+		if err := checker.CheckIncidentMutable(rec.ID); errors.Is(err, storage.ErrNotFound) {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+		} else if errors.Is(err, storage.ErrReadOnlyIncident) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		} else if err != nil {
+			return incidentStorageError(c, "check incident mutable for resolve", err)
+		}
+	}
+	now := time.Now().UTC()
 	if !rec.Resolved {
-		now := time.Now().UTC()
 		rec.Resolved = true
 		rec.ResolvedAt = &now
 		if err := store.SaveIncident(rec); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			if errors.Is(err, storage.ErrReadOnlyIncident) {
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+			}
+			return incidentStorageError(c, "save resolved incident", err)
+		}
+	}
+	closedAt := now
+	if rec.ResolvedAt != nil {
+		closedAt = rec.ResolvedAt.UTC()
+	}
+	if episodes, ok := store.(storage.DetectionEpisodeStore); ok {
+		if err := episodes.CloseDetectionEpisodeByIncident(rec.ID, closedAt); err != nil &&
+			!errors.Is(err, storage.ErrNotFound) && !errors.Is(err, storage.ErrUnsupported) {
+			return incidentStorageError(c, "close detection episode", err)
 		}
 	}
 	return c.JSON(fiber.Map{
@@ -641,7 +745,7 @@ func (i *IncidentAdminController) putIntakeSettings(c *fiber.Ctx) error {
 		if errors.Is(err, services.ErrIntakeNoStorage) {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "storage not configured"})
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "save intake settings", err)
 	}
 	// Return the effective settings after the write.
 	return c.JSON(services.LoadIntakeSettings(services.Storage()))
@@ -675,30 +779,64 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get incident for analysis", err)
+	}
+	requestOrg := storage.NormalizeOrgID(middleware.OrgFromContext(c))
+	requestScope := tenancy.ScopeForWrite(store, requestOrg)
+	if !requestScope.Contains(rec.OrgID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 
 	var body analyzeRequest
 	// Body is optional; tolerate parse errors as "no body".
 	_ = c.BodyParser(&body)
 
-	snap := snapshotFromIncident(rec, body.RequestedBy)
-	task := core.AnalyzeTask{Snapshot: snap}
-
 	// Hard ceiling so a stuck tool loop cannot pin a request open
 	// forever. The agent has its own iteration cap on top of this.
-	ctx, cancel := context.WithTimeout(c.UserContext(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(callerContext(c, c.UserContext()), analyzeRunTimeout)
 	defer cancel()
+	ctx = agent.DecorateAIContext(ctx, requestScope)
+
+	analysis, runErr, saveErr := runAndPersistAnalysis(ctx, rec, body.RequestedBy)
+	if saveErr != nil {
+		return incidentStorageError(c, "save analysis", saveErr)
+	}
+
+	status := fiber.StatusOK
+	if runErr != nil {
+		status = fiber.StatusBadGateway
+	}
+	return c.Status(status).JSON(analysis)
+}
+
+// analyzeRunTimeout is the hard ceiling on one analyze run, shared by the
+// synchronous and streaming paths so they cannot drift apart.
+const analyzeRunTimeout = 2 * time.Minute
+
+// runAndPersistAnalysis runs the agent against one incident and saves the
+// record. The two errors are separate on purpose: a failed RUN is still a
+// persisted record the operator should see (502), while a failed SAVE means
+// there is nothing to show (500).
+func runAndPersistAnalysis(
+	ctx context.Context,
+	rec *storage.IncidentRecord,
+	requestedBy string,
+) (analysis *storage.AnalysisRecord, runErr error, saveErr error) {
+	store := services.Storage()
+	ag := services.AnalyzeAgent()
+
+	snap := snapshotFromIncident(rec, requestedBy)
+	task := core.AnalyzeTask{Snapshot: snap}
 
 	startedAt := time.Now().UTC()
 	result, runErr := ag.Run(ctx, task)
 
-	analysis := &storage.AnalysisRecord{
+	analysis = &storage.AnalysisRecord{
 		ID:          uuid.NewString(),
 		OrgID:       rec.OrgID,
 		IncidentID:  rec.ID,
 		RequestedAt: startedAt,
-		RequestedBy: body.RequestedBy,
+		RequestedBy: requestedBy,
 		Status:      "ok",
 	}
 	if result != nil {
@@ -713,15 +851,123 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 		analysis.Error = runErr.Error()
 	}
 
-	if saveErr := store.SaveAnalysis(analysis); saveErr != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": fmt.Sprintf("save: %v", saveErr)})
+	saveErr = store.SaveAnalysis(analysis)
+	return analysis, runErr, saveErr
+}
+
+// streamObserver forwards analyze events to the SSE writer. Sends are
+// NON-BLOCKING by design: the observer is called from inside the agent's tool
+// callbacks, so a slow or vanished browser must never stall the model run.
+// A dropped event is recoverable — the terminal event carries the analysis id
+// and the persisted record holds the complete trace.
+type streamObserver struct{ ch chan core.AnalyzeEvent }
+
+const terminalEventSendTimeout = 5 * time.Second
+
+func (o streamObserver) OnAnalyzeEvent(ev core.AnalyzeEvent) {
+	select {
+	case o.ch <- ev:
+	default:
+	}
+}
+
+func sendTerminalAnalyzeEvent(ctx context.Context, ch chan<- core.AnalyzeEvent, ev core.AnalyzeEvent) {
+	timer := time.NewTimer(terminalEventSendTimeout)
+	defer timer.Stop()
+	select {
+	case ch <- ev:
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+}
+
+// analyzeStream is the live view of the same work /analyze does: it streams
+// each tool call as Server-Sent Events, then a terminal event carrying the
+// persisted analysis id.
+//
+// The run is deliberately detached from the request context. Closing the tab
+// cancels the STREAM, never the analysis — an AI run is expensive and its
+// record still belongs to the incident.
+func (i *IncidentAdminController) analyzeStream(c *fiber.Ctx) error {
+	store := services.Storage()
+	if store == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "storage not configured"})
+	}
+	if services.AnalyzeAgent() == nil {
+		return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "analyze agent not enabled"})
 	}
 
-	status := fiber.StatusOK
-	if runErr != nil {
-		status = fiber.StatusBadGateway
+	rec, err := store.GetIncident(c.Params("id"))
+	if errors.Is(err, storage.ErrNotFound) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
-	return c.Status(status).JSON(analysis)
+	if err != nil {
+		return incidentStorageError(c, "get incident for analysis stream", err)
+	}
+	requestOrg := storage.NormalizeOrgID(middleware.OrgFromContext(c))
+	requestScope := tenancy.ScopeForWrite(store, requestOrg)
+	if !requestScope.Contains(rec.OrgID) {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
+	}
+
+	var body analyzeRequest
+	_ = c.BodyParser(&body)
+	requestedBy := body.RequestedBy
+
+	events := make(chan core.AnalyzeEvent, 256)
+
+	runCtx, cancel := context.WithTimeout(callerContext(c, context.Background()), analyzeRunTimeout)
+	runCtx = agent.DecorateAIContext(runCtx, requestScope)
+	go func() {
+		defer cancel()
+		defer close(events)
+
+		obsCtx := core.WithAnalyzeObserver(runCtx, streamObserver{ch: events})
+		analysis, runErr, saveErr := runAndPersistAnalysis(obsCtx, rec, requestedBy)
+
+		term := core.AnalyzeEvent{At: time.Now().UTC(), Kind: core.AnalyzeEventRunFinished}
+		if analysis != nil {
+			term.AnalysisID = analysis.ID
+			term.DurationMs = analysis.DurationMs
+		}
+		switch {
+		case saveErr != nil:
+			log.Printf("incident admin storage failure: operation=%q error=%v", "save streamed analysis", saveErr)
+			term.Kind = core.AnalyzeEventRunFailed
+			term.Error = internalServerErrorMessage
+		case runErr != nil:
+			term.Kind = core.AnalyzeEventRunFailed
+			term.Error = runErr.Error()
+		}
+		sendTerminalAnalyzeEvent(runCtx, events, term)
+	}()
+
+	c.Set(fiber.HeaderContentType, "text/event-stream")
+	c.Set(fiber.HeaderCacheControl, "no-cache")
+	c.Set(fiber.HeaderConnection, "keep-alive")
+	// nginx and friends buffer proxied responses by default, which would hold
+	// the whole stream until the run ends and defeat the point.
+	c.Set("X-Accel-Buffering", "no")
+
+	c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+		for ev := range events {
+			b, mErr := json.Marshal(ev)
+			if mErr != nil {
+				continue
+			}
+			if _, wErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Kind, b); wErr != nil {
+				break
+			}
+			if fErr := w.Flush(); fErr != nil {
+				break
+			}
+		}
+		// Keep draining after a write failure so the producing goroutine is
+		// never left blocked on a channel nobody reads.
+		for range events {
+		}
+	})
+	return nil
 }
 
 func (i *IncidentAdminController) listAnalyses(c *fiber.Ctx) error {
@@ -737,7 +983,7 @@ func (i *IncidentAdminController) listAnalyses(c *fiber.Ctx) error {
 	}
 	recs, err := store.ListAnalysesByIncident(c.Params("id"), limit)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "list incident analyses", err)
 	}
 	return c.JSON(fiber.Map{"analyses": recs})
 }
@@ -754,13 +1000,13 @@ func (i *IncidentAdminController) listAllAnalyses(c *fiber.Ctx) error {
 	if pager, ok := store.(storage.AnalysisPager); ok {
 		total, err := pager.CountAnalyses()
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "count analyses", err)
 		}
 		size := parseAnalysisPageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
 		recs, err := pager.ListAnalysesPage(offset, size)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+			return incidentStorageError(c, "list analyses page", err)
 		}
 		return c.JSON(pagedAnalysisResponse(recs, total, offset, size, page))
 	}
@@ -773,7 +1019,7 @@ func (i *IncidentAdminController) listAllAnalyses(c *fiber.Ctx) error {
 	}
 	recs, err := store.ListAnalyses(limit)
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "list analyses", err)
 	}
 	return c.JSON(fiber.Map{"analyses": recs, "total": len(recs)})
 }
@@ -788,7 +1034,7 @@ func (i *IncidentAdminController) getAnalysis(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 	}
 	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		return incidentStorageError(c, "get analysis", err)
 	}
 	return c.JSON(rec)
 }
@@ -802,29 +1048,24 @@ func (i *IncidentAdminController) deleteAnalysis(c *fiber.Ctx) error {
 		if errors.Is(err, storage.ErrNotFound) {
 			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "not found"})
 		}
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
+		if errors.Is(err, storage.ErrReadOnlyAnalysis) {
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": err.Error()})
+		}
+		return incidentStorageError(c, "delete analysis", err)
 	}
 	return c.SendStatus(fiber.StatusNoContent)
 }
 
 // snapshotFromIncident flattens a stored IncidentRecord into the
-// analyze agent's input contract. Severity is best-effort: pulled from
-// the alert payload when present.
+// analyze agent's input contract. Service and severity go through the shared
+// extraction so the snapshot matches what the list and the detail show.
 func snapshotFromIncident(rec *storage.IncidentRecord, requestedBy string) core.AnalyzeIncidentSnapshot {
-	severity := ""
-	if rec.Content != nil {
-		if v, ok := rec.Content["severity"]; ok {
-			if s, ok := v.(string); ok {
-				severity = s
-			}
-		}
-	}
 	return core.AnalyzeIncidentSnapshot{
 		IncidentID:  rec.ID,
 		Title:       rec.Title,
-		Service:     rec.Service,
+		Service:     services.ServiceLabel(rec),
 		Source:      rec.Source,
-		Severity:    severity,
+		Severity:    services.ExtractSeverity(rec.Content),
 		Resolved:    rec.Resolved,
 		CreatedAt:   rec.CreatedAt,
 		AckedAt:     rec.AckedAt,
@@ -832,6 +1073,27 @@ func snapshotFromIncident(rec *storage.IncidentRecord, requestedBy string) core.
 		Content:     rec.Content,
 		RequestedBy: requestedBy,
 	}
+}
+
+// rawJSONOrString adapts a tool's captured text to a json.RawMessage field.
+//
+// RawMessage validates on marshal, so a non-JSON value here fails the marshal
+// of the ENTIRE analysis record and the run is lost at save. Two real sources
+// of non-JSON: capOutput truncates an oversized envelope mid-structure, and a
+// tool may simply return plain text. Neither is worth discarding an expensive
+// analysis over, so anything unparseable is stored as a JSON string instead.
+func rawJSONOrString(s string) json.RawMessage {
+	if s == "" {
+		return nil
+	}
+	if json.Valid([]byte(s)) {
+		return json.RawMessage(s)
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(b)
 }
 
 func toolCallsFromCore(traces []core.ToolCallTrace) []storage.AnalysisToolCall {
@@ -842,8 +1104,8 @@ func toolCallsFromCore(traces []core.ToolCallTrace) []storage.AnalysisToolCall {
 	for _, t := range traces {
 		out = append(out, storage.AnalysisToolCall{
 			Name:       t.Name,
-			Args:       []byte(t.Args),
-			Output:     []byte(t.Output),
+			Args:       rawJSONOrString(t.Args),
+			Output:     rawJSONOrString(t.Output),
 			DurationMs: t.DurationMs,
 			Error:      t.Error,
 		})

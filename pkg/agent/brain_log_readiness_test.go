@@ -11,12 +11,11 @@ import (
 // TestLogReadiness_DriftAgainstClassify is the anti-drift guard the design
 // requires. It drives a log pattern to a range of states across
 // thresholds {below-default, at-default, below-custom, at-custom, zero,
-// negative, already-known} and asserts THREE views of "known" all
-// agree for every row:
+// negative, already-known} and guards the two intentional clocks:
 //
-//  1. isLogKnown(...)            — the single extracted predicate
-//  2. LogReadiness(...).Ready    — the read-side readiness view
-//  3. Classify(...)              — the classifier's VerdictKnownPattern decision
+//  1. isLogKnown(...) and LogReadiness(...).Ready use persisted post-fold state.
+//  2. Classify(...) uses pre-fold state so the threshold-crossing observation
+//     emits once before Promote makes subsequent observations known.
 //
 // Spike is disabled everywhere (SpikeMultiplier == 0) so Classify's ONLY
 // "known" signal is VerdictKnownPattern — a spike would otherwise mask the
@@ -28,7 +27,8 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 		threshold int
 		// build drives the brain/catalog to the state under test and returns
 		// the LAST Classify verdict observed.
-		build func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict
+		build             func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict
+		wantClassifyKnown bool
 	}{
 		{
 			name:      "uncurated below default threshold",
@@ -75,8 +75,9 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 			},
 		},
 		{
-			name:      "zero threshold normalizes to default, high count becomes known",
-			threshold: 0,
+			name:              "zero threshold normalizes to default, high count becomes known",
+			threshold:         0,
+			wantClassifyKnown: true,
 			build: func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict {
 				var v core.TypedVerdict
 				for i := 0; i < 120; i++ {
@@ -86,8 +87,9 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 			},
 		},
 		{
-			name:      "negative threshold normalizes to default, high count becomes known",
-			threshold: -1,
+			name:              "negative threshold normalizes to default, high count becomes known",
+			threshold:         -1,
+			wantClassifyKnown: true,
 			build: func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict {
 				var v core.TypedVerdict
 				for i := 0; i < 120; i++ {
@@ -97,8 +99,9 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 			},
 		},
 		{
-			name:      "operator-marked known stays known regardless of threshold",
-			threshold: 0,
+			name:              "operator-marked known stays known regardless of threshold",
+			threshold:         0,
+			wantClassifyKnown: true,
 			build: func(t *testing.T, b *logBrain, c *Catalog) core.TypedVerdict {
 				// Create the pattern, hand-mark it known, then re-classify: the
 				// prevVerdict=="known" clause must win independently of the count
@@ -129,13 +132,9 @@ func TestLogReadiness_DriftAgainstClassify(t *testing.T) {
 			predicate := isLogKnown(p.Verdict, p.Count, tc.threshold)
 			r := LogReadiness(p, tc.threshold, 30*time.Second)
 
-			if predicate != classifyKnown {
-				t.Errorf("isLogKnown=%v but Classify known=%v (verdict=%v) — predicate drifted from classifier",
-					predicate, classifyKnown, v.Class)
-			}
-			if r.Ready != classifyKnown {
-				t.Errorf("LogReadiness.Ready=%v but Classify known=%v (verdict=%v) — readiness drifted from classifier",
-					r.Ready, classifyKnown, v.Class)
+			if classifyKnown != tc.wantClassifyKnown {
+				t.Errorf("Classify known=%v (verdict=%v), want %v from pre-fold state",
+					classifyKnown, v.Class, tc.wantClassifyKnown)
 			}
 			if r.Ready != predicate {
 				t.Errorf("LogReadiness.Ready=%v but isLogKnown=%v — readiness drifted from predicate",

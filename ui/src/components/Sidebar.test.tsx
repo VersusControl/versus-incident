@@ -5,10 +5,12 @@ import {
   screen,
   cleanup,
   fireEvent,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
+import { ApiError } from "@/lib/api";
 import { Sidebar, SidebarContent } from "./Sidebar";
 
 // This runner exposes node's experimental global localStorage, whose methods
@@ -45,28 +47,33 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
-// Nav regrouping — the agent's reasoning surfaces (Decisions, Analyses,
-// SLIs/SLOs) live in their own "AI" nav section, distinct from the raw
-// learned-catalog "Agent" views, and the SLIs/SLOs entry stays enterprise-
-// locked. This is pinned by RENDERED BEHAVIOUR (the section a user sees and
-// its links) rather than the internal source array name — a source-string
-// pin re-broke when the array was renamed `const aiZone` → `const ai`, so we
-// assert what renders instead of how the file happens to be written.
-//
-// The agent is enabled (nothing dimmed) and the baselines probe answers 403
-// (OSS / unlicensed) so the enterprise lock on SLIs/SLOs is exercised.
+const apiMocks = vi.hoisted(() => ({
+  getAgentConfig: vi.fn().mockResolvedValue({ enable: true }),
+  getSSODeployment: vi.fn(),
+  listBaselines: vi.fn(),
+}));
+
 vi.mock("@/lib/api", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/api")>();
   return {
     ...actual,
     api: {
       ...actual.api,
-      getAgentConfig: vi.fn().mockResolvedValue({ enable: true }),
-      status: vi.fn().mockResolvedValue({ runbooks_available: false }),
-      // 403 → unlicensed → enterpriseLocked === true → SLIs/SLOs shows a lock.
-      listBaselines: vi.fn().mockRejectedValue(new actual.ApiError(403, "forbidden")),
+      getAgentConfig: apiMocks.getAgentConfig,
+      getSSODeployment: apiMocks.getSSODeployment,
+      listBaselines: apiMocks.listBaselines,
     },
   };
+});
+
+beforeEach(() => {
+  apiMocks.getAgentConfig.mockReset().mockResolvedValue({ enable: true });
+  apiMocks.getSSODeployment
+    .mockReset()
+    .mockRejectedValue(new ApiError(403, "forbidden"));
+  apiMocks.listBaselines
+    .mockReset()
+    .mockRejectedValue(new ApiError(403, "forbidden"));
 });
 
 afterEach(cleanup);
@@ -79,14 +86,14 @@ afterEach(() => {
   }
 });
 
-function renderSidebar() {
+function renderSidebar(onNavigate?: () => void) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter
         future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
       >
-        <SidebarContent />
+        <SidebarContent onNavigate={onNavigate} />
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -98,6 +105,7 @@ function renderSidebar() {
 async function renderSettled() {
   renderSidebar();
   await screen.findAllByLabelText("Enterprise");
+  await screen.findByText("Enterprise");
 }
 
 // The primary nav is a flat list: each Zone renders a header <div> followed by
@@ -118,79 +126,199 @@ function navSections(): Record<string, string[]> {
   return sections;
 }
 
-describe("Sidebar — the AI nav section groups the agent's reasoning surfaces", () => {
-  it("renders an 'AI' section holding Decisions, Analyses and SLIs/SLOs in order", async () => {
+describe("Sidebar — deployment-aware navigation groups", () => {
+  it("moves only enterprise-only items into an OSS Enterprise group", async () => {
     await renderSettled();
-    // The SLIs/SLOs entry carries the enterprise lock (probe answered 403).
-    const slo = screen.getByRole("link", { name: /SLIs\/SLOs/ });
-    within(slo).getByLabelText("Enterprise");
 
+    expect(navSections()["Agent Learning"]).toEqual([
+      "/agent",
+      "/agent/services",
+      "/agent/logs",
+    ]);
     expect(navSections()["AI"]).toEqual([
       "/agent/decisions",
       "/analyses",
-      "/agent/slo",
+      "/agent/tools",
+    ]);
+    expect(navSections()["Enterprise"]).toEqual([
+      "/agent/metrics",
+      "/agent/traces",
       "/agent/alert-fatigue",
+      "/agent/slo",
+    ]);
+    expect(Object.keys(navSections())).toEqual([
+      "Respond",
+      "Connectors",
+      "Agent Learning",
+      "AI",
+      "Enterprise",
+      "Manage",
     ]);
   });
 
-  it("moved Decisions and SLIs/SLOs OUT of the Agent section", async () => {
+  it("partitions every navigation route exactly once without empty entries", async () => {
     await renderSettled();
 
-    const sections = navSections();
-    expect(sections["Agent"]).not.toContain("/agent/decisions");
-    expect(sections["Agent"]).not.toContain("/agent/slo");
-    // The Agent section still holds the raw learned-catalog views.
-    expect(sections["Agent"]).toContain("/agent/logs");
+    const routes = Object.values(navSections()).flat();
+    expect(routes).toEqual([
+      "/now",
+      "/incidents",
+      "/agent/chat",
+      "/agent/kubernetes",
+      "/agent",
+      "/agent/services",
+      "/agent/logs",
+      "/agent/decisions",
+      "/analyses",
+      "/agent/tools",
+      "/agent/metrics",
+      "/agent/traces",
+      "/agent/alert-fatigue",
+      "/agent/slo",
+      "/people",
+      "/admin",
+      "/settings",
+    ]);
+    expect(routes).not.toContain("");
+    expect(new Set(routes).size).toBe(routes.length);
   });
 
-  it("keeps SLIs/SLOs enterprise-locked while Decisions stays ungated", async () => {
-    await renderSettled();
-    const slo = screen.getByRole("link", { name: /SLIs\/SLOs/ });
-    // The lock icon (aria-label 'Enterprise') is the gated affordance.
-    expect(within(slo).getByLabelText("Enterprise")).toBeTruthy();
-    // Decisions is ungated — no lock.
-    const decisions = screen.getByRole("link", { name: /Decisions/ });
-    expect(within(decisions).queryByLabelText("Enterprise")).toBeNull();
+  it("keeps the existing grouping and order for Enterprise deployments", async () => {
+    apiMocks.getSSODeployment.mockResolvedValue({ org: "acme" });
+    renderSidebar();
+    await screen.findAllByLabelText("Enterprise");
+    await waitFor(() => expect(apiMocks.getSSODeployment).toHaveBeenCalledOnce());
+
+    expect(navSections()).toEqual({
+      Respond: ["/now", "/incidents", "/agent/chat"],
+      Connectors: ["/agent/kubernetes"],
+      "Agent Learning": [
+        "/agent",
+        "/agent/services",
+        "/agent/logs",
+        "/agent/metrics",
+        "/agent/traces",
+      ],
+      AI: [
+        "/agent/decisions",
+        "/analyses",
+        "/agent/alert-fatigue",
+        "/agent/slo",
+        "/agent/tools",
+      ],
+      Manage: ["/people", "/admin", "/settings"],
+    });
+    const links = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link");
+    const sloIndex = links.findIndex((link) => link.getAttribute("href") === "/agent/slo");
+    expect(links[sloIndex + 1].getAttribute("href")).toBe("/agent/tools");
+    expect(links[sloIndex + 1].textContent).toBe("Connectors & Tools");
   });
 
-  it("keeps Alert fatigue enterprise-locked alongside SLIs/SLOs", async () => {
+  it("preserves Enterprise-safe grouping after a transient deployment error", async () => {
+    apiMocks.getSSODeployment.mockRejectedValue(new Error("network unavailable"));
+    renderSidebar();
+
+    await waitFor(() => expect(apiMocks.getSSODeployment).toHaveBeenCalledOnce());
+    expect(navSections()["Enterprise"]).toBeUndefined();
+    expect(navSections()["Agent Learning"]).toContain("/agent/metrics");
+    expect(navSections()["AI"]).toContain("/agent/alert-fatigue");
+  });
+
+  it("keeps Chat in Respond and Connectors & Tools in AI while omitting Runbooks", async () => {
     await renderSettled();
-    const af = screen.getByRole("link", { name: /Alert fatigue/ });
-    expect(within(af).getByLabelText("Enterprise")).toBeTruthy();
+
+    for (const [name, href] of [
+      ["Chat", "/agent/chat"],
+      ["Connectors & Tools", "/agent/tools"],
+    ] as const) {
+      const link = screen.getByRole("link", { name });
+      expect(link.getAttribute("href")).toBe(href);
+      expect(link.getAttribute("title")).toBeNull();
+      expect(within(link).queryByLabelText("Enterprise")).toBeNull();
+    }
+    expect(screen.queryByRole("link", { name: "Runbooks" })).toBeNull();
+    expect(navSections().Respond).toContain("/agent/chat");
+    expect(navSections().AI).not.toContain("/agent/chat");
+  });
+
+  it("locks execution pages but keeps connectors and tools readable when the agent is disabled", async () => {
+    apiMocks.getAgentConfig.mockResolvedValue({ enable: false });
+    await renderSettled();
+
+    for (const name of ["Chat", "Overview", "Services", "Logs", "Metrics", "Traces", "Decisions", "Analyses", "Alert fatigue", "SLIs/SLOs"]) {
+      const link = screen.getByRole("link", {
+        name: `${name} Enterprise`,
+      });
+      expect(link.getAttribute("title")).toContain("AI agent is disabled");
+      expect(within(link).getByLabelText("Enterprise")).toBeTruthy();
+    }
+
+    const tools = screen.getByRole("link", { name: "Connectors & Tools" });
+    expect(tools.getAttribute("href")).toBe("/agent/tools");
+    expect(tools.getAttribute("title")).toBeNull();
+    expect(within(tools).queryByLabelText("Enterprise")).toBeNull();
+    const kubernetes = screen.getByRole("link", { name: "Kubernetes" });
+    expect(kubernetes.getAttribute("href")).toBe("/agent/kubernetes");
+    expect(kubernetes.getAttribute("title")).toBeNull();
+    expect(within(kubernetes).queryByLabelText("Enterprise")).toBeNull();
+    expect(navSections().Connectors).toEqual(["/agent/kubernetes"]);
+  });
+
+  it("closes the mobile drawer when navigating to Kubernetes", async () => {
+    const onNavigate = vi.fn();
+    renderSidebar(onNavigate);
+    fireEvent.click(await screen.findByRole("link", { name: "Kubernetes" }));
+    expect(onNavigate).toHaveBeenCalledOnce();
   });
 });
 
-// Icons live on the GROUP headers, not on individual items. Each zone header
-// (Respond / Agent / AI / Tools / Manage) carries a representative Lucide icon
-// beside its title, while individual nav rows are text-only — the leading
-// per-item icon was removed. The active accent bar, the enterprise Lock badge,
-// the dim styling and the in-dev "Dev" chip all stay intact.
-describe("Sidebar — icons on group headers, not on items", () => {
-  const GROUPS = ["Respond", "Agent", "AI", "Tools", "Manage"];
+describe("Sidebar — expanded row icons", () => {
+  const GROUPS = ["Respond", "Connectors", "Agent Learning", "AI", "Enterprise", "Manage"];
+  const ITEMS = [
+    "Now",
+    "Incidents",
+    "Kubernetes",
+    "Overview",
+    "Services",
+    "Logs",
+    "Metrics",
+    "Traces",
+    "Chat",
+    "Connectors & Tools",
+    "Decisions",
+    "Analyses",
+    "Alert fatigue",
+    "SLIs/SLOs",
+    "People",
+    "Admin",
+    "Settings",
+  ];
 
-  it("renders an icon beside every group header title", async () => {
+  it("renders expanded group headers as text only", async () => {
     await renderSettled();
     for (const title of GROUPS) {
       const header = screen.getByText(title).closest("div");
       expect(header).not.toBeNull();
-      // The header carries exactly one leading icon (an <svg>) next to its text.
-      expect(header?.querySelector("svg")).not.toBeNull();
+      expect(header?.querySelector("svg")).toBeNull();
     }
   });
 
-  it("renders plain nav items with no leading icon", async () => {
+  it("renders an aria-hidden leading icon on every item without changing names", async () => {
     await renderSettled();
-    // An ordinary, ungated item is text-only — no svg at all.
-    const now = screen.getByRole("link", { name: "Now" });
-    expect(now.querySelector("svg")).toBeNull();
+    for (const label of ITEMS) {
+      const link = screen.getByText(label).closest("a");
+      expect(link).not.toBeNull();
+      expect(link?.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
+      expect(link?.getAttribute("aria-label")).toBeNull();
+    }
+    expect(screen.getByRole("link", { name: "Now" })).toBeTruthy();
   });
 
-  it("keeps the enterprise Lock badge on a locked item (its only svg)", async () => {
+  it("keeps both the item icon and Enterprise lock SVG on a locked item", async () => {
     await renderSettled();
-    // A locked item drops its leading icon but KEEPS the Lock badge — so the
-    // single remaining svg is the lock, not a per-item nav icon.
     const metrics = screen.getByRole("link", { name: /Metrics/ });
-    expect(metrics.querySelectorAll("svg")).toHaveLength(1);
+    expect(metrics.querySelectorAll("svg")).toHaveLength(2);
+    expect(metrics.querySelector('svg[aria-hidden="true"]')).not.toBeNull();
     within(metrics).getByLabelText("Enterprise");
   });
 });
@@ -254,6 +382,66 @@ describe("Sidebar desktop rail — collapse / expand toggle", () => {
     ).toBeTruthy();
     expect(screen.queryByRole("link", { name: "Now" })).toBeNull();
     expect(screen.getByRole("link", { name: "Respond" })).toBeTruthy();
+  });
+
+  // Without this, a collapsed rail can only reach each zone's FIRST item —
+  // every other item in the group is unreachable until the rail is expanded.
+  it("reveals a zone's other items on hover while collapsed", async () => {
+    window.localStorage.setItem("versus.sidebar.collapsed", "1");
+    renderRail();
+
+    const respondGroup = await screen.findByRole("link", { name: "Respond" });
+    // Closed by default: only the group icon is reachable.
+    expect(screen.queryByRole("link", { name: "Incidents" })).toBeNull();
+
+    fireEvent.mouseEnter(respondGroup.parentElement as HTMLElement);
+
+    // The flyout lists the whole zone, not just its primary route.
+    const flyout = screen.getByTestId("nav-flyout-respond");
+    expect(within(flyout).getByRole("link", { name: "Now" })).toBeTruthy();
+    expect(within(flyout).getByRole("link", { name: "Incidents" })).toBeTruthy();
+
+    // Closing is deferred so a pointer crossing to the panel does not dismiss
+    // it mid-travel, so this settles rather than flipping synchronously.
+    fireEvent.mouseLeave(respondGroup.parentElement as HTMLElement);
+    await waitFor(() =>
+      expect(screen.queryByTestId("nav-flyout-respond")).toBeNull(),
+    );
+  });
+
+  it("keeps the OSS Enterprise group and every gated route reachable", async () => {
+    window.localStorage.setItem("versus.sidebar.collapsed", "1");
+    renderRail();
+
+    const enterpriseGroup = await screen.findByRole("link", {
+      name: "Enterprise",
+    });
+    expect(enterpriseGroup.getAttribute("href")).toBe("/agent/metrics");
+    fireEvent.mouseEnter(enterpriseGroup.parentElement as HTMLElement);
+
+    const flyout = screen.getByTestId("nav-flyout-enterprise");
+    for (const label of ["Metrics", "Traces", "Alert fatigue", "SLIs/SLOs"]) {
+      expect(within(flyout).getByRole("link", { name: new RegExp(label) })).toBeTruthy();
+    }
+    expect(within(flyout).getByText("Enterprise").closest("div")?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("opens connector and learning flyouts on keyboard focus with the agent disabled", async () => {
+    apiMocks.getAgentConfig.mockResolvedValue({ enable: false });
+    window.localStorage.setItem("versus.sidebar.collapsed", "1");
+    renderRail();
+    const connectors = await screen.findByRole("link", { name: "Connectors" });
+    expect(connectors.getAttribute("href")).toBe("/agent/kubernetes");
+    fireEvent.focus(connectors);
+    const link = within(screen.getByTestId("nav-flyout-connectors")).getByRole("link", { name: "Kubernetes" });
+    expect(link.getAttribute("href")).toBe("/agent/kubernetes");
+    expect(link.getAttribute("title")).toBeNull();
+    fireEvent.keyDown(connectors, { key: "Escape" });
+    expect(screen.queryByTestId("nav-flyout-connectors")).toBeNull();
+    const learning = screen.getByRole("link", { name: "Agent Learning" });
+    expect(learning.getAttribute("href")).toBe("/agent");
+    fireEvent.focus(learning);
+    expect(within(screen.getByTestId("nav-flyout-agent learning")).getByRole("link", { name: /Overview/ })).toBeTruthy();
   });
 });
 

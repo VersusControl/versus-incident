@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="Spike detection. Patterns already in the catalog stay tracked, feeding a running EWMA average. Every tick the agent compares this tick's count against that average and asks whether it is way above normal. If not, it is normal and only updates the average. If it is, safety guards check a minimum count and a minimum history: if those fail it is treated as normal, and only if all pass is it reported as a spike to the shadow log or as an AI alert.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .lab  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+      .zone { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#5B6B78; letter-spacing:1.5px; }
+    </style>
+  </defs>
+
+  <rect width="760" height="428" fill="#FFFFFF"/>
+
+  <path d="M208,52 a79,8 0 0 1 158,0 v40 a79,8 0 0 1 -158,0 z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <path d="M208,52 a79,8 0 0 0 158,0" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="78" text-anchor="middle" class="name" font-size="13">Known patterns</text>
+  <text x="287" y="94" text-anchor="middle" class="t" font-size="11.5">already in the catalog</text>
+
+  <text x="298" y="134" text-anchor="start" class="lab" font-size="12">still tracked</text>
+  <path d="M287,104 V156" stroke="#000000" stroke-width="2" stroke-dasharray="6 5" fill="none" marker-end="url(#a)"/>
+
+  <text x="99"  y="142" text-anchor="middle" class="zone" font-size="12">EVERY TICK</text>
+  <text x="569" y="142" text-anchor="middle" class="zone" font-size="12">SPIKE CHECK</text>
+
+  <rect x="20" y="160" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="99" y="188" text-anchor="middle" class="name" font-size="13">This tick's count</text>
+  <text x="99" y="208" text-anchor="middle" class="t" font-size="11.5">12 matches right now</text>
+
+  <text x="193" y="150" text-anchor="middle" class="lab" font-size="12">compare</text>
+  <path d="M180,192 H204" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <path d="M208,168 a79,8 0 0 1 158,0 v48 a79,8 0 0 1 -158,0 z" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <path d="M208,168 a79,8 0 0 0 158,0" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="196" text-anchor="middle" class="name" font-size="13">Running average</text>
+  <text x="287" y="214" text-anchor="middle" class="t" font-size="11.5">EWMA baseline</text>
+
+  <path d="M368,192 H411" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <polygon points="475,158 535,192 475,226 415,192" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="188" text-anchor="middle" class="name" font-size="12">Way above</text>
+  <text x="475" y="202" text-anchor="middle" class="name" font-size="12">normal?</text>
+
+  <text x="560" y="180" text-anchor="middle" class="lab" font-size="12">yes</text>
+  <path d="M539,192 H580" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="584" y="160" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="188" text-anchor="middle" class="name" font-size="13">Safety guards</text>
+  <text x="663" y="208" text-anchor="middle" class="t" font-size="11.5">min count, min history</text>
+
+  <text x="486" y="272" text-anchor="start" class="lab" font-size="12">no</text>
+  <path d="M475,230 V310" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <text x="560" y="276" text-anchor="middle" class="lab" font-size="12">fail</text>
+  <path d="M620,228 V284 H520 V310" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <text x="710" y="272" text-anchor="start" class="lab" font-size="12">all pass</text>
+  <path d="M700,228 V310" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="396" y="314" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="342" text-anchor="middle" class="name" font-size="13">Normal, ignore</text>
+  <text x="475" y="362" text-anchor="middle" class="t" font-size="11.5">update the average</text>
+
+  <rect x="584" y="314" width="158" height="64" rx="12" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="342" text-anchor="middle" class="name" font-size="13">Spike</text>
+  <text x="663" y="362" text-anchor="middle" class="t" font-size="11.5">shadow log or AI alert</text>
+</svg>

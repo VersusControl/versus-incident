@@ -2,6 +2,11 @@
 
 This guide explains how to deploy Versus Incident using Helm, a package manager for Kubernetes.
 
+For the agent's read-only Kubernetes connection, including native EKS, AKS,
+and GKE authentication values, see the
+[Kubernetes Configuration](/agent/kubernetes/configuration). No cloud CLI or
+Kubernetes credential plugin is installed or executed.
+
 ## Requirements
 
 - Kubernetes 1.19+
@@ -78,7 +83,7 @@ alert:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas for the deployment (set to `1` when `agent.enable=true` or persistence is enabled) | `2` |
-| `config.publicHost` | Public URL for acknowledgment links | `""` |
+| `config.publicHost` | Canonical external HTTP(S) origin for links, secure cookies, and exact-origin CSRF behind rewriting or TLS-terminating proxies | `""` |
 | `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
 | `storage.type` | Storage backend (only `file` is implemented today) | `"file"` |
 | `storage.persistence.enabled` | Mount a PVC at the fixed `/app/data` path | `false` |

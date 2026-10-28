@@ -15,12 +15,13 @@ import (
 )
 
 type ViberProvider struct {
-	botToken     string
-	userID       string
-	channelID    string
-	templatePath string
-	apiType      string // "bot" or "channel"
-	client       *http.Client
+	kubernetesIssueTemplatePath string
+	botToken                    string
+	userID                      string
+	channelID                   string
+	templatePath                string
+	apiType                     string // "bot" or "channel"
+	client                      *http.Client
 }
 
 // ViberBotMessage represents a message for Viber Bot API
@@ -46,12 +47,13 @@ func NewViberProvider(cfg config.ViberConfig, proxyConfig config.ProxyConfig) *V
 	client := utils.CreateHTTPClient(proxyConfig, cfg.UseProxy)
 
 	return &ViberProvider{
-		botToken:     cfg.BotToken,
-		userID:       cfg.UserID,
-		channelID:    cfg.ChannelID,
-		templatePath: cfg.TemplatePath,
-		apiType:      apiType,
-		client:       client,
+		kubernetesIssueTemplatePath: cfg.KubernetesIssueTemplatePath,
+		botToken:                    cfg.BotToken,
+		userID:                      cfg.UserID,
+		channelID:                   cfg.ChannelID,
+		templatePath:                cfg.TemplatePath,
+		apiType:                     apiType,
+		client:                      client,
 	}
 }
 
@@ -62,7 +64,9 @@ func (v *ViberProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := v.templatePath
-	if i.Content != nil && utils.IsAgentIncident(*i.Content) {
+	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
+		tplPath = utils.KubernetesIssueTemplatePath(v.kubernetesIssueTemplatePath, utils.KubernetesIssueViberTemplatePath)
+	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
 		tplPath = utils.AgentViberTemplatePath
 	}
 

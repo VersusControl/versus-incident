@@ -17,6 +17,23 @@ serviceAccount:
   create: true
   name: ""
 
+# Optionally grant the chart ServiceAccount the cluster-wide read permissions
+# used by all eight Kubernetes tools. Leave disabled when bindings are managed
+# separately or when namespace-scoped Roles are preferred.
+kubernetesReaderRBAC:
+  enabled: false
+  # Gateway API CRDs are optional and may not be installed. Enable only when
+  # generic Gateway and HTTPRoute reads are needed.
+  gatewayAPI: false
+
+# Optional, separate service-account grants for supported Kubernetes actor
+# operations. Mount its token as the actor auth token_file; never reuse the
+# read-only connector credential.
+kubernetesActionsRBAC:
+  enabled: false
+  namespace: ""
+  serviceAccountName: ""
+
 service:
   type: ClusterIP
   port: 3000
@@ -152,7 +169,9 @@ config:
   name: versus-incident
   host: 0.0.0.0
   port: 3000
-  publicHost: ""  # Set to your public host for acknowledgement URLs
+  # Canonical external HTTP(S) origin for links, secure cookies, and exact-origin
+  # CSRF checks behind rewriting or TLS-terminating proxies.
+  publicHost: ""
 
 # Shared secret required by all admin endpoints (`/api/admin/*` and
 # `/api/agent/*`). Clients send the same value in the `X-Gateway-Secret`
@@ -214,14 +233,92 @@ agent:
   pollInterval: 30s
   lookback: 5m
   newServiceGrace: 30m
+  # Max signals pulled into one tick, and the per-signal byte cap above which
+  # a message is truncated. Defaults mirror the binary's embedded baseline
+  # (pkg/config/default_config.yaml).
+  batchMax: 5000
+  signalMaxBytes: 65536
+
+  # Ordered regexes applied to each (post-redaction) message to discover the
+  # service name; the first pattern that matches wins and its first capture
+  # group is the service. Rendered verbatim into config.yaml — add your own
+  # log format at the top of the list. Defaults mirror the binary's baseline.
+  servicePatterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '^\s*\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d{1,9})?\s+([A-Za-z][A-Za-z0-9._-]*)\s+\['
+    - '\[\s*([A-Za-z][A-Za-z0-9._-]*)\s*,\s*(?i:request[_-]?id|trace[_-]?id|span[_-]?id)\b'
+    - '\[[^\]]+\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '---\s+\[[^\]]*\]\s+\[([A-Za-z0-9._-]+)\]'
+    - '---\s+\[[^\]]*\]\s+([A-Za-z][A-Za-z0-9._-]*)\s*:'
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    - '\[([A-Za-z0-9._-]+)\]'
+
+  # Redaction scrubs each message BEFORE it is mined, catalogued, stored or
+  # sent to an LLM — the privacy/DLP control on the way out of the box.
+  # Built-in detectors (emails, tokens, keys, card/account numbers) always
+  # run when enable=true; the knobs below tune the rest.
+  redaction:
+    enable: true
+    # IP addresses are frequently the useful part of a log line, so they are
+    # kept by default. Set true to mask them too.
+    redactIps: false
+    # Extra operator-supplied regexes; every match is replaced with a
+    # redaction marker. Rendered verbatim into config.yaml.
+    extraPatterns:
+      - "(?i)password=\\S+"
+      - "Authorization:\\s*Bearer\\s+\\S+"
+
+  # Pattern catalog: persistence cadence, when a learned pattern becomes
+  # "known", and the spike-detection thresholds for known patterns.
+  catalog:
+    persistInterval: 30s
+    # Sightings before a learned pattern is auto-promoted to "known".
+    # Values <= 0 are normalised back up to 100 by the binary.
+    autoPromoteAfter: 100
+    # Spike z-score: a known pattern re-fires when its per-second rate sits
+    # this many standard deviations above its learned baseline.
+    spikeZ: 3.0
+    # Deterministic safety net — a tick with at least this many matches
+    # always surfaces regardless of z-score or warmup. 0 disables it.
+    spikeAbsCeiling: 0
+    # Consecutive spiking ticks required before firing (debounce). 1 = none.
+    spikeSustainTicks: 1
+    # Absolute noise floor: minimum tick count before a spike can fire.
+    spikeMinFrequency: 5
+    # Warmup gate: total sightings required before the z-score is trusted.
+    spikeMinBaselineCount: 20
+
+  # Drain-style log-template miner that turns raw messages into patterns.
+  miner:
+    similarityThreshold: 0.4
+    treeDepth: 4
+    maxChildren: 100
+
+  # Regex prefilter applied before mining. defaultPattern is the catch-all
+  # for logs; rules are named patterns that always qualify a message.
+  regex:
+    defaultPattern: "(?i).*error.*"
+    rules:
+      - name: oom-killer
+        pattern: "Out of memory: Killed process"
+      - name: panic
+        pattern: "(?i)panic:"
+      - name: 5xx-burst
+        pattern: "HTTP/[0-9.]+\\s+5\\d\\d"
 
   ai:
     # AI analyzer toggle. Required for detect mode to actually call an LLM.
     # When false, detect mode classifies patterns but never calls the model
     # (dry-run; no API key needed).
     enable: false
-    # OpenAI API key. Stored in the chart Secret and exposed as
-    # AGENT_AI_API_KEY env var.
+    # Model backend: openai | deepseek | qwen | ollama | claude | gemini.
+    # apiKey below must be the credential for the provider selected here.
+    provider: openai
+    baseUrl: ""
+    # API key for the selected provider. Stored in the chart Secret and
+    # exposed as the AGENT_AI_API_KEY env var.
     apiKey: ""
     model: "gpt-4o-mini"
     # Randomness control. Set -1 to omit temperature entirely for
@@ -292,33 +389,15 @@ agent:
     findRunbook:
       embeddingModel: ""     # e.g. "text-embedding-3-small"; empty = tool omitted
 
-    # query_metrics — inspect a metric's recent behaviour on demand by running
-    # a PromQL range query against a Prometheus endpoint (read-only). Returns
-    # per-series summaries (last/min/max/delta). Registered only when
-    # prometheus.address is set; independent of any `prometheus` source.
-    queryMetrics:
-      prometheus:
-        address: ""              # e.g. http://prometheus:9090; empty = tool omitted
-        bearerToken: ""          # Authorization: Bearer <token>
-        username: ""             # fallback HTTP Basic
-        password: ""
-        insecureSkipVerify: false # dev only — never against prod
-    # query_traces — correlate an incident with distributed traces by searching
-    # a Tempo-compatible backend (TraceQL). Returns redacted span summaries
-    # (service, operation, duration, error). Registered only when tempo.address
-    # is set. Only the Tempo backend is implemented today.
-    queryTraces:
-      tempo:
-        address: ""              # e.g. http://tempo:3200; empty = tool omitted
-        bearerToken: ""
-        username: ""             # fallback HTTP Basic
-        password: ""
-        insecureSkipVerify: false # dev only
-
   # Inline signal sources. Each entry is rendered verbatim (via toYaml)
   # into agent_sources.yaml — use snake_case keys matching the Go config
   # (`from_beginning`, `message_field`, etc.). Leave empty to disable
   # the agent loop.
+  #
+  # agent_sources.yaml lands in the ConfigMap, which is NOT a secret store.
+  # Write source credentials as ${VAR} and supply the value through
+  # `extraEnv` / `extraEnvFrom` below; the loader expands ${VAR} across the
+  # whole file at boot.
   # Example:
   #   sources:
   #     - name: app-logs
@@ -328,6 +407,52 @@ agent:
   #         path: /var/log/app.log
   #         from_beginning: false
   sources: []
+
+connectors:
+  kubernetes:
+    multiple: false
+    clusters: []
+    endpoint: ""
+    caFile: ""
+    caData: ""
+    serverName: ""
+    clusterID: "default"
+    credentialID: ""
+    timeout: "10s"
+    discoveryTTL: "5m"
+    changeCapture: "continuous"
+    allowPrivateNetworks: false
+    endpointCIDRs: []
+    auth:
+      mode: ""
+      token: ""
+      tokenFile: ""
+      clientCertificate: {certificateFile: "", keyFile: "", certificateData: "", keyData: ""}
+      kubeconfig: {path: "", context: ""}
+      eks: {clusterName: "", region: "", roleARN: "", profile: ""}
+      aks: {credentialMode: "", serverID: "", tenantID: "", clientID: "", clientSecret: "", federatedTokenFile: "", environment: ""}
+      gke: {credentialsFile: ""}
+    actions:
+      enable: false
+      maxReplicas: 20
+      timeout: "15s"
+      auth: {mode: ""}
+
+# Extra environment variables for the container, appended after everything the
+# chart wires itself. Use these to supply values referenced as ${VAR} from
+# agent_sources.yaml, which is rendered verbatim into the ConfigMap.
+#   extraEnv:
+#     - name: ELASTIC_PASSWORD
+#       valueFrom:
+#         secretKeyRef:
+#           name: my-elastic-secret
+#           key: password
+extraEnv: []
+# Bulk-import env from existing Secrets/ConfigMaps.
+#   extraEnvFrom:
+#     - secretRef:
+#         name: my-agent-source-credentials
+extraEnvFrom: []
 
 
 # Proxy configuration (global settings)
@@ -348,6 +473,7 @@ alert:
     token: ""
     channelId: ""
     templatePath: "/app/config/slack_message.tmpl"
+    kubernetesIssueTemplatePath: "" # Empty selects the shipped Kubernetes issue template.
     messageProperties:
       buttonText: "Acknowledge Alert"
       buttonStyle: "primary"
@@ -358,6 +484,7 @@ alert:
     botToken: ""
     chatId: ""
     templatePath: "/app/config/telegram_message.tmpl"
+    kubernetesIssueTemplatePath: "" # Empty selects the shipped Kubernetes issue template.
     useProxy: false  # Set to true to use global proxy settings for Telegram API calls
   
   viber:
@@ -367,6 +494,7 @@ alert:
     channelId: ""
     apiType: "channel" # "bot" or "channel"
     templatePath: "/app/config/viber_message.tmpl"
+    kubernetesIssueTemplatePath: "" # Empty selects the shipped Kubernetes issue template.
     useProxy: false  # Set to true to use global proxy settings for Viber API calls
   
   email:
@@ -378,17 +506,20 @@ alert:
     to: ""
     subject: "Incident Alert"
     templatePath: "/app/config/email_message.tmpl"
+    kubernetesIssueTemplatePath: "" # Empty selects the shipped Kubernetes issue template.
   
   msteams:
     enable: false
     powerAutomateUrl: ""
     templatePath: "/app/config/msteams_message.tmpl"
+    kubernetesIssueTemplatePath: "" # Empty selects the shipped Kubernetes issue template.
     otherPowerUrls: {}
   
   lark:
     enable: false
     webhookUrl: ""
     templatePath: "/app/config/lark_message.tmpl"
+    kubernetesIssueTemplatePath: "" # Empty selects the shipped Kubernetes issue template.
     useProxy: false  # Set to true to use global proxy settings for Lark API calls
     otherWebhookUrls: {}
 
@@ -401,6 +532,15 @@ alert:
   sqs:
     enable: false
     queueUrl: ""
+
+# Inbound queue sources. The binary reads these from the top-level `queue`
+# block; `alert` is outbound channels only. The SNS/SQS toggles themselves
+# stay under `alert.sns` / `alert.sqs` above for backward compatibility —
+# the chart maps them into `queue` when it renders config.yaml.
+queue:
+  # Log the raw body of every message pulled off the queue. Useful while
+  # wiring up a new producer; noisy in production.
+  debugBody: true
 
 oncall:
   initializedOnly: false

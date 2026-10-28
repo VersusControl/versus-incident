@@ -1,0 +1,14 @@
+    proxy:
+      url: \$\{PROXY_URL\}
+      username: \$\{PROXY_USERNAME\}
+      password: \$\{PROXY_PASSWORD\}
+use_proxy: true
+- name: PROXY_URL
+- name: PROXY_USERNAME
+- name: PROXY_PASSWORD
+- name: TELEGRAM_USE_PROXY
+- name: VIBER_USE_PROXY
+- name: LARK_USE_PROXY
+proxy_password:
+# The proxy password must never be rendered as a literal.
+!s3cr3t-proxy-password

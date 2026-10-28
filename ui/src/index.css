@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Product width scale: list previews, analysis dialogs, and wide dialogs. */
+.max-w-lg {
+  max-width: 720px;
+}
+.max-w-xl {
+  max-width: 960px;
+}
+.max-w-2xl {
+  max-width: 1200px;
+}
+
 /* ---------- Theme variables ----------
    Dark is the default (the 3am ops context); [data-theme="light"] swaps
    the map. `.force-dark` re-pins the dark values on a subtree — the
@@ -61,6 +72,7 @@
   --sev-ok-solid: 22 163 74;
 
   --sk-shimmer: 255 255 255;
+  --sk-base: 38 44 61;
 }
 
 [data-theme="light"] {
@@ -103,13 +115,27 @@
   --sev-ok-solid: 22 163 74;
 
   --sk-shimmer: 0 0 0;
+  --sk-base: 195 201 214;
 }
+
+/* Tool identities are vivid in the light catalog and intentionally collapse
+  to one white visual language in dark incident-response mode. */
+.tool-brand-icon { color: #fff; }
+[data-theme="light"] .tool-brand-kubernetes { color: #326ce5; }
+[data-theme="light"] .tool-brand-git { color: #f4512c; }
+[data-theme="light"] .tool-brand-runbook,
+[data-theme="light"] .tool-brand-dependencies,
+[data-theme="light"] .tool-brand-common { color: #000; }
 
 /* ---------- Base ---------- */
 html,
 body,
 #root {
   height: 100%;
+}
+
+#root {
+  overflow: clip;
 }
 
 html {
@@ -206,6 +232,27 @@ body {
   }
   .card-body {
     @apply p-4;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .card-body > * {
+    min-width: 0;
+  }
+  .overlay-body {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: hidden;
+    overflow-wrap: anywhere;
+  }
+  .overlay-body > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .overlay-body pre {
+    max-width: 100%;
+    overflow-x: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   /* Pill / tag — dark tinted bg + 400-level text ⇒ ≥4.5:1 on surface. */
@@ -319,6 +366,17 @@ body {
   textarea.input {
     @apply h-auto py-2;
   }
+  select.input {
+    /* Native selects: drop the browser arrow (which pins to the right edge and
+       ignores padding) and paint our own slate-400 chevron with real right
+       spacing. pr-8 reserves room so the longest option never runs under it.
+       Text <input>s keep the tighter px-2. */
+    @apply appearance-none pr-8;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='%2394a3b8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.55rem center;
+    background-size: 1rem;
+  }
   .field-label {
     @apply mb-1 block text-2xs uppercase tracking-wider text-ink-300;
   }
@@ -326,7 +384,8 @@ body {
   /* Skeletons — layout-preserving shimmer. Static under reduced-motion via
      the global rule above. */
   .sk {
-    @apply relative overflow-hidden rounded bg-ink-600;
+    @apply relative overflow-hidden rounded;
+    background-color: rgb(var(--sk-base));
   }
   .sk::after {
     content: "";
@@ -343,6 +402,12 @@ body {
     100% {
       transform: translateX(100%);
     }
+  }
+
+  /* Panel entrance — reuses the row fade so dashboard cards settle in
+     together; reduced motion collapses it via the global rule. */
+  .rise-in {
+    animation: row-in 220ms ease-out backwards;
   }
 
   /* Skip link — first tab stop, visible only on focus. */

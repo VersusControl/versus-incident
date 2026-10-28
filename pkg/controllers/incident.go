@@ -16,8 +16,9 @@ func CreateIncident(c *fiber.Ctx) error {
 	raw := c.Body()
 
 	if cfg.Alert.DebugBody {
-		// Log the raw request body for debugging purposes
-		fmt.Println("Raw Request Body:", string(raw))
+		// Log the raw request body for debugging purposes, quoted: the body is
+		// caller-controlled, so an embedded newline would forge a log line.
+		fmt.Printf("Raw Request Body: %q\n", raw)
 	}
 
 	// Detect if payload is an array; otherwise treat as single JSON object

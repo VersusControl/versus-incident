@@ -1,0 +1,72 @@
+{{- if .Values.kubernetesActionsRBAC.enabled }}
+{{- $namespace := default .Release.Namespace .Values.kubernetesActionsRBAC.namespace }}
+{{- $serviceAccount := default (printf "%s-kubernetes-actor" (include "versus-incident.fullname" .)) .Values.kubernetesActionsRBAC.serviceAccountName }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $serviceAccount }}
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "versus-incident.fullname" . }}-kubernetes-actor
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "statefulsets", "statefulsets/scale", "daemonsets"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "versus-incident.fullname" . }}-kubernetes-actor
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "versus-incident.fullname" . }}-kubernetes-actor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "versus-incident.fullname" . }}-kubernetes-node-actor
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "versus-incident.fullname" . }}-kubernetes-node-actor
+  labels:
+    {{- include "versus-incident.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $serviceAccount }}
+    namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "versus-incident.fullname" . }}-kubernetes-node-actor
+{{- end }}

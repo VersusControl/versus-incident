@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 // aisettings.go — the single-slot runtime AI-settings resolver seam.
@@ -19,14 +21,21 @@ import (
 // process-wide slot, registered once at boot, mutex-guarded. OSS registers
 // nothing, so aiSettingsResolver() returns nil and every call site falls
 // back to the static YAML ai config — community behaviour is byte-for-byte
-// unchanged (one nil-check, no allocations, no goroutines, the outbound
-// transport is left as a plain pass-through).
+// unchanged for ordinary requests (one nil-check, no allocations, no
+// goroutines, and no runtime key substitution).
 
 // AISettingsResolver resolves effective AI settings at runtime. ok=false on
 // a method means "no opinion" -> caller uses the static YAML ai config.
 type AISettingsResolver interface {
 	EffectiveKey(ctx context.Context) (key string, ok bool)
 	EffectiveEnabled(ctx context.Context) (enabled bool, ok bool)
+}
+
+// AICredentialResolver atomically resolves the runtime credential and whether
+// one is configured. A configured credential that cannot be decrypted returns
+// an empty key with present=true, preventing fallback to a YAML credential.
+type AICredentialResolver interface {
+	EffectiveCredential(ctx context.Context) (key string, present bool)
 }
 
 // AIProviderResolver is an OPTIONAL extension of AISettingsResolver: a
@@ -40,6 +49,30 @@ type AISettingsResolver interface {
 type AIProviderResolver interface {
 	EffectiveProvider(ctx context.Context) (provider string, ok bool)
 }
+
+// AIBaseURLResolver is an OPTIONAL extension of AISettingsResolver. A
+// successful empty value explicitly clears the configured endpoint; ok=false
+// means inherit the static YAML endpoint.
+type AIBaseURLResolver interface {
+	EffectiveBaseURL(ctx context.Context) (baseURL string, ok bool)
+}
+
+// AIBoundKeyResolver returns a key only when the runtime destination still
+// matches the destination captured by a constructed model.
+type AIBoundKeyResolver interface {
+	EffectiveKeyFor(ctx context.Context, provider, baseURL string) (key string, ok bool)
+}
+
+// AIContextDecorator is an OPTIONAL extension of AISettingsResolver. It lets
+// a consumer attach its private runtime-settings identity to ctx from a scope
+// the server has already resolved and trusted. OSS does not interpret the
+// scope and registers no decorator, so community contexts pass through
+// unchanged.
+type AIContextDecorator interface {
+	DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context
+}
+
+type aiScopeContextKey struct{}
 
 // Process-wide single slot. A consumer registers a resolver at boot; the
 // worker reads it once per tick and the chat-model transport reads it once
@@ -70,19 +103,131 @@ func aiSettingsResolver() AISettingsResolver {
 	return aiSettingsResolverSlot
 }
 
+// DecorateAIContext applies the registered resolver's optional context
+// decorator for a server-resolved scope. With no resolver or no decorator it
+// returns ctx unchanged. Callers must derive scope from trusted tenancy state,
+// never from request bodies or client-selected headers.
+func DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
+	scope = scope.Normalized()
+	ctx = tenancy.WithOrgScope(ctx, scope)
+	ctx = context.WithValue(ctx, aiScopeContextKey{}, scope)
+	resolver := aiSettingsResolver()
+	decorator, ok := resolver.(AIContextDecorator)
+	if !ok || decorator == nil {
+		return ctx
+	}
+	return decorator.DecorateAIContext(ctx, scope)
+}
+
+// AIContextScope returns the trusted scope attached by DecorateAIContext.
+func AIContextScope(ctx context.Context) (tenancy.OrgScope, bool) {
+	if ctx == nil {
+		return tenancy.OrgScope{}, false
+	}
+	scope, ok := ctx.Value(aiScopeContextKey{}).(tenancy.OrgScope)
+	return scope.Normalized(), ok
+}
+
+// orgAISettingsGetter is the optional capability a registered
+// AISettingsResolver may also implement to answer a synchronous, org-scoped
+// lookup of the current AI override — the shape read-only HTTP surfaces need
+// (they have no worker ctx carrying the org). ok=false means "no opinion".
+// Community OSS registers no resolver at all, so EffectiveAISettingsForOrg
+// returns the YAML floor unchanged.
+type orgAISettingsGetter interface {
+	EffectiveAISettingsForOrg(org string) (enabled bool, provider string, ok bool)
+}
+
+// EffectiveAISettingsForOrg returns the runtime-effective AI enable flag and
+// model provider for org, for read-only display surfaces such as the admin
+// config endpoint. It consults the registered AISettingsResolver's optional
+// org-scoped getter and falls back to the YAML floor when there is no
+// resolver, no override, or an unsupported provider value — so a resolver that
+// cannot answer degrades to the configured values instead of reporting a false
+// "on". Community OSS registers no resolver, so it returns the floor
+// byte-for-byte unchanged.
+func EffectiveAISettingsForOrg(org string, yamlEnabled bool, yamlProvider string) (enabled bool, provider string) {
+	enabled, provider = yamlEnabled, yamlProvider
+	r := aiSettingsResolver()
+	if r == nil {
+		return enabled, provider
+	}
+	g, ok := r.(orgAISettingsGetter)
+	if !ok {
+		return enabled, provider
+	}
+	en, p, ok := g.EffectiveAISettingsForOrg(org)
+	if !ok {
+		return enabled, provider
+	}
+	enabled = en
+	if p = strings.TrimSpace(p); p != "" && einowrap.IsSupportedProvider(p) {
+		provider = p
+	}
+	return enabled, provider
+}
+
+// orgAIKeyGetter is the optional capability a registered AISettingsResolver may
+// also implement to answer, for a read-only display surface, whether an AI
+// credential is configured for org. It reports a BOOLEAN, never the key and
+// never a masked prefix, so the seam that tells the UI "a key is set" cannot
+// become a key-disclosure path. ok=false means "no opinion". Community OSS
+// registers no resolver at all, so EffectiveAIKeySetForOrg reports the YAML
+// floor unchanged.
+type orgAIKeyGetter interface {
+	EffectiveAIKeySetForOrg(org string) (keySet bool, ok bool)
+}
+
+// EffectiveAIKeySetForOrg reports whether an AI credential is configured for
+// org at RUNTIME — the enterprise per-org override when it has an opinion, else
+// the YAML floor. The admin config endpoint used to report the YAML floor only,
+// so an org whose key lives solely in the runtime override rendered as "no key
+// configured" while the worker was happily calling the model with it.
+//
+// It resolves through the same registered AISettingsResolver as the AI enable
+// flag, so the two cannot disagree, and it returns only the set/unset fact.
+func EffectiveAIKeySetForOrg(org, yamlKey string) bool {
+	keySet := strings.TrimSpace(yamlKey) != ""
+	r := aiSettingsResolver()
+	if r == nil {
+		return keySet
+	}
+	g, ok := r.(orgAIKeyGetter)
+	if !ok {
+		return keySet
+	}
+	if set, ok := g.EffectiveAIKeySetForOrg(org); ok {
+		return set
+	}
+	return keySet
+}
+
 // aiSettingsKeyFunc returns a per-request key override function backed by
 // the registered AISettingsResolver, or nil when none is set. The chat
-// model wraps its outbound transport with this function only when it is
-// non-nil, so OSS (no resolver) keeps a plain pass-through transport and is
-// byte-for-byte unchanged. The returned function re-reads the live slot on
-// every call, so a hot-swapped key takes effect without a restart.
+// model consults this function for per-request key replacement when present.
+// With no resolver OSS performs no runtime key substitution. The returned
+// function re-reads the live slot on every call, so a hot-swapped key takes
+// effect without a restart.
 func aiSettingsKeyFunc() func(context.Context) (string, bool) {
 	if aiSettingsResolver() == nil {
 		return nil
 	}
 	return func(ctx context.Context) (string, bool) {
 		if r := aiSettingsResolver(); r != nil {
-			return r.EffectiveKey(ctx)
+			if credentials, ok := r.(AICredentialResolver); ok {
+				return credentials.EffectiveCredential(ctx)
+			}
+			key, ok := r.EffectiveKey(ctx)
+			if ok {
+				return key, true
+			}
+			if presence, ok := r.(interface {
+				EffectiveKeySet(context.Context) (bool, bool)
+			}); ok {
+				if set, known := presence.EffectiveKeySet(ctx); known && set {
+					return "", true
+				}
+			}
 		}
 		return "", false
 	}
@@ -103,9 +248,21 @@ func aiRuntime() einowrap.RuntimeAI {
 		return einowrap.RuntimeAI{}
 	}
 	return einowrap.RuntimeAI{
+		Credential: func(ctx context.Context, provider, baseURL string) (string, bool) {
+			if resolver, ok := aiSettingsResolver().(AIBoundKeyResolver); ok && resolver != nil {
+				return resolver.EffectiveKeyFor(ctx, provider, baseURL)
+			}
+			return "", false
+		},
 		Provider: func(ctx context.Context) (string, bool) {
 			if pr, ok := aiSettingsResolver().(AIProviderResolver); ok && pr != nil {
 				return pr.EffectiveProvider(ctx)
+			}
+			return "", false
+		},
+		BaseURL: func(ctx context.Context) (string, bool) {
+			if resolver, ok := aiSettingsResolver().(AIBaseURLResolver); ok && resolver != nil {
+				return resolver.EffectiveBaseURL(ctx)
 			}
 			return "", false
 		},
@@ -117,6 +274,11 @@ func aiRuntime() einowrap.RuntimeAI {
 		},
 		KeySet: func(ctx context.Context) (bool, bool) {
 			if r := aiSettingsResolver(); r != nil {
+				if presence, ok := r.(interface {
+					EffectiveKeySet(context.Context) (bool, bool)
+				}); ok {
+					return presence.EffectiveKeySet(ctx)
+				}
 				_, ok := r.EffectiveKey(ctx)
 				return ok, true
 			}

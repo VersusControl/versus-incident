@@ -2,6 +2,13 @@
 
 This Helm chart deploys Versus Incident, a robust incident management tool that supports alerting across multiple channels with easy custom messaging and on-call integrations.
 
+The agent's read-only Kubernetes connector supports native in-cluster, token,
+client-certificate, safe kubeconfig, EKS IAM, AKS Entra, and closed GKE
+service-account, file-workload-identity, or metadata-workload-identity
+authentication. It does not require or execute cloud CLIs or auth plugins. See
+[Kubernetes Connector](https://docs.versusincident.com/#/agent/connectors/kubernetes)
+for complete values and cloud prerequisites.
+
 ## Requirements
 
 - Kubernetes 1.19+
@@ -146,39 +153,103 @@ alert:
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `replicaCount` | Number of replicas for the deployment | `2` |
-| `config.publicHost` | Public URL for acknowledgment links | `""` |
+| `config.publicHost` | Canonical external HTTP(S) origin for links, secure cookies, and exact-origin CSRF behind rewriting or TLS-terminating proxies | `""` |
 | `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
-| `storage.type` | Storage backend (`file`, `redis`, `database`). Only `file` is implemented today. | `"file"` |
+| `storage.type` | Storage backend (`file` or `postgres`). HA derives `postgres`. | `"file"` |
+| `storage.postgres.dsn` | Postgres DSN (stored in chart Secret) when `storage.type=postgres` | `""` |
 | `storage.persistence.enabled` | Mount a PVC at the fixed `/app/data` path so agent state survives restarts | `false` |
 | `storage.persistence.size` | PVC request size | `"1Gi"` |
 | `agent.enable` | Enable the AI SRE Agent (must run with `replicaCount: 1`) | `false` |
 | `agent.mode` | `training`, `shadow`, or `detect` | `"training"` |
+| `agent.batchMax` | Max signals pulled into one tick | `5000` |
+| `agent.signalMaxBytes` | Per-signal byte cap above which a message is truncated | `65536` |
+| `agent.servicePatterns` | Ordered regexes used to discover the service name from a message | see `values.yaml` |
+| `agent.redaction.enable` | Scrub each message before it is mined, stored, or sent to an LLM | `true` |
+| `agent.redaction.redactIps` | Also mask IP addresses | `false` |
+| `agent.redaction.extraPatterns` | Extra operator-supplied redaction regexes | see `values.yaml` |
+| `agent.catalog.persistInterval` | How often the pattern catalog is flushed to storage | `"30s"` |
+| `agent.catalog.autoPromoteAfter` | Sightings before a learned pattern becomes "known" | `100` |
+| `agent.catalog.spikeZ` | Z-score above the learned baseline at which a known pattern re-fires | `3.0` |
+| `agent.catalog.spikeAbsCeiling` | Match count that always surfaces regardless of z-score (`0` disables) | `0` |
+| `agent.catalog.spikeSustainTicks` | Consecutive spiking ticks required before firing | `1` |
+| `agent.catalog.spikeMinFrequency` | Absolute noise floor before a spike can fire | `5` |
+| `agent.catalog.spikeMinBaselineCount` | Sightings required before the z-score is trusted | `20` |
+| `agent.miner.similarityThreshold` | Log-template miner similarity threshold | `0.4` |
+| `agent.miner.treeDepth` | Miner parse-tree depth | `4` |
+| `agent.miner.maxChildren` | Miner max children per node | `100` |
+| `agent.regex.defaultPattern` | Catch-all prefilter applied to log messages | `"(?i).*error.*"` |
+| `agent.regex.rules` | Named patterns that always qualify a message | see `values.yaml` |
 | `agent.ai.enable` | Enable LLM analysis in detect mode | `false` |
-| `agent.ai.apiKey` | OpenAI API key (stored in chart Secret) | `""` |
+| `agent.ai.provider` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, `gemini` | `"openai"` |
+| `agent.ai.apiKey` | API key for the selected provider (stored in chart Secret) | `""` |
 | `agent.ai.model` | Model identifier | `"gpt-4o-mini"` |
 | `agent.ai.temperature` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. | `0.2` |
 | `agent.ai.maxCallsPerHour` | Per-hour AI call rate limit (`0` = unlimited) | `60` |
 | `agent.ai.analyze.model` | Override model for the on-demand analyze agent (empty inherits `agent.ai.model`) | `""` |
 | `agent.tools.toolTimeout` | Per-tool dispatch timeout for analyze tools | `"20s"` |
 | `agent.tools.parallelTools` | Run multiple tool calls in one model turn concurrently | `false` |
+| `agent.tools.recentChanges.git.auth.token` | Git HTTPS token/PAT (stored in chart Secret, injected as `GIT_AUTH_TOKEN`) | `""` |
 | `agent.tools.recentChanges.git.repos` | Remote git repos read by the `recent_changes` tool (empty = unregistered) | `[]` |
 | `agent.tools.describeDependencies.services` | Service-dependency graph for the `describe_dependencies` tool (empty = unregistered) | `[]` |
 | `agent.tools.findRunbook.embeddingModel` | Embedding model for the `find_runbook` runbook-RAG tool (empty = unregistered) | `""` |
 | `agent.sources` | Inline list of signal sources (snake_case keys) | `[]` |
+| `extraEnv` | Extra container env vars — use these to supply `${VAR}` credentials referenced from `agent.sources` | `[]` |
+| `extraEnvFrom` | Bulk-import env from existing Secrets/ConfigMaps | `[]` |
+| `proxy.url` | Outbound HTTP/HTTPS/SOCKS5 proxy used by channels with `useProxy: true` | `""` |
+| `proxy.username` | Proxy username (stored in chart Secret) | `""` |
+| `proxy.password` | Proxy password (stored in chart Secret) | `""` |
 | `alert.slack.enable` | Enable Slack notifications | `false` |
 | `alert.slack.token` | Slack bot token | `""` |
 | `alert.slack.channelId` | Slack channel ID | `""` |
 | `alert.telegram.enable` | Enable Telegram notifications | `false` |
+| `alert.telegram.useProxy` | Route Telegram API calls through `proxy.*` | `false` |
 | `alert.email.enable` | Enable email notifications | `false` |
 | `alert.msteams.enable` | Enable Microsoft Teams notifications | `false` |
 | `alert.lark.enable` | Enable Lark notifications | `false` |
+| `alert.lark.useProxy` | Route Lark webhook calls through `proxy.*` | `false` |
 | `alert.viber.enable` | Enable Viber notifications | `false` |
 | `alert.viber.apiType` | Viber API type ("channel" or "bot") | `"channel"` |
+| `alert.viber.useProxy` | Route Viber API calls through `proxy.*` | `false` |
+| `queue.debugBody` | Log the raw body of every message pulled off the inbound queue | `true` |
 | `oncall.enable` | Enable on-call functionality | `false` |
 | `oncall.provider` | On-call provider ("aws_incident_manager" or "pagerduty") | `"aws_incident_manager"` |
 | `redis.enabled` | Enable bundled Redis (required for on-call) | `false` |
 
+The standalone `query_metrics` and `query_traces` tools are retired. For metric
+and trace reads, use a licensed Enterprise image with the `intelligence`
+entitlement and enabled `prometheus` / `traces` sources in `agent.sources`.
+These sources contribute `discover_metrics` / `read_metric_series` and
+`discover_trace_fields` / `read_trace_spans` to Chat and Analyze, respectively.
+There is no automatic migration: remove old `agent.tools.queryMetrics` and
+`agent.tools.queryTraces` values and move backend addresses and credentials to
+the corresponding source `options` (snake_case keys). Reference credentials as
+`${VAR}` in `agent.sources` and provide them via `extraEnv` / `extraEnvFrom`;
+source definitions are stored in a ConfigMap, not a Secret. OSS has no metric
+or trace read tools.
+
+> The SNS/SQS inbound toggles live under `alert.sns` / `alert.sqs` for backward
+> compatibility; the chart maps them into the binary's top-level `queue` block
+> when it renders `config.yaml`.
+>
+> Every credential in the table above is written to the chart Secret and reaches
+> the process as an environment variable that the config files expand via
+> `${VAR}`. No credential is rendered into the ConfigMap.
+
 ## Notification Channel Configuration
+
+All six channels (`slack`, `telegram`, `viber`, `email`, `msteams`, `lark`)
+support `alert.<channel>.kubernetesIssueTemplatePath`. It renders the
+application's `kubernetes_issue_template_path` for Kubernetes issue alerts
+only. The default empty value uses the shipped
+`config/kubernetes_issue_<channel>.tmpl`; a custom path must exist inside every
+pod, for example through a custom image or an operator-managed volume mount.
+Setting a path does not enable the channel or per-cluster issue alerts.
+
+```yaml
+alert:
+  slack:
+    kubernetesIssueTemplatePath: "/app/custom/kubernetes_issue_slack.tmpl"
+```
 
 ### Slack
 
@@ -431,7 +502,11 @@ alert:
   sns:
     enable: true
     httpsEndpointSubscriptionPath: "/sns"
+    topicArn: "arn:aws:sns:us-east-1:111122223333:my-topic"  # required when enable=true
 ```
+
+`topicArn` pins the endpoint to your topic; the server refuses to start without
+it.
 
 ## Ingress Configuration
 
@@ -456,7 +531,9 @@ ingress:
         - versus-incident.example.com
 ```
 
-When enabling Ingress, make sure to also set the `config.publicHost` value to match your host for proper acknowledgement URL creation:
+When enabling Ingress, set `config.publicHost` to the exact browser-visible
+HTTP(S) origin. It owns external links, secure-cookie derivation, and exact-origin
+CSRF checks; forwarded host and protocol headers are not trusted:
 
 ```yaml
 config:

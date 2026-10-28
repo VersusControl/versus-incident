@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/services"
@@ -17,6 +16,7 @@ type SNSMessage struct {
 	MessageId        string `json:"MessageId"`
 	Token            string `json:"Token,omitempty"` // Omit empty for Notification type
 	TopicArn         string `json:"TopicArn"`
+	Subject          string `json:"Subject,omitempty"` // Notification only, optional
 	Message          string `json:"Message"`
 	SubscribeURL     string `json:"SubscribeURL,omitempty"` // Omit empty for Notification type
 	Timestamp        string `json:"Timestamp"`
@@ -32,20 +32,42 @@ func SNS(c *fiber.Ctx) error {
 
 	rawBody := c.Body()
 
-	if err := json.Unmarshal(rawBody, &msg); err != nil {
-		return c.Status(400).SendString("Invalid SNS message: " + err.Error())
+	if err := decodeSNSMessage(rawBody, &msg); err != nil {
+		// Quoted: the body is third-party content, so an embedded newline would
+		// forge a log line. Only the reason is recorded — never a URL, a
+		// signature, or a payload read out of the body.
+		log.Printf("SNS message rejected: reason=%q", err.Error())
+		return c.Status(fiber.StatusBadRequest).SendString("SNS message rejected")
+	}
+
+	// Anyone with an AWS account can have Amazon sign a message, so a valid
+	// signature proves "some SNS topic", not "our SNS topic". Without the pin an
+	// attacker's own topic is accepted here, and its SubscriptionConfirmation
+	// would subscribe this endpoint to it for good. TopicArn is covered by the
+	// signature and read from the same parse the canonical string uses, so
+	// checking it first is sound — and it keeps an unverified body from costing
+	// an outbound certificate fetch.
+	if want := cfg.Queue.SNS.TopicARN; want == "" || msg.TopicArn != want {
+		log.Printf("SNS message rejected: type=%q reason=%q", msg.Type, "topic arn is not the configured topic")
+		return c.Status(fiber.StatusBadRequest).SendString("SNS message rejected")
+	}
+
+	// The endpoint is unauthenticated, so nothing in the body is trusted until
+	// the RSA signature over its canonical form verifies against an
+	// Amazon-served certificate. Fail closed: an unverified body is neither
+	// confirmed nor turned into an incident.
+	if err := verifySNSMessage(rawBody, &msg); err != nil {
+		log.Printf("SNS message rejected: type=%q reason=%q", msg.Type, err.Error())
+		return c.Status(fiber.StatusBadRequest).SendString("SNS message rejected")
 	}
 
 	switch msg.Type {
 	case "SubscriptionConfirmation":
 		{
-
-			resp, err := http.Get(msg.SubscribeURL)
-
-			if err != nil {
-				return fmt.Errorf("subscription confirmation failed: %w", err)
+			if err := confirmSNSSubscription(c.UserContext(), msg.SubscribeURL); err != nil {
+				log.Printf("SNS subscription confirmation refused: reason=%q", err.Error())
+				return c.Status(fiber.StatusBadRequest).SendString("SNS subscription confirmation refused")
 			}
-			defer resp.Body.Close()
 
 			log.Println("SNS subscription confirmed")
 		}
@@ -53,8 +75,10 @@ func SNS(c *fiber.Ctx) error {
 	case "Notification":
 		{
 			if cfg.Queue.DebugBody {
-				// Log the raw queue message for debugging purposes
-				fmt.Println("Queue Message:", msg.Message)
+				// Log the raw queue message for debugging purposes, quoted: the
+				// message is third-party content, so an embedded newline would
+				// forge a log line.
+				fmt.Printf("Queue Message: %q\n", msg.Message)
 			}
 
 			content := &map[string]interface{}{}

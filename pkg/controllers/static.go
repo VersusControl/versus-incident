@@ -54,9 +54,7 @@ func MountStaticUI(app *fiber.App) {
 	// route, and isn't already matched by the FS handler should serve
 	// index.html so the React router can take over.
 	app.Use(func(c *fiber.Ctx) error {
-		path := c.Path()
-		if strings.HasPrefix(path, "/api/") ||
-			strings.HasPrefix(path, "/healthz") {
+		if excludeFromSPAFallback(c.Path()) {
 			return fiber.ErrNotFound
 		}
 		f, err := dist.Open("index.html")
@@ -72,6 +70,14 @@ func MountStaticUI(app *fiber.App) {
 		c.Type("html")
 		return c.Send(body)
 	})
+}
+
+func excludeFromSPAFallback(path string) bool {
+	return path == "/api" ||
+		strings.HasPrefix(path, "/api/") ||
+		path == "/enterprise/api" ||
+		strings.HasPrefix(path, "/enterprise/api/") ||
+		path == "/healthz"
 }
 
 // uiBuilt reports whether the embedded dist directory contains a real

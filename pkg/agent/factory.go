@@ -61,6 +61,13 @@ func BuildSources(cfg config.AgentConfig) ([]core.SignalSource, []error) {
 				continue
 			}
 			sources = append(sources, sp)
+		case "signoz":
+			sz, err := signalsources.NewSigNozSource(s.Name, s.Signoz)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("source %s: %w", s.Name, err))
+				continue
+			}
+			sources = append(sources, sz)
 		default:
 			// Source types not built into OSS are resolved through the
 			// registration hook (signalsources.Register). The enterprise

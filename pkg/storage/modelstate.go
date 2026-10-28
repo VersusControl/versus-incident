@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +45,61 @@ type ModelState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// Data is the opaque, consumer-defined payload, stored verbatim.
 	Data []byte `json:"data"`
+}
+
+// ModelStatePage is one bounded page plus the storage work used to produce it.
+type ModelStatePage struct {
+	States  []*ModelState
+	Next    string
+	Scanned int
+	Bytes   int64
+	Done    bool
+}
+
+type modelStateBlobWriter interface {
+	WriteModelStateBlob(name string, data []byte) error
+}
+
+// ListPage returns at most limit model artifacts in stable key order, strictly
+// after cursor. It never falls back to the unbounded ListBlobs contract.
+func (s *ModelStore) ListPage(ctx context.Context, orgID, agent, cursor string, limit int) ([]*ModelState, string, error) {
+	page, err := s.ListPageBounded(ctx, orgID, agent, cursor, limit)
+	return page.States, page.Next, err
+}
+
+// ListPageBounded returns a context-aware page and honest storage work usage.
+// Backends without the stronger bounded capability fail closed.
+func (s *ModelStore) ListPageBounded(ctx context.Context, orgID, agent, cursor string, limit int) (ModelStatePage, error) {
+	org := NormalizeOrgID(orgID)
+	for _, c := range []string{org, agent} {
+		if c == "" || strings.ContainsAny(c, "/\\") || strings.Contains(c, "..") {
+			return ModelStatePage{}, ErrInvalidModelKey
+		}
+	}
+	if limit <= 0 {
+		return ModelStatePage{Done: true}, nil
+	}
+	lister, ok := s.p.(BoundedBlobPageLister)
+	if !ok {
+		return ModelStatePage{}, ErrUnsupported
+	}
+	prefix := ModelStateNamespace + "/" + org + "/" + agent + "/"
+	page, err := lister.ListBlobsPageBounded(ctx, prefix, cursor, limit)
+	if err != nil {
+		return ModelStatePage{}, fmt.Errorf("storage: page model state %q: %w", prefix, err)
+	}
+	out := make([]*ModelState, 0, len(page.Blobs))
+	for _, blob := range page.Blobs {
+		if err := ctx.Err(); err != nil {
+			return ModelStatePage{}, err
+		}
+		var state ModelState
+		if err := json.Unmarshal(blob.Data, &state); err != nil {
+			continue
+		}
+		out = append(out, &state)
+	}
+	return ModelStatePage{States: out, Next: page.Next, Scanned: page.Scanned, Bytes: page.Bytes, Done: page.Done}, nil
 }
 
 // ModelStore is a thin, unopinionated helper over a Provider that persists
@@ -94,6 +150,9 @@ func (s *ModelStore) Put(orgID, agent, key string, version int, data []byte) err
 	enc, err := json.Marshal(&ms)
 	if err != nil {
 		return fmt.Errorf("storage: marshal model state %q: %w", name, err)
+	}
+	if writer, ok := s.p.(modelStateBlobWriter); ok {
+		return writer.WriteModelStateBlob(name, enc)
 	}
 	return s.p.WriteBlob(name, enc)
 }
@@ -160,6 +219,9 @@ func (s *ModelStore) Purge(orgID, agent, key string) error {
 	name, err := modelBlobName(orgID, agent, key)
 	if err != nil {
 		return err
+	}
+	if deleter, ok := s.p.(BlobDeleter); ok {
+		return deleter.DeleteBlob(name)
 	}
 	lc, ok := s.p.(Lifecycle)
 	if !ok {

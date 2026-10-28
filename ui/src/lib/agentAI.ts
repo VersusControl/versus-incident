@@ -5,7 +5,7 @@
 // the node vitest env (the UI has no jsdom/testing-library). The components are
 // thin shells over these helpers.
 
-import { ApiError } from "@/lib/api";
+import { ApiError, type AISettingsView } from "@/lib/api";
 
 // extractCode pulls the structured `code` discriminator out of an ApiError
 // body (the server returns { error, code, remedy } on a guarded 422). Returns
@@ -76,70 +76,159 @@ export function keySetLabel(keySet: boolean, last4: string): string {
   return tail ? `Key set ····${tail}` : "Key set";
 }
 
-// HEADER_AUTH_PROVIDERS are the model backends that authenticate with a
-// provider-specific HEADER (claude → `x-api-key`, gemini → `x-goog-api-key`)
-// rather than a Bearer token. The enterprise per-org runtime key override is
-// injected via the Bearer `AuthKeyFunc` path ONLY, so for these
-// providers the per-org key does NOT apply at runtime — the agent falls back to
-// the YAML-configured key. Per-org key rotation today therefore fully applies
-// only to the Bearer providers (openai/deepseek/qwen). This mirrors the
-// enterprise AI-settings doc note.
-export const HEADER_AUTH_PROVIDERS = ["claude", "gemini"] as const;
-
-// isHeaderAuthProvider reports whether a provider authenticates by header
-// (claude/gemini) rather than Bearer.
-export function isHeaderAuthProvider(provider: string): boolean {
-  return (HEADER_AUTH_PROVIDERS as readonly string[]).includes(provider.trim());
-}
-
 // ProviderKeyNotice is the pure verdict for the AI-settings provider `<select>`.
-// It tells the control whether a
-// provider change is staged and, if so, whether the operator still owes the
-// matching key — so Save can warn/confirm before reusing the previous key.
+// It tells the control whether a provider change is staged and whether the
+// operator must supply the selected provider's key before Save can proceed.
 export interface ProviderKeyNotice {
   // show — a provider change is staged (the selection differs from the saved
   // provider); render the inline notice.
   show: boolean;
-  // requireKey — the provider changed but NO new key was entered, so Save would
-  // reuse the previous per-org key (Bearer providers) or fall back to the YAML
-  // key (claude/gemini). The control should warn + confirm before saving.
+  // requireKey — a keyed provider changed but no new key was entered. The
+  // control must block Save; the server independently enforces the invariant.
   requireKey: boolean;
-  // tone — "warn" when a key is still owed, "info" when the change is fully
-  // specified (new key entered).
+  // tone — "warn" when a key is owed or a stored key will be cleared.
   tone: "warn" | "info";
   message: string;
 }
 
 // providerKeyNotice computes the staged-provider-change verdict from the saved
 // provider, the currently-selected provider, and whether a new key was entered.
-// It is the single source of truth for both the inline notice and the Save
-// confirmation, kept DOM-free so it can be unit-tested in the node vitest env.
+// It is the single source of truth for the inline notice and Save disabled
+// state, kept DOM-free so it can be unit-tested in the node vitest env.
 export function providerKeyNotice(
   savedProvider: string,
   selectedProvider: string,
   keyEntered: boolean,
+  onOverride = false,
 ): ProviderKeyNotice {
   const sel = selectedProvider.trim();
-  const changed = sel !== savedProvider.trim();
+  if (sel === "" && onOverride && savedProvider.trim() !== "") {
+    return {
+      show: true,
+      requireKey: false,
+      tone: "info",
+      message:
+        "To use the provider from YAML, use Revert to YAML floor below. Saving this override will keep its current provider.",
+    };
+  }
+  // A blank provider remains an explicit preserve operation at the API
+  // boundary for enable-only writes and legacy clients.
+  const changed = sel !== "" && sel !== savedProvider.trim();
   if (!changed) {
     return { show: false, requireKey: false, tone: "info", message: "" };
   }
-  const target = sel || "the config default";
+  if (sel === "ollama") {
+    return {
+      show: true,
+      requireKey: false,
+      tone: "warn",
+      message:
+        "Saving will switch the model provider to ollama and clear the stored runtime API key.",
+    };
+  }
   if (keyEntered) {
     return {
       show: true,
       requireKey: false,
       tone: "info",
-      message: `Saving will switch the model provider to ${target} with the key you entered.`,
+      message: `Saving will switch the model provider to ${sel} with the key you entered.`,
     };
   }
-  const reuse = isHeaderAuthProvider(sel)
-    ? `${sel} authenticates by header (not Bearer), so the per-org key override does not apply to it yet — it will use the YAML-configured key. Enter ${sel}'s key (and rotate the YAML key) to be sure the right credential is used.`
-    : `the existing per-org key will be reused on the new endpoint. Enter the matching key for ${target} to avoid sending the wrong credential.`;
   return {
     show: true,
     requireKey: true,
     tone: "warn",
-    message: `You're switching the model provider to ${target} without entering a new key — ${reuse}`,
+    message: `Enter a new API key to switch providers.`,
+  };
+}
+
+export interface EndpointKeyNotice {
+  show: boolean;
+  requireKey: boolean;
+  message: string;
+}
+
+export function endpointKeyNotice(
+  savedBaseURL: string,
+  selectedBaseURL: string,
+  selectedProvider: string,
+  keyEntered: boolean,
+): EndpointKeyNotice {
+  const saved = savedBaseURL.trim();
+  const selected = selectedBaseURL.trim();
+  if (saved === selected) {
+    return { show: false, requireKey: false, message: "" };
+  }
+
+  const keyRequired = selected !== "" || selectedProvider.trim() !== "ollama";
+  if (!keyRequired) {
+    return {
+      show: true,
+      requireKey: false,
+      message: "Saving will use the native ollama endpoint and clear the stored runtime API key.",
+    };
+  }
+  if (keyEntered) {
+    return {
+      show: true,
+      requireKey: false,
+      message: selected
+        ? "Saving will change the endpoint using the new API key you entered."
+        : "Saving will switch to the native endpoint using the new API key you entered.",
+    };
+  }
+  return {
+    show: true,
+    requireKey: true,
+    message: "Enter a new API key when changing endpoint destinations.",
+  };
+}
+
+export function effectiveAITransportLabel(baseURL: string, provider: string): string {
+  if (baseURL.trim()) return "OpenAI-compatible (custom endpoint)";
+  return provider.trim() || "config default";
+}
+
+export function projectAISettingsProvider(
+  view: Pick<AISettingsView, "provider" | "base_url">,
+): string {
+  return view.base_url.trim() ? "custom" : view.provider.trim() || "openai";
+}
+
+export function buildAISettingsSave(
+  view: Pick<AISettingsView, "provider" | "base_url" | "source" | "key_set">,
+  enabled: boolean,
+  selectedProvider: string,
+  keyInput: string,
+  baseURL: string,
+) {
+  const custom = selectedProvider === "custom";
+  const provider = custom ? "openai" : selectedProvider;
+  const selectedBaseURL = custom ? baseURL.trim() : "";
+  const apiKey = keyInput.trim();
+  const providerNotice = providerKeyNotice(
+    view.base_url.trim() ? "openai" : view.source === "override" ? view.provider : "",
+    provider,
+    apiKey.length > 0,
+    view.source === "override",
+  );
+  const endpointNotice: EndpointKeyNotice = custom && !view.key_set && !apiKey
+    ? {
+        show: true,
+        requireKey: true,
+        message: "Enter a new API key to save a custom endpoint.",
+      }
+    : endpointKeyNotice(
+        view.base_url,
+        selectedBaseURL,
+        provider,
+        apiKey.length > 0,
+      );
+  return {
+    input: { enabled, provider, apiKey, baseURL: selectedBaseURL },
+    providerNotice,
+    endpointNotice,
+    requireKey: providerNotice.requireKey || endpointNotice.requireKey,
+    customEndpointMissing: custom && !selectedBaseURL,
   };
 }

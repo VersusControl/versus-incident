@@ -97,6 +97,7 @@ func TestGraylog_PullBasic(t *testing.T) {
 	if len(signals) != 2 {
 		t.Fatalf("expected 2 signals, got %d", len(signals))
 	}
+	assertNormalizedSignal(t, signals[0], "graylog:test")
 	if signals[0].Message != "connection refused to db-01" {
 		t.Errorf("unexpected message %q", signals[0].Message)
 	}

@@ -1,51 +1,34 @@
 import { describe, it, expect } from "vitest";
-import { ApiError, resolveInitialAuth, type AuthProbe } from "@/lib/api";
+import {
+  ApiError,
+  isCommunityDeploymentError,
+  resolveInitialAuth,
+  type AuthProbe,
+} from "@/lib/api";
 
 // resolveInitialAuth is the pure console-entry decision AuthGate runs on mount.
-// These tests pin the two-credential contract without a DOM harness:
-//   1. a held gateway secret that verifies -> ok; a 401 -> needs-secret;
-//      a transient (non-401) error must NOT trap the user -> ok.
-//   2. with NO secret, an established SSO session opens the console; a 401
-//      no-session (or a community binary with no deployment org) falls back to
-//      the secret screen.
+// These tests pin cookie-first reload admission without a DOM harness.
 
 // base returns an AuthProbe whose checks all reject, so each test overrides
 // only the behavior it asserts.
 function base(): AuthProbe {
   return {
-    hasSecret: () => false,
-    checkSecret: () => Promise.reject(new ApiError(401, "unauthorized")),
+    probeGatewaySession: () => Promise.reject(new ApiError(401, "unauthorized")),
     deploymentOrg: () => Promise.reject(new ApiError(403, "not enterprise")),
     probeSession: () => Promise.reject(new ApiError(401, "no active session")),
   };
 }
 
-describe("resolveInitialAuth — held secret path", () => {
-  it("opens the console when a held secret verifies", async () => {
+describe("resolveInitialAuth — gateway session path", () => {
+  it("opens the console when the protected cookie probe succeeds", async () => {
     const p = base();
-    p.hasSecret = () => true;
-    p.checkSecret = () => Promise.resolve({});
+    p.probeGatewaySession = () => Promise.resolve({});
     expect(await resolveInitialAuth(p)).toBe("ok");
   });
 
-  it("shows the secret screen when the held secret is rejected (401)", async () => {
+  it("does not probe enterprise discovery after a valid gateway cookie", async () => {
     const p = base();
-    p.hasSecret = () => true;
-    p.checkSecret = () => Promise.reject(new ApiError(401, "bad secret"));
-    expect(await resolveInitialAuth(p)).toBe("needs-secret");
-  });
-
-  it("does NOT trap the user on a transient (non-401) error", async () => {
-    const p = base();
-    p.hasSecret = () => true;
-    p.checkSecret = () => Promise.reject(new Error("network down"));
-    expect(await resolveInitialAuth(p)).toBe("ok");
-  });
-
-  it("does NOT probe SSO when a secret is held", async () => {
-    const p = base();
-    p.hasSecret = () => true;
-    p.checkSecret = () => Promise.resolve({});
+    p.probeGatewaySession = () => Promise.resolve({});
     let probed = false;
     p.deploymentOrg = () => {
       probed = true;
@@ -56,7 +39,7 @@ describe("resolveInitialAuth — held secret path", () => {
   });
 });
 
-describe("resolveInitialAuth — SSO session path (no secret)", () => {
+describe("resolveInitialAuth — authoritative deployment states", () => {
   it("admits a valid SSO session and opens the console", async () => {
     const p = base();
     p.deploymentOrg = () => Promise.resolve("b");
@@ -67,20 +50,45 @@ describe("resolveInitialAuth — SSO session path (no secret)", () => {
     expect(await resolveInitialAuth(p)).toBe("ok");
   });
 
-  it("falls back to needs-secret when the session probe 401s", async () => {
+  it("requires Enterprise login when a licensed deployment has no session", async () => {
     const p = base();
     p.deploymentOrg = () => Promise.resolve("b");
     p.probeSession = () => Promise.reject(new ApiError(401, "no active session"));
-    expect(await resolveInitialAuth(p)).toBe("needs-secret");
+    expect(await resolveInitialAuth(p)).toBe("needs-enterprise-login");
   });
 
-  it("falls back to needs-secret on a community binary (no deployment org)", async () => {
+  it("requires gateway login on a community binary (no deployment org)", async () => {
     const p = base();
     p.deploymentOrg = () => Promise.reject(new ApiError(403, "not enterprise"));
     // probeSession must never be reached.
     p.probeSession = () => {
       throw new Error("probeSession should not run without a deployment org");
     };
-    expect(await resolveInitialAuth(p)).toBe("needs-secret");
+    expect(await resolveInitialAuth(p)).toBe("needs-gateway-secret");
+  });
+
+  it("requires retry when deployment discovery fails transiently", async () => {
+    const p = base();
+    p.deploymentOrg = () => Promise.reject(new TypeError("network unavailable"));
+    p.probeSession = () => {
+      throw new Error("probeSession should not run after failed discovery");
+    };
+    expect(await resolveInitialAuth(p)).toBe("retry");
+  });
+
+  it("requires retry when the licensed session probe fails transiently", async () => {
+    const p = base();
+    p.deploymentOrg = () => Promise.resolve("b");
+    p.probeSession = () => Promise.reject(new ApiError(503, "unavailable"));
+    expect(await resolveInitialAuth(p)).toBe("retry");
+  });
+});
+
+describe("isCommunityDeploymentError", () => {
+  it("accepts only authoritative community responses", () => {
+    expect(isCommunityDeploymentError(new ApiError(403, "not enterprise"))).toBe(true);
+    expect(isCommunityDeploymentError(new ApiError(404, "not mounted"))).toBe(true);
+    expect(isCommunityDeploymentError(new ApiError(503, "unavailable"))).toBe(false);
+    expect(isCommunityDeploymentError(new TypeError("network unavailable"))).toBe(false);
   });
 });

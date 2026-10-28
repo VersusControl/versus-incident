@@ -16,7 +16,7 @@ import (
 // The model PROVIDER (openai | deepseek | qwen | ollama | claude | gemini |
 // litellm) is chosen at CONSTRUCTION time: each provider picks a different SDK/builder
 // (provider.go), so a provider change cannot hot-reload through a request
-// header the way the per-request key override (AuthKeyFunc) does — the model
+// header the way the per-request runtime key override does — the model
 // object must be REBUILT. A Holder is the rebuild lifecycle: it caches a built
 // model keyed by its effective signature and rebuilds only when that signature
 // changes, so steady-state has no per-call cost while an operator's runtime
@@ -36,10 +36,20 @@ import (
 // never rebuilt).
 //
 // Provider composes with the existing per-request key override: the key VALUE
-// still hot-reloads through the AuthKeyFunc transport WITHOUT a rebuild (it is
+// still hot-reloads through the provider-native transport WITHOUT a rebuild (it is
 // NOT part of the signature); only the provider, the model id, and the
 // enable/key-presence STATE force a rebuild.
 type RuntimeAI struct {
+	// Credential resolves a key only when the model's bound protocol and
+	// runtime endpoint still match the effective destination.
+	Credential func(ctx context.Context, provider, baseURL string) (key string, ok bool)
+
+	// BaseURL returns a runtime endpoint override. ok=false means inherit the
+	// configured endpoint; ok=true with an empty URL explicitly clears it.
+	// Endpoint changes rebuild the model so chat and embedding clients switch
+	// destinations together.
+	BaseURL func(ctx context.Context) (baseURL string, ok bool)
+
 	// Provider returns a runtime provider override for ctx. ok=false ⇒ no
 	// opinion (use the configured provider). An unknown/unsupported value
 	// FAILS CLOSED: the Holder keeps the configured provider and logs once
@@ -56,6 +66,11 @@ type RuntimeAI struct {
 	// folded. The key VALUE is never part of the signature (it hot-reloads
 	// through the transport). Optional.
 	KeySet func(ctx context.Context) (set bool, ok bool)
+
+	// Revision folds an opaque runtime configuration revision into the
+	// signature. Tool catalogs use a hash of durable per-agent settings so all
+	// replicas rebuild their bound graph on the next turn after a change.
+	Revision func(ctx context.Context) (revision string, ok bool)
 }
 
 // triState captures a folded boolean signal that may also be "unknown" so the
@@ -85,10 +100,14 @@ func foldBool(fn func(ctx context.Context) (bool, bool), ctx context.Context) tr
 // modelSignature is the comparable rebuild key. Two Gets that resolve to the
 // same signature reuse the cached model; any difference forces a rebuild.
 type modelSignature struct {
-	provider string
-	model    string
-	enabled  triState
-	keySet   triState
+	provider    string
+	providerSet bool
+	model       string
+	baseURL     string
+	baseURLSet  bool
+	enabled     triState
+	keySet      triState
+	revision    string
 }
 
 // Holder lazily builds and caches a model artifact of type T (a chat model, a
@@ -168,7 +187,30 @@ func (h *Holder[T]) Get(ctx context.Context) (T, error) {
 
 	cfg := h.base
 	cfg.Provider = sig.provider
-	v, err := h.build(ctx, cfg, h.opts)
+	if sig.baseURLSet {
+		cfg.BaseURL = sig.baseURL
+	}
+	opts := h.opts
+	if sig.providerSet || sig.baseURLSet {
+		cfg.APIKey = runtimeConstructionAPIKey
+		opts.RuntimeKeyFunc = func(context.Context) (string, bool) { return "", true }
+		if h.rt.Credential != nil {
+			provider, baseURL := credentialBinding(cfg)
+			opts.RuntimeKeyFunc = func(requestCtx context.Context) (string, bool) {
+				key, ok := h.rt.Credential(requestCtx, provider, baseURL)
+				if !ok {
+					return "", true
+				}
+				return key, true
+			}
+		}
+	} else if h.rt.Credential != nil {
+		provider, baseURL := credentialBinding(cfg)
+		opts.RuntimeKeyFunc = func(requestCtx context.Context) (string, bool) {
+			return h.rt.Credential(requestCtx, provider, baseURL)
+		}
+	}
+	v, err := h.build(ctx, cfg, opts)
 	if err != nil {
 		var zero T
 		return zero, err
@@ -195,11 +237,17 @@ func (h *Holder[T]) Current() T {
 // fails closed to the configured provider. Caller holds h.mu.
 func (h *Holder[T]) resolveSignature(ctx context.Context) modelSignature {
 	provider := resolveProvider(h.base.Provider)
+	providerSet := false
+	baseURL, baseURLSet := "", false
+	if h.rt.BaseURL != nil {
+		baseURL, baseURLSet = h.rt.BaseURL(ctx)
+	}
 	if h.rt.Provider != nil {
 		if p, ok := h.rt.Provider(ctx); ok {
 			name := resolveProvider(p)
 			if h.valid(name) {
 				provider = name
+				providerSet = true
 			} else if h.lastBad != name {
 				log.Printf("eino: runtime provider %q unsupported; keeping configured provider %q", p, provider)
 				h.lastBad = name
@@ -207,11 +255,34 @@ func (h *Holder[T]) resolveSignature(ctx context.Context) modelSignature {
 		}
 	}
 	return modelSignature{
-		provider: provider,
-		model:    h.base.Model,
-		enabled:  foldBool(h.rt.Enabled, ctx),
-		keySet:   foldBool(h.rt.KeySet, ctx),
+		provider:    provider,
+		providerSet: providerSet,
+		model:       h.base.Model,
+		baseURL:     baseURL,
+		baseURLSet:  baseURLSet,
+		enabled:     foldBool(h.rt.Enabled, ctx),
+		keySet:      foldBool(h.rt.KeySet, ctx),
+		revision:    foldRevision(h.rt.Revision, ctx),
 	}
+}
+
+func credentialBinding(cfg config.AgentAIConfig) (provider, baseURL string) {
+	baseURL = cfg.BaseURL
+	if baseURL != "" {
+		return DefaultProvider, baseURL
+	}
+	return cfg.Provider, ""
+}
+
+func foldRevision(fn func(context.Context) (string, bool), ctx context.Context) string {
+	if fn == nil {
+		return ""
+	}
+	revision, ok := fn(ctx)
+	if !ok {
+		return ""
+	}
+	return revision
 }
 
 // isChatProvider reports whether name is a registered chat provider.

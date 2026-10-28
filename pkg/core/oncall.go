@@ -92,6 +92,18 @@ func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string,
 
 // Start initiates the on-call workflow for an incident
 func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error {
+	return w.StartContext(context.Background(), incidentID, oc)
+}
+
+// StartContext bounds initial delivery and queue admission by the caller's budget.
+// Once admitted, a delayed escalation outlives the request that queued it.
+func (w *OnCallWorkflow) StartContext(ctx context.Context, incidentID string, oc config.OnCallConfig) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if w == nil || w.redisClient == nil {
 		return fmt.Errorf("the on-call workflow hasn't been properly initialized")
 	}
@@ -99,8 +111,6 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 	if w.provider == nil {
 		return fmt.Errorf("no on-call provider available")
 	}
-
-	ctx := context.Background()
 
 	// If WaitMinutes is 0, trigger immediately
 	if oc.WaitMinutes == 0 {
@@ -118,6 +128,7 @@ func (w *OnCallWorkflow) Start(incidentID string, oc config.OnCallConfig) error 
 
 	// Start timer to check for acknowledgment
 	go func() {
+		ctx := context.Background()
 		<-time.After(time.Duration(oc.WaitMinutes) * time.Minute)
 
 		// Check if incident is still pending

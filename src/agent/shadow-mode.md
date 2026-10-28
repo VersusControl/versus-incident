@@ -1,4 +1,4 @@
-# AI Agent — Shadow Mode
+# Shadow Mode
 
 Shadow mode is the **practice run** between training and detect.
 The agent keeps learning, and on top of that it decides what it
@@ -37,7 +37,7 @@ filter → group → save) and adds **one extra step at the end**:
 look at the result and, if it isn't already known, record it in
 the shadow log.
 
-![AI Agent](../docs/images/shadow-mode.png)
+![Shadow mode: the agent reads a log source, hides secrets, skips uninteresting lines, groups the rest into shapes and remembers them, then asks whether it has seen the pattern before. Old news stays quiet; anything new is written to shadow.log as a would have alerted entry and printed to the console for review. No real alert is sent](../docs/images/shadow-mode.svg)
 
 Three things to remember:
 
@@ -210,80 +210,6 @@ to triage them.
 >
 > 500 lines at default weights gives about 25 anomaly lines across
 > ~10 different templates — a tidy worked example.
-
-## Reading the shadow log
-
-The **Shadow** page in the admin UI is where you review what the
-agent would have alerted on. Everything below is available there —
-no command line needed.
-
-### List every entry (most recent first)
-
-The Shadow page lists every distinct pattern the agent flagged in
-the current window, sorted so the freshest noise is on top. Each
-row shows:
-
-- **template** — the learned shape, with `<*>` marking the parts
-  that change.
-- **sample message** — one example line, with secrets already
-  hidden.
-- **source** and **rule** — where the line came from and which
-  filter rule matched.
-- **verdict** — `unknown` for first sightings, `spike` for a known
-  pattern firing far more than usual.
-- **count** / **occurrences** — how many raw lines matched, and how
-  many distinct ticks they arrived in.
-
-The two numbers to watch:
-
-- **count** — high count with low occurrences means a brief flurry;
-  high in both means a steady drip you should look at.
-- **occurrences** — how many distinct polling cycles the pattern
-  fired in.
-
-Click any row to open its detail view with the full sample and
-timestamps.
-
-### Summary stats
-
-The top of the Shadow page shows aggregate counts for a quick "is
-this getting better?" check between review rounds:
-
-- **events** — distinct patterns in the log.
-- **total signals** — raw volume across every entry.
-- **total occurrences** — roughly "how many ticks would have paged
-  me?".
-- **unknown** / **spike** — breakdown by verdict.
-
-A healthy review cycle drives events and total occurrences down
-over time, even as total signals stays flat (because you're
-labeling the boring patterns as known).
-
-### Force-save to disk
-
-The agent only saves the shadow log to disk periodically so it
-doesn't hammer the disk. If you need a snapshot **right now**, use
-the **Flush** action on the Shadow page to save immediately.
-
-### Clear the log
-
-Once you've reviewed a batch and either labeled the patterns as
-known or fixed the underlying bug, use the **Clear** action on the
-Shadow page so the next round starts from zero. This also empties
-the saved file so a restart doesn't bring the old entries back.
-**The catalog is left alone** — every learned pattern stays exactly
-where it was. You're only emptying the "would have alerted" inbox.
-
-### Status at a glance
-
-The **Status** page in the sidebar shows both stores at once:
-
-- **patterns** — number of entries in the catalog.
-- **shadow events** — distinct entries in the shadow log right now.
-
-If the shadow event count stops growing for many ticks, the agent
-has nothing new to flag — a good sign you're getting close to ready
-for `detect` mode.
 
 ## A typical review loop
 

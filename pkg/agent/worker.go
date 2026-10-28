@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/scheduler"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
@@ -64,7 +67,7 @@ type Worker struct {
 	matchAll *RegexMatcher
 	// kindByName maps an enabled source NAME to its data-source KIND
 	// (signalsources.KindOf(type)). It drives per-kind matcher selection in
-	// matcherForSource; unknown/unregistered types resolve to KindLogs.
+	// matcherForSource; unknown/unregistered types resolve to KindUnknown.
 	kindByName map[string]signalsources.Kind
 	// metricsMatcher / tracesMatcher hold the OPTIONAL top-level per-kind regex
 	// override built from agent.regex.metrics / agent.regex.traces. nil when
@@ -76,8 +79,11 @@ type Worker struct {
 	// Detect-mode dependencies. All three are nil-safe: when ai.Detect
 	// is nil the worker emits a deterministic templated alert instead of
 	// calling AI, so a detection is never dropped for lack of a key.
-	ai      AIBundle
-	emitter Emitter
+	ai                       AIBundle
+	emitter                  Emitter
+	continueDetectionEpisode DetectionEpisodeRecorder
+	healthRecorder           core.LogHealthRecorder
+	orgID                    string
 
 	pollInterval    time.Duration
 	persistEvery    time.Duration
@@ -101,6 +107,10 @@ type Worker struct {
 // and moves on).
 type Emitter func(f *core.AIFinding, r core.AgentResult, source, service string) error
 
+// DetectionEpisodeRecorder records an occurrence without deciding whether it
+// should be enriched or emitted.
+type DetectionEpisodeRecorder func(storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error)
+
 // WorkerOptions bundles the dependencies a Worker needs. Construction does
 // not connect to anything; the worker dials lazily inside Run.
 type WorkerOptions struct {
@@ -121,24 +131,34 @@ type WorkerOptions struct {
 	// Emitter is invoked for each finding in detect mode. nil disables
 	// emission (worker still calls AI and caches the result, but the
 	// finding does not flow through to channels).
-	Emitter Emitter
+	Emitter                  Emitter
+	ContinueDetectionEpisode DetectionEpisodeRecorder
+	// HealthRecorder receives source-neutral post-grouping log projections.
+	// It never pulls a source or classifies an observation itself.
+	HealthRecorder core.LogHealthRecorder
+	// OrgID is the trusted write organization for worker-produced records.
+	// Empty preserves the single-tenant OSS default.
+	OrgID string
 }
 
 // NewWorker validates options and applies defaults.
 func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w := &Worker{
-		cfg:      opt.Cfg,
-		sources:  opt.Sources,
-		cursors:  opt.Cursors,
-		redactor: opt.Redactor,
-		matcher:  opt.Matcher,
-		miner:    opt.Miner,
-		catalog:  opt.Catalog,
-		shadow:   opt.Shadow,
-		detect:   opt.Detect,
-		services: opt.Services,
-		ai:       opt.AI,
-		emitter:  opt.Emitter,
+		cfg:                      opt.Cfg,
+		sources:                  opt.Sources,
+		cursors:                  opt.Cursors,
+		redactor:                 opt.Redactor,
+		matcher:                  opt.Matcher,
+		miner:                    opt.Miner,
+		catalog:                  opt.Catalog,
+		shadow:                   opt.Shadow,
+		detect:                   opt.Detect,
+		services:                 opt.Services,
+		ai:                       opt.AI,
+		emitter:                  opt.Emitter,
+		continueDetectionEpisode: opt.ContinueDetectionEpisode,
+		healthRecorder:           opt.HealthRecorder,
+		orgID:                    storage.NormalizeOrgID(opt.OrgID),
 	}
 
 	if w.miner == nil {
@@ -153,6 +173,16 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	w.lookback = parseDurationOr(opt.Cfg.Lookback, 5*time.Minute)
 	w.ewmaAlpha = 0.2 // configurable once spike detection lands
 	w.newServiceGrace = parseDurationOr(opt.Cfg.NewServiceGrace, 0)
+
+	// A tail's re-read span is also the span a replacement process replays
+	// after an abrupt kill, and what it has to cover is every row learned since
+	// the last catalog flush. This is the one place that knows both numbers, so
+	// widen every tail here by one persist interval rather than trusting two
+	// settings in two files to be tuned against each other.
+	if widened := signalsources.ApplyTailReplaySpan(w.sources, w.persistEvery); len(widened) > 0 {
+		log.Printf("agent: tail re-read span widened by the %s catalog persist_interval so an abrupt restart cannot lose unflushed rows: %s",
+			w.persistEvery, signalsources.FormatTailWindows(widened))
+	}
 
 	// Wire the baseline fold from the poll interval + spike settings so
 	// Catalog.Upsert folds a poll-independent per-second rate through the
@@ -180,12 +210,19 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	if pat := opt.Cfg.Regex.Traces; pat != "" {
 		w.tracesMatcher, _ = NewRegexMatcher(config.AgentRegexConfig{DefaultPattern: pat})
 	}
-	w.kindByName = make(map[string]signalsources.Kind, len(opt.Cfg.Sources))
-	for _, s := range opt.Cfg.Sources {
-		if !s.Enable {
-			continue
+	w.kindByName = make(map[string]signalsources.Kind, len(w.sources))
+	for _, configured := range opt.Cfg.Sources {
+		if configured.Enable {
+			w.kindByName[configured.Name] = signalsources.KindOf(configured.Type)
 		}
-		w.kindByName[s.Name] = signalsources.KindOf(s.Type)
+	}
+	for _, source := range w.sources {
+		for _, configured := range opt.Cfg.Sources {
+			if configured.Enable && signalsources.MatchesConfiguredName(source.Name(), configured.Name) {
+				w.kindByName[source.Name()] = signalsources.KindOf(configured.Type)
+				break
+			}
+		}
 	}
 
 	// Resolve per-type brains. In OSS this registers nothing (the log brain is
@@ -283,8 +320,12 @@ func (w *Worker) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			log.Printf("agent: worker stopping; flushing catalog…")
+			flushed := true
 			if err := w.catalog.Persist(); err != nil {
 				log.Printf("agent: final catalog flush failed: %v", err)
+				flushed = false
+			} else {
+				log.Printf("agent: catalog flushed on shutdown (%d patterns)", w.catalog.Len())
 			}
 			if w.shadow != nil {
 				if err := w.shadow.Persist(); err != nil {
@@ -296,13 +337,23 @@ func (w *Worker) Run(ctx context.Context) {
 					log.Printf("agent: final detect flush failed: %v", err)
 				}
 			}
+			if flushed {
+				// This worker's ctx is already canceled, so the commit needs a
+				// live one of its own or every backend call fails instantly and
+				// the restart replays the last window for nothing.
+				commitCtx, cancel := context.WithTimeout(context.Background(), shutdownCommitTimeout)
+				w.commitSources(commitCtx)
+				cancel()
+			}
 			return
 		case <-tick.C:
 			w.tick(ctx)
 		case <-persist.C:
+			flushed := true
 			if w.catalog.Dirty() {
 				if err := w.catalog.Persist(); err != nil {
 					log.Printf("agent: catalog flush failed: %v", err)
+					flushed = false
 				} else {
 					log.Printf("agent: catalog flushed (%d patterns)", w.catalog.Len())
 				}
@@ -321,7 +372,69 @@ func (w *Worker) Run(ctx context.Context) {
 					log.Printf("agent: detect log flushed (%d events)", w.detect.Len())
 				}
 			}
+			// The rows this cycle learned are now in storage, so the ids that
+			// suppress re-reading them may become durable too — in that order,
+			// never the other way round.
+			if flushed {
+				w.commitSources(ctx)
+			}
 		}
+	}
+}
+
+// shutdownCommitTimeout bounds the post-flush commit on the shutdown path. A
+// container stop gives the process a limited grace period; overrunning it turns
+// a graceful stop into a kill, so the commit gets a short, explicit budget.
+const shutdownCommitTimeout = 5 * time.Second
+
+// commitSources lets every source that stages delivery state make it durable.
+// It runs ONLY after the catalog flush that put this cycle's rows in storage,
+// which is what keeps the two writes from inverting: a source's record of "I
+// already delivered this row" can never outlive the row itself.
+//
+// A source with no staged state does not implement core.SourceCommitter and is
+// skipped, so it behaves exactly as it did before the seam existed. A failing
+// commit is logged and the loop continues — the pending ids stay pending and
+// the next commit retries them, so the cost is a possible replay, never a hole.
+func (w *Worker) commitSources(ctx context.Context) {
+	for _, src := range w.sources {
+		committer, ok := src.(core.SourceCommitter)
+		if !ok {
+			continue
+		}
+		if err := committer.Commit(ctx); err != nil {
+			log.Printf("agent: %s: persisting the delivered-row set failed: %v (a restart before the next commit may re-emit up to one reorder window; no row is lost)", src.Name(), err)
+		}
+	}
+}
+
+// StartWorker runs the worker in its own goroutine and returns a channel that
+// closes when Run has returned — that is, when the shutdown flush AND the
+// commit that follows it have finished. A process that exits without waiting on
+// this races its own final flush and drops everything learned since the last
+// periodic one.
+func StartWorker(ctx context.Context, w *Worker) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.Run(ctx)
+	}()
+	return done
+}
+
+// WaitForShutdownFlush blocks until the worker signalled by done has finished
+// its shutdown flush, or until timeout elapses. It reports whether the flush
+// completed, so the caller can say so rather than exiting silently mid-write.
+// A nil channel (agent disabled) returns immediately.
+func WaitForShutdownFlush(done <-chan struct{}, timeout time.Duration) bool {
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
@@ -347,6 +460,17 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	since := w.loadCursor(ctx, src.Name())
 
 	signals, newCursor, err := src.Pull(ctx, since)
+	if w.healthRecorder != nil && scheduler.Owns("service-health") && w.sourceKind(src.Name()) == signalsources.KindLogs {
+		if recordErr := w.healthRecorder.RecordSourceHealth(ctx, core.SourceHealthObservation{
+			OrgID: w.orgID, SourceID: src.Name(), AttemptedAt: time.Now().UTC(),
+			Succeeded: err == nil, ErrorClass: sourceHealthErrorClass(err),
+		}); recordErr != nil {
+			log.Printf("agent: recording source health for %s failed: %v", src.Name(), recordErr)
+		}
+	}
+	if w.ai.ObserveSourceHealth != nil {
+		w.ai.ObserveSourceHealth(src.Name(), err, time.Now())
+	}
 	if err != nil {
 		log.Printf("agent: pull from %s failed: %v", src.Name(), err)
 		return
@@ -367,13 +491,20 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		return
 	}
 
-	// Cap batch size as a safety net.
-	if w.cfg.BatchMax > 0 && len(signals) > w.cfg.BatchMax {
-		log.Printf("agent: %s returned %d signals, truncating to batch_max=%d",
-			src.Name(), len(signals), w.cfg.BatchMax)
-		signals = signals[:w.cfg.BatchMax]
+	batchSize := len(signals)
+	if w.cfg.BatchMax > 0 && batchSize > w.cfg.BatchMax {
+		batchSize = w.cfg.BatchMax
 	}
+	for start := 0; start < len(signals); start += batchSize {
+		end := min(start+batchSize, len(signals))
+		if !w.processSourceBatch(ctx, src, mode, signals[start:end], newCursor) {
+			return
+		}
+	}
+	w.saveCursor(ctx, src.Name(), newCursor)
+}
 
+func (w *Worker) processSourceBatch(ctx context.Context, src core.SignalSource, mode string, signals []core.Signal, newCursor time.Time) bool {
 	// Redact every payload before doing anything else with it.
 	for i := range signals {
 		if w.redactor != nil {
@@ -443,7 +574,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	observations, err := learner.Group(ctx, signals)
 	if err != nil {
 		log.Printf("agent: grouping signals from %s failed: %v", src.Name(), err)
-		return
+		return false
 	}
 
 	// Per-log-pattern learn-exclusion. The pre-Group chokepoint above can
@@ -481,7 +612,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		// Track the service so the grace window starts even in training mode.
 		if o.Service != "" && o.Service != "_unknown" {
 			if w.catalog.RegisterService(o.Service) {
-				log.Printf("agent: new service discovered: %s", o.Service)
+				log.Printf("agent: new service discovered: %q", o.Service)
 			}
 		}
 
@@ -491,7 +622,7 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		// before we ever classify it). Then fold the tick into the model.
 		mean, std, confident := learner.Expected(ctx, o.Key, o.Timestamp)
 		if err := learner.Learn(ctx, []core.Observation{o}); err != nil {
-			log.Printf("agent: learning key=%s from %s failed: %v", o.Key, src.Name(), err)
+			log.Printf("agent: learning key=%q from %s failed: %v", o.Key, src.Name(), err)
 			continue
 		}
 
@@ -499,7 +630,27 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		// classify against the pre-fold snapshot and sink. Split into its own
 		// method (with early-returns for grace/known/suppressed) so the
 		// promotion step below always runs, on every path, in every mode.
-		w.handleObservation(ctx, mode, src, o, mean, std, confident, detector, verdicts)
+		verdict, classified, inGrace := w.handleObservation(ctx, mode, src, o, mean, std, confident, detector, verdicts)
+		if w.healthRecorder != nil && scheduler.Owns("service-health") && learner.Kind() == "logs" {
+			projection := core.LogHealthObservation{
+				OrgID: w.orgID, SourceID: src.Name(), Service: o.Service,
+				PatternID: o.Key, ObservedAt: o.Timestamp, Frequency: o.Frequency,
+				StrongestSeverity: o.StrongestSeverity, NewPattern: o.IsNew, InGrace: inGrace,
+				ExpectedRate: mean, ExpectedSpread: std, LifecycleClassified: classified,
+			}
+			if classified {
+				projection.LifecycleClass = verdict.Class.String()
+			}
+			if err := w.healthRecorder.RecordLogHealth(ctx, projection); err != nil {
+				log.Printf("agent: recording log health fold from %s failed: %v", src.Name(), err)
+				if statusErr := w.healthRecorder.RecordSourceHealth(ctx, core.SourceHealthObservation{
+					OrgID: w.orgID, SourceID: src.Name(), AttemptedAt: time.Now().UTC(),
+					Succeeded: false, ErrorClass: "unavailable",
+				}); statusErr != nil {
+					log.Printf("agent: recording degraded health projection for %s failed: %v", src.Name(), statusErr)
+				}
+			}
+		}
 
 		// Auto-promotion runs on the LEARN path, once per folded observation, in
 		// EVERY mode — including training, which never calls Classify. It is
@@ -512,10 +663,9 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 		promoteByCount(learner, o.Key)
 	}
 
-	w.saveCursor(ctx, src.Name(), newCursor)
-
 	log.Printf("agent: tick %s signals=%d matched=%d patterns=%d skipped_no_match=%d skipped_excluded=%d verdicts=%v cursor=%s",
 		src.Name(), pulled, matched, len(observations), pulled-matched-excludedPatternFreq, excluded+excludedPatternFreq, verdicts, newCursor.Format(time.RFC3339))
+	return true
 }
 
 // handleObservation runs the mode-specific tail for one ALREADY-FOLDED
@@ -535,15 +685,16 @@ func (w *Worker) handleObservation(
 	confident bool,
 	detector core.SignalDetector,
 	verdicts map[string]int,
-) {
+) (core.TypedVerdict, bool, bool) {
 	switch mode {
 	case "training":
 		// Pure observation. No verdict, no incident.
 		verdicts["learned"]++
 		if o.IsNew {
-			log.Printf("%sagent: new pattern %s (source=%s tag=%s) → %s%s",
+			log.Printf("%sagent: new pattern %q (source=%s tag=%q) → %q%s",
 				colorGreen, o.Key, src.Name(), w.shadowTag(o), truncateString(o.Signal, 120), colorReset)
 		}
+		return core.TypedVerdict{}, false, false
 
 	case "shadow", "detect":
 		// New-service grace is shared by shadow and detect: shadow is meant
@@ -554,10 +705,10 @@ func (w *Worker) handleObservation(
 			w.catalog.IsServiceInGrace(o.Service, w.newServiceGrace) {
 			verdicts["grace"]++
 			if o.IsNew {
-				log.Printf("%sagent[%s]: new pattern %s (service=%s in grace, learning only) → %s%s",
+				log.Printf("%sagent[%s]: new pattern %q (service=%q in grace, learning only) → %q%s",
 					colorGreen, mode, o.Key, o.Service, truncateString(o.Signal, 120), colorReset)
 			}
-			return
+			return core.TypedVerdict{}, false, true
 		}
 
 		v := detector.Classify(o, mean, std, confident)
@@ -568,11 +719,14 @@ func (w *Worker) handleObservation(
 		// is a no-op for the OSS log brain; it is what lets a metric/trace
 		// brain keep learning a fresh key without firing.
 		if !v.Confident {
-			return
+			return v, true, false
 		}
 		// A known, non-spiking pattern is normal — nothing to surface.
 		if v.Class == core.VerdictKnownPattern {
-			return
+			if mode == "detect" {
+				w.recordKnownDetectionContinuation(src.Name(), detector.Kind(), o)
+			}
+			return v, true, false
 		}
 
 		// Mode-specific sink: shadow records to NDJSON; detect calls
@@ -586,17 +740,92 @@ func (w *Worker) handleObservation(
 				w.shadow.Record(src.Name(), o.Key, o.Service, o.Signal, sample,
 					w.shadowTag(o), v.Class.String(), o.Frequency)
 			}
-			log.Printf("%sagent[shadow]: would alert pattern=%s service=%s tag=%s verdict=%s freq=%d%s",
+			log.Printf("%sagent[shadow]: would alert pattern=%q service=%q tag=%q verdict=%s freq=%d%s",
 				colorGreen, o.Key, o.Service, w.shadowTag(o), v.Class, o.Frequency, colorReset)
 		} else {
-			outcome := w.emitDetect(ctx, src.Name(), o.Key, o.Signal, o.Service, o.Samples, v.Class, v.Baseline, v.Score, std, v.Reason)
+			outcome := w.emitDetect(ctx, src.Name(), detector.Kind(), o.Key, o.Signal, o.Service, o.Frequency, o.Samples, v.Class, v.Baseline, v.Score, std, v.Reason, observationSeverity(o))
 			verdicts["emit_"+outcome]++
 		}
+		return v, true, false
 
 	default:
 		log.Printf("agent: unknown mode=%q, treating as training", mode)
 		verdicts["learned"]++
+		return core.TypedVerdict{}, false, false
 	}
+}
+
+func (w *Worker) sourceKind(name string) signalsources.Kind {
+	if kind := w.kindByName[name]; kind != "" {
+		return kind
+	}
+	return signalsources.KindUnknown
+}
+
+func sourceHealthErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "timeout"
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "unauthorized"), strings.Contains(message, "authentication"):
+		return "authentication"
+	case strings.Contains(message, "forbidden"), strings.Contains(message, "permission"):
+		return "permission"
+	case strings.Contains(message, "rate limit"), strings.Contains(message, "too many requests"):
+		return "rate_limit"
+	case strings.Contains(message, "connect"), strings.Contains(message, "network"):
+		return "connection"
+	default:
+		return "unavailable"
+	}
+}
+
+func (w *Worker) recordKnownDetectionContinuation(source, signalKind string, observation core.Observation) {
+	if w.continueDetectionEpisode == nil || observation.Frequency <= 0 {
+		return
+	}
+	decision, err := w.continueDetectionEpisode(storage.DetectionOccurrence{
+		Identity: storage.DetectionIdentity{
+			AgentKind: "detect", Source: source, Service: observation.Service,
+			SignalKind: signalKind, ConditionKey: observation.Key,
+		},
+		Frequency: int64(observation.Frequency), Severity: observationSeverity(observation),
+		ReceivedAt: observation.Timestamp, ExistingOnly: true,
+	})
+	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrUnsupported) {
+		return
+	}
+	event := &DetectEvent{
+		Source: source, PatternID: observation.Key, Service: observation.Service,
+		Verdict: core.VerdictKnownPattern.String(), Frequency: observation.Frequency,
+		Timestamp: observation.Timestamp,
+	}
+	emission := &core.DetectionEmissionResult{NotificationOutcome: "not_applicable"}
+	if err != nil {
+		message := err.Error()
+		if len(message) > 256 {
+			message = message[:256]
+		}
+		log.Printf("agent: episode_error operation=continue_known error=%q", message)
+		emission.EpisodeAction = "episode_error"
+		emission.EpisodeError = message
+	} else {
+		setDetectionEmissionFromDecision(emission, decision)
+	}
+	w.recordDetectEvent(event, emission)
+}
+
+func setDetectionEmissionFromDecision(emission *core.DetectionEmissionResult, decision storage.DetectionEpisodeDecision) {
+	emission.Fingerprint = decision.Fingerprint
+	emission.EpisodeID = decision.EpisodeID
+	emission.IncidentID = decision.IncidentID
+	emission.OccurrenceDelta = decision.OccurrenceDelta
+	emission.OccurrenceCount = decision.OccurrenceCount
+	emission.EpisodeAction = string(decision.Action)
 }
 
 // signalPromoter is an OPTIONAL capability a brain may implement to persist a
@@ -641,21 +870,30 @@ func promoteByCount(learner core.SignalLearner, key string) {
 //     would-be call and returns the ok label (shadow-of-detect).
 func (w *Worker) emitDetect(
 	ctx context.Context,
-	source, patternID, template, service string,
+	source, signalKind, patternID, template, service string,
+	frequency int,
 	signals []core.Signal,
 	verdict core.AgentVerdict,
 	prevBaseline float64,
 	score, baselineStd float64,
 	explanation string,
+	fullObservationSeverity ...string,
 ) string {
+	ruleSeverity := strongestSeverity(signals)
+	if len(fullObservationSeverity) > 0 && utils.SeverityRank(fullObservationSeverity[0]) > utils.SeverityRank(ruleSeverity) {
+		ruleSeverity = utils.NormalizeSeverity(fullObservationSeverity[0])
+	}
 	result := core.AgentResult{
-		Verdict:       verdict,
-		PatternID:     patternID,
-		Template:      template,
-		SampleSignals: signals,
-		Frequency:     len(signals),
-		Baseline:      prevBaseline,
-		RuleSeverity:  strongestSeverity(signals),
+		Verdict:           verdict,
+		PatternID:         patternID,
+		Template:          template,
+		SampleSignals:     signals,
+		Frequency:         frequency,
+		Baseline:          prevBaseline,
+		AgentKind:         "detect",
+		SignalKind:        signalKind,
+		DetectionEmission: &core.DetectionEmissionResult{},
+		RuleSeverity:      ruleSeverity,
 	}
 
 	// Build a partial DetectEvent up front so every outcome path can
@@ -666,7 +904,7 @@ func (w *Worker) emitDetect(
 		Template:     template,
 		Service:      service,
 		Verdict:      verdict.String(),
-		Frequency:    len(signals),
+		Frequency:    frequency,
 		Baseline:     prevBaseline,
 		BaselineStd:  baselineStd,
 		Score:        score,
@@ -683,7 +921,7 @@ func (w *Worker) emitDetect(
 	// restart; OSS registers no resolver so this collapses to the original
 	// `w.ai.Detect == nil` check.
 	if w.ai.Detect == nil || !w.effectiveAIEnabled(ctx) {
-		log.Printf("%sagent[detect:basic]: templated alert pattern=%s service=%s verdict=%s freq=%d %s",
+		log.Printf("%sagent[detect:basic]: templated alert pattern=%q service=%q verdict=%s freq=%d %s",
 			colorGreen, patternID, service, verdict, len(signals), colorReset)
 		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
 		evt.Finding = finding
@@ -693,13 +931,13 @@ func (w *Worker) emitDetect(
 		if outcome == "send_error" {
 			evt.Error = "emitter returned error"
 		}
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 
 	// 2. Cache hit — reuse the prior finding.
 	if cached, ok := w.ai.Cache.Get(patternID); ok {
-		log.Printf("%sagent[detect]: cache hit pattern=%s verdict=%s freq=%d%s",
+		log.Printf("%sagent[detect]: cache hit pattern=%q verdict=%s freq=%d%s",
 			colorGreen, patternID, verdict, len(signals), colorReset)
 		evt.Finding = cached
 		outcome := w.send(cached, result, source, service, "cached")
@@ -707,7 +945,7 @@ func (w *Worker) emitDetect(
 		if outcome == "send_error" {
 			evt.Error = "emitter returned error (see logs)"
 		}
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 
@@ -715,7 +953,7 @@ func (w *Worker) emitDetect(
 	// deterministic finding so a transient budget exhaustion never drops a
 	// page.
 	if !w.ai.Rate.Allow() {
-		log.Printf("agent[detect]: AI quota exceeded; templated alert pattern=%s freq=%d", patternID, len(signals))
+		log.Printf("agent[detect]: AI quota exceeded; templated alert pattern=%q freq=%d", patternID, len(signals))
 		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
 		evt.Finding = finding
 		evt.Model = "heuristic"
@@ -724,7 +962,7 @@ func (w *Worker) emitDetect(
 		if outcome == "send_error" {
 			evt.Error = "emitter returned error"
 		}
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 
@@ -732,14 +970,14 @@ func (w *Worker) emitDetect(
 	// transient AI outage never drops a page.
 	call, err := w.ai.Detect.Run(ctx, core.DetectTask{Result: result})
 	if err != nil {
-		log.Printf("agent[detect]: AI analyze failed pattern=%s: %v; sending templated alert", patternID, err)
+		log.Printf("agent[detect]: AI failed pattern=%q: %v; sending templated alert", patternID, err)
 		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
 		evt.Finding = finding
 		evt.Model = "heuristic"
 		evt.Error = err.Error()
 		outcome := w.send(finding, result, source, service, "emitted_basic_error")
 		evt.Outcome = outcome
-		w.detect.Record(evt)
+		w.recordDetectEvent(evt, result.DetectionEmission)
 		return outcome
 	}
 	finding := call.Finding
@@ -756,8 +994,21 @@ func (w *Worker) emitDetect(
 	if outcome == "send_error" {
 		evt.Error = "emitter returned error (see logs)"
 	}
-	w.detect.Record(evt)
+	w.recordDetectEvent(evt, result.DetectionEmission)
 	return outcome
+}
+
+func (w *Worker) recordDetectEvent(event *DetectEvent, emission *core.DetectionEmissionResult) {
+	if emission != nil {
+		event.EpisodeID = emission.EpisodeID
+		event.IncidentID = emission.IncidentID
+		event.OccurrenceDelta = emission.OccurrenceDelta
+		event.OccurrenceCount = emission.OccurrenceCount
+		event.EpisodeAction = emission.EpisodeAction
+		event.NotificationOutcome = emission.NotificationOutcome
+		event.EpisodeError = emission.EpisodeError
+	}
+	w.detect.Record(event)
 }
 
 // send delegates to the configured emitter and translates errors into
@@ -767,16 +1018,16 @@ func (w *Worker) send(finding *core.AIFinding, result core.AgentResult, source, 
 	// but must not silently demote below the rule-declared severity.
 	clampSeverityFloor(finding, result.RuleSeverity)
 	if w.emitter == nil {
-		log.Printf("%sagent[detect]: pattern=%s service=%s severity=%s confidence=%.2f title=%q (no emitter wired)%s",
+		log.Printf("%sagent[detect]: pattern=%q service=%q severity=%q confidence=%.2f title=%q (no emitter wired)%s",
 			colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
 			truncateString(finding.Title, 80), colorReset)
 		return okLabel
 	}
 	if err := w.emitter(finding, result, source, service); err != nil {
-		log.Printf("agent[detect]: emit failed pattern=%s: %v", result.PatternID, err)
+		log.Printf("agent[detect]: emit failed pattern=%q: %v", result.PatternID, err)
 		return "send_error"
 	}
-	log.Printf("%sagent[detect]: emitted pattern=%s service=%s severity=%s confidence=%.2f title=%q%s",
+	log.Printf("%sagent[detect]: emitted pattern=%q service=%q severity=%q confidence=%.2f title=%q%s",
 		colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
 		truncateString(finding.Title, 80), colorReset)
 	return okLabel
@@ -802,7 +1053,8 @@ func (w *Worker) shadowTag(o core.Observation) string {
 //     agent.regex.traces (metricsMatcher / tracesMatcher), when set;
 //  2. the per-kind built-in default — match-all for metrics/traces;
 //  3. the global logs matcher (w.matcher) for the logs kind and any
-//     unknown/unregistered type (which KindOf defaults to KindLogs).
+//     unknown/unregistered type. KindOf reports KindUnknown for an unknown
+//     type, which reaches the switch default and uses the logs matcher.
 //
 // Only the log-brain path consults this; metric/trace sources bound to their
 // proper enterprise brain group by fields and never hit it. The per-kind
@@ -936,6 +1188,13 @@ func strongestSeverity(signals []core.Signal) string {
 		}
 	}
 	return best
+}
+
+func observationSeverity(observation core.Observation) string {
+	if utils.SeverityRank(observation.StrongestSeverity) > 0 {
+		return utils.NormalizeSeverity(observation.StrongestSeverity)
+	}
+	return strongestSeverity(observation.Samples)
 }
 
 // clampSeverityFloor raises finding.Severity up to floor when floor is a

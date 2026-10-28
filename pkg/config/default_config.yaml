@@ -34,6 +34,7 @@ alert:
     token: ${SLACK_TOKEN}
     channel_id: ${SLACK_CHANNEL_ID}
     template_path: "config/slack_message.tmpl"
+    kubernetes_issue_template_path: ""
     message_properties:
       button_text: "Acknowledge Alert"
       button_style: "primary"
@@ -44,6 +45,7 @@ alert:
     bot_token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
     template_path: "config/telegram_message.tmpl"
+    kubernetes_issue_template_path: ""
     use_proxy: false
 
   viber:
@@ -53,6 +55,7 @@ alert:
     user_id: ${VIBER_USER_ID}
     channel_id: ${VIBER_CHANNEL_ID}
     template_path: "config/viber_message.tmpl"
+    kubernetes_issue_template_path: ""
     use_proxy: false
 
   email:
@@ -64,11 +67,13 @@ alert:
     to: ${EMAIL_TO}
     subject: ${EMAIL_SUBJECT}
     template_path: "config/email_message.tmpl"
+    kubernetes_issue_template_path: ""
 
   msteams:
     enable: false
     power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL}
     template_path: "config/msteams_message.tmpl"
+    kubernetes_issue_template_path: ""
     other_power_urls:
       qc: ${MSTEAMS_OTHER_POWER_URL_QC}
 
@@ -76,6 +81,7 @@ alert:
     enable: false
     webhook_url: ${LARK_WEBHOOK_URL}
     template_path: "config/lark_message.tmpl"
+    kubernetes_issue_template_path: ""
     use_proxy: false
     other_webhook_urls:
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
@@ -198,6 +204,7 @@ agent:
     # (default http://localhost:4000/v1), api_key is the proxy virtual key, and
     # model is the LiteLLM model alias (e.g. "gpt-5" or "claude-sonnet").
     provider: openai
+    base_url: ""
     api_key: ${AGENT_AI_API_KEY}
     model: "gpt-5.4-mini"
     temperature: 0.2

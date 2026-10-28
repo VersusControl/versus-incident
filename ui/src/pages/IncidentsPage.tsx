@@ -13,16 +13,17 @@ import {
   ChevronUp,
   Eye,
   Loader2,
-  Search,
   UserPlus,
 } from "lucide-react";
 import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
+import { deliveryErrorLabel, hasDeliveryError } from "@/lib/incidentPresentation";
+import { countWindowLabel } from "@/lib/countWindow";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
+import { incidentSeverity } from "@/lib/severity";
 import { useTableKeys } from "@/lib/hooks";
 import {
   INCIDENT_STATUS_VALUES,
   filterIncidentsByText,
-  formatOriginCounts,
   incidentResetKey,
   matchesStatus,
   normalizeOrigin,
@@ -46,6 +47,8 @@ import {
   SelectAllCheckbox,
 } from "@/components/BulkActionBar";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
@@ -105,6 +108,7 @@ function useIncidentIndex(
     return {
       incidents: pages.flatMap((p) => p.incidents),
       counts: first.counts,
+      count_window: first.count_window,
       total: first.total,
     };
   }, [listQuery.data]);
@@ -231,12 +235,18 @@ export function IncidentsPage() {
 
   const { data, isLoading, isError, error, refetch, isRefetching, listQuery } =
     useIncidentIndex(useServerSearch, trimmed, origin);
-  // Whole-set per-origin totals (all statuses) from the server drive the
-  // origin-tab badges and the top-bar summary, so both feeds stay visible
-  // regardless of the active tab. by_status is the authoritative per-origin ×
-  // per-status breakdown the status-tab counts read.
+  // Per-origin OPEN counts drive the origin-tab badges and the top-bar
+  // summary: the useful number on this page is how much work is waiting, not
+  // how much has ever arrived. It also matches the Now page and the header
+  // badge, which already read the open bucket, so no two surfaces disagree.
+  // by_status is the authoritative per-origin × per-status breakdown the
+  // status-tab counts read.
   const byStatus = data?.counts?.by_status;
-  const originCounts = byStatus?.all;
+  const originCounts = byStatus?.open;
+
+  const windowLabel = data
+    ? countWindowLabel(data.count_window, "short")
+    : undefined;
 
   // Roster lookups are shared by every row — resolve them once here.
   const teamsQ = useQuery({ queryKey: ["teams"], queryFn: api.listTeams });
@@ -383,8 +393,14 @@ export function IncidentsPage() {
         x.id === i.id
           ? { ...x, resolved: true, resolved_at: new Date().toISOString() }
           : x;
+      // NOTE: a queryKey predicate is a PREFIX match, so ["incidents"] also
+      // selects ["incidents","counts"], which holds a counts OBJECT, and
+      // ["incidents","list"]. Only the array-shaped caches can be mapped —
+      // calling .map on the counts object threw inside onMutate and surfaced
+      // as "Resolve failed: <x>.map is not a function" before the request was
+      // ever sent.
       qc.setQueriesData<IncidentSummary[]>({ queryKey: ["incidents"] }, (old) =>
-        old?.map(flip),
+        Array.isArray(old) ? old.map(flip) : old,
       );
       qc.setQueriesData<InfiniteData<IncidentIndex>>(
         { queryKey: ["incident-index"] },
@@ -486,77 +502,78 @@ export function IncidentsPage() {
     <>
       <TopBar
         title="Incidents"
-        subtitle={formatOriginCounts(originCounts)}
+        subtitle={windowLabel ? `counts over ${windowLabel}` : undefined}
+        showCountWindow={false}
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {/* Origin is the primary split: AI-detected (default) vs the
-              inbound webhook/alert firehose, each with its whole-set
-              count so neither buries the other. */}
-          <SegmentedControl
-            param="origin"
-            defaultValue="ai_detect"
-            aria-label="Filter incidents by origin"
-            options={[
-              {
-                value: "ai_detect",
-                label: originLabel("ai_detect"),
-                badge: originCounts?.ai_detect,
-              },
-              {
-                value: "webhook",
-                label: originLabel("webhook"),
-                badge: originCounts?.webhook,
-              },
-            ]}
-          />
-          <div className="relative max-w-md flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              className="input pl-7"
+        <FilterBar
+          tabs={
+            <>
+              {/* Origin is the primary split: AI-detected (default) vs the
+                  inbound webhook/alert firehose, each with its whole-set
+                  count so neither buries the other. Grouped with status so
+                  every tab sits together, before the search. */}
+              <SegmentedControl
+                param="origin"
+                defaultValue="ai_detect"
+                aria-label="Filter incidents by origin"
+                options={[
+                  {
+                    value: "ai_detect",
+                    label: originLabel("ai_detect"),
+                    badge: originCounts?.ai_detect,
+                  },
+                  {
+                    value: "webhook",
+                    label: originLabel("webhook"),
+                    badge: originCounts?.webhook,
+                  },
+                ]}
+              />
+              <SegmentedControl
+                param="status"
+                defaultValue="open"
+                aria-label="Filter incidents by status"
+                options={[
+                  // Badges stay undefined until the query settles — counts
+                  // computed from [] mid-load would render a false "0 = all
+                  // quiet" row of badges next to skeleton rows.
+                  { value: "open", label: "Open", badge: data ? counts.open : undefined },
+                  { value: "acked", label: "Acked", badge: data ? counts.acked : undefined },
+                  {
+                    value: "resolved",
+                    label: "Resolved",
+                    badge: data ? counts.resolved : undefined,
+                  },
+                  { value: "all", label: "All", badge: data ? counts.all : undefined },
+                ]}
+              />
+            </>
+          }
+          search={
+            <SearchInput
+              value={q}
+              onChange={setQ}
+              ariaLabel="Search incidents"
               placeholder={
                 searchSupported
                   ? "Search incidents (title, service, payload)…"
                   : "Filter loaded incidents by id, title or service…"
               }
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
             />
-          </div>
-          <SegmentedControl
-            param="status"
-            defaultValue="open"
-            aria-label="Filter incidents by status"
-            options={[
-              // Badges stay undefined until the query settles — counts
-              // computed from [] mid-load would render a false "0 = all
-              // quiet" row of badges next to skeleton rows.
-              { value: "open", label: "Open", badge: data ? counts.open : undefined },
-              { value: "acked", label: "Acked", badge: data ? counts.acked : undefined },
-              {
-                value: "resolved",
-                label: "Resolved",
-                badge: data ? counts.resolved : undefined,
-              },
-              { value: "all", label: "All", badge: data ? counts.all : undefined },
-            ]}
-          />
-          {/* Window-scoped incidents-analytics report — spans both origins, so
-              it lives in the toolbar, not on any one incident/tab. Hidden when
-              the runtime report setting is disabled (via capabilities). */}
-          <div className="ml-auto flex items-center gap-3">
-            {/* Auto-resolve is a webhook-origin concept only — it controls
-                whether inbound webhook incidents land resolved. Mounted only on
-                the webhook tab, so no intake request fires on the AI tab. */}
-            {origin === "webhook" && <WebhookAutoResolveToggle />}
-            <ReportsButton />
-          </div>
-        </div>
+          }
+          actions={
+            <>
+              {/* Window-scoped incidents-analytics report — spans both origins,
+                  so it lives in the toolbar, not on any one incident/tab.
+                  Auto-resolve is a webhook-origin concept only, mounted only on
+                  the webhook tab so no intake request fires on the AI tab. */}
+              {origin === "webhook" && <WebhookAutoResolveToggle />}
+              <ReportsButton />
+            </>
+          }
+        />
 
         {isError ? (
           <RetryableError
@@ -667,7 +684,7 @@ export function IncidentsPage() {
                     className="text-brand-300 hover:underline"
                     onClick={() => fetchNextPage()}
                   >
-                    Load more ({data?.total?.toLocaleString() ?? ""} total)
+                    Load more ({data?.total?.toLocaleString() ?? ""} in {windowLabel})
                   </button>
                 )}
               </div>
@@ -863,9 +880,9 @@ function IncidentPeekBody({
         </PeekField>
       </dl>
 
-      {i.notify_status === "failed" && i.notify_error && (
+      {hasDeliveryError(i) && i.notify_error && (
         <div className="rounded-control border border-sev-critical/40 bg-sev-critical/5 p-2 text-2xs text-sev-critical">
-          <span className="font-semibold">Notify failed:</span> {i.notify_error}
+          <span className="font-semibold">{deliveryErrorLabel(i.notify_status)}:</span> {i.notify_error}
         </div>
       )}
 
@@ -930,7 +947,7 @@ function IncidentRow({
   );
   const hasAssignment =
     !!i.assigned_team_id || (i.assigned_member_ids ?? []).length > 0;
-  const notifyFailed = i.notify_status === "failed";
+  const notifyFailed = hasDeliveryError(i);
 
   return (
     <>
@@ -962,23 +979,34 @@ function IncidentRow({
           )}
         </td>
         <td>
-          {/* Severity stays empty until the backend ships a severity field on
-              list summaries (UX_REDESIGN §3.5 ask #1) — IncidentSummary
-              carries no content for the detail page's parser to read. */}
-          <SeverityBadge severity={null} />
+          <SeverityBadge
+            severity={incidentSeverity(
+              null,
+              i.highest_observed_severity,
+              i.highest_notified_severity,
+            )}
+          />
         </td>
         <td title={fmtAbs(i.created_at)}>{fmtRel(i.created_at)}</td>
         <td>
           {/* Origin is already split by the top tabs (AI-detected vs
               Webhook), so the per-row source chip is redundant here — the
               title stands alone. */}
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 flex-col gap-0.5">
             <Link
               to={`/incidents/${i.id}`}
               className="truncate font-medium text-ink-50 hover:text-link hover:underline"
             >
               {truncate(incidentTitle(i), 80)}
             </Link>
+            {!!i.detection_episode_id && (
+              <span className="text-2xs text-ink-400">
+                {(i.occurrence_count ?? 1).toLocaleString()} occurrences
+                {i.detection_last_seen && (
+                  <> · last seen {fmtRel(i.detection_last_seen)}</>
+                )}
+              </span>
+            )}
           </div>
         </td>
         <td>
@@ -1006,11 +1034,7 @@ function IncidentRow({
           )}
         </td>
         <td>
-          {!i.notify_status ? (
-            <EmptyValue />
-          ) : i.notify_status === "sent" ? (
-            <Pill tone="good">sent</Pill>
-          ) : notifyFailed ? (
+          {notifyFailed ? (
             <button
               aria-expanded={notifyExpanded}
               aria-controls={`notify-err-${i.id}`}
@@ -1023,9 +1047,13 @@ function IncidentRow({
               onClick={onToggleNotify}
             >
               <Pill tone="bad" className="gap-0.5">
-                failed
+                {i.notify_status || "failed"}
                 {notifyExpanded ? (
                   <ChevronUp size={10} aria-hidden />
+                ) : !i.notify_status ? (
+                  <EmptyValue />
+                ) : i.notify_status === "sent" ? (
+                  <Pill tone="good">sent</Pill>
                 ) : (
                   <ChevronDown size={10} aria-hidden />
                 )}
@@ -1048,7 +1076,7 @@ function IncidentRow({
             colSpan={COLS}
             className="bg-sev-critical/5 px-3 py-2 text-2xs text-sev-critical"
           >
-            <span className="font-semibold">Notify failed:</span>{" "}
+            <span className="font-semibold">{deliveryErrorLabel(i.notify_status)}:</span>{" "}
             {i.notify_error || "No error detail was recorded for this send."}
           </td>
         </tr>

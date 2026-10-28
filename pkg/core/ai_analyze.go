@@ -3,7 +3,11 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // AnalyzeIncidentSnapshot is the input payload handed to the
@@ -36,8 +40,7 @@ type AnalyzeIncidentSnapshot struct {
 	RequestedBy string `json:"requested_by,omitempty"`
 }
 
-// AnalyzeTool is the contract every analyze-side read-only tool
-// satisfies. Tools are registered with the analyze agent at
+// Tool is the contract every read-only AI tool satisfies. Tools are registered with an agent at
 // construction time; the agent surfaces them to the model as Eino
 // ToolInfo and dispatches model-requested calls back to this
 // interface.
@@ -45,7 +48,7 @@ type AnalyzeIncidentSnapshot struct {
 // Implementations MUST be read-only. The compile-time guard in
 // pkg/agent/ai/analyze rejects any import of services.CreateIncident
 // transitively.
-type AnalyzeTool interface {
+type Tool interface {
 	// Name is the model-visible tool name. Must be a stable identifier
 	// (snake_case is the convention).
 	Name() string
@@ -63,6 +66,108 @@ type AnalyzeTool interface {
 	Invoke(ctx context.Context, args json.RawMessage) (*ToolResult, error)
 }
 
+// SourceRoutedTool identifies a provider tool whose existing capability can be
+// combined with another provider by dispatching an explicit source argument.
+type SourceRoutedTool interface {
+	Tool
+	SourceNames() []string
+}
+
+// ContextAuthorizedTool can remove unauthorized sources or the entire tool
+// before a model catalog is built. Implementations must not perform backend IO.
+type ContextAuthorizedTool interface {
+	Tool
+	AuthorizedTool(context.Context) Tool
+}
+
+// AnalyzeTool is retained for source compatibility.
+// Deprecated: use Tool.
+type AnalyzeTool = Tool
+
+// ToolErrorCode classifies a tool failure without exposing its underlying cause.
+type ToolErrorCode string
+
+const (
+	ToolErrorInvalidArguments ToolErrorCode = "invalid_arguments"
+	ToolErrorTimeout          ToolErrorCode = "timeout"
+	ToolErrorCancelled        ToolErrorCode = "cancelled"
+	ToolErrorBackend          ToolErrorCode = "backend_error"
+	ToolErrorInternal         ToolErrorCode = "internal_error"
+)
+
+// ToolError carries a model-safe message while retaining the underlying cause
+// for trusted server-side handling. Cause is never part of the model envelope.
+type ToolError struct {
+	Code    ToolErrorCode
+	Message string
+	Cause   error
+}
+
+// Error implements error without exposing the underlying cause.
+func (err *ToolError) Error() string {
+	if err == nil {
+		return ""
+	}
+	return err.Message
+}
+
+// Unwrap retains errors.Is/errors.As support for trusted server-side callers.
+func (err *ToolError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Cause
+}
+
+// NewToolError constructs a classified tool error with a model-safe message.
+func NewToolError(code ToolErrorCode, message string, cause error) error {
+	return &ToolError{Code: code, Message: message, Cause: cause}
+}
+
+// ClassifyToolError returns only model-safe fields. Unknown errors are treated
+// as backend failures and their text is deliberately discarded.
+func ClassifyToolError(err error) (ToolErrorCode, string) {
+	var classified *ToolError
+	if errors.As(err, &classified) {
+		return classified.Code, classified.Message
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ToolErrorTimeout, "tool timed out"
+	}
+	if errors.Is(err, context.Canceled) {
+		return ToolErrorCancelled, "tool run was cancelled"
+	}
+	return ToolErrorBackend, "tool backend failed"
+}
+
+// ToolDisplayer optionally gives a tool a human-readable activity name.
+type ToolDisplayer interface {
+	DisplayName() string
+}
+
+// AnalyzeToolDisplayer is retained for source compatibility.
+// Deprecated: use ToolDisplayer.
+type AnalyzeToolDisplayer = ToolDisplayer
+
+// ToolDisplayName returns an explicit display name or title-cases the stable name.
+func ToolDisplayName(tool Tool) string {
+	if tool == nil || (reflect.ValueOf(tool).Kind() == reflect.Ptr && reflect.ValueOf(tool).IsNil()) {
+		return ""
+	}
+	if displayer, ok := tool.(ToolDisplayer); ok {
+		if display := strings.TrimSpace(displayer.DisplayName()); display != "" {
+			return display
+		}
+	}
+	parts := strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(tool.Name()))
+	for i, part := range parts {
+		runes := []rune(part)
+		runes[0] = unicode.ToUpper(runes[0])
+		parts[i] = string(runes)
+	}
+	return strings.Join(parts, " ")
+}
+
 // ToolResult is the uniform envelope every AnalyzeTool returns. The
 // shape is stable so the model sees a predictable schema across tools;
 // the per-tool payload lives in Data as JSON-encodable values.
@@ -71,15 +176,66 @@ type AnalyzeTool interface {
 // multiple tool responses can disambiguate without relying on call
 // ordering.
 //
-// Found — optional flag for lookup-style tools (pattern_history,
-// describe_service) to signal "no such entity" without an error.
+// Found — optional flag for lookup-style tools (get_pattern,
+// get_service) to signal "no such entity" without an error.
 // Defaults to true; lookups that miss should set it to false and
 // leave Data empty (or populated with just the query echo).
 //
 // Data — the typed payload. Keys are tool-specific; values must be
 // JSON-marshalable (no channels, funcs, or unexported structs).
 type ToolResult struct {
-	Tool  string         `json:"tool"`
-	Found bool           `json:"found"`
-	Data  map[string]any `json:"data,omitempty"`
+	Tool      string         `json:"tool"`
+	Found     bool           `json:"found"`
+	Available *bool          `json:"-"`
+	Reason    string         `json:"reason,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+}
+
+// IsAvailable reports availability, defaulting existing results to true.
+func (result ToolResult) IsAvailable() bool {
+	return result.Available == nil || *result.Available
+}
+
+// UnavailableToolResult returns an expected missing-capability result.
+// UnavailableToolResult reports missing capability as a successful result so
+// the model can adapt without treating expected configuration as a tool error.
+func UnavailableToolResult(tool, reason string) *ToolResult {
+	available := false
+	return &ToolResult{Tool: tool, Found: false, Available: &available, Reason: reason}
+}
+
+// MarshalJSON keeps availability explicit on the wire while preserving old constructors.
+func (result ToolResult) MarshalJSON() ([]byte, error) {
+	type wireResult struct {
+		Tool      string         `json:"tool"`
+		Found     bool           `json:"found"`
+		Available bool           `json:"available"`
+		Reason    string         `json:"reason,omitempty"`
+		Data      map[string]any `json:"data,omitempty"`
+	}
+	return json.Marshal(wireResult{
+		Tool: result.Tool, Found: result.Found, Available: result.IsAvailable(),
+		Reason: result.Reason, Data: result.Data,
+	})
+}
+
+// UnmarshalJSON preserves explicit availability when reading stored results.
+func (result *ToolResult) UnmarshalJSON(data []byte) error {
+	type wireResult struct {
+		Tool      string         `json:"tool"`
+		Found     bool           `json:"found"`
+		Available *bool          `json:"available"`
+		Reason    string         `json:"reason,omitempty"`
+		Data      map[string]any `json:"data,omitempty"`
+	}
+	var wire wireResult
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	result.Tool = wire.Tool
+	result.Found = wire.Found
+	result.Available = wire.Available
+	result.Reason = wire.Reason
+	result.Data = wire.Data
+	return nil
 }

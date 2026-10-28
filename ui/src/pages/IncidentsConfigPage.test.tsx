@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ToastProvider } from "@/components/Toast";
-import { IncidentsConfigPanel } from "./IncidentsConfigPage";
+import { IncidentsConfigSection } from "./IncidentsConfigPage";
 import { api, type IncidentsConfig } from "@/lib/api";
 
 // The per-channel config card must NOT surface the template path — that is a
@@ -80,13 +80,13 @@ function renderPanel() {
   return render(
     <QueryClientProvider client={qc}>
       <ToastProvider>
-        <IncidentsConfigPanel />
+        <IncidentsConfigSection part="channels" />
       </ToastProvider>
     </QueryClientProvider>,
   );
 }
 
-describe("IncidentsConfigPanel channel card", () => {
+describe("IncidentsConfigSection channel card", () => {
   beforeEach(() => {
     vi.mocked(api.getIncidentsConfig).mockResolvedValue(config());
   });

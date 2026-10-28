@@ -1,0 +1,93 @@
+package tenancy
+
+import (
+	"context"
+	"reflect"
+	"testing"
+)
+
+func TestTrustedContextOrgScopeCopiesReadScope(t *testing.T) {
+	scope := NewOrgScope("licensed", "default")
+	ctx := WithOrgScope(context.Background(), scope)
+	scope.Read[0] = "changed"
+	got, ok := ContextOrgScope(ctx)
+	if !ok || got.Write != "licensed" || got.Read[0] != "licensed" {
+		t.Fatal("trusted context scope drifted")
+	}
+	got.Read[0] = "changed"
+	second, _ := ContextOrgScope(ctx)
+	if second.Read[0] != "licensed" {
+		t.Fatal("returned context scope mutable")
+	}
+}
+
+func TestDefaultOrgScope(t *testing.T) {
+	got := DefaultOrgScope()
+	if got.Write != DefaultOrgID {
+		t.Fatalf("Write = %q, want %q", got.Write, DefaultOrgID)
+	}
+	if !reflect.DeepEqual(got.Read, []string{DefaultOrgID}) {
+		t.Fatalf("Read = %v, want [%q]", got.Read, DefaultOrgID)
+	}
+}
+
+func TestTrustedOrgScopeForeignAndNilContext(t *testing.T) {
+	boot := NewOrgScope("licensed", "default")
+	if got := TrustedOrgScope(boot, "licensed"); !reflect.DeepEqual(got, boot) {
+		t.Fatalf("boot=%+v", got)
+	}
+	if got := TrustedOrgScope(boot, "foreign"); !reflect.DeepEqual(got, NewOrgScope("foreign")) {
+		t.Fatalf("foreign=%+v", got)
+	}
+	if got := TrustedOrgScope(NewOrgScope("cloud"), "cloud"); len(got.Read) != 1 {
+		t.Fatal("cloud union")
+	}
+	if got, ok := ContextOrgScope(context.TODO()); ok || !reflect.DeepEqual(got, DefaultOrgScope()) {
+		t.Fatalf("nil context=%+v %v", got, ok)
+	}
+	got := TrustedOrgScope(boot, "licensed")
+	got.Read[1] = "foreign"
+	if boot.Read[1] != "default" {
+		t.Fatal("scope aliases caller")
+	}
+}
+
+func TestNewOrgScopeWriteFirstAndDeduplicated(t *testing.T) {
+	got := NewOrgScope("licensed", DefaultOrgID, "licensed", "legacy", DefaultOrgID)
+	want := OrgScope{Write: "licensed", Read: []string{"licensed", DefaultOrgID, "legacy"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("NewOrgScope = %#v, want %#v", got, want)
+	}
+}
+
+func TestOrgScopeNormalizesBlankAndOwnsReadSlice(t *testing.T) {
+	read := []string{"", "legacy"}
+	scope := NewOrgScope("", read...)
+	read[1] = "mutated"
+	if !reflect.DeepEqual(scope.Read, []string{DefaultOrgID, "legacy"}) {
+		t.Fatalf("Read = %v, want [%q legacy]", scope.Read, DefaultOrgID)
+	}
+
+	orgs := scope.OrgIDs()
+	orgs[0] = "mutated"
+	if scope.Read[0] != DefaultOrgID {
+		t.Fatalf("OrgIDs returned aliased storage: scope.Read = %v", scope.Read)
+	}
+}
+
+type testScopeSource struct{ scope OrgScope }
+
+func (source *testScopeSource) OrgScope() OrgScope { return source.scope }
+
+func TestScopeForWriteUsesOnlyMatchingTrustedScope(t *testing.T) {
+	source := &testScopeSource{scope: NewOrgScope("licensed", DefaultOrgID)}
+	got := ScopeForWrite(source, "licensed")
+	if !got.Contains("licensed") || !got.Contains(DefaultOrgID) || got.Contains("foreign") {
+		t.Fatalf("matching scope = %#v", got)
+	}
+
+	got = ScopeForWrite(source, "foreign")
+	if !reflect.DeepEqual(got, NewOrgScope("foreign")) {
+		t.Fatalf("mismatched scope = %#v, want foreign-only fallback", got)
+	}
+}

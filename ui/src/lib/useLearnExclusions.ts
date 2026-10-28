@@ -37,7 +37,7 @@ import { useToast } from "@/components/toastContext";
 // feature never leaks a header or an inert widget to a non-admin.
 //
 // Disable-Learn semantics are preserved end to end: toggling calls the SAME enterprise
-// endpoints (POST/DELETE .../services/:name for a service; the whole-list PUT
+// endpoints (POST .../services/batch for a service selection; the whole-list PUT
 // for a metric/trace signal AND for a log pattern — the log-pattern grain has
 // no per-pattern POST/DELETE route, so it rides the same read-modify-write PUT
 // the metric grain does), and an excluded (service, signal) or (service,
@@ -97,15 +97,18 @@ export interface LearnExclusionControls {
   isServiceExcluded: (service: string) => boolean;
   isSignalExcluded: (signal: string) => boolean;
   isPatternExcluded: (patternKey: string) => boolean;
-  toggleService: (service: string, exclude: boolean) => void;
   toggleSignal: (signal: string, exclude: boolean) => void;
   togglePattern: (patternKey: string, exclude: boolean) => void;
-  // Batch variants for the bulk-action bar. Both fold MANY entries into ONE
-  // whole-list PUT (per-entry PUTs would race on the same stale list, the last
-  // write dropping the rest): toggleSignals over the metric grain,
-  // togglePatterns over the log-pattern grain.
+  // Batch variants for the bulk-action bar. toggleSignals (metric grain) and
+  // togglePatterns (log-pattern grain) fold MANY entries into ONE whole-list
+  // PUT — per-entry writes would race on the same stale list, the last write
+  // dropping the rest. toggleServices instead posts INTENT (the names + the
+  // direction) to the batch service route, which merges server-side under a
+  // per-org lock: nothing about the resulting policy comes from this client, so
+  // a stale page cannot revert a concurrent change or clobber another grain.
   toggleSignals: (signals: string[], exclude: boolean) => void;
   togglePatterns: (patternKeys: string[], exclude: boolean) => void;
+  toggleServices: (services: string[], exclude: boolean) => void;
 }
 
 // useLearnExclusions wires the shared control state for one list page. It reads
@@ -146,9 +149,9 @@ export function useLearnExclusions(licensed: boolean): LearnExclusionControls {
       description: err instanceof Error ? err.message : String(err),
     });
 
-  const serviceMut = useMutation({
-    mutationFn: (v: { service: string; exclude: boolean }) =>
-      api.setServiceLearnExclusion(v.service, v.exclude),
+  const servicesMut = useMutation({
+    mutationFn: (v: { services: string[]; exclude: boolean }) =>
+      api.setServiceLearnExclusions(v.services, v.exclude),
     onSuccess: onWritten,
     onError: onWriteError,
   });
@@ -161,7 +164,7 @@ export function useLearnExclusions(licensed: boolean): LearnExclusionControls {
 
   const busy =
     ex.isFetching ||
-    serviceMut.isPending ||
+    servicesMut.isPending ||
     signalMut.isPending ||
     !ex.data;
 
@@ -174,7 +177,6 @@ export function useLearnExclusions(licensed: boolean): LearnExclusionControls {
     isSignalExcluded: (signal) => metricExcluded(signal, ex.data?.metrics),
     isPatternExcluded: (patternKey) =>
       patternExcluded(patternKey, ex.data?.patterns),
-    toggleService: (service, exclude) => serviceMut.mutate({ service, exclude }),
     toggleSignal: (signal, exclude) =>
       signalMut.mutate({
         services: ex.data?.services ?? [],
@@ -211,5 +213,7 @@ export function useLearnExclusions(licensed: boolean): LearnExclusionControls {
           exclude,
         ),
       }),
+    toggleServices: (services, exclude) =>
+      servicesMut.mutate({ services, exclude }),
   };
 }

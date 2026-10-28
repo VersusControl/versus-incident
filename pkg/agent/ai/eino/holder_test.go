@@ -2,6 +2,7 @@ package eino_test
 
 import (
 	"context"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -179,6 +180,90 @@ func TestHolder_KeyStateRebuild(t *testing.T) {
 	}
 	if m0 == m1 {
 		t.Fatalf("key-state transition did not rebuild the model")
+	}
+}
+
+func TestHolder_RuntimeBaseURLOverrideClearAndInherit(t *testing.T) {
+	baseURL := ""
+	baseURLSet := false
+	builds := 0
+	holder := einowrap.NewModelHolder(
+		config.AgentAIConfig{Provider: "openai", BaseURL: "https://yaml.example/v1", Model: holderOpenAIModel},
+		einowrap.Options{},
+		einowrap.RuntimeAI{BaseURL: func(context.Context) (string, bool) { return baseURL, baseURLSet }},
+		func(_ context.Context, cfg config.AgentAIConfig, _ einowrap.Options) (string, error) {
+			builds++
+			return cfg.BaseURL, nil
+		},
+	)
+
+	assertEndpoint := func(want string) {
+		t.Helper()
+		got, err := holder.Get(context.Background())
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got != want {
+			t.Fatalf("effective BaseURL = %q, want %q", got, want)
+		}
+	}
+
+	assertEndpoint("https://yaml.example/v1")
+	baseURL, baseURLSet = "https://runtime.example/v1", true
+	assertEndpoint("https://runtime.example/v1")
+	assertEndpoint("https://runtime.example/v1")
+	if builds != 2 {
+		t.Fatalf("build count for stable URL = %d, want 2", builds)
+	}
+	baseURL = ""
+	assertEndpoint("")
+	baseURLSet = false
+	assertEndpoint("https://yaml.example/v1")
+	if builds != 4 {
+		t.Fatalf("build count after clear and inherit = %d, want 4", builds)
+	}
+}
+
+func TestGeminiHolder_RuntimeOnlyKeySetClearRebuilds(t *testing.T) {
+	var keySet atomic.Bool
+	keySet.Store(true)
+	key := "runtime-gemini-key"
+	holder := einowrap.NewChatModelHolder(config.AgentAIConfig{Provider: "gemini", Model: "gemini-test"}, einowrap.Options{
+		RuntimeKeyFunc: func(context.Context) (string, bool) { return key, true },
+	}, einowrap.RuntimeAI{KeySet: func(context.Context) (bool, bool) { return keySet.Load(), true }})
+	configured, err := holder.Get(context.Background())
+	if err != nil {
+		t.Fatalf("runtime-only Gemini build: %v", err)
+	}
+	key = ""
+	keySet.Store(false)
+	cleared, err := holder.Get(context.Background())
+	if err != nil {
+		t.Fatalf("cleared Gemini rebuild: %v", err)
+	}
+	if configured == cleared {
+		t.Fatal("runtime key set-to-clear transition did not rebuild Gemini client")
+	}
+}
+
+func TestHolder_RuntimeRevisionRebuilds(t *testing.T) {
+	var revision atomic.Int64
+	runtime := einowrap.RuntimeAI{Revision: func(context.Context) (string, bool) {
+		return strconv.FormatInt(revision.Load(), 10), true
+	}}
+	holder := einowrap.NewChatModelHolder(baseOpenAICfg(), einowrap.Options{}, runtime)
+	first, err := holder.Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	same, err := holder.Get(context.Background())
+	if err != nil || same != first {
+		t.Fatalf("unchanged revision rebuilt: same=%v err=%v", same == first, err)
+	}
+	revision.Add(1)
+	changed, err := holder.Get(context.Background())
+	if err != nil || changed == first {
+		t.Fatalf("changed revision did not rebuild: changed=%v err=%v", changed != first, err)
 	}
 }
 

@@ -33,10 +33,10 @@ export function originLabel(o: IncidentOrigin): string {
   return o === "webhook" ? "Webhook / Alerts" : "AI Detected";
 }
 
-// formatOriginCounts renders the separated top-bar summary so the two
-// feeds are never lumped into one total. Returns undefined while the
-// counts are still loading so the subtitle stays blank rather than
-// flashing "AI: 0 · Webhook: 0".
+// formatOriginCounts renders the separated open-incident badge in the header
+// so the two feeds are never lumped into one total. Returns undefined while
+// the counts are still loading, so the badge stays blank rather than flashing
+// "AI: 0 · Webhook: 0".
 export function formatOriginCounts(
   counts: OriginCounts | undefined,
 ): string | undefined {

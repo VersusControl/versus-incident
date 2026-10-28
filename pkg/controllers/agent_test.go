@@ -158,8 +158,8 @@ func TestServiceDetail_OSSShape(t *testing.T) {
 	if c, _ := inc["count"].(float64); c != 2 {
 		t.Errorf("incidents.count = %v, want 2", inc["count"])
 	}
-	if wd, _ := inc["window_days"].(float64); wd != float64(serviceIncidentWindowDays) {
-		t.Errorf("incidents.window_days = %v, want %d", inc["window_days"], serviceIncidentWindowDays)
+	if window, _ := inc["count_window"].(string); window != agent.CountWindow7d {
+		t.Errorf("incidents.count_window = %v, want %q", inc["count_window"], agent.CountWindow7d)
 	}
 	sev, _ := inc["severities"].(map[string]any)
 	if sev["critical"] != float64(1) || sev["high"] != float64(1) {

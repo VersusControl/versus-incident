@@ -1,18 +1,15 @@
-# AI Agent — Getting Started
+# Getting Started
 
 This guide takes you from nothing to a running agent in **training
-mode**, reading from a local file and saving what it learns to disk.
+mode**, which reading logs from a **local file**. For the complete list of data sources, please [check here](./data-sources.md).
 
-![Training Mode](../docs/images/agent-training-mode.png)
+![Training mode end to end: the agent reads a log file and keeps a Redis cursor of where it stopped, hides secrets, checks whether each line is interesting, skips the ones that are not, clusters the rest into shapes, writes them to the pattern catalog, and you review the result in the web UI](../docs/images/agent-training-mode.svg)
 
 By the end you'll have:
 
 - A way to look at what it learned through the admin UI.
 - (Optional) A script that writes realistic test logs so you can
   play with it before pointing the agent at real data.
-
-> **Reminder.** The agent is **off by default**. Nothing in this
-> guide happens until you set `AGENT_ENABLE=true`.
 
 ## Before you start
 
@@ -45,7 +42,7 @@ versus-agent/
 └── logs/                    # the file the agent will read
 ```
 
-## 2. Write a small `config.yaml`
+## 2. Write a small config
 
 Copy this into `config/config.yaml`. Everything not related to the
 agent is turned off so you can focus on training.
@@ -107,11 +104,10 @@ agent:
     rules: []
 ```
 
-## 3. Write `agent_sources.yaml`
+## 3. Write agent sources
 
 The list of log sources lives in a sibling file `agent_sources.yaml`
-next to your main `config.yaml`. The file is optional. For training,
-point it at a single local log file.
+next to your main `config.yaml`. For training, point it at a single local log file.
 
 ```yaml
 sources:
@@ -129,6 +125,9 @@ sources:
 Mount four things from your machine: the two config files, the data
 folder (so the learned catalog survives restarts), and the logs folder
 (so the agent can read your application's log file).
+
+> **Reminder.** The agent is **off by default**. Nothing in this
+> guide happens until you set `AGENT_ENABLE=true`.
 
 ```bash
 docker run -d \

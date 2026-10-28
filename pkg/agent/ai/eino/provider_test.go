@@ -89,6 +89,9 @@ func TestSupportedProvidersExported(t *testing.T) {
 		if !einowrap.IsSupportedProvider(name) {
 			t.Fatalf("IsSupportedProvider(%q) = false, want true", name)
 		}
+		if keyless := einowrap.IsKeylessProvider(name); keyless != (name == "ollama") {
+			t.Fatalf("IsKeylessProvider(%q) = %v, want %v", name, keyless, name == "ollama")
+		}
 	}
 	// Case-insensitive, and empty normalises to the openai default.
 	if !einowrap.IsSupportedProvider("OpenAI") || !einowrap.IsSupportedProvider("  DeepSeek ") {
@@ -100,6 +103,9 @@ func TestSupportedProvidersExported(t *testing.T) {
 	// An unknown value is rejected at the boundary.
 	if einowrap.IsSupportedProvider("bogus-llm") {
 		t.Fatal("IsSupportedProvider(\"bogus-llm\") = true, want false")
+	}
+	if einowrap.IsKeylessProvider("bogus-llm") {
+		t.Fatal("IsKeylessProvider(\"bogus-llm\") = true, want false")
 	}
 }
 
@@ -376,8 +382,7 @@ func TestChatModel_LiteLLM_ConfigBaseURLRoutesEgress(t *testing.T) {
 }
 
 // TestChatModel_Ollama_KeylessAndNativeFormat proves the Ollama path: Ollama is
-// keyless, so NO Authorization header is sent (the AuthKeyFunc transport is a
-// harmless no-op with no resolver), and JSON-mode is requested via the native
+// keyless, so NO Authorization header is sent, and JSON-mode is requested via the native
 // `format` field rather than an OpenAI response_format object. The reply
 // round-trips through detect.ParseFinding.
 func TestChatModel_Ollama_KeylessAndNativeFormat(t *testing.T) {
@@ -549,5 +554,44 @@ func TestChatModel_Claude_EgressUsesAPIKeyHeader(t *testing.T) {
 	}
 	if got.Title != expected.Title {
 		t.Errorf("Title = %q, want %q", got.Title, expected.Title)
+	}
+}
+
+func TestClaudeTemperatureCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		model           string
+		temperature     float64
+		wantTemperature bool
+	}{
+		{model: "claude-3-5-sonnet-20241022", temperature: 0.2, wantTemperature: true},
+		{model: "claude-sonnet-5", temperature: 0.2, wantTemperature: true},
+		{model: "claude-sonnet-5", temperature: -1, wantTemperature: false},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			var request map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
+				if err := json.NewDecoder(incoming.Body).Decode(&request); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				writer.Header().Set("Content-Type", "application/json")
+				_, _ = writer.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant","model":"test","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+			}))
+			defer server.Close()
+
+			chatModel, err := einowrap.NewChatModel(context.Background(), config.AgentAIConfig{
+				Provider: "claude", APIKey: "test-key", Model: test.model,
+				MaxTokens: 64, Temperature: test.temperature,
+			}, einowrap.Options{BaseURL: server.URL, HTTPClient: server.Client()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := chatModel.Generate(context.Background(), []*schema.Message{schema.UserMessage("hello")}); err != nil {
+				t.Fatal(err)
+			}
+			_, hasTemperature := request["temperature"]
+			if hasTemperature != test.wantTemperature {
+				t.Fatalf("temperature present = %t, want %t; request=%v", hasTemperature, test.wantTemperature, request)
+			}
+		})
 	}
 }

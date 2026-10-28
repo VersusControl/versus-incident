@@ -42,7 +42,7 @@ type frontMatter struct {
 // IngestDir scans dir (recursively) for `*.md` runbook files, embeds
 // each one through embedder, and writes the resulting records to store,
 // then persists the corpus. It is the WRITE path — it lives here in
-// pkg/runbook, OUTSIDE pkg/agent/ai/analyze/tools, so the analyze
+// pkg/runbook, OUTSIDE pkg/agent/ai/tools/common, so the AI
 // read-only import-graph guard stays green.
 //
 // Ingestion is incremental: a runbook whose indexed text is unchanged

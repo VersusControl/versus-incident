@@ -21,6 +21,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,8 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // ErrNotFound is returned by Get* methods when the key/id is missing.
@@ -43,6 +46,14 @@ var ErrUnsupported = errors.New("storage: backend not implemented")
 // ErrUnknownDomain is returned by Lifecycle methods when domain is not
 // one of the fixed {DomainIncidents, DomainAnalyses, DomainBlobs} set.
 var ErrUnknownDomain = errors.New("storage: unknown lifecycle domain")
+
+// ErrReadOnlyIncident is returned when a mutation targets an incident that is
+// visible through a read scope but does not belong to its write org.
+var ErrReadOnlyIncident = errors.New("storage: incident belongs to read-only archive")
+
+// ErrReadOnlyAnalysis is returned when a mutation targets an analysis that is
+// visible through a read scope but does not belong to its write org.
+var ErrReadOnlyAnalysis = errors.New("storage: analysis belongs to read-only archive")
 
 // Lifecycle domains. A small fixed set so a backend can map each to its
 // physical table(s) without ever trusting caller-supplied input.
@@ -73,16 +84,13 @@ const DefaultDataDir = "data"
 // org, so every persisted record transparently belongs to "default" and
 // no behaviour changes. Multi-tenant scoping (enterprise) overrides this
 // per request via the org-injection seam (pkg/middleware).
-const DefaultOrgID = "default"
+const DefaultOrgID = tenancy.DefaultOrgID
 
 // NormalizeOrgID returns a non-empty org id, falling back to
 // DefaultOrgID when s is blank. Backends call this on the persistence
 // path so a record is never stored with an empty OrgID.
 func NormalizeOrgID(s string) string {
-	if s == "" {
-		return DefaultOrgID
-	}
-	return s
+	return tenancy.NormalizeOrgID(s)
 }
 
 // Origin is the coarse, tier-neutral classifier for HOW an incident
@@ -170,6 +178,42 @@ type Provider interface {
 	// connections, db pools). Calling Close on a closed provider is a
 	// no-op.
 	Close() error
+}
+
+// BlobPageLister is an optional bounded enumeration capability. Implementations
+// return at most limit blobs in lexical name order, strictly after cursor.
+// Callers that require bounded storage work must fail closed when it is absent.
+type BlobPageLister interface {
+	ListBlobsPage(ctx context.Context, prefix, cursor string, limit int) ([]Blob, error)
+}
+
+// BoundedBlobPageLister is the stronger paging capability used when callers
+// must account for skipped index entries as well as returned blobs. Next is
+// the last key examined, so malformed or concurrently removed entries cannot
+// strand a caller on the same page. Implementations must bound all work by
+// limit and report the bytes read from artifact files.
+type BoundedBlobPageLister interface {
+	ListBlobsPageBounded(ctx context.Context, prefix, cursor string, limit int) (BlobPage, error)
+}
+
+// BlobDeleter is an optional exact-key blob deletion capability.
+type BlobDeleter interface {
+	DeleteBlob(name string) error
+}
+
+// BlobPage is one resource-bounded keyset page.
+type BlobPage struct {
+	Blobs   []Blob
+	Next    string
+	Scanned int
+	Bytes   int64
+	Done    bool
+}
+
+// IncidentMutationChecker is an optional capability for scoped providers that
+// can expose whether a visible incident belongs to an immutable read archive.
+type IncidentMutationChecker interface {
+	CheckIncidentMutable(id string) error
 }
 
 // Blob is one entry returned by Provider.ListBlobs: a stored blob's
@@ -274,6 +318,22 @@ func StatusCountsOf(recs []*IncidentRecord) IncidentStatusCounts {
 	return out
 }
 
+// StatusCountsSince is StatusCountsOf bounded to records created at or after
+// since. A zero since is unbounded, so the two agree exactly — the contract
+// IncidentWindowCounter promises.
+func StatusCountsSince(recs []*IncidentRecord, since time.Time) IncidentStatusCounts {
+	if since.IsZero() {
+		return StatusCountsOf(recs)
+	}
+	kept := make([]*IncidentRecord, 0, len(recs))
+	for _, rec := range recs {
+		if rec != nil && !rec.CreatedAt.Before(since) {
+			kept = append(kept, rec)
+		}
+	}
+	return StatusCountsOf(kept)
+}
+
 // AssembleStatusCounts builds the per-origin × per-status result from the
 // whole-set totals and the ai_detect slice, deriving webhook as the complement
 // (total − ai_detect) so AIDetect + Webhook == Total for every status
@@ -326,6 +386,62 @@ type IncidentPager interface {
 	ListIncidentsPage(origin string, offset, limit int) ([]*IncidentRecord, error)
 }
 
+// ScopedIncidentPager is the organization-aware form of IncidentPager. A
+// multi-organization wrapper uses it to keep count and pagination in the
+// backend; callers fall back to IncidentPager when the capability is absent.
+type ScopedIncidentPager interface {
+	CountIncidentsForScope(scope tenancy.OrgScope) (IncidentCounts, error)
+	CountIncidentsByStatusForScope(scope tenancy.OrgScope) (IncidentStatusCounts, error)
+	ListIncidentsPageForScope(scope tenancy.OrgScope, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// IncidentWindowCounter is an optional capability on top of IncidentPager: the
+// same per-origin × per-status tally, bounded to incidents created at or after
+// `since`. It backs the operator-configurable count window, so the numbers
+// describe current load rather than an all-time total that only grows.
+//
+// A zero `since` means unbounded and MUST return exactly what
+// CountIncidentsByStatus returns. Backends that cannot express the bound do not
+// implement it; callers type-assert and fall back to the unbounded count,
+// exactly like Searcher / Lifecycle / IncidentPager.
+type IncidentWindowCounter interface {
+	CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error)
+}
+
+// ScopedIncidentWindowCounter is the organization-aware recent-window count.
+type ScopedIncidentWindowCounter interface {
+	CountIncidentsByStatusSinceForScope(scope tenancy.OrgScope, since time.Time) (IncidentStatusCounts, error)
+}
+
+// IncidentServiceCounter is an optional capability for service-scoped incident
+// summaries. Backends can push org, service, and time predicates into storage
+// instead of filtering a bounded whole-table page in the controller.
+type IncidentServiceCounter interface {
+	CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error)
+	ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error)
+}
+
+// ScopedIncidentServiceCounter queries one logical service across an ordered
+// organization scope.
+type ScopedIncidentServiceCounter interface {
+	CountIncidentsByServiceSinceForScope(scope tenancy.OrgScope, service string, since time.Time) (int, map[string]int, error)
+	ListIncidentsByServiceSinceForScope(scope tenancy.OrgScope, service string, since time.Time, limit int) ([]*IncidentRecord, error)
+}
+
+// ScopedIncidentServiceSummaryReader returns service counts in one bounded
+// storage query. Counts include every scoped incident at or after Since and
+// are keyed by the incident's durable service label.
+type ScopedIncidentServiceSummaryReader interface {
+	CountIncidentsByServicesSinceForScope(scope tenancy.OrgScope, services []string, since time.Time) (map[string]int, error)
+}
+
+// ScopedIncidentServiceRangeSummaryReader returns exact service counts for a
+// half-open [start,end) window in one storage query. A zero end leaves the
+// upper bound open.
+type ScopedIncidentServiceRangeSummaryReader interface {
+	CountIncidentsByServicesInRangeForScope(scope tenancy.OrgScope, services []string, start, end time.Time) (map[string]int, error)
+}
+
 // AnalysisPager is an optional capability a backend may implement on top of
 // Provider to serve the analyses list without ever loading the whole table.
 // It is the analyses twin of IncidentPager: it splits the two things the list
@@ -345,6 +461,29 @@ type AnalysisPager interface {
 	// rows. limit <= 0 uses DefaultAnalysisPageSize; a negative offset is
 	// treated as 0.
 	ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, error)
+}
+
+// ScopedAnalysisPager is the organization-aware form of AnalysisPager.
+type ScopedAnalysisPager interface {
+	CountAnalysesForScope(scope tenancy.OrgScope) (int, error)
+	ListAnalysesPageForScope(scope tenancy.OrgScope, offset, limit int) ([]*AnalysisRecord, error)
+}
+
+// AnalysisSearchOptions is a bounded analysis-history query. IncidentID and
+// Service are exact, case-sensitive filters; Query is a case-insensitive
+// full-record search. Offset and Limit page newest-first results.
+type AnalysisSearchOptions struct {
+	IncidentID string
+	Service    string
+	Query      string
+	Offset     int
+	Limit      int
+}
+
+// ScopedAnalysisSearchPager pushes analysis-history filters, exact counting,
+// and paging into storage.
+type ScopedAnalysisSearchPager interface {
+	SearchAnalysesPageForScope(scope tenancy.OrgScope, opts AnalysisSearchOptions) ([]*AnalysisRecord, int, error)
 }
 
 // IncidentSearchPager is an optional capability a backend may implement on
@@ -377,6 +516,13 @@ type IncidentSearchPager interface {
 	SearchIncidentsPage(query, origin string, offset, limit int) ([]*IncidentRecord, error)
 }
 
+// ScopedIncidentSearchPager keeps scoped search counts and pages in storage.
+type ScopedIncidentSearchPager interface {
+	CountIncidentsMatchingForScope(scope tenancy.OrgScope, query string) (IncidentCounts, error)
+	CountIncidentsMatchingByStatusForScope(scope tenancy.OrgScope, query string) (IncidentStatusCounts, error)
+	SearchIncidentsPageForScope(scope tenancy.OrgScope, query, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
 // Searcher is an optional capability a backend may implement on top of
 // Provider. It exposes full-text-style search over incidents and
 // analyses. Backends that cannot search efficiently (memory, file) do
@@ -394,6 +540,12 @@ type Searcher interface {
 	SearchAnalyses(query string, limit int) ([]*AnalysisRecord, error)
 }
 
+// ScopedSearcher is the organization-aware form of Searcher.
+type ScopedSearcher interface {
+	SearchIncidentsForScope(scope tenancy.OrgScope, query string, limit int) ([]*IncidentRecord, error)
+	SearchAnalysesForScope(scope tenancy.OrgScope, query string, limit int) ([]*AnalysisRecord, error)
+}
+
 // RangeLister is an optional capability a backend may implement on top of
 // Provider: return only the incidents whose CreatedAt falls in a
 // [start, end) window, newest first. It exists so a large backend
@@ -408,6 +560,13 @@ type RangeLister interface {
 	// newest first. limit <= 0 returns the full window. A zero end is
 	// treated as an open upper bound (all incidents at or after start).
 	ListIncidentsInRange(start, end time.Time, limit int) ([]*IncidentRecord, error)
+}
+
+// ScopedRangeLister is the organization-aware form of RangeLister. A
+// multi-organization wrapper uses it to push both the organization membership
+// and time window into the backend without scanning foreign records.
+type ScopedRangeLister interface {
+	ListIncidentsInRangeForScope(scope tenancy.OrgScope, start, end time.Time, limit int) ([]*IncidentRecord, error)
 }
 
 // Lifecycle is an optional capability a backend may implement on top of
@@ -460,6 +619,14 @@ type BlobCreator interface {
 	// so ReadBlob(key) observes the one surviving set of bytes regardless of
 	// which caller won.
 	CreateBlobIfAbsent(key string, data []byte) (written bool, err error)
+}
+
+// BlobCAS is an optional capability for optimistic updates to shared blobs.
+// expected nil means the key must be absent; otherwise the stored bytes must
+// exactly match expected. A nil replacement atomically removes a matching
+// existing key; otherwise a successful swap durably stores replacement.
+type BlobCAS interface {
+	CompareAndSwapBlob(key string, expected, replacement []byte) (swapped bool, err error)
 }
 
 // SQLAccessor is an optional capability a backend may implement on top of
@@ -521,12 +688,20 @@ type IncidentRecord struct {
 	// "sent"    — every enabled channel returned success
 	// "partial" — at least one channel succeeded, at least one failed
 	// "failed"  — no channel succeeded
-	NotifyStatus string                 `json:"notify_status,omitempty"`
-	NotifyError  string                 `json:"notify_error,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	AckedAt      *time.Time             `json:"acked_at,omitempty"`
-	ResolvedAt   *time.Time             `json:"resolved_at,omitempty"`
-	Content      map[string]interface{} `json:"content,omitempty"`
+	// "diverted" — an external interceptor completed delivery
+	NotifyStatus            string                 `json:"notify_status,omitempty"`
+	NotifyError             string                 `json:"notify_error,omitempty"`
+	CreatedAt               time.Time              `json:"created_at"`
+	AckedAt                 *time.Time             `json:"acked_at,omitempty"`
+	ResolvedAt              *time.Time             `json:"resolved_at,omitempty"`
+	DetectionFingerprint    string                 `json:"detection_fingerprint,omitempty"`
+	DetectionEpisodeID      string                 `json:"detection_episode_id,omitempty"`
+	OccurrenceCount         int64                  `json:"occurrence_count,omitempty"`
+	DetectionFirstSeen      *time.Time             `json:"detection_first_seen,omitempty"`
+	DetectionLastSeen       *time.Time             `json:"detection_last_seen,omitempty"`
+	HighestObservedSeverity string                 `json:"highest_observed_severity,omitempty"`
+	HighestNotifiedSeverity string                 `json:"highest_notified_severity,omitempty"`
+	Content                 map[string]interface{} `json:"content,omitempty"`
 
 	// AssignedTeamID and AssignedMemberIDs record an operator's
 	// assignment for this incident. Routing logic will read
@@ -534,6 +709,50 @@ type IncidentRecord struct {
 	// holds the references. Empty means unassigned.
 	AssignedTeamID    string   `json:"assigned_team_id,omitempty"`
 	AssignedMemberIDs []string `json:"assigned_member_ids,omitempty"`
+}
+
+func CloneIncidentRecord(rec *IncidentRecord) *IncidentRecord {
+	if rec == nil {
+		return nil
+	}
+	clone := *rec
+	clone.ChannelsEnabled = append([]string(nil), rec.ChannelsEnabled...)
+	clone.ChannelsNotified = append([]string(nil), rec.ChannelsNotified...)
+	clone.AssignedMemberIDs = append([]string(nil), rec.AssignedMemberIDs...)
+	clone.AckedAt = utcPtrCopy(rec.AckedAt)
+	clone.ResolvedAt = utcPtrCopy(rec.ResolvedAt)
+	clone.DetectionFirstSeen = utcPtrCopy(rec.DetectionFirstSeen)
+	clone.DetectionLastSeen = utcPtrCopy(rec.DetectionLastSeen)
+	clone.Content = cloneIncidentContent(rec.Content)
+	return &clone
+}
+
+func cloneIncidentContent(content map[string]interface{}) map[string]interface{} {
+	if content == nil {
+		return nil
+	}
+	clone := make(map[string]interface{}, len(content))
+	for key, value := range content {
+		clone[key] = cloneIncidentValue(value)
+	}
+	return clone
+}
+
+func cloneIncidentValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return cloneIncidentContent(typed)
+	case []interface{}:
+		clone := make([]interface{}, len(typed))
+		for index, item := range typed {
+			clone[index] = cloneIncidentValue(item)
+		}
+		return clone
+	case []string:
+		return append([]string(nil), typed...)
+	default:
+		return value
+	}
 }
 
 // EffectiveOrigin returns the record's explicit Origin, or derives one
@@ -546,6 +765,116 @@ func (r *IncidentRecord) EffectiveOrigin() string {
 		return r.Origin
 	}
 	return OriginFromSource(r.Source)
+}
+
+// ServiceLabel returns the record's display service: the durable Service
+// column, else a best-effort pull from the payload. Callers that list, filter
+// or aggregate by service MUST use it rather than reading Service directly, so
+// a row whose service lives only in content — a legacy row, or a payload shape
+// the column never captured — is attributed identically everywhere.
+func (r *IncidentRecord) ServiceLabel() string {
+	if r == nil {
+		return ""
+	}
+	if r.Service != "" {
+		return r.Service
+	}
+	return utils.ExtractService(r.Content)
+}
+
+func mergeDetectionIncident(existing, incoming *IncidentRecord) {
+	if existing == nil || incoming == nil || incoming.DetectionEpisodeID == "" ||
+		existing.DetectionEpisodeID != incoming.DetectionEpisodeID {
+		return
+	}
+	incoming.Title = existing.Title
+	incoming.Source = existing.Source
+	incoming.Service = existing.Service
+	incoming.Origin = existing.Origin
+	incoming.ChannelsEnabled = append([]string(nil), existing.ChannelsEnabled...)
+	incoming.ChannelsNotified = append([]string(nil), existing.ChannelsNotified...)
+	incoming.OnCallTriggered = existing.OnCallTriggered
+	incoming.OnCallError = existing.OnCallError
+	incoming.NotifyStatus = existing.NotifyStatus
+	incoming.NotifyError = existing.NotifyError
+	mergeDetectionProgress(existing, incoming)
+	incoming.Content = cloneIncidentContent(existing.Content)
+	if incoming.Content == nil {
+		incoming.Content = make(map[string]interface{})
+	}
+	incoming.Content["Frequency"] = incoming.OccurrenceCount
+}
+
+func mergeDetectionProgress(existing, incoming *IncidentRecord) {
+	if existing == nil || incoming == nil || incoming.DetectionEpisodeID == "" ||
+		existing.DetectionEpisodeID != incoming.DetectionEpisodeID {
+		return
+	}
+	if existing.OccurrenceCount > incoming.OccurrenceCount {
+		incoming.OccurrenceCount = existing.OccurrenceCount
+	}
+	if incoming.DetectionFirstSeen == nil || existing.DetectionFirstSeen != nil && existing.DetectionFirstSeen.Before(*incoming.DetectionFirstSeen) {
+		incoming.DetectionFirstSeen = utcPtrCopy(existing.DetectionFirstSeen)
+	}
+	if incoming.DetectionLastSeen == nil || existing.DetectionLastSeen != nil && existing.DetectionLastSeen.After(*incoming.DetectionLastSeen) {
+		incoming.DetectionLastSeen = utcPtrCopy(existing.DetectionLastSeen)
+	}
+	if utils.SeverityRank(existing.HighestObservedSeverity) > utils.SeverityRank(incoming.HighestObservedSeverity) {
+		incoming.HighestObservedSeverity = existing.HighestObservedSeverity
+	}
+	if utils.SeverityRank(existing.HighestNotifiedSeverity) > utils.SeverityRank(incoming.HighestNotifiedSeverity) {
+		incoming.HighestNotifiedSeverity = existing.HighestNotifiedSeverity
+	}
+	if incoming.Content == nil {
+		incoming.Content = make(map[string]interface{})
+	}
+	incoming.Content["Frequency"] = incoming.OccurrenceCount
+}
+
+func detectionIncidentUpdate(existing, incoming *IncidentRecord) *IncidentRecord {
+	if existing == nil {
+		return CloneIncidentRecord(incoming)
+	}
+	updated := CloneIncidentRecord(existing)
+	updated.Title = incoming.Title
+	updated.Source = incoming.Source
+	updated.Service = incoming.Service
+	updated.Origin = incoming.Origin
+	if incoming.NotifyStatus != "" {
+		updated.ChannelsEnabled = append([]string(nil), incoming.ChannelsEnabled...)
+		updated.ChannelsNotified = append([]string(nil), incoming.ChannelsNotified...)
+		updated.OnCallTriggered = incoming.OnCallTriggered
+		updated.OnCallError = incoming.OnCallError
+		updated.NotifyStatus = incoming.NotifyStatus
+		updated.NotifyError = incoming.NotifyError
+	}
+	updated.DetectionFingerprint = incoming.DetectionFingerprint
+	updated.DetectionEpisodeID = incoming.DetectionEpisodeID
+	updated.OccurrenceCount = incoming.OccurrenceCount
+	updated.DetectionFirstSeen = utcPtrCopy(incoming.DetectionFirstSeen)
+	updated.DetectionLastSeen = utcPtrCopy(incoming.DetectionLastSeen)
+	updated.HighestObservedSeverity = incoming.HighestObservedSeverity
+	updated.HighestNotifiedSeverity = incoming.HighestNotifiedSeverity
+	if updated.Content == nil {
+		updated.Content = make(map[string]interface{})
+	}
+	for key, value := range incoming.Content {
+		updated.Content[key] = cloneIncidentValue(value)
+	}
+	mergeDetectionProgress(existing, updated)
+	severity := canonicalDetectionIncidentSeverity(updated.HighestObservedSeverity, updated.HighestNotifiedSeverity)
+	if severity != "" {
+		updated.Content["Severity"] = severity
+	}
+	return updated
+}
+
+func utcPtrCopy(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
 }
 
 // AnalysisRecord is the durable shape of one analyze-mode run. The
@@ -586,4 +915,32 @@ type AnalysisToolCall struct {
 	Output     json.RawMessage `json:"output,omitempty"`
 	DurationMs int64           `json:"duration_ms,omitempty"`
 	Error      string          `json:"error,omitempty"`
+}
+
+// CloneAnalysisRecord returns a detached copy safe to pass across storage and
+// tenancy boundaries.
+func CloneAnalysisRecord(rec *AnalysisRecord) *AnalysisRecord {
+	if rec == nil {
+		return nil
+	}
+	clone := *rec
+	if rec.ToolCalls != nil {
+		clone.ToolCalls = make([]AnalysisToolCall, len(rec.ToolCalls))
+		copy(clone.ToolCalls, rec.ToolCalls)
+		for index := range clone.ToolCalls {
+			clone.ToolCalls[index].Args = append(json.RawMessage(nil), rec.ToolCalls[index].Args...)
+			clone.ToolCalls[index].Output = append(json.RawMessage(nil), rec.ToolCalls[index].Output...)
+		}
+	}
+	if rec.Finding != nil {
+		finding := *rec.Finding
+		finding.Suggestions = append([]string(nil), rec.Finding.Suggestions...)
+		finding.SampleIDs = append([]string(nil), rec.Finding.SampleIDs...)
+		finding.RootCauseHypotheses = append([]core.RootCauseHypothesis(nil), rec.Finding.RootCauseHypotheses...)
+		finding.Evidence = append([]core.EvidenceItem(nil), rec.Finding.Evidence...)
+		finding.RelatedPatternIDs = append([]string(nil), rec.Finding.RelatedPatternIDs...)
+		finding.NextSteps = append([]string(nil), rec.Finding.NextSteps...)
+		clone.Finding = &finding
+	}
+	return &clone
 }

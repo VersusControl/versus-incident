@@ -77,6 +77,35 @@ func TestSignalSchema_Indexes(t *testing.T) {
 	}
 }
 
+func TestAnalysisSchema_NormalizedOrgExpressionIndex(t *testing.T) {
+	db := migratedDB(t)
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	reopened, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+	if err != nil {
+		t.Fatalf("rerun Postgres migrations: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var definition string
+	if err := db.QueryRow(`
+		SELECT indexdef FROM pg_indexes
+		WHERE schemaname='public' AND indexname='idx_analyses_org_normalized'`,
+	).Scan(&definition); err != nil {
+		t.Fatalf("normalized analysis org index missing: %v", err)
+	}
+	for _, fragment := range []string{"vs_analyses", "COALESCE", "NULLIF", "org_id", "default"} {
+		if !strings.Contains(definition, fragment) {
+			t.Fatalf("analysis org index %q missing %q", definition, fragment)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM pg_indexes
+		WHERE schemaname='public' AND indexname='idx_analyses_org_normalized'`,
+	).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("normalized analysis org index count = %d, err=%v; want one after rerun", count, err)
+	}
+}
+
 // TestSignalSchema_InstanceIndexDefaultZero proves the HA write-shard ordinal
 // defaults to 0 — so the OSS single-instance path always writes one row per
 // pattern without naming any HA policy.
@@ -154,6 +183,55 @@ func TestSignalSchema_BaselineModeColumns(t *testing.T) {
 		}
 		if !strings.Contains(colDefault, tc.defaultLike) {
 			t.Fatalf("vs_logs.%s default = %q, want it to contain %q", tc.column, colDefault, tc.defaultLike)
+		}
+	}
+}
+
+func TestSignalSchema_CatalogResetShadowColumns(t *testing.T) {
+	db := migratedDB(t)
+	for _, table := range []string{"vs_patterns", "vs_services"} {
+		var dataType, isNullable, colDefault string
+		if err := db.QueryRow(`
+			SELECT data_type, is_nullable, COALESCE(column_default, '')
+			FROM information_schema.columns
+			WHERE table_name=$1 AND column_name='reset_shadow'`, table,
+		).Scan(&dataType, &isNullable, &colDefault); err != nil {
+			t.Fatalf("%s.reset_shadow missing: %v", table, err)
+		}
+		if dataType != "boolean" || isNullable != "NO" || !strings.Contains(colDefault, "false") {
+			t.Fatalf("%s.reset_shadow = type %q nullable %q default %q", table, dataType, isNullable, colDefault)
+		}
+	}
+}
+
+func TestSignalSchema_CatalogResetCutoffColumns(t *testing.T) {
+	db := migratedDB(t)
+	tests := []struct {
+		table       string
+		column      string
+		nullable    string
+		defaultLike string
+	}{
+		{table: "vs_patterns", column: "reset_at", nullable: "YES"},
+		{table: "vs_logs", column: "persisted_at", nullable: "NO", defaultLike: "now()"},
+	}
+	for _, test := range tests {
+		var dataType, isNullable, columnDefault string
+		if err := db.QueryRow(`
+			SELECT data_type, is_nullable, COALESCE(column_default, '')
+			FROM information_schema.columns
+			WHERE table_name=$1 AND column_name=$2`, test.table, test.column,
+		).Scan(&dataType, &isNullable, &columnDefault); err != nil {
+			t.Fatalf("%s.%s missing: %v", test.table, test.column, err)
+		}
+		if dataType != "timestamp with time zone" || isNullable != test.nullable {
+			t.Fatalf("%s.%s = type %q nullable %q", test.table, test.column, dataType, isNullable)
+		}
+		if test.defaultLike == "" && columnDefault != "" {
+			t.Fatalf("%s.%s default = %q, want none", test.table, test.column, columnDefault)
+		}
+		if test.defaultLike != "" && !strings.Contains(columnDefault, test.defaultLike) {
+			t.Fatalf("%s.%s default = %q, want it to contain %q", test.table, test.column, columnDefault, test.defaultLike)
 		}
 	}
 }

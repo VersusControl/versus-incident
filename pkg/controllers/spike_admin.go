@@ -5,8 +5,6 @@ import (
 	"strings"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
-	"github.com/VersusControl/versus-incident/pkg/config"
-	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 
 	"github.com/gofiber/fiber/v2"
@@ -30,24 +28,9 @@ func NewSpikeAdminController() *SpikeAdminController {
 //	GET /api/admin/agent/spike-settings   current global spike baseline mode
 //	PUT /api/admin/agent/spike-settings   update the global spike baseline mode
 func (sc *SpikeAdminController) Register(router fiber.Router) {
-	g := router.Group("/admin/agent", sc.authMiddleware)
+	g := router.Group("/admin/agent", adminGatewayGuard)
 	g.Get("/spike-settings", sc.getSettings)
 	g.Put("/spike-settings", sc.putSettings)
-}
-
-// authMiddleware reuses the agent gateway secret (constant-time compare),
-// mirroring the rest of the admin surface.
-func (sc *SpikeAdminController) authMiddleware(c *fiber.Ctx) error {
-	if middleware.RequestAuthorized(c) {
-		return c.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := c.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-	return c.Next()
 }
 
 // getSettings returns the current global spike baseline mode (or the built-in

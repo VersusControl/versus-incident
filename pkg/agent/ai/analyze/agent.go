@@ -2,8 +2,9 @@ package analyze
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,9 +20,14 @@ import (
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	utilcb "github.com/cloudwego/eino/utils/callbacks"
-	"github.com/eino-contrib/jsonschema"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
+	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
+	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
+	prometheustools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/prometheus"
+	signoztools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/signoz"
+	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -49,19 +55,14 @@ const (
 // asserts this so future edits cannot silently turn analyze into a
 // notification path.
 type Agent struct {
-	cfg config.AgentAIConfig
-	// agent is the ReAct agent used when a fixed ChatModel override was
-	// supplied (tests). It is nil in production, where holder owns the
-	// (re)build instead.
-	agent *react.Agent
-	// holder lazily (re)builds the ReAct agent — tool-calling chat model
-	// plus the bound tool node — when the effective provider (or model id /
-	// runtime state) changes, so an operator's runtime provider switch is
-	// picked up on the next Run without a restart. Nil when a fixed
-	// ChatModel override was supplied.
-	holder  *einowrap.Holder[*react.Agent]
-	tools   map[string]core.AnalyzeTool
-	maxIter int
+	cfg          config.AgentAIConfig
+	runtime      einowrap.RuntimeAI
+	chatModel    model.ToolCallingChatModel
+	holder       *einowrap.Holder[model.ToolCallingChatModel]
+	buildAgent   func(context.Context, model.ToolCallingChatModel) (*react.Agent, error)
+	tools        map[string]core.Tool
+	toolDisplays map[string]string
+	maxIter      int
 }
 
 // Options is the constructor-side bag for test plumbing.
@@ -70,10 +71,9 @@ type Options struct {
 	BaseURL    string
 	Timeout    time.Duration
 
-	// AuthKeyFunc is an OPTIONAL per-request Authorization override passed
-	// straight to the chat model's transport. Nil (the OSS default) leaves
-	// the YAML-keyed header untouched.
-	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+	// RuntimeKeyFunc is an optional per-request provider credential override.
+	// Nil keeps the configured YAML credential.
+	RuntimeKeyFunc func(ctx context.Context) (key string, ok bool)
 
 	// Runtime folds optional runtime overrides (provider / enabled / key
 	// state) into the model holder's rebuild signature. The zero value (the
@@ -93,29 +93,24 @@ type Options struct {
 	// ParallelTools runs multiple tool calls emitted in one model turn
 	// concurrently. False (the default) dispatches them sequentially.
 	ParallelTools bool
+
+	// ToolProvider returns the currently enabled tool list when the model graph
+	// rebuilds. Nil pins the constructor list.
+	ToolProvider func() ([]core.Tool, error)
 }
 
 // New constructs an analyze Agent. cfg must already be resolved for
 // the analyze task (see config.AgentAIConfig.Resolve). Every tool in
 // the supplied list is registered with the agent.
-func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool, opts Options) (*Agent, error) {
+func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.Tool, opts Options) (*Agent, error) {
 	toolTimeout := opts.ToolTimeout
 	if toolTimeout == 0 {
 		toolTimeout = defaultToolTimeout
 	}
 
-	reg := map[string]core.AnalyzeTool{}
-	einoTools := make([]tool.BaseTool, 0, len(tools))
-	for _, t := range tools {
-		if t == nil || t.Name() == "" {
-			continue
-		}
-		reg[t.Name()] = t
-		et, err := newEinoTool(t, toolTimeout)
-		if err != nil {
-			return nil, err
-		}
-		einoTools = append(einoTools, et)
+	reg, displays, _, err := prepareTools(tools, toolTimeout)
+	if err != nil {
+		return nil, err
 	}
 
 	chat := opts.ChatModel
@@ -126,6 +121,23 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool
 	// the bound tool node. It is the per-(re)build unit: the holder calls it
 	// each time the effective model signature changes.
 	buildReactAgent := func(ctx context.Context, chat model.ToolCallingChatModel) (*react.Agent, error) {
+		current := tools
+		if opts.ToolProvider != nil {
+			var err error
+			current, err = opts.ToolProvider()
+			if err != nil {
+				return nil, fmt.Errorf("analyze: load tools: %w", err)
+			}
+		}
+		current = k8stools.FilterAuthorized(ctx, current)
+		current = elasticsearchtools.FilterAuthorized(ctx, current)
+		current = signoztools.FilterAuthorized(ctx, current)
+		current = prometheustools.FilterAuthorized(ctx, current)
+		current = commontools.FilterBaselineAuthorized(ctx, current)
+		_, _, einoTools, err := prepareTools(current, toolTimeout)
+		if err != nil {
+			return nil, err
+		}
 		// MaxStep bounds the ReAct graph's pregel super-steps. The graph
 		// alternates chat -> tools -> chat ...; N chat calls interleaved
 		// with N-1 tool rounds take 2N-1 steps. Allowing maxIter tool
@@ -157,9 +169,12 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool
 	}
 
 	a := &Agent{
-		cfg:     cfg,
-		tools:   reg,
-		maxIter: maxIter,
+		cfg:          cfg,
+		runtime:      opts.Runtime,
+		tools:        reg,
+		toolDisplays: displays,
+		maxIter:      maxIter,
+		buildAgent:   buildReactAgent,
 	}
 
 	// A fixed ChatModel override (tests) is never rebuilt: build the ReAct
@@ -167,32 +182,51 @@ func New(ctx context.Context, cfg config.AgentAIConfig, tools []core.AnalyzeTool
 	// a runtime provider change rebuilds the tool-calling model + ReAct graph
 	// on the next Run without a restart.
 	if chat != nil {
-		reactAgent, err := buildReactAgent(ctx, chat)
-		if err != nil {
+		if _, err := buildReactAgent(ctx, chat); err != nil {
 			return nil, err
 		}
-		a.agent = reactAgent
+		a.chatModel = chat
 		return a, nil
 	}
 
-	a.holder = einowrap.NewModelHolder(cfg, einowrap.Options{
-		HTTPClient:  opts.HTTPClient,
-		BaseURL:     opts.BaseURL,
-		Timeout:     opts.Timeout,
-		AuthKeyFunc: opts.AuthKeyFunc,
-	}, opts.Runtime, func(ctx context.Context, c config.AgentAIConfig, o einowrap.Options) (*react.Agent, error) {
-		base, err := einowrap.NewToolCallingChatModel(ctx, c, o)
-		if err != nil {
-			return nil, err
-		}
-		return buildReactAgent(ctx, base)
-	})
+	a.holder = einowrap.NewToolCallingChatModelHolder(cfg, einowrap.Options{
+		HTTPClient:     opts.HTTPClient,
+		BaseURL:        opts.BaseURL,
+		Timeout:        opts.Timeout,
+		RuntimeKeyFunc: opts.RuntimeKeyFunc,
+	}, opts.Runtime)
 	// Build once up front so a bad config (empty model, explicitly-set
 	// unknown provider) still fails fast at construction.
-	if _, err := a.holder.Get(ctx); err != nil {
+	base, err := a.holder.Get(ctx)
+	if err != nil {
+		return nil, safeAnalyzeProviderError(ctx, a.effectiveProvider(ctx), a.cfg.Model, err)
+	}
+	if _, err := buildReactAgent(ctx, base); err != nil {
 		return nil, err
 	}
 	return a, nil
+}
+
+func prepareTools(tools []core.Tool, timeout time.Duration) (map[string]core.Tool, map[string]string, []tool.BaseTool, error) {
+	registry := make(map[string]core.Tool, len(tools))
+	displays := make(map[string]string, len(tools))
+	adapted := make([]tool.BaseTool, 0, len(tools))
+	for _, value := range tools {
+		if value == nil || value.Name() == "" {
+			continue
+		}
+		if _, exists := registry[value.Name()]; exists {
+			return nil, nil, nil, fmt.Errorf("duplicate tool name %q", value.Name())
+		}
+		registry[value.Name()] = value
+		displays[value.Name()] = core.ToolDisplayName(value)
+		einotool, err := einowrap.NewTool(ledger.LedgeredTool{Tool: value}, timeout, maxToolOutputBytes)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		adapted = append(adapted, einotool)
+	}
+	return registry, displays, adapted, nil
 }
 
 // Name implements core.AIAgent.
@@ -200,6 +234,18 @@ func (a *Agent) Name() string { return "analyze" }
 
 // Kind implements core.AIAgent.
 func (a *Agent) Kind() core.AITaskKind { return core.AITaskAnalyze }
+
+func (a *Agent) effectiveProvider(ctx context.Context) string {
+	if a.runtime.Provider != nil {
+		if provider, ok := a.runtime.Provider(ctx); ok && einowrap.IsSupportedProvider(provider) {
+			return provider
+		}
+	}
+	if strings.TrimSpace(a.cfg.Provider) == "" {
+		return einowrap.DefaultProvider
+	}
+	return a.cfg.Provider
+}
 
 // Run implements core.AIAgent. Rejects any non-AnalyzeTask.
 func (a *Agent) Run(ctx context.Context, task core.AITask) (*core.AICallResult, error) {
@@ -221,10 +267,15 @@ func (a *Agent) Run(ctx context.Context, task core.AITask) (*core.AICallResult, 
 // statically-built agent; otherwise it consults the holder, which rebuilds
 // the tool-calling model + graph only when the signature changed.
 func (a *Agent) reactAgent(ctx context.Context) (*react.Agent, error) {
-	if a.agent != nil {
-		return a.agent, nil
+	chatModel := a.chatModel
+	if chatModel == nil {
+		var err error
+		chatModel, err = a.holder.Get(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return a.holder.Get(ctx)
+	return a.buildAgent(ctx, chatModel)
 }
 
 func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*core.AICallResult, error) {
@@ -239,27 +290,47 @@ func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*co
 	// / model / runtime state changed (nil holder ⇒ fixed test override).
 	reactAgent, err := a.reactAgent(ctx)
 	if err != nil {
-		return &core.AICallResult{UserPrompt: user, Model: a.cfg.Model}, fmt.Errorf("analyze: build react agent: %w", err)
+		safeErr := safeAnalyzeProviderError(ctx, a.effectiveProvider(ctx), a.cfg.Model, err)
+		return &core.AICallResult{UserPrompt: user, Model: safeAnalyzeResultModel(a.cfg.Model, safeErr)}, safeErr
 	}
 
 	// The audit trace is built from Eino tool callbacks rather than
 	// hand instrumentation, so it captures every tool the framework
 	// dispatches (including concurrent calls in one turn).
-	collector := &traceCollector{}
-	handler := utilcb.NewHandlerHelper().Tool(collector.toolHandler()).Handler()
+	collector := &traceCollector{
+		obsCtx:       ctx,
+		toolDisplays: a.toolDisplays,
+		provider:     a.effectiveProvider(ctx),
+		model:        a.cfg.Model,
+	}
+	handler := utilcb.NewHandlerHelper().
+		ChatModel(collector.chatModelHandler()).
+		Tool(collector.toolHandler()).
+		Handler()
+
+	core.EmitAnalyzeEvent(ctx, core.AnalyzeEvent{Kind: core.AnalyzeEventRunStarted})
 
 	start := time.Now()
-	out, err := reactAgent.Generate(ctx, messages, agent.WithComposeOptions(compose.WithCallbacks(handler)))
+	callOpts := agent.WithComposeOptions(compose.WithCallbacks(handler))
+	var out *schema.Message
+	// Stream only when someone is watching. An unwatched run has nothing to
+	// gain from incremental delivery, and Generate stays the simpler path.
+	if core.AnalyzeObserverFrom(ctx) != nil {
+		out, err = streamFinalMessage(ctx, reactAgent, messages, collector, callOpts)
+	} else {
+		out, err = reactAgent.Generate(ctx, messages, callOpts)
+	}
 	durationMs := time.Since(start).Milliseconds()
 	traces := collector.ordered()
 
 	if err != nil {
+		safeErr := safeAnalyzeProviderError(ctx, a.effectiveProvider(ctx), a.cfg.Model, err)
 		return &core.AICallResult{
 			UserPrompt: user,
 			DurationMs: durationMs,
-			Model:      a.cfg.Model,
+			Model:      safeAnalyzeResultModel(a.cfg.Model, safeErr),
 			ToolCalls:  traces,
-		}, fmt.Errorf("analyze: react agent: %w", err)
+		}, safeErr
 	}
 	if out == nil {
 		return &core.AICallResult{
@@ -301,6 +372,73 @@ func (a *Agent) run(ctx context.Context, snap core.AnalyzeIncidentSnapshot) (*co
 	}, nil
 }
 
+func safeAnalyzeProviderError(ctx context.Context, provider, model string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("analyze: run timed out: %w", context.DeadlineExceeded)
+	}
+	var configErr *einowrap.ConfigError
+	if errors.As(err, &configErr) {
+		return configErr
+	}
+	return einowrap.SafeProviderError(provider, model, err)
+}
+
+func safeAnalyzeResultModel(configured string, err error) string {
+	var providerErr *einowrap.ProviderError
+	if errors.As(err, &providerErr) {
+		return providerErr.Model
+	}
+	return configured
+}
+
+// streamFinalMessage runs the ReAct loop in streaming mode and reassembles
+// the assistant's answer from the graph's output chunks.
+//
+// The per-chunk events the viewer sees are NOT emitted here: they come from
+// the chat model callback, which sees every model turn rather than only the
+// final one and — being a single goroutine per turn — emits each turn's
+// deltas and its model_finished in a fixed order. Emitting from both places
+// would race and split the transcript.
+//
+// Only Content is carried over: the reassembled message feeds ParseFinding
+// and the persisted RawResponse, both of which read Content alone.
+func streamFinalMessage(
+	ctx context.Context,
+	reactAgent *react.Agent,
+	messages []*schema.Message,
+	collector *traceCollector,
+	opts ...agent.AgentOption,
+) (*schema.Message, error) {
+	sr, err := reactAgent.Stream(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+	// Runs after sr.Close(): the run must not be reported finished while a
+	// model turn is still emitting events, or the client sees the terminal
+	// event and stops reading before the transcript is complete.
+	defer collector.waitDrains()
+	defer sr.Close()
+
+	var sb strings.Builder
+	for {
+		chunk, recvErr := sr.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			return nil, recvErr
+		}
+		if chunk == nil || chunk.Content == "" {
+			continue
+		}
+		sb.WriteString(chunk.Content)
+	}
+	return &schema.Message{Role: schema.Assistant, Content: sb.String()}, nil
+}
+
 // traceCollector turns Eino tool callbacks into ordered
 // core.ToolCallTrace entries. Tools may run concurrently, so the slice
 // is mutex-guarded and reassembled in start order (a monotonically
@@ -310,6 +448,137 @@ type traceCollector struct {
 	mu    sync.Mutex
 	seq   int64
 	items []*traceItem
+	// turn counts model round-trips so the UI can group each batch of tool
+	// calls under the model turn that asked for them.
+	turn int64
+	// obsCtx carries the run's AnalyzeObserver. Eino hands each callback its
+	// own ctx, so the observer is held here rather than read from those.
+	obsCtx       context.Context
+	toolDisplays map[string]string
+	provider     string
+	model        string
+	// drains tracks the goroutines reading each streamed model turn.
+	drains sync.WaitGroup
+}
+
+type modelTurnCtxKey struct{}
+
+// nextSeq continues the tool sequence for the run-level terminal events, so
+// the stream stays strictly ordered end to end.
+func (c *traceCollector) nextSeq() int64 {
+	return atomic.AddInt64(&c.seq, 1)
+}
+
+func (c *traceCollector) emit(ev core.AnalyzeEvent) {
+	if c.obsCtx == nil {
+		return
+	}
+	core.EmitAnalyzeEvent(c.obsCtx, ev)
+}
+
+// waitDrains blocks until every streamed model turn has been fully read and
+// its events emitted.
+func (c *traceCollector) waitDrains() { c.drains.Wait() }
+
+// chatModelHandler streams the model's own turns. Without it the viewer sees
+// tool calls appear from nowhere with dead air in between, which is most of
+// the wall-clock time of a run.
+//
+// Only the assistant's content is forwarded, capped by the same capOutput used
+// for tool output. The final turn's content is what gets persisted as
+// RawResponse, so this exposes nothing the stored record does not already
+// hold; intermediate turns are usually empty (tool calls only).
+func (c *traceCollector) chatModelHandler() *utilcb.ModelCallbackHandler {
+	return &utilcb.ModelCallbackHandler{
+		OnStart: func(ctx context.Context, _ *callbacks.RunInfo, _ *model.CallbackInput) context.Context {
+			turn := atomic.AddInt64(&c.turn, 1)
+			c.emit(core.AnalyzeEvent{
+				Seq:  c.nextSeq(),
+				Kind: core.AnalyzeEventModelStarted,
+				Turn: int(turn),
+			})
+			return context.WithValue(ctx, modelTurnCtxKey{}, turn)
+		},
+		OnEnd: func(ctx context.Context, _ *callbacks.RunInfo, output *model.CallbackOutput) context.Context {
+			turn, _ := ctx.Value(modelTurnCtxKey{}).(int64)
+			ev := core.AnalyzeEvent{
+				Seq:  c.nextSeq(),
+				Kind: core.AnalyzeEventModelFinished,
+				Turn: int(turn),
+			}
+			if output != nil && output.Message != nil {
+				ev.Output = capOutput(strings.TrimSpace(output.Message.Content))
+			}
+			c.emit(ev)
+			return ctx
+		},
+		// A streamed model turn ends through this timing instead of OnEnd, so
+		// without it a streamed run would never report a finished turn and the
+		// viewer's cursor would spin forever. Eino hands every handler its own
+		// copy of the stream, so draining it here cannot starve the graph.
+		OnEndWithStreamOutput: func(ctx context.Context, _ *callbacks.RunInfo, output *schema.StreamReader[*model.CallbackOutput]) context.Context {
+			turn, _ := ctx.Value(modelTurnCtxKey{}).(int64)
+			c.drains.Add(1)
+			go c.drainModelStream(output, turn)
+			return ctx
+		},
+		OnError: func(ctx context.Context, _ *callbacks.RunInfo, err error) context.Context {
+			turn, _ := ctx.Value(modelTurnCtxKey{}).(int64)
+			ev := core.AnalyzeEvent{
+				Seq:  c.nextSeq(),
+				Kind: core.AnalyzeEventModelFinished,
+				Turn: int(turn),
+			}
+			if err != nil {
+				ev.Error = einowrap.SafeProviderError(c.provider, c.model, err).Diagnostic
+			}
+			c.emit(ev)
+			return ctx
+		},
+	}
+}
+
+// drainModelStream reads one model turn's output copy to completion, emitting
+// a delta per non-empty chunk and a single model_finished when the turn ends.
+// Both come from this one goroutine, so a turn's events are always ordered
+// deltas-then-finished.
+func (c *traceCollector) drainModelStream(output *schema.StreamReader[*model.CallbackOutput], turn int64) {
+	defer c.drains.Done()
+	defer output.Close()
+
+	var sb strings.Builder
+	var streamErr error
+	for {
+		chunk, recvErr := output.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			streamErr = recvErr
+			break
+		}
+		if chunk == nil || chunk.Message == nil || chunk.Message.Content == "" {
+			continue
+		}
+		sb.WriteString(chunk.Message.Content)
+		c.emit(core.AnalyzeEvent{
+			Seq:    c.nextSeq(),
+			Kind:   core.AnalyzeEventModelDelta,
+			Turn:   int(turn),
+			Output: capOutput(chunk.Message.Content),
+		})
+	}
+
+	ev := core.AnalyzeEvent{
+		Seq:    c.nextSeq(),
+		Kind:   core.AnalyzeEventModelFinished,
+		Turn:   int(turn),
+		Output: capOutput(strings.TrimSpace(sb.String())),
+	}
+	if streamErr != nil {
+		ev.Error = einowrap.SafeProviderError(c.provider, c.model, streamErr).Diagnostic
+	}
+	c.emit(ev)
 }
 
 type traceItem struct {
@@ -336,6 +605,14 @@ func (c *traceCollector) toolHandler() *utilcb.ToolCallbackHandler {
 			c.mu.Lock()
 			c.items = append(c.items, it)
 			c.mu.Unlock()
+			c.emit(core.AnalyzeEvent{
+				Seq:         it.seq,
+				Kind:        core.AnalyzeEventToolStarted,
+				Turn:        int(atomic.LoadInt64(&c.turn)),
+				Tool:        it.trace.Name,
+				ToolDisplay: c.toolDisplays[it.trace.Name],
+				Args:        it.trace.Args,
+			})
 			return context.WithValue(ctx, traceCtxKey{}, it)
 		},
 		OnEnd: func(ctx context.Context, _ *callbacks.RunInfo, output *tool.CallbackOutput) context.Context {
@@ -347,6 +624,14 @@ func (c *traceCollector) toolHandler() *utilcb.ToolCallbackHandler {
 			if output != nil {
 				it.trace.Output = capOutput(output.Response)
 			}
+			c.emit(core.AnalyzeEvent{
+				Seq:         it.seq,
+				Kind:        core.AnalyzeEventToolFinished,
+				Tool:        it.trace.Name,
+				ToolDisplay: c.toolDisplays[it.trace.Name],
+				Output:      it.trace.Output,
+				DurationMs:  it.trace.DurationMs,
+			})
 			return ctx
 		},
 		OnError: func(ctx context.Context, _ *callbacks.RunInfo, err error) context.Context {
@@ -356,8 +641,17 @@ func (c *traceCollector) toolHandler() *utilcb.ToolCallbackHandler {
 			}
 			it.trace.DurationMs = time.Since(it.start).Milliseconds()
 			if err != nil {
-				it.trace.Error = err.Error()
+				code, message := core.ClassifyToolError(err)
+				it.trace.Error = string(code) + ": " + message
 			}
+			c.emit(core.AnalyzeEvent{
+				Seq:         it.seq,
+				Kind:        core.AnalyzeEventToolError,
+				Tool:        it.trace.Name,
+				ToolDisplay: c.toolDisplays[it.trace.Name],
+				DurationMs:  it.trace.DurationMs,
+				Error:       it.trace.Error,
+			})
 			return ctx
 		},
 	}
@@ -379,87 +673,4 @@ func capOutput(s string) string {
 		return s[:maxToolOutputBytes] + `..."truncated"`
 	}
 	return s
-}
-
-// einoTool adapts a read-only core.AnalyzeTool onto Eino's
-// tool.InvokableTool so the ReAct agent's ToolsNode can dispatch it.
-// The single core.ToolResult envelope is preserved: Invoke still
-// returns core.ToolResult, which this adapter JSON-marshals (capped at
-// maxToolOutputBytes) into the string the model consumes.
-type einoTool struct {
-	impl    core.AnalyzeTool
-	info    *schema.ToolInfo
-	timeout time.Duration
-}
-
-func newEinoTool(t core.AnalyzeTool, timeout time.Duration) (*einoTool, error) {
-	info := &schema.ToolInfo{
-		Name: t.Name(),
-		Desc: t.Description(),
-	}
-	argsSchema := t.ArgsSchema()
-	if len(argsSchema) > 0 {
-		raw, err := json.Marshal(argsSchema)
-		if err != nil {
-			return nil, fmt.Errorf("analyze: marshal schema for tool %q: %w", t.Name(), err)
-		}
-		js := &jsonschema.Schema{}
-		if err := json.Unmarshal(raw, js); err != nil {
-			return nil, fmt.Errorf("analyze: parse schema for tool %q: %w", t.Name(), err)
-		}
-		info.ParamsOneOf = schema.NewParamsOneOfByJSONSchema(js)
-	}
-	return &einoTool{impl: t, info: info, timeout: timeout}, nil
-}
-
-// Info implements tool.BaseTool.
-func (e *einoTool) Info(_ context.Context) (*schema.ToolInfo, error) { return e.info, nil }
-
-// InvokableRun implements tool.InvokableTool. Tool errors (including a
-// per-tool timeout) are surfaced to the model as a structured error
-// message instead of aborting the ReAct graph, mirroring the prior
-// loop's resilience (the model can recover or pick another tool on the
-// next turn).
-func (e *einoTool) InvokableRun(ctx context.Context, argumentsInJSON string, _ ...tool.Option) (string, error) {
-	result, err := e.invoke(ctx, json.RawMessage(argumentsInJSON))
-	if err != nil {
-		return fmt.Sprintf(`{"error":%q}`, err.Error()), nil
-	}
-	b, mErr := json.Marshal(result)
-	if mErr != nil {
-		return fmt.Sprintf(`{"error":%q}`, "marshal tool output: "+mErr.Error()), nil
-	}
-	return capOutput(string(b)), nil
-}
-
-// invoke runs the wrapped tool under the per-tool timeout. A
-// non-positive timeout disables the cap and the tool runs directly.
-// Otherwise the tool runs against a derived deadline context; if it
-// outruns the deadline (even when the tool ignores cancellation) the
-// dispatch returns a timeout error promptly while the goroutine drains
-// into a buffered channel, so no goroutine is leaked indefinitely.
-func (e *einoTool) invoke(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
-	if e.timeout <= 0 {
-		return e.impl.Invoke(ctx, args)
-	}
-
-	tctx, cancel := context.WithTimeout(ctx, e.timeout)
-	defer cancel()
-
-	type result struct {
-		out *core.ToolResult
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		out, err := e.impl.Invoke(tctx, args)
-		done <- result{out: out, err: err}
-	}()
-
-	select {
-	case <-tctx.Done():
-		return nil, fmt.Errorf("tool %q timed out after %s", e.impl.Name(), e.timeout)
-	case r := <-done:
-		return r.out, r.err
-	}
 }

@@ -77,7 +77,7 @@ function respond(rows: BaselineRow[]): BaselinesResponse {
   return { org: "acme", count: rows.length, baselines: rows };
 }
 
-function renderPage(page: ReactElement) {
+function renderPage(page: ReactElement, entry = "/") {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -85,6 +85,7 @@ function renderPage(page: ReactElement) {
     <QueryClientProvider client={qc}>
       <ToastProvider>
         <MemoryRouter
+          initialEntries={[entry]}
           future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
         >
           {page}
@@ -304,7 +305,7 @@ describe("LearnedSignalsView — Last seen click-to-sort", () => {
   it("defaults to most-recent-first and flips to oldest-first on header click", async () => {
     vi.mocked(api.listBaselines).mockResolvedValue(threeRows());
 
-    renderPage(<MetricsPage />);
+    renderPage(<MetricsPage />, "/metrics?group=flat");
     await screen.findAllByTitle("View details");
 
     // Default sort: newest last_updated first, regardless of the incoming order.

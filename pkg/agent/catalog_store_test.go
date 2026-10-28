@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/stats"
 )
 
 // catalog_store_test.go — proves the CatalogStore seam: nil-default is the
@@ -31,13 +32,15 @@ func (f *fakeCatalogStore) Load() (map[string]*Pattern, map[string]*ServiceInfo,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loads++
-	return f.patterns, f.services, nil
+	return cloneFakePatterns(f.patterns), cloneFakeServices(f.services), nil
 }
 
 func (f *fakeCatalogStore) Persist(patterns map[string]*Pattern, services map[string]*ServiceInfo) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.persists++
+	f.patterns = cloneFakePatterns(patterns)
+	f.services = cloneFakeServices(services)
 	return nil
 }
 
@@ -61,7 +64,33 @@ func (f *fakeCatalogStore) Curate(edit CatalogEdit) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.curates = append(f.curates, edit)
+	if edit.Kind == CatalogEditRepointService {
+		if p := f.patterns[edit.PatternID]; p != nil {
+			p.Service = edit.Service
+		}
+	}
 	return nil
+}
+
+func cloneFakePatterns(patterns map[string]*Pattern) map[string]*Pattern {
+	out := make(map[string]*Pattern, len(patterns))
+	for id, pattern := range patterns {
+		copy := *pattern
+		copy.Tags = append([]string(nil), pattern.Tags...)
+		copy.Samples = append([]string(nil), pattern.Samples...)
+		copy.Seasonal = append([]stats.EWMA(nil), pattern.Seasonal...)
+		out[id] = &copy
+	}
+	return out
+}
+
+func cloneFakeServices(services map[string]*ServiceInfo) map[string]*ServiceInfo {
+	out := make(map[string]*ServiceInfo, len(services))
+	for name, service := range services {
+		copy := *service
+		out[name] = &copy
+	}
+	return out
 }
 
 func (f *fakeCatalogStore) counts() (loads, persists, snaps, curates int) {
@@ -252,6 +281,56 @@ func verdictOf(p *Pattern) string {
 		return "<nil>"
 	}
 	return p.Verdict
+}
+
+// TestCatalog_GraceControl_MutatesInMemoryWithStore pins the fix for QA-078,
+// the same bug class as MarkKnown above. IsServiceInGrace reads the in-memory
+// map on every signal and nothing reloads it from the store, so a store-only
+// grace edit did not reach the worker until the next process start: the API
+// returned 200 and AllServices (a store read) reported in_grace=false while
+// the worker kept logging "in grace, learning only" and raised no finding.
+func TestCatalog_GraceControl_MutatesInMemoryWithStore(t *testing.T) {
+	const grace = time.Hour
+	fake := &fakeCatalogStore{
+		services: map[string]*ServiceInfo{
+			"checkout": {FirstSeen: time.Now().UTC()},
+		},
+	}
+	SetCatalogStore(fake)
+	t.Cleanup(func() { SetCatalogStore(nil) })
+
+	cat, err := LoadCatalog(nil)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	if !cat.IsServiceInGrace("checkout", grace) {
+		t.Fatal("precondition: a just-registered service must be in grace")
+	}
+
+	if !cat.EndServiceGrace("checkout") {
+		t.Fatal("EndServiceGrace returned false for an existing service")
+	}
+	// The worker's very next tick must see this — no restart, no reload.
+	if cat.IsServiceInGrace("checkout", grace) {
+		t.Error("after EndServiceGrace the service is STILL in grace in memory: the worker would keep learning silently until restart (QA-078)")
+	}
+
+	if !cat.RestartServiceGrace("checkout") {
+		t.Fatal("RestartServiceGrace returned false for an existing service")
+	}
+	if !cat.IsServiceInGrace("checkout", grace) {
+		t.Error("after RestartServiceGrace the service is NOT back in grace in memory")
+	}
+
+	// Durability is not traded away for the in-memory fix.
+	fake.mu.Lock()
+	edits := append([]CatalogEdit(nil), fake.curates...)
+	fake.mu.Unlock()
+	if len(edits) != 2 ||
+		edits[0].Kind != CatalogEditEndServiceGrace || edits[0].Service != "checkout" ||
+		edits[1].Kind != CatalogEditRestartServiceGrace || edits[1].Service != "checkout" {
+		t.Fatalf("Curate edits = %+v, want end then restart for checkout", edits)
+	}
 }
 
 // TestCatalog_InstalledStore_HotPathNeverCallsStore proves Get/Upsert and the

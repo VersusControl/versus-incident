@@ -164,7 +164,7 @@ func (a *AgentController) SetCatalogConfig(cat config.AgentCatalogConfig, poll t
 //	POST   /detect/flush     force-flush the detect log to disk
 //	GET    /ai/system-prompt the assembled system prompt sent on every AI call
 func (a *AgentController) Register(router fiber.Router) {
-	g := router.Group("/agent", a.authMiddleware)
+	g := router.Group("/agent", adminGatewayGuard)
 	g.Get("/status", a.getStatus)
 	g.Get("/patterns", a.listPatterns)
 	g.Get("/patterns/:id", a.getPattern)
@@ -191,28 +191,6 @@ func (a *AgentController) Register(router fiber.Router) {
 	g.Delete("/detect", a.clearDetect)
 	g.Post("/detect/flush", a.flushDetect)
 	g.Get("/ai/system-prompt", a.getSystemPrompt)
-}
-
-// authMiddleware enforces a shared gateway secret. Clients send the
-// configured value verbatim in the `X-Gateway-Secret` header — there is no
-// Bearer prefix or other framing. Comparison is constant-time to deny
-// header-length / prefix-match timing oracles.
-func (a *AgentController) authMiddleware(c *fiber.Ctx) error {
-	// An enterprise auth handler may have already authenticated this request
-	// with an alternative credential (e.g. an SSO session); honour that so a
-	// single enterprise credential unlocks both the data plane and the admin
-	// surfaces. Community OSS never sets this, so the gateway check is unchanged.
-	if middleware.RequestAuthorized(c) {
-		return c.Next()
-	}
-	cfg := config.GetConfig()
-	expected := cfg.GatewaySecret
-	got := c.Get("X-Gateway-Secret")
-	if expected == "" || !secureEqual(got, expected) {
-		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
-	}
-
-	return c.Next()
 }
 
 func (a *AgentController) getStatus(c *fiber.Ctx) error {
@@ -589,10 +567,6 @@ func (a *AgentController) listServices(c *fiber.Ctx) error {
 // large histories.
 const serviceIncidentScanLimit = 500
 
-// serviceIncidentWindowDays is the rolling window the per-service incident
-// summary covers.
-const serviceIncidentWindowDays = 30
-
 // serviceRecentIncidentMax caps the recent-incident list in the detail
 // response.
 const serviceRecentIncidentMax = 10
@@ -716,20 +690,52 @@ func graceStatus(firstSeen time.Time, grace time.Duration) (bool, int) {
 	return false, 0
 }
 
-// serviceIncidentSummary builds the bounded, org-scoped incident summary for
-// one service: count, a severity histogram, and the most-recent incidents
-// (newest first). It scans at most serviceIncidentScanLimit records and keeps
-// only those inside the serviceIncidentWindowDays window. A nil store or read
-// error degrades to an empty summary rather than failing the whole detail call.
+// serviceIncidentSummary builds an org-scoped count, severity histogram, and
+// newest-first incident list. It prefers a service-scoped storage query and
+// retains the bounded whole-table scan for backends without that capability.
 func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
-	summary := fiber.Map{
-		"window_days": serviceIncidentWindowDays,
-		"count":       0,
-		"severities":  fiber.Map{},
-		"recent":      []fiber.Map{},
-	}
 	store := services.Storage()
+	settings := agent.LoadCountSettings(store)
+	summary := fiber.Map{
+		"count_window": settings.Window,
+		"count":        0,
+		"severities":   fiber.Map{},
+		"recent":       []fiber.Map{},
+	}
 	if store == nil {
+		return summary
+	}
+	cutoff := settings.Since(time.Now().UTC())
+	if counter, ok := store.(storage.IncidentServiceCounter); ok {
+		count, rawSeverities, err := counter.CountIncidentsByServiceSince(org, name, cutoff)
+		if err != nil {
+			return summary
+		}
+		recs, err := counter.ListIncidentsByServiceSince(org, name, cutoff, serviceRecentIncidentMax)
+		if err != nil {
+			return summary
+		}
+		severities := fiber.Map{}
+		for raw, n := range rawSeverities {
+			band := services.SeverityBand(raw)
+			if current, exists := severities[band].(int); exists {
+				severities[band] = current + n
+			} else {
+				severities[band] = n
+			}
+		}
+		recent := make([]fiber.Map, 0, len(recs))
+		for _, rec := range recs {
+			recent = append(recent, fiber.Map{
+				"id":         rec.ID,
+				"title":      rec.Title,
+				"severity":   incidentSeverity(rec),
+				"created_at": rec.CreatedAt,
+			})
+		}
+		summary["count"] = count
+		summary["severities"] = severities
+		summary["recent"] = recent
 		return summary
 	}
 	recs, err := store.ListIncidents(serviceIncidentScanLimit)
@@ -737,12 +743,11 @@ func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
 		return summary
 	}
 
-	cutoff := time.Now().UTC().Add(-serviceIncidentWindowDays * 24 * time.Hour)
 	severities := fiber.Map{}
 	recent := make([]fiber.Map, 0, serviceRecentIncidentMax)
 	count := 0
 	for _, rec := range recs {
-		if rec.Service != name || storage.NormalizeOrgID(rec.OrgID) != org {
+		if services.ServiceLabel(rec) != name || storage.NormalizeOrgID(rec.OrgID) != org {
 			continue
 		}
 		if rec.CreatedAt.Before(cutoff) {
@@ -772,16 +777,16 @@ func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
 }
 
 // incidentSeverity reads the best-effort severity carried in the alert
-// payload, falling back to "unknown" (mirrors snapshotFromIncident's lookup).
+// payload through the shared extraction and collapses it to one of the fixed
+// report bands. Banding keeps the histogram to that closed set: the raw label
+// is payload-supplied, so keying the response on it would both fragment the
+// counts the report shows and let a stream of distinct labels inflate the
+// response with unbounded keys.
 func incidentSeverity(rec *storage.IncidentRecord) string {
-	if rec.Content != nil {
-		if v, ok := rec.Content["severity"]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
+	if rec == nil {
+		return "unknown"
 	}
-	return "unknown"
+	return services.SeverityBand(services.ExtractSeverity(rec.Content))
 }
 
 type serviceGraceRequest struct {

@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="Detect mode. The shared pipeline pulls and scrapes logs while hiding secrets, matches and clusters them, and updates the catalog and its running average. Three detect gates then run in order: is the pattern known and calm, is there a cache hit on a prior AI finding, and is the rate limit ok. Any gate that trips drops the line as known, grace or quota. Only a line that passes every gate goes to the AI SRE, which analyses it with an LLM, emits an incident to Slack, Teams and on call, and shows it in the web UI.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .lab  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+      .zone { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#5B6B78; letter-spacing:1.5px; }
+    </style>
+  </defs>
+
+  <rect width="760" height="428" fill="#FFFFFF"/>
+
+  <text x="250" y="30" text-anchor="middle" class="zone" font-size="12">SHARED PIPELINE</text>
+
+  <rect x="20" y="44" width="158" height="60" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="99" y="70" text-anchor="middle" class="name" font-size="13">Pull and scrape</text>
+  <text x="99" y="90" text-anchor="middle" class="t" font-size="11.5">read logs, hide secrets</text>
+
+  <path d="M180,74 H204" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="208" y="44" width="158" height="60" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="70" text-anchor="middle" class="name" font-size="13">Match and cluster</text>
+  <text x="287" y="90" text-anchor="middle" class="t" font-size="11.5">filter, then group</text>
+
+  <path d="M368,74 H392" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <path d="M396,52 a79,8 0 0 1 158,0 v36 a79,8 0 0 1 -158,0 z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <path d="M396,52 a79,8 0 0 0 158,0" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="76" text-anchor="middle" class="name" font-size="13">Catalog and EWMA</text>
+  <text x="475" y="92" text-anchor="middle" class="t" font-size="11.5">update the average</text>
+
+  <path d="M475,100 V120 H130 V146" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <text x="330" y="138" text-anchor="middle" class="zone" font-size="12">DETECT GATES</text>
+
+  <polygon points="130,150 188,184 130,218 72,184" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="130" y="180" text-anchor="middle" class="name" font-size="12">Known and</text>
+  <text x="130" y="194" text-anchor="middle" class="name" font-size="12">calm?</text>
+
+  <text x="230" y="172" text-anchor="middle" class="lab" font-size="12">no</text>
+  <path d="M192,184 H268" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <polygon points="330,150 388,184 330,218 272,184" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="330" y="188" text-anchor="middle" class="name" font-size="12">Cache hit?</text>
+
+  <text x="430" y="172" text-anchor="middle" class="lab" font-size="12">no</text>
+  <path d="M392,184 H468" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <polygon points="530,150 588,184 530,218 472,184" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="530" y="180" text-anchor="middle" class="name" font-size="12">Rate limit</text>
+  <text x="530" y="194" text-anchor="middle" class="name" font-size="12">ok?</text>
+
+  <text x="140" y="240" text-anchor="start" class="lab" font-size="12">yes</text>
+  <path d="M130,222 V246" stroke="#000000" stroke-width="2.5" fill="none"/>
+  <text x="340" y="240" text-anchor="start" class="lab" font-size="12">yes</text>
+  <path d="M330,222 V246" stroke="#000000" stroke-width="2.5" fill="none"/>
+  <text x="540" y="240" text-anchor="start" class="lab" font-size="12">quota</text>
+  <path d="M530,222 V246" stroke="#000000" stroke-width="2.5" fill="none"/>
+
+  <path d="M530,246 H60" stroke="#000000" stroke-width="2.5" fill="none"/>
+  <path d="M60,246 V296" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <text x="612" y="176" text-anchor="middle" class="lab" font-size="12">ok</text>
+  <path d="M592,184 H620 V260 H287 V296" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <text x="475" y="284" text-anchor="middle" class="zone" font-size="12">ALERT</text>
+
+  <rect x="20" y="300" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="99" y="328" text-anchor="middle" class="name" font-size="13">Drop</text>
+  <text x="99" y="348" text-anchor="middle" class="t" font-size="11.5">known, grace or quota</text>
+
+  <rect x="208" y="300" width="158" height="64" rx="12" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="287" y="328" text-anchor="middle" class="name" font-size="13">AI SRE</text>
+  <text x="287" y="348" text-anchor="middle" class="t" font-size="11.5">analyse with an LLM</text>
+
+  <text x="380" y="292" text-anchor="middle" class="lab" font-size="12">finding</text>
+  <path d="M368,332 H392" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="396" y="300" width="158" height="64" rx="12" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="475" y="328" text-anchor="middle" class="name" font-size="13">Emit incident</text>
+  <text x="475" y="348" text-anchor="middle" class="t" font-size="11.5">Slack, Teams, on call</text>
+
+  <path d="M556,332 H580" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="584" y="300" width="158" height="64" rx="12" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="663" y="328" text-anchor="middle" class="name" font-size="13">Web UI</text>
+  <text x="663" y="348" text-anchor="middle" class="t" font-size="11.5">patterns and incidents</text>
+</svg>

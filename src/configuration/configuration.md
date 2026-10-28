@@ -106,7 +106,7 @@ queue:
     https_endpoint_subscription_path: /sns # URI to receive SNS messages, e.g. ${host}:${port}/sns or ${https_endpoint_subscription}/sns
     # Options If you want to automatically create an sns subscription
     https_endpoint_subscription: ${SNS_HTTPS_ENDPOINT_SUBSCRIPTION} # If the user configures an HTTPS endpoint, then an SNS subscription will be automatically created, e.g. https://your-domain.com
-    topic_arn: ${SNS_TOPIC_ARN}
+    topic_arn: ${SNS_TOPIC_ARN} # Required when sns.enable is true
 
   # AWS SQS
   sqs:
@@ -303,9 +303,17 @@ The application relies on several environment variables to configure alerting se
 ### Admin & Gateway
 | Variable          | Description |
 |------------------|-------------|
-| `GATEWAY_SECRET` | Shared secret required to access the admin dashboard and every `/api/admin/*` and `/api/agent/*` endpoint. Sent by clients in the `X-Gateway-Secret` header. **When unset the admin endpoints are not registered at all.** |
+| `GATEWAY_SECRET` | Shared secret required to access the admin dashboard and every `/api/admin/*` and `/api/agent/*` endpoint. API clients send it in `X-Gateway-Secret`; the browser exchanges it once at `POST /api/auth/gateway-session` for an opaque HttpOnly cookie that expires after eight hours. **When unset, gateway login fails closed and the protected endpoints remain unavailable.** |
 
-> **OSS vs Enterprise.** `GATEWAY_SECRET` / `X-Gateway-Secret` is the admin credential on the **OSS/community** binary. The **Enterprise** binary retires the gateway secret and authenticates the **signed-in admin session** (SSO or the default-admin login) instead.
+The root-level YAML `public_host` is the sole configured external URL. Set it to
+the exact browser-visible HTTP(S) origin when Versus is behind a rewriting or
+TLS-terminating proxy. It owns external links, secure-cookie derivation, and
+exact-origin CSRF checks. Paths beyond `/`, queries, fragments, userinfo,
+non-HTTP schemes, and invalid ports stop startup; scheme/host casing and default
+ports are normalized. Forwarded host/protocol headers are not trusted. Empty
+keeps direct request TLS and Host behavior.
+
+> **OSS vs Enterprise.** `GATEWAY_SECRET` / `X-Gateway-Secret` is the admin credential on the **OSS/community** binary. The **Enterprise** binary disables gateway exchange, header, and cookie authentication and authenticates the **signed-in admin session** (SSO or the default-admin login) instead.
 
 ### Storage
 | Variable       | Description |
@@ -428,7 +436,7 @@ This automatic detection provides backward compatibility while supporting newer 
 |-----------------------------|-------------|
 | `SNS_ENABLE`             | Set to `true` to enable receive Alert Messages from SNS. |
 | `SNS_HTTPS_ENDPOINT_SUBSCRIPTION`             | This specifies the HTTPS endpoint to which SNS sends messages. When an HTTPS endpoint is configured, an SNS subscription is automatically created. If no endpoint is configured, you must create the SNS subscription manually using the CLI or AWS Console. E.g. `https://your-domain.com`. |
-| `SNS_TOPIC_ARN`             | AWS ARN of the SNS topic to subscribe to. |
+| `SNS_TOPIC_ARN`             | **Required when `SNS_ENABLE` is `true`** — Versus will not start without it. AWS ARN of the SNS topic to subscribe to. The `/sns` endpoint is unauthenticated and reachable by anyone, and a valid AWS signature only proves a message came from *some* SNS topic; the ARN is what binds the endpoint to yours. Messages from any other topic are refused. |
 | `SQS_ENABLE`             | Set to `true` to enable receive Alert Messages from AWS SQS. |
 | `SQS_QUEUE_URL`             | URL of the AWS SQS queue to receive messages from. |
 

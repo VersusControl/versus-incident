@@ -12,9 +12,9 @@
 # they stay silent under the generator's normal traffic and fire the moment
 # you hit `/spike`.
 #
-# AUTO-WIRE: configuring this source ALONE also lights up the analyze
-# `query_metrics` tool pointed at the SAME Prometheus — there is deliberately
-# no `tools.yaml` in this example. See the README "Auto-wire" section.
+# Licensed Prometheus sources contribute `discover_metrics` and
+# `read_metric_series` to Chat and Analyze. Both route reads through the
+# configured source; no separate `tools.yaml` entry is needed.
 sources:
   - name: demo-prom
     type: prometheus

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="428" viewBox="0 0 760 428" role="img" aria-label="Four stages: a generator posts healthy OTLP spans, then a spike, into Tempo, Tempo holds the spans for Versus Enterprise to read, Versus discovers each service and operation and learns its p99 and error rate baseline, then detects when one stays wrong and the detect AI classifies it, opening an incident that lands in data/incidents.json and pages on call">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .name { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:700; fill:#12222F; }
+      .t    { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#5B6B78; }
+      .lab  { font-family:"Helvetica Neue",Helvetica,Arial,sans-serif; font-weight:400; fill:#000000; }
+    </style>
+  </defs>
+
+  <rect width="760" height="428" fill="#FFFFFF"/>
+
+  <rect x="27" y="160" width="160" height="130" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="107" y="206" text-anchor="middle" class="name" font-size="16">Generator</text>
+  <text x="107" y="232" text-anchor="middle" class="t" font-size="12">healthy spans</text>
+  <text x="107" y="252" text-anchor="middle" class="t" font-size="12">then a spike</text>
+
+  <text x="198" y="148" text-anchor="middle" class="lab" font-size="12">posts spans</text>
+  <path d="M187,225 H209" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="209" y="160" width="160" height="130" rx="14" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <text x="289" y="206" text-anchor="middle" class="name" font-size="16">Tempo</text>
+  <text x="289" y="232" text-anchor="middle" class="t" font-size="12">OTLP receiver</text>
+  <text x="289" y="252" text-anchor="middle" class="t" font-size="12">stores the spans</text>
+
+  <text x="380" y="148" text-anchor="middle" class="lab" font-size="12">reads spans</text>
+  <path d="M369,225 H391" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="391" y="160" width="160" height="130" rx="14" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="471" y="206" text-anchor="middle" class="name" font-size="16">Discover</text>
+  <text x="471" y="232" text-anchor="middle" class="t" font-size="12">service + operation</text>
+  <text x="471" y="252" text-anchor="middle" class="t" font-size="12">p99 + error rate</text>
+
+  <text x="562" y="148" text-anchor="middle" class="lab" font-size="12">baseline learned</text>
+  <path d="M551,225 H573" stroke="#000000" stroke-width="2.5" fill="none" marker-end="url(#a)"/>
+
+  <rect x="573" y="160" width="160" height="130" rx="14" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <text x="653" y="206" text-anchor="middle" class="name" font-size="16">Detect</text>
+  <text x="653" y="232" text-anchor="middle" class="t" font-size="12">stays wrong a while</text>
+  <text x="653" y="252" text-anchor="middle" class="t" font-size="12">AI classifies it</text>
+
+  <text x="380" y="336" text-anchor="middle" class="t" font-size="12">Incident opens in data/incidents.json and pages on call</text>
+</svg>

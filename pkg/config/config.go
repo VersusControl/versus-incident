@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/VersusControl/versus-incident/pkg/weborigin"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -43,7 +45,8 @@ type Config struct {
 
 	Storage StorageConfig `mapstructure:"storage"`
 
-	Agent AgentConfig `mapstructure:"agent"`
+	Agent      AgentConfig      `mapstructure:"agent"`
+	Connectors ConnectorsConfig `mapstructure:"connectors"`
 }
 
 // StorageConfig is the durable-storage block. It is the single source of
@@ -105,11 +108,12 @@ type AlertConfig struct {
 }
 
 type SlackConfig struct {
-	Enable            bool
-	Token             string
-	ChannelID         string                 `mapstructure:"channel_id"`
-	TemplatePath      string                 `mapstructure:"template_path"`
-	MessageProperties SlackMessageProperties `mapstructure:"message_properties"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	Token                       string
+	ChannelID                   string                 `mapstructure:"channel_id"`
+	TemplatePath                string                 `mapstructure:"template_path"`
+	MessageProperties           SlackMessageProperties `mapstructure:"message_properties"`
 }
 
 type SlackMessageProperties struct {
@@ -119,16 +123,18 @@ type SlackMessageProperties struct {
 }
 
 type TelegramConfig struct {
-	Enable       bool
-	BotToken     string `mapstructure:"bot_token"`
-	ChatID       string `mapstructure:"chat_id"`
-	TemplatePath string `mapstructure:"template_path"`
-	UseProxy     bool   `mapstructure:"use_proxy"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	BotToken                    string `mapstructure:"bot_token"`
+	ChatID                      string `mapstructure:"chat_id"`
+	TemplatePath                string `mapstructure:"template_path"`
+	UseProxy                    bool   `mapstructure:"use_proxy"`
 }
 
 type ViberConfig struct {
-	Enable  bool
-	APIType string `mapstructure:"api_type"` // "bot" or "channel" - defaults to "channel"
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	APIType                     string `mapstructure:"api_type"` // "bot" or "channel" - defaults to "channel"
 	// Bot API configuration
 	BotToken     string `mapstructure:"bot_token"`
 	UserID       string `mapstructure:"user_id"`
@@ -139,30 +145,33 @@ type ViberConfig struct {
 }
 
 type EmailConfig struct {
-	Enable       bool
-	SMTPHost     string `mapstructure:"smtp_host"`
-	SMTPPort     string `mapstructure:"smtp_port"`
-	Username     string
-	Password     string
-	To           string
-	Subject      string
-	TemplatePath string `mapstructure:"template_path"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	SMTPHost                    string `mapstructure:"smtp_host"`
+	SMTPPort                    string `mapstructure:"smtp_port"`
+	Username                    string
+	Password                    string
+	To                          string
+	Subject                     string
+	TemplatePath                string `mapstructure:"template_path"`
 }
 
 type MSTeamsConfig struct {
-	Enable         bool
-	TemplatePath   string            `mapstructure:"template_path"`
-	OtherPowerURLs map[string]string `mapstructure:"other_power_urls"` // Optional alternative Power Automate URLs
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	TemplatePath                string            `mapstructure:"template_path"`
+	OtherPowerURLs              map[string]string `mapstructure:"other_power_urls"` // Optional alternative Power Automate URLs
 	// Power Automate Workflow URL for Teams integration
 	PowerAutomateURL string `mapstructure:"power_automate_url"`
 }
 
 type LarkConfig struct {
-	Enable           bool
-	WebhookURL       string            `mapstructure:"webhook_url"`
-	TemplatePath     string            `mapstructure:"template_path"`
-	OtherWebhookURLs map[string]string `mapstructure:"other_webhook_urls"`
-	UseProxy         bool              `mapstructure:"use_proxy"`
+	KubernetesIssueTemplatePath string `mapstructure:"kubernetes_issue_template_path"`
+	Enable                      bool
+	WebhookURL                  string            `mapstructure:"webhook_url"`
+	TemplatePath                string            `mapstructure:"template_path"`
+	OtherWebhookURLs            map[string]string `mapstructure:"other_webhook_urls"`
+	UseProxy                    bool              `mapstructure:"use_proxy"`
 }
 
 type QueueConfig struct {
@@ -316,6 +325,9 @@ func loadConfigFromPath(path string) (*Config, error) {
 	if rerr != nil {
 		return nil, fmt.Errorf("failed to read config: %w", rerr)
 	}
+	if err := rejectToolConnectors(userRaw); err != nil {
+		return nil, err
+	}
 	if err := v.MergeConfig(bytes.NewReader(userRaw)); err != nil {
 		return nil, fmt.Errorf("failed to merge config: %w", err)
 	}
@@ -332,9 +344,22 @@ func loadConfigFromPath(path string) (*Config, error) {
 	v.SetTypeByDefaultValue(true)
 
 	loaded := &Config{}
+	settings, err := rawConfigSettings(userRaw)
+	if err != nil {
+		return nil, err
+	}
+	connectorValue, present := configValue(settings, "connectors")
+	if present && connectorValue == nil {
+		return nil, fmt.Errorf("invalid connectors configuration")
+	}
+	connectors, err := decodeConnectors(connectorValue)
+	if err != nil {
+		return nil, err
+	}
 	if err := v.Unmarshal(loaded); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	loaded.Connectors = connectors
 
 	// Normalize the auto-promotion threshold at the single load chokepoint so
 	// every downstream consumer (worker brain, controller readiness, the
@@ -423,11 +448,11 @@ func loadConfigFromPath(path string) (*Config, error) {
 	if p := os.Getenv("AGENT_AI_PROVIDER"); p != "" {
 		loaded.Agent.AI.Provider = p
 	}
+	if baseURL, ok := os.LookupEnv("AGENT_AI_BASE_URL"); ok {
+		loaded.Agent.AI.BaseURL = baseURL
+	}
 	if k := os.Getenv("AGENT_AI_API_KEY"); k != "" {
 		loaded.Agent.AI.APIKey = k
-	}
-	if b := os.Getenv("AGENT_AI_BASE_URL"); b != "" {
-		loaded.Agent.AI.BaseURL = b
 	}
 	if m := os.Getenv("AGENT_AI_MODEL"); m != "" {
 		loaded.Agent.AI.Model = m
@@ -461,6 +486,25 @@ func loadConfigFromPath(path string) (*Config, error) {
 		loaded.Agent.Tools = tools
 	}
 
+	connectorsPath := filepath.Join(filepath.Dir(path), "connectors.yaml")
+	if _, statErr := os.Stat(connectorsPath); statErr == nil {
+		connectors, err := loadConnectorsFile(connectorsPath)
+		if err != nil {
+			return nil, err
+		}
+		loaded.Connectors = connectors
+	} else if !os.IsNotExist(statErr) {
+		return nil, fmt.Errorf("cannot access connectors file")
+	}
+
+	if strings.TrimSpace(loaded.PublicHost) != "" {
+		normalized, err := weborigin.Normalize(loaded.PublicHost)
+		if err != nil {
+			return nil, fmt.Errorf("public_host: %w", err)
+		}
+		loaded.PublicHost = normalized
+	}
+
 	return loaded, nil
 }
 
@@ -472,21 +516,27 @@ func loadAgentSourcesFile(path string) ([]AgentSourceConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read: %w", err)
 	}
-	// Expand ${VAR} references across the whole document so values inside
-	// list items (e.g. sources[].options.address) are expanded too, not
-	// just top-level scalars.
-	expanded := os.ExpandEnv(string(raw))
 
 	v := viper.New()
 	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(expanded)); err != nil {
+	if err := v.ReadConfig(bytes.NewReader(raw)); err != nil {
 		return nil, fmt.Errorf("read: %w", err)
 	}
 
 	var wrapper struct {
 		Sources []AgentSourceConfig `mapstructure:"sources"`
 	}
-	if err := v.Unmarshal(&wrapper); err != nil {
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:           &wrapper,
+		TagName:          "mapstructure",
+		ErrorUnused:      true,
+		WeaklyTypedInput: true,
+		DecodeHook:       mapstructure.StringToSliceHookFunc(","),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal: %w", err)
+	}
+	if err := decoder.Decode(expandEnvironmentScalars(v.AllSettings())); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
 	return wrapper.Sources, nil
@@ -501,24 +551,55 @@ func loadToolsFile(path string) (ToolsConfig, error) {
 	if err != nil {
 		return ToolsConfig{}, fmt.Errorf("read: %w", err)
 	}
-	// Expand ${VAR} references across the whole document so values inside
-	// list items (e.g. recent_changes.git.repos[].url) are expanded too,
-	// not just top-level scalars.
-	expanded := os.ExpandEnv(string(raw))
+	if err := rejectToolConnectors(raw); err != nil {
+		return ToolsConfig{}, err
+	}
 
 	v := viper.New()
 	v.SetConfigType("yaml")
-	if err := v.ReadConfig(strings.NewReader(expanded)); err != nil {
+	if err := v.ReadConfig(bytes.NewReader(raw)); err != nil {
 		return ToolsConfig{}, fmt.Errorf("read: %w", err)
 	}
 
 	var wrapper struct {
 		Tools ToolsConfig `mapstructure:"tools"`
 	}
-	if err := v.Unmarshal(&wrapper); err != nil {
+	metadata := &mapstructure.Metadata{}
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Result:           &wrapper,
+		TagName:          "mapstructure",
+		Metadata:         metadata,
+		WeaklyTypedInput: true,
+		DecodeHook:       mapstructure.StringToSliceHookFunc(","),
+	})
+	if err != nil {
 		return ToolsConfig{}, fmt.Errorf("unmarshal: %w", err)
 	}
+	if err := decoder.Decode(expandEnvironmentScalars(v.AllSettings())); err != nil {
+		return ToolsConfig{}, fmt.Errorf("unmarshal: %w", err)
+	}
+	for _, unused := range metadata.Unused {
+		if !strings.HasPrefix(unused, "tools.") || strings.Contains(strings.TrimPrefix(unused, "tools."), ".") {
+			return ToolsConfig{}, fmt.Errorf("unmarshal: unused field %s", unused)
+		}
+	}
 	return wrapper.Tools, nil
+}
+
+func expandEnvironmentScalars(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return os.ExpandEnv(typed)
+	case map[string]any:
+		for key, child := range typed {
+			typed[key] = expandEnvironmentScalars(child)
+		}
+	case []any:
+		for index, child := range typed {
+			typed[index] = expandEnvironmentScalars(child)
+		}
+	}
+	return value
 }
 
 func GetConfig() *Config {

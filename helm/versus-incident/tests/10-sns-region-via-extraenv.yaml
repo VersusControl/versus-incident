@@ -1,0 +1,7 @@
+# SNS enabled with an explicitly null aws block. The dict default must keep
+# this rendering, and no AWS credential may appear.
+alert:
+  sns:
+    enable: true
+    topicArn: "arn:aws:sns:us-east-1:111122223333:versus-alerts"
+aws: null

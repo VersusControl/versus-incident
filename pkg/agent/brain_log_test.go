@@ -222,13 +222,14 @@ func TestLogBrain_ClassifyLifecycle(t *testing.T) {
 		t.Fatalf("under-threshold verdict = %v, want unknown", v.Class)
 	}
 
-	// 3. Cross the threshold → KnownPattern (suppressed) + marked known.
+	// 3. Cross the threshold → current observation stays Unknown, then promotion
+	// marks subsequent observations known.
 	v = classifyOnce(t, b, logObs("p", 10))
 	if got := c.Get("p").Count; got != 100 {
 		t.Fatalf("count = %d, want 100", got)
 	}
-	if v.Class != core.VerdictKnownPattern {
-		t.Fatalf("at-threshold verdict = %v, want known", v.Class)
+	if v.Class != core.VerdictUnknown {
+		t.Fatalf("at-threshold verdict = %v, want unknown from pre-fold state", v.Class)
 	}
 	if c.Get("p").Verdict != "known" {
 		t.Fatalf("catalog verdict = %q, want known (MarkKnown must fire)", c.Get("p").Verdict)
@@ -271,8 +272,8 @@ func TestLogBrain_AutoPromoteAfter_DefaultPromotesAt100(t *testing.T) {
 	if got := c.Get("p").Count; got != 100 {
 		t.Fatalf("count = %d, want 100", got)
 	}
-	if v.Class != core.VerdictKnownPattern {
-		t.Fatalf("at-threshold verdict = %v, want known", v.Class)
+	if v.Class != core.VerdictUnknown {
+		t.Fatalf("at-threshold verdict = %v, want unknown from pre-fold state", v.Class)
 	}
 	if c.Get("p").Verdict != "known" {
 		t.Fatalf("catalog verdict = %q, want known (MarkKnown must fire at 100)", c.Get("p").Verdict)
@@ -294,8 +295,8 @@ func TestLogBrain_AutoPromoteAfter_CustomThresholdPromotes(t *testing.T) {
 	if got := c.Get("p").Count; got != 50 {
 		t.Fatalf("count = %d, want 50", got)
 	}
-	if v.Class != core.VerdictKnownPattern {
-		t.Fatalf("at-custom-threshold verdict = %v, want known", v.Class)
+	if v.Class != core.VerdictUnknown {
+		t.Fatalf("at-custom-threshold verdict = %v, want unknown from pre-fold state", v.Class)
 	}
 	if c.Get("p").Verdict != "known" {
 		t.Fatalf("catalog verdict = %q, want known at the custom threshold", c.Get("p").Verdict)
@@ -324,7 +325,8 @@ func TestLogBrain_AutoPromoteAfter_ZeroNormalizesToDefault(t *testing.T) {
 		t.Fatalf("verdict at count=90 = %v, want unknown (below the default gate)", v.Class)
 	}
 
-	// Cross the default gate: 10th batch → 100 sightings, now known.
+	// Cross the default gate: the 10th batch is still classified from count 90,
+	// then promotion marks later observations known.
 	v = classifyOnce(t, b, logObs("p", 10))
 	if got := c.Get("p").Count; got != 100 {
 		t.Fatalf("count = %d, want 100", got)
@@ -332,8 +334,8 @@ func TestLogBrain_AutoPromoteAfter_ZeroNormalizesToDefault(t *testing.T) {
 	if c.Get("p").Verdict != "known" {
 		t.Fatalf("auto_promote_after=0 did not promote at count=100; <=0 must normalize to the default")
 	}
-	if v.Class != core.VerdictKnownPattern {
-		t.Fatalf("verdict at count=100 = %v, want known (0 normalizes to the default gate)", v.Class)
+	if v.Class != core.VerdictUnknown {
+		t.Fatalf("verdict at count=100 = %v, want unknown from pre-fold count 90", v.Class)
 	}
 }
 
@@ -391,24 +393,22 @@ func TestLogBrain_AutoPromoteAfter_AlreadyKnownStaysKnown(t *testing.T) {
 
 // (f) The operator's real "first fetch" scenario: an Elasticsearch source's
 // FIRST batch lands a pattern whose sighting count is already far above the
-// threshold (e.g. 3304 >= 100) in a single tick. It must classify known
-// immediately — Promote flips the stored verdict and LogReadiness reports Ready
-// — not sit "still learning" forever. This pins the count clause of isLogKnown
-// on the first-batch path so a large first pull is never stuck learning once the
-// threshold is the (non-zero) default.
-func TestLogBrain_AutoPromoteAfter_FirstBatchAboveThresholdIsKnown(t *testing.T) {
+// threshold in a single tick. Classification must see the pre-fold count zero
+// and emit it once; Promote then flips the stored verdict so later ticks are
+// known.
+func TestLogBrain_AutoPromoteAfter_FirstBatchAboveThresholdEmitsThenPromotes(t *testing.T) {
 	cat := config.AgentCatalogConfig{
 		AutoPromoteAfter: 100, // the embedded default an omitted key resolves to
 		SpikeMultiplier:  0,   // isolate the count-promotion path from spike
 	}
 	b, c := newLogBrainForTest(t, cat)
 
-	v := classifyOnce(t, b, logObs("p", 3304)) // single first-fetch batch
-	if got := c.Get("p").Count; got != 3304 {
-		t.Fatalf("count = %d, want 3304", got)
+	v := classifyOnce(t, b, logObs("p", 500))
+	if got := c.Get("p").Count; got != 500 {
+		t.Fatalf("count = %d, want 500", got)
 	}
-	if v.Class != core.VerdictKnownPattern {
-		t.Fatalf("first-batch verdict = %v, want known (3304 >= 100)", v.Class)
+	if v.Class != core.VerdictUnknown {
+		t.Fatalf("first-batch verdict = %v, want unknown from pre-fold count zero", v.Class)
 	}
 	if c.Get("p").Verdict != "known" {
 		t.Fatalf("catalog verdict = %q, want known (Promote must fire on the first batch)", c.Get("p").Verdict)
@@ -418,7 +418,7 @@ func TestLogBrain_AutoPromoteAfter_FirstBatchAboveThresholdIsKnown(t *testing.T)
 	// state for a pattern already past the (non-zero) threshold.
 	r := LogReadiness(c.Get("p"), cat.AutoPromoteAfter, 30*time.Second)
 	if !r.Ready {
-		t.Fatalf("LogReadiness.Ready = false, want true (3304 >= 100)")
+		t.Fatalf("LogReadiness.Ready = false, want true (500 >= 100)")
 	}
 	if r.Needed != 100 {
 		t.Fatalf("LogReadiness.Needed = %d, want 100 (threshold target, not the no-target sentinel)", r.Needed)

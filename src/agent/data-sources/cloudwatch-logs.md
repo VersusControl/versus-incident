@@ -36,7 +36,32 @@ cloudwatchlogs:
   log_stream_prefix: ""                   # restrict to streams starting with this string
   filter_pattern: ""                      # CloudWatch filter syntax — NOT regex
   page_size: 500                          # max 10000
+  reorder_window: ""                      # e.g. "1m" — see below. Unset by default.
 ```
+
+## Boundary events and `reorder_window`
+
+Each tick re-reads an **inclusive** span below the poll cursor and suppresses
+what it has already delivered by event id, so an event sharing the cursor's
+millisecond is recovered and still learned exactly once. CloudWatch timestamps
+are millisecond-precision and bursty, so that boundary case is rare but real.
+
+`reorder_window` sets how much of that span is **lateness tolerance** — how far
+behind the cursor an event may arrive and still be picked up. Events arriving
+later than that are not recovered.
+
+The span the agent actually scans is `reorder_window + agent.catalog.persist_interval`.
+The persist interval is added because delivered ids are only made durable after
+the flush that stored the events they describe, so the same span is what a
+restarted process re-reads to recover everything a killed one read but never
+stored. That is why a source with **no** `reorder_window` still re-reads one
+persist interval: with a strictly-after scan an abrupt restart would silently
+drop every event read since the last flush. The agent logs the effective span
+once at boot.
+
+The id set is persisted alongside the poll cursor when Redis is configured, so a
+restart resumes without re-learning the span; without Redis it is in-process
+only and a restart re-reads the span once.
 
 ## Authentication
 

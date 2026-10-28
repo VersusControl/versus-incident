@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- ClickHouse drop-in for the SigNoz example: point replicated tables at
+     ZooKeeper, declare the single-shard `cluster` the SigNoz schema migrator
+     creates its tables ON, and define the {shard}/{replica} macros that the
+     Replicated* engines substitute into their ZooKeeper paths. Without the
+     macros the very first migration fails with "No macro 'shard' in config". -->
+<clickhouse>
+    <macros>
+        <shard>01</shard>
+        <replica>replica-01</replica>
+    </macros>
+
+    <zookeeper>
+        <node index="1">
+            <host>zookeeper</host>
+            <port>2181</port>
+        </node>
+    </zookeeper>
+
+    <remote_servers>
+        <cluster>
+            <shard>
+                <replica>
+                    <host>clickhouse</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </cluster>
+    </remote_servers>
+</clickhouse>

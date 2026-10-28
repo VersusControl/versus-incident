@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { Eye, Loader2, Search, X } from "lucide-react";
+import { Eye, Loader2, X } from "lucide-react";
 import { api, type AnalysisRecord } from "@/lib/api";
 import { fmtAbs, fmtRel, formatDuration, incidentTitle } from "@/lib/format";
 import { useTableKeys } from "@/lib/hooks";
@@ -13,6 +13,9 @@ import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { FilterPanel } from "@/components/FilterPanel";
+import { SearchInput } from "@/components/SearchInput";
 import { Pagination } from "@/components/Pagination";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import {
@@ -35,7 +38,11 @@ const COLS = 9;
 export function AnalysesListPage() {
   const [params, setParams] = useSearchParams();
   const tab = params.get("tab") ?? "analyses";
-  const status = params.get("status") ?? "all";
+  const requestedStatus = params.get("status");
+  const status =
+    requestedStatus === "ok" || requestedStatus === "error"
+      ? requestedStatus
+      : "all";
   const incidentFilter = params.get("incident");
   const q = params.get("q") ?? "";
 
@@ -147,17 +154,72 @@ export function AnalysesListPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3">
-          <SegmentedControl
-            param="tab"
-            defaultValue="analyses"
-            aria-label="Analyses view"
-            options={[
-              { value: "analyses", label: "Analyses" },
-              { value: "postmortems", label: "Post-mortems" },
-            ]}
-          />
-        </div>
+        <FilterBar
+          tabs={
+            <SegmentedControl
+              param="tab"
+              defaultValue="analyses"
+              aria-label="Analyses view"
+              options={[
+                { value: "analyses", label: "Analyses" },
+                { value: "postmortems", label: "Post-mortems" },
+              ]}
+            />
+          }
+          search={
+            tab === "analyses" ? (
+              <SearchInput
+                value={q}
+                onChange={(v) => setParam("q", v || null)}
+                placeholder="Search by incident, finding or model…"
+                ariaLabel="Search analyses"
+              />
+            ) : undefined
+          }
+          actions={
+            tab === "analyses" ? (
+              <>
+                <FilterPanel
+                  facets={[]}
+                  activeCount={status === "all" ? 0 : 1}
+                  onToggle={() => {}}
+                  onClear={() => setParam("status", null)}
+                  controls={
+                    <SegmentedControl
+                      param="status"
+                      defaultValue="all"
+                      aria-label="Call status filter"
+                      options={[
+                        { value: "all", label: "All" },
+                        { value: "ok", label: "OK" },
+                        { value: "error", label: "Error" },
+                      ]}
+                    />
+                  }
+                />
+                {incidentFilter && (
+                  <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-2xs text-ink-100">
+                    <span className="text-ink-300">incident:</span>
+                    <span
+                      className="max-w-48 truncate font-medium"
+                      title={incidentFilter}
+                    >
+                      {titleByID.get(incidentFilter) ||
+                        incidentTitle({ id: incidentFilter })}
+                    </span>
+                    <button
+                      aria-label="Clear incident filter"
+                      className="rounded p-0.5 text-ink-300 hover:text-ink-50"
+                      onClick={() => setParam("incident", null)}
+                    >
+                      <X size={11} aria-hidden />
+                    </button>
+                  </span>
+                )}
+              </>
+            ) : undefined
+          }
+        />
 
         {tab === "postmortems" ? (
           <div className="card">
@@ -168,53 +230,6 @@ export function AnalysesListPage() {
           </div>
         ) : (
           <>
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <div className="relative max-w-md flex-1">
-                <Search
-                  size={12}
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-                  aria-hidden
-                />
-                <input
-                  data-page-search
-                  className="input pl-7"
-                  placeholder="Search by incident, finding or model…"
-                  aria-label="Search analyses"
-                  value={q}
-                  onChange={(e) => setParam("q", e.target.value || null)}
-                />
-              </div>
-              <SegmentedControl
-                param="status"
-                defaultValue="all"
-                aria-label="Call status filter"
-                options={[
-                  { value: "all", label: "All" },
-                  { value: "ok", label: "OK" },
-                  { value: "error", label: "Error" },
-                ]}
-              />
-              {incidentFilter && (
-                <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1 text-2xs text-ink-100">
-                  <span className="text-ink-300">incident:</span>
-                  <span
-                    className="max-w-48 truncate font-medium"
-                    title={incidentFilter}
-                  >
-                    {titleByID.get(incidentFilter) ||
-                      incidentTitle({ id: incidentFilter })}
-                  </span>
-                  <button
-                    aria-label="Clear incident filter"
-                    className="rounded p-0.5 text-ink-300 hover:text-ink-50"
-                    onClick={() => setParam("incident", null)}
-                  >
-                    <X size={11} aria-hidden />
-                  </button>
-                </span>
-              )}
-            </div>
-
             {isError && (
               <div className="mb-3">
                 <RetryableError

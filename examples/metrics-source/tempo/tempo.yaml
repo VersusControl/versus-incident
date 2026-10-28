@@ -1,6 +1,7 @@
 # Minimal single-binary Tempo config for the optional traces overlay.
 # Receives OTLP over HTTP (:4318) from the loadgen and serves the search
-# API on :3200 that the Enterprise `traces` source / `query_traces` tool query.
+# API on :3200 that the licensed `traces` source reads. Its Chat/Analyze
+# tools are `discover_trace_fields` and `read_trace_spans`.
 server:
   http_listen_port: 3200
 

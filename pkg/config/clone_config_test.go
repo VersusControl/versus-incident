@@ -1,9 +1,29 @@
 package config
 
 import (
+	"crypto/x509"
 	"reflect"
 	"testing"
 )
+
+func TestCloneKubernetesIssueTemplateOverrides(t *testing.T) {
+	src := Config{Alert: AlertConfig{
+		Slack:    SlackConfig{KubernetesIssueTemplatePath: "slack"},
+		Telegram: TelegramConfig{KubernetesIssueTemplatePath: "telegram"},
+		Viber:    ViberConfig{KubernetesIssueTemplatePath: "viber"},
+		Email:    EmailConfig{KubernetesIssueTemplatePath: "email"},
+		MSTeams:  MSTeamsConfig{KubernetesIssueTemplatePath: "teams"},
+		Lark:     LarkConfig{KubernetesIssueTemplatePath: "lark"},
+	}}
+	got := cloneConfig(&src)
+	if !reflect.DeepEqual(got.Alert, src.Alert) {
+		t.Fatalf("%+v", got.Alert)
+	}
+	got.Alert.Slack.KubernetesIssueTemplatePath = "changed"
+	if src.Alert.Slack.KubernetesIssueTemplatePath != "slack" {
+		t.Fatal("source mutated")
+	}
+}
 
 // TestCloneAgentAIAnalyzeConfig asserts the analyze model override is
 // carried into the cloned config so per-request overrides never lose the
@@ -30,6 +50,24 @@ func TestCloneConfigCarriesAnalyzeKnobs(t *testing.T) {
 	dst := cloneConfig(src)
 	if dst.Agent.AI.Analyze != src.Agent.AI.Analyze {
 		t.Fatalf("analyze block = %+v, want %+v", dst.Agent.AI.Analyze, src.Agent.AI.Analyze)
+	}
+}
+
+func TestCloneConfigCarriesChatKnobs(t *testing.T) {
+	src := &Config{}
+	src.Agent.AI.Chat = AgentAITaskConfig{Model: "chat-model", MaxTokens: 2048, MaxCallsPerHour: 17}
+	dst := cloneConfig(src)
+	if dst.Agent.AI.Chat != src.Agent.AI.Chat {
+		t.Fatalf("chat block = %+v, want %+v", dst.Agent.AI.Chat, src.Agent.AI.Chat)
+	}
+}
+
+func TestCloneConfigCarriesSplunkNamespace(t *testing.T) {
+	src := &Config{}
+	src.Agent.Sources = []AgentSourceConfig{{Name: "logs", Type: "splunk", Splunk: AgentSplunkSourceConfig{Owner: "admin", App: "ops"}}}
+	dst := cloneConfig(src)
+	if dst.Agent.Sources[0].Splunk.Owner != "admin" || dst.Agent.Sources[0].Splunk.App != "ops" {
+		t.Fatalf("namespace lost in clone: %+v", dst.Agent.Sources[0].Splunk)
 	}
 }
 
@@ -107,10 +145,12 @@ func TestCloneConfigCarriesElasticsearchReorderWindow(t *testing.T) {
 			Name: "prod",
 			Type: "elasticsearch",
 			Elasticsearch: AgentElasticsearchSourceConfig{
-				Addresses:     []string{"http://es:9200"},
-				Index:         "logs-*",
-				ExtraFields:   []string{"error.stack_trace"},
-				ReorderWindow: "90s",
+				Addresses:       []string{"http://es:9200"},
+				AllowLoopback:   true,
+				Index:           "logs-*",
+				TieBreakerField: "event.sequence",
+				ExtraFields:     []string{"error.stack_trace"},
+				ReorderWindow:   "90s",
 			},
 		},
 	}
@@ -124,15 +164,83 @@ func TestCloneConfigCarriesElasticsearchReorderWindow(t *testing.T) {
 
 	// Mutating the clone must not touch the source (deep copy, no shared slices).
 	dst.Agent.Sources[0].Elasticsearch.ReorderWindow = "mutated"
+	dst.Agent.Sources[0].Elasticsearch.TieBreakerField = "mutated"
 	dst.Agent.Sources[0].Elasticsearch.Addresses[0] = "http://mutated:9200"
 	dst.Agent.Sources[0].Elasticsearch.ExtraFields[0] = "mutated"
 	if src.Agent.Sources[0].Elasticsearch.ReorderWindow != "90s" {
 		t.Error("clone shares reorder_window with the source")
 	}
+	if src.Agent.Sources[0].Elasticsearch.TieBreakerField != "event.sequence" {
+		t.Error("clone omitted or shares tie_breaker_field with the source")
+	}
 	if src.Agent.Sources[0].Elasticsearch.Addresses[0] != "http://es:9200" {
 		t.Error("clone shares the Addresses slice with the source")
 	}
 	if src.Agent.Sources[0].Elasticsearch.ExtraFields[0] != "error.stack_trace" {
+		t.Error("clone shares the ExtraFields slice with the source")
+	}
+}
+
+func TestCloneConfigCarriesLokiServiceLabel(t *testing.T) {
+	src := &Config{}
+	src.Agent.Sources = []AgentSourceConfig{{Name: "logs", Type: "loki", Loki: AgentLokiSourceConfig{ServiceLabel: "service_name"}}}
+	if got := cloneConfig(src).Agent.Sources[0].Loki.ServiceLabel; got != "service_name" {
+		t.Fatalf("cloned service_label = %q, want service_name", got)
+	}
+}
+
+// TestCloneConfigCarriesSignozSource asserts the SigNoz typed block survives a
+// full cloneConfig round-trip. Per-request configs are built by cloning the
+// base, so a field missing from the clone is silently dropped on every request —
+// the source would then be constructed with an empty address and API key.
+func TestCloneConfigCarriesSignozSource(t *testing.T) {
+	rootCAs := x509.NewCertPool()
+	src := &Config{}
+	src.Agent.Sources = []AgentSourceConfig{
+		{
+			Name: "signoz-prod",
+			Type: "signoz",
+			Signoz: AgentSignozSourceConfig{
+				Address:              "https://eu.signoz.cloud",
+				APIKey:               "signoz-key",
+				InsecureSkipVerify:   true,
+				AllowLoopback:        true,
+				RootCAs:              rootCAs,
+				AllowPrivateNetworks: true,
+				Query:                "severity_text = 'ERROR'",
+				MessageField:         "body",
+				SeverityField:        "severity_text",
+				ExtraFields:          []string{"service.name"},
+				PageSize:             250,
+				ReorderWindow:        "90s",
+			},
+		},
+	}
+	dst := cloneConfig(src)
+	got := dst.Agent.Sources[0].Signoz
+	want := src.Agent.Sources[0].Signoz
+	want.RootCAs = got.RootCAs
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cloned SigNoz source = %+v, want %+v", dst.Agent.Sources[0].Signoz, src.Agent.Sources[0].Signoz)
+	}
+	if dst.Agent.Sources[0].Signoz.RootCAs == rootCAs {
+		t.Fatal("clone shares the RootCAs pool with the source")
+	}
+	if !dst.Agent.Sources[0].Signoz.RootCAs.Equal(rootCAs) {
+		t.Fatal("clone did not carry the RootCAs trust certificates")
+	}
+
+	// Mutating the clone must not touch the source (deep copy, no shared slices).
+	dst.Agent.Sources[0].Signoz.Address = "mutated"
+	dst.Agent.Sources[0].Signoz.ReorderWindow = "mutated"
+	dst.Agent.Sources[0].Signoz.ExtraFields[0] = "mutated"
+	if src.Agent.Sources[0].Signoz.Address != "https://eu.signoz.cloud" {
+		t.Error("clone shares address with the source")
+	}
+	if src.Agent.Sources[0].Signoz.ReorderWindow != "90s" {
+		t.Error("clone shares reorder_window with the source")
+	}
+	if src.Agent.Sources[0].Signoz.ExtraFields[0] != "service.name" {
 		t.Error("clone shares the ExtraFields slice with the source")
 	}
 }

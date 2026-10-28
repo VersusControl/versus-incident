@@ -1,4 +1,4 @@
-# AI Agent — Redaction
+# Redaction
 
 **Redaction** is scrubbing sensitive text — secrets and personal data — out of a log line before anything else touches it. The agent does this the moment it reads a signal, so the parts you don't want to keep or send anywhere are replaced with a harmless placeholder first.
 

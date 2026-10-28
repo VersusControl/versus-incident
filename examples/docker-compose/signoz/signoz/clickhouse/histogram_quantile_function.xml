@@ -1,0 +1,25 @@
+<!-- Executable UDF SigNoz's quantile queries call. The filename must match
+     ClickHouse's stock `*_function.*ml` glob for this to be loaded at all;
+     the binary itself is placed in /var/lib/clickhouse/user_scripts by the
+     init-clickhouse one-shot. -->
+<functions>
+    <function>
+        <type>executable</type>
+        <name>histogramQuantile</name>
+        <return_type>Float64</return_type>
+        <argument>
+            <type>Array(Float64)</type>
+            <name>buckets</name>
+        </argument>
+        <argument>
+            <type>Array(Float64)</type>
+            <name>counts</name>
+        </argument>
+        <argument>
+            <type>Float64</type>
+            <name>quantile</name>
+        </argument>
+        <format>CSV</format>
+        <command>./histogramQuantile</command>
+    </function>
+</functions>

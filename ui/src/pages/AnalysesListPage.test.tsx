@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { AnalysesListPage } from "./AnalysesListPage";
@@ -50,17 +50,22 @@ function idx(
 
 function LocationProbe() {
   const loc = useLocation();
-  return <div data-testid="path">{loc.pathname}</div>;
+  return (
+    <>
+      <div data-testid="path">{loc.pathname}</div>
+      <div data-testid="search">{loc.search}</div>
+    </>
+  );
 }
 
-function renderPage() {
+function renderPage(entry = "/analyses") {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter
-        initialEntries={["/analyses"]}
+        initialEntries={[entry]}
         future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
       >
         <LocationProbe />
@@ -151,5 +156,48 @@ describe("AnalysesListPage server pagination", () => {
     const calls = vi.mocked(api.listAllAnalysesIndex).mock.calls;
     expect(calls[0][0]).toEqual({ offset: 0 });
     expect(calls.some((c) => c[0]?.offset === 2)).toBe(true);
+  });
+});
+
+describe("AnalysesListPage status filter panel", () => {
+  beforeEach(() => {
+    vi.mocked(api.listIncidents).mockResolvedValue([]);
+    vi.mocked(api.listAllAnalysesIndex).mockResolvedValue(
+      idx([rec({ id: "ok", status: "ok" }), rec({ id: "error", status: "error" })]),
+    );
+  });
+
+  it("places Filters beside the tabs in a wrapping row", () => {
+    renderPage("/analyses");
+    const filterButton = screen.getByRole("button", { name: /^Filters/ });
+    const tabs = screen.getByRole("tab", { name: "Analyses" });
+    const row = filterButton.closest(".mb-3.flex");
+
+    expect(row).toBeTruthy();
+    expect(row?.className).toContain("flex-wrap");
+    expect(tabs.closest(".mb-3.flex")).toBe(row);
+  });
+
+  it("moves All/OK/Error into Filters and clears only status", async () => {
+    renderPage("/analyses?status=error&q=keep");
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
+
+    const panel = screen.getByRole("dialog", { name: "Filters" });
+    expect(within(panel).getByRole("tab", { name: "Error" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(within(panel).getByRole("button", { name: "Clear all" }));
+    expect(screen.getByTestId("search").textContent).toBe("?q=keep");
+  });
+
+  it("treats an unknown status as the default All filter", async () => {
+    renderPage("/analyses?status=unknown");
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
+
+    const panel = screen.getByRole("dialog", { name: "Filters" });
+    expect(within(panel).getByRole("tab", { name: "All" }).getAttribute("aria-selected")).toBe("true");
+    expect(within(panel).getByText("No filters applied")).toBeTruthy();
+    expect(
+      (within(panel).getByRole("button", { name: "Clear all" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
   });
 });

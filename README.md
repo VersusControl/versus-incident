@@ -9,35 +9,44 @@
 </p>
 
 <p align="center">
-  <strong>Versus Incident is the self-hosted AI SRE agent.</strong> It learns what your systems
-  normally look like and escalates only what is new or unexpected issues — routing to your chat channels and
-  on-call platform.
+  <strong>Your AI SRE Teammate</strong> </br>
 </p>
 
 <p align="center">
-  Free with MIT license · <a href="https://versusincident.com/pricing" target="_blank">Enterprise Pricing</a>
+  You don't have to monitor your systems alone. Versus Incident will keep track of your services, applications, and systems, detect new or unexpected problems, and provide your team with the evidence needed to investigate.
 </p>
 
-![Versus](src/docs/images/versus-dashboard-01.png)
+<p align="center">
+  <i>Auto-detecting incident in your system</i>
+  <img alt="Versus Dashboard" src="src/docs/images/versus-dashboard.svg">
+</p>
+
+<p align="center">
+  <i>Auto-detecting issues in Kubernetes</i>
+  </br></br>
+  <img alt="Versus Dashboard" src="src/docs/images/kubernetes-harness-overview.png">
+</p>
+
 
 ## How Versus Creates Incidents
 
 Incidents reach Versus two ways, and both are handled by the same notification, templating, and on-call logic:
 
-- **AI SRE Agent (auto-detect)** — point the agent at your logs and it learns your normal patterns, then automatically raises an incident when a brand-new error or anomaly appears. No alert rules to maintain.
+- **AI SRE Agent (auto-detect)** — point the agent at your logs, metrics, traces, and kubernetes, then it learns your normal patterns, then automatically raises an incident when a brand-new error or anomaly appears. No alert rules to maintain.
 - **Webhook alerts (you define)** — any tool that can POST a webhook (Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, or your own scripts) sends incidents straight to Versus, formatted with your own templates.
 
 Whichever source raises it, an incident is templated, fanned out to every channel you enable, and escalated to on-call if it isn't acknowledged in time.
 
 ## Features
 
-- 🤖 **AI SRE Agent**: An AI agent that reads your logs, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
-- 🌐 **Webhook Alerts**: Receive incidents from any tool that can POST a webhook — Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, and more.
+- 🤖 **AI SRE Agent**: An AI agent that reads your logs, metrics and traces, learns what normal looks like, and automatically opens an incident only when something new and unexpected appears.
+- 💬 **DevOps Agent Chat**: The DevOps Agent's shipped web experience is Chat in the Versus UI. This agent is designed to effectively enhance your understanding of your connection system.
+- 📊 **Kubernetes Harness Dashboard**: Explore your Kubernetes environment in one place: cluster health and capacity, workloads, resource relationships, recent changes, Helm releases, and GitOps status.
 - 🚨 **Multi-channel Notifications**: Fan out every incident to Slack, Microsoft Teams, Telegram, Viber, Email, and Lark (more channels coming!)
-- 📝 **Custom Templates**: Define your own alert messages using Go templates
-- 🔧 **Easy Configuration**: YAML-based configuration with environment variables support
-- 📡 **REST API**: Simple HTTP interface to receive alerts
 - 📞 **On-Call**: On-Call integrations (PagerDuty, Opsgenie, incident.io, ServiceNow)
+- 🔧 **Easy Configuration**: YAML-based configuration with environment variables support.
+- 🌐 **Webhook Alerts**: Receive incidents from any tool that can POST a webhook — Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit, and more.
+- 📝 **Custom Templates**: Define your own alert messages using Go templates.
 
 ![Versus](src/docs/images/versus-architecture.png)
 
@@ -124,7 +133,8 @@ port: 3000
 # ... existing alert configurations ...
 
 # Shared secret required for ALL admin endpoints (`/api/admin/*` and
-# `/api/agent/*`). Sent by clients in the `X-Gateway-Secret` header.
+# `/api/agent/*`). API clients send it in `X-Gateway-Secret`; the dashboard
+# exchanges it once for an opaque HttpOnly session cookie.
 gateway_secret: ${GATEWAY_SECRET}
 
 # Storage backend for the pattern catalog, shadow log, and incident
@@ -195,9 +205,21 @@ The `agent` section includes:
 > **Admin secret.** All admin endpoints (`/api/admin/*` and
 > `/api/agent/*`) are protected by the **root-level** `gateway_secret`
 > (env `GATEWAY_SECRET`). Set it to any value you choose; clients send
-> the same value in the `X-Gateway-Secret` header. When no secret is
+> the same value in the `X-Gateway-Secret` header. The dashboard sends it
+> only to `POST /api/auth/gateway-session`, then uses an HttpOnly,
+> SameSite=Strict cookie with an eight-hour absolute lifetime. Reloads reuse
+> the cookie; sign-out, expiry, cookie clearing, or secret rotation requires
+> signing in again. When no secret is
 > configured the admin endpoints are not registered and the agent
 > refuses to start.
+>
+> Set the root-level `public_host` to the exact browser-visible HTTP(S) origin,
+> for example `https://versus.example.com`. Versus validates and normalizes it
+> at startup and uses it for external links, cookie `Secure`, and exact-origin
+> checks behind TLS-terminating or Host-rewriting proxies. Forwarded
+> protocol/host headers are not trusted implicitly. Leave it empty for a direct
+> deployment, where the request's actual protocol and Host are used for browser
+> security checks.
 
 > **Storage.** The agent's catalog and the incident history shown in the
 > UI are persisted via the **root-level** `storage:` block (default:

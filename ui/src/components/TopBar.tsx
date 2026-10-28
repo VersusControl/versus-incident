@@ -6,6 +6,7 @@ import clsx from "clsx";
 import {
   api,
   clearSecret,
+  gatewaySessionLogout,
   getSsoSession,
   localLogout,
   ssoLogout,
@@ -13,6 +14,7 @@ import {
 import { isLocalAdminSession } from "@/lib/localAdmin";
 import { useOpenIncidentCount } from "@/lib/hooks";
 import { formatOriginCounts } from "@/lib/incidentList";
+import { countWindowLabel } from "@/lib/countWindow";
 import { useTheme } from "@/lib/theme";
 import { roleLabel, isAdminRole } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
@@ -31,11 +33,17 @@ interface Props {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
+  showCountWindow?: boolean;
 }
 
-export function TopBar({ title, subtitle, actions }: Props) {
+export function TopBar({
+  title,
+  subtitle,
+  actions,
+  showCountWindow = true,
+}: Props) {
   const shell = useContext(ShellContext);
-  const { open, originCounts } = useOpenIncidentCount();
+  const { open, originCounts, countWindow } = useOpenIncidentCount();
   const { theme, toggle } = useTheme();
 
   const config = useQuery({
@@ -44,6 +52,7 @@ export function TopBar({ title, subtitle, actions }: Props) {
     staleTime: 60_000,
     retry: 1,
   });
+  const windowLabel = countWindowLabel(countWindow, "short");
   // Only poll the agent liveness endpoint when the agent is actually enabled.
   // /api/agent/status does not exist when agent.enable=false, so polling it
   // would 404 forever and the chip would show "reconnecting…" for a deployment
@@ -59,10 +68,19 @@ export function TopBar({ title, subtitle, actions }: Props) {
 
   return (
     <header
-      className="z-sticky flex h-14 shrink-0 items-center justify-between gap-3
-                 border-b border-ink-600 bg-surface-sunken px-4 lg:px-6"
+      className={clsx(
+        "z-sticky flex shrink-0 items-center justify-between gap-1.5 border-b border-ink-600 bg-surface-sunken px-2 sm:gap-3 sm:px-4 lg:px-6",
+        actions
+          ? "min-h-14 flex-wrap py-2 sm:h-14 sm:flex-nowrap sm:py-0"
+          : "h-14",
+      )}
     >
-      <div className="flex min-w-0 items-center gap-3">
+      <div
+        className={clsx(
+          "flex min-w-0 items-center gap-1.5 sm:gap-3",
+          actions && "basis-full sm:basis-auto",
+        )}
+      >
         <button
           aria-label="Open navigation"
           className="rounded-control p-1.5 text-ink-300 hover:bg-ink-700 hover:text-ink-100 lg:hidden"
@@ -70,8 +88,8 @@ export function TopBar({ title, subtitle, actions }: Props) {
         >
           <Menu size={18} />
         </button>
-        <div className="flex min-w-0 items-baseline gap-3">
-          <h1 className="truncate text-base font-semibold text-ink-50">{title}</h1>
+        <div className="flex min-w-0 flex-1 items-baseline gap-3">
+          <h1 className="min-w-0 flex-1 break-words text-base font-semibold text-ink-50 sm:flex-none sm:shrink-0 sm:whitespace-nowrap">{title}</h1>
           {subtitle && (
             <span className="hidden truncate text-xs text-ink-300 sm:inline">
               {subtitle}
@@ -80,7 +98,13 @@ export function TopBar({ title, subtitle, actions }: Props) {
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-3">
+      <div
+        data-testid={actions ? "topbar-actions" : undefined}
+        className={clsx(
+          "flex shrink-0 items-center gap-1.5 sm:gap-3",
+          actions && "min-w-0 basis-full flex-wrap justify-end sm:basis-auto sm:flex-nowrap",
+        )}
+      >
         {actions}
         <TopBarIdentity />
         <SignOutButton />
@@ -99,10 +123,15 @@ export function TopBar({ title, subtitle, actions }: Props) {
         {open > 0 && (
           <Link
             to="/incidents?status=open"
-            title={`${open} open — AI-detected vs webhook/alerts`}
-            className="rounded-full bg-sev-critical/15 px-2 py-0.5 text-2xs font-semibold tabular-nums text-sev-critical hover:bg-sev-critical/25"
+            title={`${open} open in the ${windowLabel} window — AI-detected vs webhook/alerts`}
+            className="flex items-center gap-1.5 rounded-full bg-sev-critical/15 px-2 py-0.5 text-2xs font-semibold tabular-nums text-sev-critical hover:bg-sev-critical/25"
           >
             {formatOriginCounts(originCounts)}
+            {showCountWindow && (
+              <span className="font-normal text-sev-critical/70">
+                {windowLabel}
+              </span>
+            )}
           </Link>
         )}
         <AgentChip
@@ -173,7 +202,7 @@ function AgentChip({
     <Link
       to="/agent"
       className={clsx(
-        "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-2xs font-medium",
+        "hidden items-center gap-1.5 rounded-full border px-2 py-0.5 text-2xs font-medium sm:inline-flex",
         cls,
       )}
     >
@@ -219,6 +248,7 @@ function SignOutButton() {
         } catch {
           // No enterprise / no SSO session — nothing to revoke.
         }
+        await gatewaySessionLogout();
         clearSecret();
         window.location.reload();
       }}

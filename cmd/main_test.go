@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	c "github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/scheduler"
+	"github.com/VersusControl/versus-incident/pkg/servicehealth"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -41,6 +47,78 @@ func TestHandlerRedisOptionsTLS(t *testing.T) {
 			t.Fatal("expected InsecureSkipVerify TLSConfig when redis.tls=true and insecure_skip_verify=true")
 		}
 	})
+}
+
+func TestServiceHealthRegistersOneOwnedSchedulerJob(t *testing.T) {
+	scheduler.Reset()
+	scheduler.SetOwnership(nil)
+	t.Cleanup(func() {
+		scheduler.Reset()
+		scheduler.SetOwnership(nil)
+	})
+	if err := startServiceHealth(servicehealth.NewManager(storage.NewMemory()), storage.NewMemory(), nil, c.AgentConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	jobs := scheduler.Registered()
+	if len(jobs) != 1 || jobs[0].Name != "service-health" {
+		t.Fatalf("registered jobs = %#v", jobs)
+	}
+	if err := startServiceHealth(servicehealth.NewManager(storage.NewMemory()), storage.NewMemory(), nil, c.AgentConfig{}, nil); err == nil {
+		t.Fatal("duplicate Service Health registration succeeded")
+	}
+	scheduler.SetOwnership(func(name string) bool { return name != "service-health" })
+	if scheduler.Owns("service-health") {
+		t.Fatal("ownership predicate did not reject Service Health job")
+	}
+}
+
+func TestServiceHealthScheduledCollectionIncludesRegisteredOrganization(t *testing.T) {
+	scheduler.Reset()
+	scheduler.SetOwnership(nil)
+	servicehealth.SetOrganizationLister(func(context.Context) ([]string, error) { return []string{"org-a"}, nil })
+	t.Cleanup(func() {
+		scheduler.Reset()
+		scheduler.SetOwnership(nil)
+		servicehealth.SetOrganizationLister(nil)
+	})
+	store := storage.NewMemory()
+	manager := servicehealth.NewManager(store)
+	if err := startServiceHealth(manager, store, nil, c.AgentConfig{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	jobs := scheduler.Registered()
+	if len(jobs) != 1 {
+		t.Fatalf("registered jobs = %#v", jobs)
+	}
+	if err := jobs[0].Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := manager.LoadSnapshot("org-a"); err != nil || !ok {
+		t.Fatalf("non-default snapshot exists = %v, err %v", ok, err)
+	}
+}
+
+func TestServiceHealthUsesOnlyConfiguredLogSources(t *testing.T) {
+	configured := c.AgentConfig{Sources: []c.AgentSourceConfig{
+		{Name: "logs", Type: "loki", Enable: true},
+		{Name: "disabled", Type: "file", Enable: false},
+		{Name: "metrics", Type: "prometheus", Enable: true},
+		{Name: "traces", Type: "traces", Enable: true},
+		{Name: "unknown", Type: "custom", Enable: true},
+	}}
+	got := serviceHealthLogSourceIDs(configured, []core.SignalSource{
+		&healthSource{name: "loki:logs"}, &healthSource{name: "file:disabled"}, &healthSource{name: "prometheus:metrics"}, &healthSource{name: "traces:traces"}, &healthSource{name: "custom:unknown"},
+	})
+	if len(got) != 1 || got[0] != "loki:logs" {
+		t.Fatalf("log sources = %#v", got)
+	}
+}
+
+type healthSource struct{ name string }
+
+func (source *healthSource) Name() string { return source.name }
+func (source *healthSource) Pull(context.Context, time.Time) ([]core.Signal, time.Time, error) {
+	return nil, time.Time{}, nil
 }
 
 // TestNewRedisClientClusterType verifies that enabling cluster mode builds a

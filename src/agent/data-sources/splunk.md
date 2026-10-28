@@ -41,6 +41,9 @@ splunk:
 
   insecure_skip_verify: false        # dev only
 
+  owner: ""                         # optional native search-job namespace owner (requires app)
+  app: ""                           # optional native search-job namespace app (requires owner)
+
   search: 'index=main level=error'   # REQUIRED. SPL query (auto-prefixed with `search`).
   time_field: _time                  # timestamp field on each event
   message_field: _raw                # field copied into the log message

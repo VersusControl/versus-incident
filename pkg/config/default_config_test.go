@@ -22,6 +22,35 @@ func parseRawYAML(t *testing.T, data []byte) *viper.Viper {
 	return v
 }
 
+func TestAgentSourceKubernetesClusterBindingDecodeAndClone(t *testing.T) {
+	for _, sourceType := range []string{"prometheus", "traces", "signoz", "loki", "file"} {
+		t.Run(sourceType, func(t *testing.T) {
+			config := parseRawYAML(t, fmt.Appendf(nil, "agent:\n  sources:\n    - name: traffic\n      type: %s\n      enable: true\n      kubernetes_cluster: west\n      options:\n        service: billing\n", sourceType))
+			var original Config
+			if err := config.Unmarshal(&original); err != nil {
+				t.Fatal(err)
+			}
+			cloned := cloneConfig(&original)
+			if len(cloned.Agent.Sources) != 1 {
+				t.Fatal("source not decoded")
+			}
+			source := cloned.Agent.Sources[0]
+			if source.KubernetesCluster != "west" || source.Type != sourceType || !source.Enable || source.Options["service"] != "billing" {
+				t.Fatalf("binding or existing source semantics lost: %+v", source)
+			}
+			cloned.Agent.Sources[0].KubernetesCluster = "east"
+			if original.Agent.Sources[0].KubernetesCluster != "west" {
+				t.Fatal("binding clone mutated original")
+			}
+		})
+	}
+	config := parseRawYAML(t, []byte("agent:\n  sources:\n    - name: legacy\n      type: file\n"))
+	var original Config
+	if err := config.Unmarshal(&original); err != nil || original.Agent.Sources[0].KubernetesCluster != "" {
+		t.Fatalf("legacy source default changed: %+v err=%v", original.Agent.Sources, err)
+	}
+}
+
 // TestDefaultConfigMatchesSample enforces that the embedded best-practice
 // baseline (default_config.yaml) and the documented sample (config/config.yaml)
 // must carry the same keys and the same values, so a change to one can never

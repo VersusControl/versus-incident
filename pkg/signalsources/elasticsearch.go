@@ -11,25 +11,26 @@
 package signalsources
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
+	"log"
+	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	elasticsearchapp "github.com/VersusControl/versus-incident/pkg/elasticsearch"
 )
 
 // ElasticsearchSource pulls log documents from one or more Elasticsearch
 // addresses using the `_search` API with a `range` filter on the configured
-// time field. It uses sort-by-time + `search_after` for stable pagination.
+// time field. With a configured doc-values tie breaker it paginates on
+// (time, tie breaker) with `search_after`; without one it uses a scroll
+// snapshot sorted by time.
 //
 // This intentionally avoids the official ES client to keep the dependency
 // surface small. The set of features used (basic auth, API-key auth,
@@ -43,13 +44,15 @@ import (
 // ingestion) are still seen instead of being stranded forever behind a strict
 // `gt`. To avoid folding those re-scanned documents into the model twice, the
 // source tracks the `_id`s it has already emitted whose timestamp falls inside
-// the current reorder window and skips them on the next tick. That dedup set is
-// pruned to one window each tick, so it stays bounded to (window × ingest rate)
-// rather than growing with all-time history.
+// the span the next query re-reads and skips them on the next tick. That dedup
+// set is the shared TailDedup: bounded by time and by size, and durable through
+// its backend so a restart resumes on both halves of the position rather than
+// replaying the window.
 type ElasticsearchSource struct {
-	name   string
-	cfg    config.AgentElasticsearchSourceConfig
-	client *http.Client
+	name            string
+	cfg             config.AgentElasticsearchSourceConfig
+	client          *elasticsearchapp.Client
+	projectedFields []string
 
 	// reorderWindow is how far below the cursor each tick re-scans (inclusive)
 	// to catch out-of-order / late-indexed docs. Documents indexed more than
@@ -57,25 +60,38 @@ type ElasticsearchSource struct {
 	// bounded trade-off that keeps the dedup set memory-bounded.
 	reorderWindow time.Duration
 
+	// replaySpan is added to reorderWindow to size what a tick actually
+	// re-scans. The agent wiring sets it to the catalog persist interval so a
+	// replacement process re-reads everything a killed one learned but never
+	// flushed. See ApplyTailReplaySpan.
+	replaySpan time.Duration
+
 	// nowFn is the wall clock the tail reads to upper-bound the scan (`lte`)
 	// and clamp the cursor (ClampCursor). Overridable in tests; nil ⇒ time.Now.
 	nowFn func() time.Time
 
-	// mu guards emitted. Pull holds it for the whole tick and Rewind takes it to
-	// clear the set, so a catalog clear can never interleave with a tick and
-	// leave stale dedup state that would suppress a legitimate relearn.
+	// mu guards the dedup set. Pull holds it for the whole tick and Rewind
+	// takes it to clear the set, so a catalog clear can never interleave with a
+	// tick and leave stale dedup state that would suppress a legitimate relearn.
 	mu sync.Mutex
-	// emitted is the set of document `_id`s already delivered whose timestamp is
-	// within reorderWindow of the last cursor. They are skipped on the next
-	// tick's overlapping re-fetch so each document is learned exactly once.
-	emitted map[string]struct{}
+	// dedup is the set of document `_id`s already delivered whose timestamp is
+	// still inside the span the next query re-reads. They are skipped on the
+	// next tick's overlapping re-fetch so each document is learned exactly once.
+	dedup    *TailDedup
+	pageSize int
 }
 
 // defaultESReorderWindow is used when reorder_window is unset/invalid. One
 // minute comfortably covers Elasticsearch's default ~1s refresh lag plus minor
 // clock skew and bursty ingestion, while keeping the per-tick re-scan and dedup
 // set small.
-const defaultESReorderWindow = time.Minute
+const (
+	defaultESReorderWindow = time.Minute
+	maximumESPageSize      = 1000
+	maximumESPullItems     = 10000
+	maximumESPullBytes     = 8 << 20
+	maximumESScanItems     = defaultTailDedupMax
+)
 
 // NewElasticsearchSource validates config and returns a ready source.
 func NewElasticsearchSource(name string, cfg config.AgentElasticsearchSourceConfig) (*ElasticsearchSource, error) {
@@ -94,6 +110,9 @@ func NewElasticsearchSource(name string, cfg config.AgentElasticsearchSourceConf
 	if cfg.PageSize <= 0 {
 		cfg.PageSize = 500
 	}
+	if cfg.PageSize > maximumESPageSize {
+		cfg.PageSize = maximumESPageSize
+	}
 
 	reorderWindow := defaultESReorderWindow
 	if cfg.ReorderWindow != "" {
@@ -102,19 +121,49 @@ func NewElasticsearchSource(name string, cfg config.AgentElasticsearchSourceConf
 		}
 	}
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: cfg.InsecureSkipVerify},
+	service, err := elasticsearchapp.NewService(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("elasticsearch source %q: %w", name, err)
 	}
-	return &ElasticsearchSource{
-		name:          name,
-		cfg:           cfg,
-		client:        &http.Client{Transport: tr, Timeout: 30 * time.Second},
-		reorderWindow: reorderWindow,
-		emitted:       make(map[string]struct{}),
-	}, nil
+	src := &ElasticsearchSource{
+		name:            name,
+		cfg:             service.Config(),
+		client:          service.Client(),
+		projectedFields: service.ProjectedFields(),
+		reorderWindow:   reorderWindow,
+		pageSize:        cfg.PageSize,
+	}
+	src.dedup = NewTailDedup(src.Name())
+	return src, nil
 }
 
 func (s *ElasticsearchSource) Name() string { return "elasticsearch:" + s.name }
+
+// SetTailReplaySpan widens what each tick re-scans so it also covers the docs a
+// killed process learned but never flushed. It implements TailReplaySpanSetter.
+func (s *ElasticsearchSource) SetTailReplaySpan(span time.Duration) (time.Duration, time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if span > 0 {
+		s.replaySpan = span
+	}
+	return s.reorderWindow, s.scanWindow()
+}
+
+// scanWindow is how far below the cursor a tick re-scans: the operator's
+// lateness budget plus the crash-replay span. Callers hold s.mu.
+func (s *ElasticsearchSource) scanWindow() time.Duration { return s.reorderWindow + s.replaySpan }
+
+// SetTailDedupBackend makes this source's boundary dedup set durable. It
+// implements TailDedupBinder.
+func (s *ElasticsearchSource) SetTailDedupBackend(b TailDedupBackend) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dedup == nil {
+		s.dedup = NewTailDedup(s.Name())
+	}
+	s.dedup.SetBackend(b)
+}
 
 // now returns the source's wall clock. Tests override nowFn to freeze it; the
 // nil-guard keeps struct-literal construction working.
@@ -126,7 +175,7 @@ func (s *ElasticsearchSource) now() time.Time {
 }
 
 // Pull issues a `_search` query with an INCLUSIVE `range[time_field] >= lower`
-// (where lower = since - reorderWindow) and walks pages with `search_after`
+// (where lower = since - reorderWindow) and walks pages with a scroll or `search_after`
 // until the page is short or we've collected enough docs. Documents already
 // delivered on a previous tick — tracked by `_id` within the reorder window —
 // are skipped so each is learned exactly once. The returned cursor is the
@@ -143,6 +192,9 @@ func (s *ElasticsearchSource) now() time.Time {
 // intentionally not tailed. Minor clock skew (a producer a few seconds ahead)
 // is not lost: once the wall clock passes such a document it falls inside the
 // next tick's inclusive `[cursor - reorderWindow, now]` re-scan.
+//
+// Without a tie_breaker_field a scroll pins the search snapshot so equal-time
+// documents are visited across pages without relying on shard-copy ordering.
 func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core.Signal, time.Time, error) {
 	// Hold the lock for the whole tick so a concurrent Rewind (catalog clear)
 	// cannot interleave: it either fully precedes this Pull (we re-emit from an
@@ -162,55 +214,168 @@ func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core
 	// tests / a first tick with no lookback) is left untouched so the query
 	// still matches from the beginning of time rather than a negative year.
 	lower := since
-	if !since.IsZero() && s.reorderWindow > 0 {
-		lower = since.Add(-s.reorderWindow)
+	if !since.IsZero() && s.scanWindow() > 0 {
+		lower = since.Add(-s.scanWindow())
+	}
+
+	// Hydrate the persisted dedup set before the first query of the process. A
+	// failure here costs duplicates, never documents, so it is logged and the
+	// tick continues.
+	if err := s.dedup.Load(ctx); err != nil {
+		log.Printf("agent: %s: loading the persisted dedup set failed: %v (this tick may re-emit up to one reorder window)", s.Name(), err)
 	}
 
 	cursor := since // never rewind the cursor below where we already were
 	var signals []core.Signal
 
-	// seenHit is the minimal state needed to rebuild the dedup set after the
-	// tick — id + timestamp for every document the query returned.
-	type seenHit struct {
-		id string
-		ts time.Time
-	}
-	var seen []seenHit
+	// seen is the minimal state the dedup set needs — id + timestamp for every
+	// document the query returned.
+	var seen []DedupRow
 	var searchAfter []interface{}
+	var previousTuple *esPaginationTuple
+	seenTies := make(map[string]struct{})
+	acceptedBytes := 0
+	emittedItems := 0
+	scannedItems := 0
+	scanBudgetExhausted := false
+	effectivePageSize := s.pageSize
 
-	// Cap total iterations so a misconfigured query can't loop forever.
-	const maxPages = 20
+	timeOnly := s.cfg.TieBreakerField == ""
+	scrollID := ""
+	cleanupScrollID := ""
+	scrollAddress := ""
+	if timeOnly {
+		defer func() {
+			if cleanupScrollID != "" {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if err := s.client.ClearIngestScroll(cleanupCtx, scrollAddress, cleanupScrollID); err != nil {
+					log.Printf("agent: %s: clearing Elasticsearch scroll failed: %v", s.Name(), err)
+				}
+			}
+		}()
+	}
+
+	// Cap scanned hits separately from emitted rows. Replayed dedup hits do not
+	// consume the delivery budgets, so a later tick can cross the retained
+	// same-timestamp prefix and reach unseen rows without an unbounded scan.
+	maxPages := maximumESScanItems
+pageLoop:
 	for page := 0; page < maxPages; page++ {
-		body, err := s.buildQuery(lower, now, searchAfter)
-		if err != nil {
-			return signals, cursor, err
+		var resp *esSearchResponse
+		var requestSize int
+		for {
+			requestSize = effectivePageSize
+			body, err := s.buildQueryPage(lower, now, searchAfter, requestSize)
+			if err != nil {
+				return signals, cursor, err
+			}
+			if timeOnly {
+				resp = &esSearchResponse{}
+				if scrollID == "" {
+					scrollAddress, err = s.client.OpenIngestScroll(ctx, body, resp)
+				} else {
+					err = s.client.NextIngestScroll(ctx, scrollAddress, scrollID, resp)
+				}
+				if err == nil {
+					if resp.ScrollID != "" {
+						cleanupScrollID = resp.ScrollID
+					}
+					if resp.ScrollID != "" && len(resp.ScrollID) <= 8192 {
+						scrollID = resp.ScrollID
+					}
+					if shardErr := resp.Shards.Err(); shardErr != nil {
+						return nil, since, fmt.Errorf("elasticsearch source %q: %w", s.name, shardErr)
+					}
+					if resp.ScrollID == "" || len(resp.ScrollID) > 8192 {
+						return nil, since, fmt.Errorf("elasticsearch source %q: invalid scroll cursor", s.name)
+					}
+				}
+			} else {
+				resp, err = s.doSearch(ctx, "", body)
+			}
+			if !errors.Is(err, elasticsearchapp.ErrResponseTooLarge) {
+				if err != nil {
+					if timeOnly {
+						return nil, since, err
+					}
+					return signals, cursor, err
+				}
+				break
+			}
+			if timeOnly && scrollID != "" {
+				if effectivePageSize > 1 {
+					s.pageSize = max(1, effectivePageSize/2)
+					return nil, since, fmt.Errorf("elasticsearch source %q: scroll page exceeds the 8 MiB response limit; retry from the original cursor with page size %d: %w", s.name, s.pageSize, err)
+				}
+				return nil, since, fmt.Errorf("elasticsearch source %q: one projected document exceeds the 8 MiB scroll response limit; tail cannot advance: %w", s.name, err)
+			}
+			if effectivePageSize == 1 {
+				return signals, cursor, fmt.Errorf("elasticsearch source %q: one projected document exceeds the 8 MiB response limit; tail cannot advance: %w", s.name, err)
+			}
+			effectivePageSize = max(1, effectivePageSize/2)
+			s.pageSize = effectivePageSize
 		}
-		resp, err := s.doSearch(ctx, body)
-		if err != nil {
-			return signals, cursor, err
+		if err := resp.Shards.Err(); err != nil {
+			return nil, since, fmt.Errorf("elasticsearch source %q: %w", s.name, err)
 		}
 		hits := resp.Hits.Hits
 		if len(hits) == 0 {
 			break
 		}
+		if !timeOnly {
+			validatedTuple, validationErr := s.validatePaginationPage(hits, previousTuple, seenTies)
+			if validationErr != nil {
+				return nil, since, validationErr
+			}
+			previousTuple = validatedTuple
+		}
 		for _, h := range hits {
+			if scannedItems >= maximumESScanItems {
+				scanBudgetExhausted = true
+				break pageLoop
+			}
+			scannedItems++
+			if s.dedup.Has(h.ID) {
+				continue
+			}
+			if emittedItems >= maximumESPullItems {
+				break pageLoop
+			}
+			encoded, encodeErr := json.Marshal(h.Source)
+			if encodeErr != nil {
+				return signals, ClampCursor(cursor, since, now), elasticsearchapp.ErrResponseTooLarge
+			}
+			if acceptedBytes+len(encoded) > maximumESPullBytes {
+				break pageLoop
+			}
 			sig, ok := s.signalFromHit(h)
 			if !ok {
 				continue
 			}
+			acceptedBytes += len(encoded)
+			emittedItems++
 			if sig.Timestamp.After(cursor) {
 				cursor = sig.Timestamp
 			}
-			seen = append(seen, seenHit{id: h.ID, ts: sig.Timestamp})
-			if _, dup := s.emitted[h.ID]; dup {
-				// Already delivered on a previous tick — the inclusive
-				// re-scan pulled it back; skip so it isn't learned twice.
-				continue
-			}
+			seen = append(seen, DedupRow{ID: h.ID, TS: sig.Timestamp})
 			signals = append(signals, sig)
 		}
-		if len(hits) < s.cfg.PageSize {
+		if emittedItems >= maximumESPullItems {
 			break
+		}
+		if scannedItems >= maximumESScanItems {
+			scanBudgetExhausted = true
+			break
+		}
+		if len(hits) < requestSize {
+			break
+		}
+		if page == maxPages-1 {
+			break
+		}
+		if timeOnly {
+			continue
 		}
 		searchAfter = hits[len(hits)-1].Sort
 	}
@@ -222,42 +387,50 @@ func (s *ElasticsearchSource) Pull(ctx context.Context, since time.Time) ([]core
 	// the tail even if a doc slips through at the boundary.
 	cursor = ClampCursor(cursor, since, now)
 
-	// Rebuild the dedup set for the next tick: keep only the `_id`s whose
-	// timestamp is within reorderWindow of the NEW cursor — exactly the docs the
-	// next inclusive re-scan can pull back. Rebuilding from the hits actually
-	// returned (emitted + re-scanned) self-prunes anything the advancing window
-	// has moved past, so the set stays bounded to one window's worth of ids.
-	windowStart := cursor.Add(-s.reorderWindow)
-	next := make(map[string]struct{}, len(seen))
-	for _, h := range seen {
-		if h.id == "" {
-			continue
-		}
-		if !h.ts.Before(windowStart) { // ts >= windowStart
-			next[h.id] = struct{}{}
-		}
+	// Stage the ids IN MEMORY before returning, so the next tick of this process
+	// does not re-deliver them, and leave them uncommitted until the worker has
+	// flushed the docs they describe. The retention floor is this tick's query
+	// lower bound — one reorder window below the cursor the tick started from —
+	// so the set covers whichever cursor turns out to be the durable one.
+	if timeOnly && scanBudgetExhausted {
+		return nil, since, fmt.Errorf("elasticsearch source %q: scanned %d documents before completing the time-only snapshot; a timestamp-only durable cursor and bounded dedup cannot safely continue a larger same-timestamp backlog; configure tie_breaker_field with a unique keyword doc-values field or narrow the query/reorder_window", s.name, maximumESScanItems)
 	}
-	s.emitted = next
-
+	s.dedup.Stage(seen, lower)
+	if scanBudgetExhausted && len(signals) == 0 {
+		advice := "increase tie_breaker_field selectivity or narrow query/reorder_window"
+		if timeOnly {
+			advice = "configure tie_breaker_field with a unique keyword doc-values field or narrow query/reorder_window"
+		}
+		return nil, since, fmt.Errorf("elasticsearch source %q: scanned %d documents without reaching an unseen row; %s", s.name, maximumESScanItems, advice)
+	}
 	return signals, cursor, nil
 }
 
-// Rewind clears the boundary dedup set so a catalog clear (which rewinds the
-// worker poll cursor to the lookback window) makes this source re-emit — and
-// therefore relearn — its whole window from scratch, exactly like a fresh
-// process start. Without it the pre-clear `_id`s would suppress the very docs
-// the operator asked to relearn.
+// Commit makes the `_id`s this source has delivered durable. The worker calls
+// it only after flushing the docs they describe, so a process that dies can
+// re-deliver docs but can never suppress docs it failed to store. It implements
+// core.SourceCommitter.
+func (s *ElasticsearchSource) Commit(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dedup.Commit(ctx)
+}
+
+// Rewind clears the boundary dedup set — in memory and in its backend — so a
+// catalog clear (which rewinds the worker poll cursor to the lookback window)
+// makes this source re-emit, and therefore relearn, its whole window from
+// scratch, exactly like a fresh process start. Without it the pre-clear `_id`s
+// would suppress the very docs the operator asked to relearn.
 //
 // It implements core.SourceRewinder. The poll cursor is the source's primary
 // position, but the dedup set is a second, source-owned piece of state the
 // cursor reset cannot reach; Rewind reconciles it. Safe to call concurrently
 // with Pull (both take mu) and leaves the source in the state a freshly
 // constructed instance would have.
-func (s *ElasticsearchSource) Rewind(_ context.Context) error {
+func (s *ElasticsearchSource) Rewind(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.emitted = make(map[string]struct{})
-	return nil
+	return s.dedup.Clear(ctx)
 }
 
 // -----------------------------------------------------------------------------
@@ -265,7 +438,9 @@ func (s *ElasticsearchSource) Rewind(_ context.Context) error {
 // -----------------------------------------------------------------------------
 
 type esSearchResponse struct {
-	Hits struct {
+	ScrollID string                      `json:"_scroll_id"`
+	Shards   elasticsearchapp.ShardStats `json:"_shards"`
+	Hits     struct {
 		Hits []esHit `json:"hits"`
 	} `json:"hits"`
 }
@@ -276,7 +451,47 @@ type esHit struct {
 	Sort   []interface{}          `json:"sort,omitempty"`
 }
 
+type esPaginationTuple struct {
+	timestamp time.Time
+	tie       string
+}
+
+func (s *ElasticsearchSource) validatePaginationPage(hits []esHit, previous *esPaginationTuple, seenTies map[string]struct{}) (*esPaginationTuple, error) {
+	for _, hit := range hits {
+		if len(hit.Sort) != 2 {
+			return nil, s.paginationTupleError()
+		}
+		sortTimestamp, sortTimestampOK := parseElasticsearchTime(hit.Sort[0])
+		sortTie, sortTieOK := hit.Sort[1].(string)
+		sourceTieValue, sourceTieFound := lookupField(hit.Source, s.cfg.TieBreakerField)
+		sourceTie, sourceTieOK := sourceTieValue.(string)
+		if !sortTimestampOK || !sortTieOK || strings.TrimSpace(sortTie) == "" ||
+			!sourceTieFound || !sourceTieOK || strings.TrimSpace(sourceTie) == "" || sourceTie != sortTie {
+			return nil, s.paginationTupleError()
+		}
+		if _, duplicate := seenTies[sortTie]; duplicate {
+			return nil, s.paginationTupleError()
+		}
+		current := &esPaginationTuple{timestamp: sortTimestamp, tie: sortTie}
+		if previous != nil && (!current.timestamp.After(previous.timestamp) &&
+			(!current.timestamp.Equal(previous.timestamp) || current.tie <= previous.tie)) {
+			return nil, s.paginationTupleError()
+		}
+		seenTies[sortTie] = struct{}{}
+		previous = current
+	}
+	return previous, nil
+}
+
+func (s *ElasticsearchSource) paginationTupleError() error {
+	return fmt.Errorf("elasticsearch source %q: invalid pagination ordering for tie_breaker_field %q; configure a non-empty unique keyword field with doc-values whose value is present in _source and returned as sort[1]", s.name, s.cfg.TieBreakerField)
+}
+
 func (s *ElasticsearchSource) buildQuery(lower, upper time.Time, searchAfter []interface{}) ([]byte, error) {
+	return s.buildQueryPage(lower, upper, searchAfter, s.cfg.PageSize)
+}
+
+func (s *ElasticsearchSource) buildQueryPage(lower, upper time.Time, searchAfter []interface{}, pageSize int) ([]byte, error) {
 	rangeFilter := map[string]interface{}{
 		s.cfg.TimeField: map[string]interface{}{
 			"gte":    lower.UTC().Format(time.RFC3339Nano),
@@ -294,11 +509,16 @@ func (s *ElasticsearchSource) buildQuery(lower, upper time.Time, searchAfter []i
 		})
 	}
 
+	sort := []interface{}{
+		map[string]interface{}{s.cfg.TimeField: map[string]interface{}{"order": "asc"}},
+	}
+	if s.cfg.TieBreakerField != "" {
+		sort = append(sort, map[string]interface{}{s.cfg.TieBreakerField: map[string]interface{}{"order": "asc"}})
+	}
 	body := map[string]interface{}{
-		"size": s.cfg.PageSize,
-		"sort": []interface{}{
-			map[string]interface{}{s.cfg.TimeField: map[string]interface{}{"order": "asc"}},
-		},
+		"size":    pageSize,
+		"_source": s.projectedFields,
+		"sort":    sort,
 		"query": map[string]interface{}{
 			"bool": map[string]interface{}{"must": must},
 		},
@@ -309,58 +529,12 @@ func (s *ElasticsearchSource) buildQuery(lower, upper time.Time, searchAfter []i
 	return json.Marshal(body)
 }
 
-func (s *ElasticsearchSource) doSearch(ctx context.Context, body []byte) (*esSearchResponse, error) {
-	var lastErr error
-	for _, addr := range s.cfg.Addresses {
-		u := strings.TrimRight(addr, "/") + "/" + s.cfg.Index + "/_search"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		s.applyAuth(req)
-
-		resp, err := s.client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, err := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode >= 400 {
-			lastErr = fmt.Errorf("elasticsearch %s: %d %s", u, resp.StatusCode, truncate(string(data), 256))
-			continue
-		}
-		var out esSearchResponse
-		if err := json.Unmarshal(data, &out); err != nil {
-			lastErr = fmt.Errorf("decode elasticsearch response: %w", err)
-			continue
-		}
-		return &out, nil
+func (s *ElasticsearchSource) doSearch(ctx context.Context, preference string, body []byte) (*esSearchResponse, error) {
+	var out esSearchResponse
+	if err := s.client.SearchIngestJSONWithPreference(ctx, preference, body, &out); err != nil {
+		return nil, err
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no elasticsearch addresses configured")
-	}
-	return nil, lastErr
-}
-
-func (s *ElasticsearchSource) applyAuth(req *http.Request) {
-	if s.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "ApiKey "+s.cfg.APIKey)
-		return
-	}
-	if s.cfg.Username != "" {
-		token := base64.StdEncoding.EncodeToString(
-			[]byte(s.cfg.Username + ":" + s.cfg.Password),
-		)
-		req.Header.Set("Authorization", "Basic "+token)
-	}
+	return &out, nil
 }
 
 // signalFromHit maps an _source document to a core.Signal. It returns false
@@ -381,13 +555,19 @@ func (s *ElasticsearchSource) signalFromHit(h esHit) (core.Signal, bool) {
 			fields[f] = v
 		}
 	}
+	projected := make(map[string]interface{})
+	for _, field := range s.projectedFields {
+		if value, found := lookupField(h.Source, field); found {
+			projected[field] = value
+		}
+	}
 	return core.Signal{
 		Source:    s.Name(),
 		Timestamp: ts,
 		Severity:  sev,
 		Message:   msg,
 		Fields:    fields,
-		Raw:       h.Source,
+		Raw:       projected,
 	}, true
 }
 
@@ -403,6 +583,11 @@ func stringField(src map[string]interface{}, path string) string {
 	if !ok {
 		return ""
 	}
+	return fieldString(v)
+}
+
+// fieldString renders one looked-up field value as text.
+func fieldString(v interface{}) string {
 	switch t := v.(type) {
 	case string:
 		return t
@@ -443,17 +628,24 @@ func extractTime(src map[string]interface{}, field string) (time.Time, bool) {
 	if !ok {
 		return time.Time{}, false
 	}
-	switch t := v.(type) {
+	return parseElasticsearchTime(v)
+}
+
+func parseElasticsearchTime(value interface{}) (time.Time, bool) {
+	switch typed := value.(type) {
 	case string:
 		// Try a couple of common ES formats.
 		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.000Z"} {
-			if ts, err := time.Parse(layout, t); err == nil {
+			if ts, err := time.Parse(layout, typed); err == nil {
 				return ts.UTC(), true
 			}
 		}
 	case float64:
 		// epoch millis
-		return time.UnixMilli(int64(t)).UTC(), true
+		if math.IsNaN(typed) || math.IsInf(typed, 0) || typed != math.Trunc(typed) || typed < math.MinInt64 || typed >= math.MaxInt64 {
+			return time.Time{}, false
+		}
+		return time.UnixMilli(int64(typed)).UTC(), true
 	}
 	return time.Time{}, false
 }

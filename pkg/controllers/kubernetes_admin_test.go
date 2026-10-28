@@ -1,0 +1,1633 @@
+package controllers
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
+	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
+	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/tests/fakekube"
+	"github.com/gofiber/fiber/v2"
+)
+
+func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
+	gatewayAuth := middleware.GatewayAuthEnabled()
+	middleware.SetGatewayAuthEnabled(false)
+	t.Cleanup(func() { middleware.SetGatewayAuthEnabled(gatewayAuth) })
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.SetScrubber(streamTestScrubber{})
+	defer service.StopCapture()
+	scope := service.ActiveScope()
+	store := kubechanges.NewStore(provider, kubeindex.Scope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID})
+	now := time.Now().UTC().Truncate(time.Second)
+	from := now.Add(-5 * time.Minute)
+	item := breaklogs.Snapshot{Cluster: "cluster", Namespace: "deleted", RootUID: "deleted-root", Pod: "api-deleted", PodUID: "deleted-pod", Container: "app", Slot: "previous", CapturedAt: now, From: from, To: now, Lines: []breaklogs.Line{{At: from, Text: "ERROR failure one"}, {At: from.Add(time.Second), Text: "WARN warning"}, {At: now, Text: "info final"}}}
+	item.ID = breaklogs.Identity(item)
+	if err := store.CommitBreakLogs([]breaklogs.Snapshot{item}, nil, "job", "", now); err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		if ctx.Get("X-View") == "unauthenticated" {
+			return ctx.Next()
+		}
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-View") != "deny")
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureSettingsWrite), ctx.Get("X-Write") == "allow")
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	var auditEvents []middleware.AdminAuditEvent
+	middleware.SetAdminAuditHook(func(_ *fiber.Ctx, event middleware.AdminAuditEvent) {
+		auditEvents = append(auditEvents, event)
+	})
+	t.Cleanup(func() { middleware.SetAdminAuditHook(nil) })
+	base := "/api/admin/kubernetes/break-logs?cluster=cluster&namespace=deleted&root_uid=deleted-root&since=" + from.Format(time.RFC3339) + "&until=" + now.Format(time.RFC3339) + "&limit=1"
+	request := httptest.NewRequest(http.MethodGet, base, nil)
+	response, err := app.Test(request, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var page kubernetes.BreakLogPage
+	if json.NewDecoder(response.Body).Decode(&page) != nil || response.StatusCode != 200 || len(page.Lines) != 1 || page.Next == "" || page.Counts.All != 3 || page.Counts.Errors != 1 || page.Counts.Warnings != 1 || len(page.Patterns) == 0 || page.Container != "app" || page.MainContainer != "app" || len(page.Containers) != 1 {
+		t.Fatalf("page=%+v status=%d", page, response.StatusCode)
+	}
+	request = httptest.NewRequest(http.MethodGet, base+"&cursor="+page.Next, nil)
+	response, err = app.Test(request, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var second kubernetes.BreakLogPage
+	json.NewDecoder(response.Body).Decode(&second)
+	if response.StatusCode != 200 || len(second.Lines) != 1 || second.Lines[0].Text == page.Lines[0].Text {
+		t.Fatal("cursor page", response.StatusCode)
+	}
+	if len(auditEvents) != 0 {
+		t.Fatalf("successful passive break-log reads audited: %+v", auditEvents)
+	}
+	for _, test := range []struct {
+		method, path, body, view, write string
+		status                          int
+	}{
+		{http.MethodGet, base, "", "deny", "", 403},
+		{http.MethodGet, base + "&mode=invalid", "", "", "", 400},
+		{http.MethodGet, base + "&limit=501", "", "", "", 400},
+		{http.MethodGet, base + "&container=app", "", "", "", 200},
+		{http.MethodGet, base + "&container=*", "", "", "", 200},
+		{http.MethodGet, base + "&container=not-a-container", "", "", "", 400},
+		{http.MethodGet, base + "&container=app&container=app", "", "", "", 400},
+		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1", "", "", "", 200},
+		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=yes", "", "", "", 400},
+		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1&breaks=0", "", "", "", 400},
+		{http.MethodGet, "/api/admin/kubernetes/agent-settings?cluster=cluster", "", "", "", 200},
+		{http.MethodGet, "/api/admin/kubernetes/issue-alerts?cluster=cluster", "", "", "", 200},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning"}`, "", "", 403},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"invalid"}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning","extra":true}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":true,"level":"warning"}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":false,"level":"critical"}`, "deny", "allow", 403},
+		{http.MethodPut, "/api/admin/kubernetes/issue-alerts?cluster=cluster", `{"enabled":false,"level":"critical"}`, "unauthenticated", "allow", 401},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{"logs":true},"break_logs":{"linked_source":""}}`, "", "", 403},
+		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{"source":"unknown","fields":{}}`, "", "", 403},
+		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{"source":"unknown","fields":{}}`, "", "allow", 404},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{"logs":true},"break_logs":{"linked_source":""}}`, "", "allow", 200},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{},"break_logs":{},"sources":[]}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=missing", `{}`, "", "allow", 404},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"break_logs":{"linked_source":"SECRET_SOURCE"}}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{}`, "deny", "allow", 403},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{}`, "unauthenticated", "", 401},
+		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{}`, "unauthenticated", "", 401},
+	} {
+		auditEvents = nil
+		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-View", test.view)
+		request.Header.Set("X-Write", test.write)
+		response, err := app.Test(request, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value map[string]any
+		json.NewDecoder(response.Body).Decode(&value)
+		response.Body.Close()
+		if response.StatusCode != test.status {
+			t.Errorf("%s %s: %d want %d body=%v", test.method, test.path, response.StatusCode, test.status, value)
+		}
+		if test.method == http.MethodGet && strings.Contains(test.path, "agent-settings") && value["can_write"] != false {
+			t.Error("read-only visibility")
+		}
+		wantAudit := !strings.Contains(test.path, "issue-alerts") && (test.method == http.MethodPut || test.method == http.MethodPost && (test.status == 401 || test.status == 403))
+		if !wantAudit {
+			if len(auditEvents) != 0 {
+				t.Errorf("passive request audited: %+v", auditEvents)
+			}
+			continue
+		}
+		result, action := middleware.AdminAuditDenied, "kubernetes.agent-settings.changed"
+		if test.status == 200 {
+			result = middleware.AdminAuditSuccess
+		}
+		if test.status == 401 || test.status == 403 {
+			action = "rbac.denied"
+		}
+		if len(auditEvents) != 1 || auditEvents[0].Action != action || auditEvents[0].Result != result {
+			t.Errorf("%s %s audit=%+v want exactly one %s/%s", test.method, test.path, auditEvents, action, result)
+		}
+		encoded, _ := json.Marshal(auditEvents)
+		if strings.Contains(string(encoded), "SECRET_SOURCE") || strings.Contains(string(encoded), "learning") {
+			t.Errorf("audit contains payload: %s", encoded)
+		}
+	}
+}
+
+func TestChatChangesOnlyTrimmingKeepsEvidenceComplete(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := &kubebreaks.Evidence{Warnings: 0, Restarts: 4, From: now, To: now, Terminations: []kubebreaks.Termination{{Reason: "Error", ExitCode: 1, Count: 1, Restarts: 4, Last: now}}}
+	issue := kubernetes.Issue{Evidence: evidence, Changes: []kubebreaks.LinkedChange{{Change: kubechanges.Change{Kind: "Deployment", Name: strings.Repeat("x", 7<<10)}}}}
+	result := chatBreakContext(issue)
+	want, _ := json.Marshal(evidence)
+	got, _ := json.Marshal(result.Evidence)
+	if !result.Partial || result.MoreChanges != 1 || len(result.Changes) != 0 || !bytes.Equal(want, got) {
+		t.Fatalf("change-only trimming changed evidence: %+v evidence=%s want=%s", result, got, want)
+	}
+}
+
+func TestChatCrashEvidenceMirroringAndTrimming(t *testing.T) {
+	now := time.Now().UTC()
+	evidence := &kubebreaks.Evidence{Warnings: 8, Restarts: 41, Partial: true, From: now, To: now,
+		Terminations: []kubebreaks.Termination{{Reason: "Error", ExitCode: 137, Signal: "SIGTERM", Count: 2, Restarts: 41, Init: true, Last: now}, {Reason: "OOMKilled", ExitCode: 137, ExitHint: "SIGKILL", Count: 1, Last: now}},
+		Waiting:      []kubebreaks.WaitingCount{{Reason: "CreateContainerConfigError", Count: 2, Init: true}},
+		PodReasons:   []kubebreaks.ReasonCount{{Reason: "Evicted", Count: 2}}, Nodes: []kubebreaks.ReasonCount{{Reason: "MemoryPressure", Count: 2}},
+		Conditions: []kubebreaks.ConditionReason{{Type: "Failed", Reason: "BackoffLimitExceeded"}}, WarningReasons: []kubebreaks.ReasonCount{{Reason: "FailedMount", Count: 8}},
+	}
+	issue := kubernetes.Issue{Rule: "pod.config_error", Evidence: evidence}
+	result := chatBreakContext(issue)
+	want, _ := json.Marshal(evidence)
+	got, _ := json.Marshal(result.Evidence)
+	if !bytes.Equal(want, got) {
+		t.Fatalf("mirror mismatch: %s != %s", want, got)
+	}
+	result.Evidence.PodReasons[0].Count = 99
+	if evidence.PodReasons[0].Count != 2 {
+		t.Fatal("chat aliases source evidence")
+	}
+	var legacy core.ChatResourceBreak
+	if err := json.Unmarshal([]byte(`{"rule":"pod.failed","evidence":{"warning_events":0,"terminations":[{"reason":"Error","exit_code":1,"count":1}]}}`), &legacy); err != nil || legacy.Evidence.Terminations[0].Init {
+		t.Fatal("old chat JSON no longer decodes")
+	}
+	for range 16 {
+		evidence.Terminations = append(evidence.Terminations, kubebreaks.Termination{Reason: strings.Repeat("A", 64), Count: 1, Restarts: 2147483647, Last: now})
+		evidence.Waiting = append(evidence.Waiting, kubebreaks.WaitingCount{Reason: strings.Repeat("B", 64), Count: 1})
+		evidence.PodReasons = append(evidence.PodReasons, kubebreaks.ReasonCount{Reason: strings.Repeat("C", 64), Count: 1})
+		evidence.Nodes = append(evidence.Nodes, kubebreaks.ReasonCount{Reason: strings.Repeat("D", 64), Count: 1})
+		evidence.WarningReasons = append(evidence.WarningReasons, kubebreaks.ReasonCount{Reason: "Unhealthy", Count: 1})
+		evidence.Warnings++
+	}
+	result = chatBreakContext(issue)
+	encoded, err := json.Marshal(result)
+	if err != nil || len(encoded) > 6<<10 || !result.Partial || result.Evidence == nil || !result.Evidence.Partial || len(result.Evidence.Terminations) == 0 || len(result.Evidence.Nodes) != 0 {
+		t.Fatalf("trim failed: %d %+v %v", len(encoded), result, err)
+	}
+	total := 0
+	for _, bucket := range result.Evidence.WarningReasons {
+		total += bucket.Count
+	}
+	if total != result.Evidence.Warnings || result.Evidence.WarningReasons[0].Reason != "Other" {
+		t.Fatal("trim lost warning arithmetic")
+	}
+}
+
+func TestChatCrashEvidenceServerDerivedAttachment(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service { return service })
+	if _, _, err := service.IndexSnapshot(t.Context(), "Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "Event", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "ServiceAccount", "ControllerRevision"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil) })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	app.Get("/investigate", func(ctx *fiber.Ctx) error {
+		attachment := &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster", ResourceID: "apps~v1~deployments", Namespace: "config", Name: "config-api", UID: "deployment-config-api", IncludeChanges: true, Break: &core.ChatResourceBreak{Rule: "CANARY_CLIENT_CONTEXT"}}}
+		if err := validateChatKubernetesAttachment(ctx, attachment); err != nil {
+			return err
+		}
+		return ctx.JSON(attachment)
+	})
+	response, err := app.Test(httptest.NewRequest("GET", "/investigate", nil), -1)
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("attachment response: %+v %v", response, err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || strings.Contains(string(body), "CANARY") || !strings.Contains(string(body), "CreateContainerConfigError") || !strings.Contains(string(body), `"warning_reasons"`) {
+		t.Fatalf("server-derived evidence missing or unsafe: %s %v", body, err)
+	}
+}
+
+func TestClusterParamResolutionAndDeniedStreams(t *testing.T) {
+	var reads atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		reads.Add(1)
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "one"}, 0)
+	entries := []kubernetes.ClusterEntry{{Info: kubernetes.ClusterInfo{ID: "one", Provider: "generic"}, Service: service}, {Info: kubernetes.ClusterInfo{ID: "denied", Provider: "generic"}, Service: service.Scoped(kubernetes.Scope{OrgID: "default", ClusterID: "denied"})}}
+	for _, multiple := range []bool{false, true} {
+		registry := kubernetes.NewClusterRegistry(multiple, entries[:1])
+		if multiple {
+			registry = kubernetes.NewClusterRegistry(true, entries)
+		}
+		app := fiber.New(fiber.Config{Immutable: true})
+		app.Use(func(ctx *fiber.Ctx) error {
+			middleware.MarkAuthorized(ctx)
+			middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+			ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"one"}}}))
+			return ctx.Next()
+		})
+		NewKubernetesAdminControllerWithRegistry(registry).Register(app.Group("/api"))
+		for _, test := range []struct {
+			path string
+			want int
+		}{{"/resources/discovery", map[bool]int{true: 400, false: 200}[multiple]}, {"/resources/discovery?cluster=one", 200}, {"/resources/discovery?cluster=unknown", 404}, {"/stream?cluster=denied", 404}, {"/pods/shop/pod/logs/stream?cluster=denied", 404}} {
+			before := reads.Load()
+			response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes"+test.path, nil), -1)
+			if err != nil || response.StatusCode != test.want {
+				t.Fatalf("multiple=%v path=%s status=%v err=%v", multiple, test.path, response, err)
+			}
+			response.Body.Close()
+			if test.want != 200 && before != reads.Load() {
+				t.Fatal("rejected request fetched cluster")
+			}
+		}
+		response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/clusters", nil), -1)
+		if err != nil || response.StatusCode != 200 {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		if strings.Contains(string(body), "denied") || strings.Contains(string(body), "org_id") || strings.Contains(string(body), upstream.URL) {
+			t.Fatalf("unsafe cluster list %s", body)
+		}
+	}
+}
+
+func TestKubernetesIssuesQueryValidationAndInvestigate(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "bad-rollout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	if _, _, err := service.IndexSnapshot(t.Context(), "Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "Event", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "ServiceAccount", "ControllerRevision"); err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	for _, test := range []struct {
+		query string
+		want  int
+	}{{"?include=other", 400}, {"?include=", 400}, {"?broken=maybe", 400}, {"?include=changes&root_uid=bad%2Fuid", 400}, {"?root_uid=deployment-checkout", 400}, {"?include=changes&root_uid=", 400}, {"?include=changes&include=changes", 400}, {"?include=changes&root_uid=deployment-checkout&namespace=payments", 404}, {"?include=changes&root_uid=deployment-checkout&namespace=shop", 200}, {"?broken=true&include=changes&limit=1", 200}} {
+		response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/issues"+test.query, nil), -1)
+		if err != nil || response.StatusCode != test.want {
+			t.Fatalf("query %s: %+v %v", test.query, response, err)
+		}
+		response.Body.Close()
+	}
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service { return service })
+	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil) })
+	app.Get("/investigate", func(ctx *fiber.Ctx) error {
+		attachment := &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: "cluster", ResourceID: "apps~v1~deployments", Namespace: "shop", Name: "checkout", UID: "deployment-checkout", IncludeChanges: true, Break: &core.ChatResourceBreak{Rule: "CANARY_CLIENT_CONTEXT"}}}
+		if err := validateChatKubernetesAttachment(ctx, attachment); err != nil {
+			return err
+		}
+		return ctx.JSON(attachment)
+	})
+	response, err := app.Test(httptest.NewRequest("GET", "/investigate", nil), -1)
+	if err != nil || response.StatusCode != 200 {
+		t.Fatalf("investigate: %+v %v", response, err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if strings.Contains(string(body), "CANARY") || strings.Contains(string(body), `"source"`) || !strings.Contains(string(body), `"image_changed"`) || !strings.Contains(string(body), `"pod.crash_loop"`) {
+		t.Fatalf("investigate grounding: %s", body)
+	}
+}
+
+func TestClusterScopeSurvivesCallerContextsAndBootstrap(t *testing.T) {
+	registry := kubernetes.NewClusterRegistry(true, []kubernetes.ClusterEntry{{Info: kubernetes.ClusterInfo{ID: "one", Provider: "generic"}, Err: errors.New("safe-construction-error")}, {Info: kubernetes.ClusterInfo{ID: "denied", Provider: "generic"}, Err: errors.New("private-error")}})
+	SetChatKubernetesRegistry(registry)
+	t.Cleanup(func() { SetChatKubernetesRegistry(nil) })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Clusters: &core.ClusterScope{IDs: []string{"one"}}}))
+		if core.CallerClusterAllowed(callerContext(ctx, context.Background()), "denied") || core.CallerClusterAllowed(approvalContext(ctx), "denied") {
+			t.Error("caller scope discarded")
+		}
+		return ctx.Next()
+	})
+	app.Get("/bootstrap", (&ChatAdminController{}).bootstrap)
+	response, err := app.Test(httptest.NewRequest("GET", "/bootstrap", nil), -1)
+	if err != nil || response.StatusCode != 200 {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if strings.Contains(string(body), "denied") || strings.Contains(string(body), "private-error") || !strings.Contains(string(body), `"id":"one"`) {
+		t.Fatalf("bootstrap not filtered %s", body)
+	}
+}
+
+func TestMultiClusterChatAttachmentRequiresVisibleClusterBeforeDiscovery(t *testing.T) {
+	var calls atomic.Int32
+	registry := kubernetes.NewClusterRegistry(true, []kubernetes.ClusterEntry{{Info: kubernetes.ClusterInfo{ID: "one"}}, {Info: kubernetes.ClusterInfo{ID: "denied"}}})
+	SetChatKubernetesRegistry(registry)
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service { calls.Add(1); return nil })
+	t.Cleanup(func() { SetChatKubernetesRegistry(nil); SetChatKubernetesServiceResolver(nil) })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Get("/", func(ctx *fiber.Ctx) error {
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Clusters: &core.ClusterScope{IDs: []string{"one"}}}))
+		return validateChatKubernetesAttachment(ctx, &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: ctx.Query("cluster"), ResourceID: "core~v1~pods", Namespace: "shop", Name: "pod"}})
+	})
+	for _, test := range []struct {
+		query string
+		want  int
+	}{{"", 400}, {"?cluster=denied", 404}, {"?cluster=unknown", 404}} {
+		response, err := app.Test(httptest.NewRequest("GET", "/"+test.query, nil), -1)
+		if err != nil || response.StatusCode != test.want {
+			t.Fatalf("attachment %s: %v %v", test.query, response, err)
+		}
+		response.Body.Close()
+	}
+	if calls.Load() != 0 {
+		t.Fatal("invisible attachment resolved cluster")
+	}
+}
+
+func TestKubernetesAdminAuthorizationAndDiscoveryAdapter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+			return
+		}
+		if request.URL.Path == "/api/v1" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+			return
+		}
+		if request.URL.Path == "/apis" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
+	build := func(authorized bool, permitted *bool) *fiber.App {
+		app := fiber.New()
+		if authorized {
+			app.Use(func(ctx *fiber.Ctx) error {
+				middleware.MarkAuthorized(ctx)
+				if permitted != nil {
+					middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), *permitted)
+				}
+				return ctx.Next()
+			})
+		}
+		NewKubernetesAdminController(service).Register(app.Group("/api"))
+		return app
+	}
+	allowed, denied := true, false
+	for _, test := range []struct {
+		authorized bool
+		permitted  *bool
+		want       int
+	}{{true, &denied, 403}, {true, nil, 403}, {true, &allowed, 200}} {
+		response, err := build(test.authorized, test.permitted).Test(httptest.NewRequest("GET", "/api/admin/kubernetes/resources/discovery", nil), -1)
+		if err != nil || response.StatusCode != test.want {
+			t.Errorf("authorized=%v permitted=%v status=%v err=%v", test.authorized, test.permitted, response.StatusCode, err)
+		}
+	}
+}
+
+type streamTestScrubber struct{}
+
+func (streamTestScrubber) Scrub(value string) string {
+	return strings.ReplaceAll(value, "secret", "[redacted]")
+}
+
+func TestKubernetesPodLogSSEDisconnectAndShutdown(t *testing.T) {
+	for _, shutdown := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disconnect", true: "shutdown"}[shutdown], func(t *testing.T) {
+			closed := make(chan struct{})
+			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Write([]byte("2026-10-01T00:00:00Z safe\n"))
+				writer.(http.Flusher).Flush()
+				<-request.Context().Done()
+				close(closed)
+			}))
+			defer upstream.Close()
+			client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
+			service.SetScrubber(streamTestScrubber{})
+			lifecycle, stop := context.WithCancel(context.Background())
+			defer stop()
+			service.SetLogStreamContext(lifecycle)
+			app := fiber.New(fiber.Config{DisableStartupMessage: true})
+			app.Use(func(ctx *fiber.Ctx) error {
+				middleware.MarkAuthorized(ctx)
+				middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+				return ctx.Next()
+			})
+			NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(service)).Register(app.Group("/api"))
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			serverDone := make(chan struct{})
+			go func() { defer close(serverDone); _ = app.Listener(listener) }()
+			defer func() { stop(); _ = app.ShutdownWithTimeout(time.Second); <-serverDone }()
+			requestContext, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			request, _ := http.NewRequestWithContext(requestContext, "GET", "http://"+listener.Addr().String()+"/api/admin/kubernetes/pods/default/pod/logs/stream?cluster=test", nil)
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			reader := bufio.NewReader(response.Body)
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					t.Fatal(err)
+				}
+				if line == "event: line\n" {
+					break
+				}
+			}
+			if shutdown {
+				stop()
+			} else {
+				cancel()
+				response.Body.Close()
+			}
+			select {
+			case <-closed:
+			case <-time.After(6 * time.Second):
+				t.Fatal("upstream survived disconnect or shutdown")
+			}
+		})
+	}
+}
+
+func TestKubernetesPodLogSSEContract(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		status         int
+		payload, query string
+		allowed        bool
+		wantStatus     int
+	}{
+		{"finite", 200, "2026-10-01T00:00:00Z secret\n", "previous=true&container=app", true, 200},
+		{"read-error", 200, "2026-10-01T00:00:00Z secret\ninvalid secret\n", "previous=true&container=app", true, 200},
+		{"without-prefix", 200, "2026-10-01T00:00:00Z secret\n", "previous=true&container=app&timestamps=false", true, 200},
+		{"safe-error", 403, "upstream-secret", "", true, 200},
+		{"previous-unavailable", 400, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"previous terminated container \"app\" in pod \"pod\" not found"}`, "previous=true", true, 200},
+		{"previous-invalid-container", 400, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"container upstream-secret is not valid for pod"}`, "previous=true&container=app", true, 200},
+		{"previous-raw-error", 400, "upstream-secret", "previous=true", true, 200},
+		{"denied", 200, "secret", "", false, 403},
+		{"malformed", 200, "secret", "tail_lines=bad", true, 400},
+		{"duplicate", 200, "secret", "previous=false&previous=true", true, 400},
+		{"unknown", 200, "secret", "follow=false", true, 400},
+		{"zero", 200, "secret", "tail_lines=0", true, 400},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				requests.Add(1)
+				writer.WriteHeader(test.status)
+				writer.Write([]byte(test.payload))
+			}))
+			defer server.Close()
+			client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "org-a", ClusterID: "test"}, 0)
+			service.SetScrubber(streamTestScrubber{})
+			app := fiber.New()
+			app.Use(func(ctx *fiber.Ctx) error {
+				middleware.MarkAuthorized(ctx)
+				middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), test.allowed)
+				return ctx.Next()
+			})
+			NewKubernetesAdminController(service).Register(app.Group("/api"))
+			response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/pods/default/pod/logs/stream?"+test.query, nil), -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil || response.StatusCode != test.wantStatus || bytes.Contains(body, []byte("secret")) {
+				t.Fatalf("status=%d body=%s err=%v", response.StatusCode, body, err)
+			}
+			if test.wantStatus != 200 {
+				if requests.Load() != 0 {
+					t.Fatal("invalid/denied request reached upstream")
+				}
+				return
+			}
+			if response.Header.Get("Content-Type") != "text/event-stream" || !bytes.Contains(body, []byte("event: heartbeat")) || !bytes.Contains(body, []byte("event: end")) {
+				t.Fatalf("SSE response=%s", body)
+			}
+			if test.status == 200 && (!bytes.Contains(body, []byte("event: line")) || !bytes.Contains(body, []byte(`"cursor":"`)) || bytes.Contains(body, []byte("id: "))) {
+				t.Fatalf("missing line or cursor: %s", body)
+			}
+			if test.status == 200 {
+				prefix := `"text":"2026-10-01T00:00:00Z [redacted]"`
+				if strings.Contains(test.query, "timestamps=false") {
+					prefix = `"text":"[redacted]"`
+				}
+				if !bytes.Contains(body, []byte(prefix)) || !bytes.Contains(body, []byte(`"timestamp":"2026-10-01T00:00:00Z"`)) {
+					t.Fatalf("timestamp contract: %s", body)
+				}
+			}
+			if test.status != 200 && !bytes.Contains(body, []byte("event: error")) {
+				t.Fatalf("missing safe error: %s", body)
+			}
+			if test.status == http.StatusBadRequest {
+				code := "invalid_arguments"
+				if test.name == "previous-unavailable" {
+					code = "previous_unavailable"
+				}
+				if test.name == "previous-unavailable" && bytes.Contains(body, []byte(`"replay_uncertain":true`)) {
+					t.Fatalf("fresh unavailable Previous logs fabricated a reconnect gap: %s", body)
+				}
+				if !bytes.Contains(body, []byte(`"code":"`+code+`"`)) || !bytes.Contains(body, []byte(`"reason":"error"`)) || bytes.Contains(body, []byte(`"retryable":true`)) {
+					t.Fatalf("incorrect safe Status envelope: %s", body)
+				}
+			}
+			if test.name == "read-error" && (!bytes.Contains(body, []byte("event: error")) || !bytes.Contains(body, []byte(`"reason":"error"`)) || bytes.Count(body, []byte(`"replay_uncertain":true`)) != 1 || bytes.Contains(body, []byte(`"reason":"error","replay_uncertain":true`))) {
+				t.Fatalf("missing checkpoint or repeated uncertainty occurrence: %s", body)
+			}
+		})
+	}
+}
+
+func TestKubernetesPodLogSSEClusterRouting(t *testing.T) {
+	var reads atomic.Int32
+	var entries []kubernetes.ClusterEntry
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	for _, cluster := range []string{"east", "west"} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			reads.Add(1)
+			if request.URL.Path != "/api/v1/namespaces/shop/pods/pod/log" {
+				t.Errorf("upstream path = %q", request.URL.Path)
+			}
+			for key := range request.URL.Query() {
+				switch key {
+				case "container", "follow", "previous", "timestamps", "sinceSeconds", "tailLines", "sinceTime":
+				default:
+					t.Errorf("unexpected upstream query key = %q", key)
+				}
+			}
+			_, _ = io.WriteString(writer, base.Format(time.RFC3339Nano)+" "+cluster+" secret\n")
+		}))
+		t.Cleanup(upstream.Close)
+		client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: cluster}, 0)
+		service.SetScrubber(streamTestScrubber{})
+		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: cluster, Provider: "generic"}, Service: service})
+	}
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"east", "west"}}}))
+		return ctx.Next()
+	})
+	NewKubernetesAdminControllerWithRegistry(kubernetes.NewClusterRegistry(true, entries)).Register(app.Group("/api"))
+	requestStream := func(query string, wantStatus int) []byte {
+		t.Helper()
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/pods/shop/pod/logs/stream?"+query, nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != wantStatus || bytes.Contains(body, []byte("secret")) {
+			t.Fatalf("status=%d body=%s err=%v", response.StatusCode, body, err)
+		}
+		return body
+	}
+	var cursor string
+	for _, cluster := range []string{"east", "west"} {
+		before := reads.Load()
+		body := requestStream("cluster="+cluster+"&container=app&previous=false&timestamps=false&since_seconds=3600&tail_lines=500", http.StatusOK)
+		if reads.Load() != before+1 || !bytes.Contains(body, []byte(`"text":"`+cluster+` [redacted]"`)) || !bytes.Contains(body, []byte("event: end")) {
+			t.Fatalf("cluster stream = %s", body)
+		}
+		if cluster == "east" {
+			for _, line := range strings.Split(string(body), "\n") {
+				if strings.HasPrefix(line, "data: ") {
+					var event kubernetes.PodLogStreamEvent
+					if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+						t.Fatal(err)
+					}
+					if event.Cursor != "" {
+						cursor = event.Cursor
+					}
+				}
+			}
+		}
+	}
+	if cursor == "" {
+		t.Fatal("missing scoped cursor")
+	}
+	for _, query := range []string{"cluster=east&cluster=west", "cluster=east&follow=false", "cluster=west&container=app&cursor=" + cursor, "container=app"} {
+		before := reads.Load()
+		requestStream(query, http.StatusBadRequest)
+		if reads.Load() != before {
+			t.Fatal("invalid stream reached upstream")
+		}
+	}
+	before := reads.Load()
+	requestStream("cluster=unknown", http.StatusNotFound)
+	if reads.Load() != before {
+		t.Fatal("unknown cluster reached upstream")
+	}
+	requestStream("cluster=east&container=app&cursor="+cursor, http.StatusOK)
+	if reads.Load() != before+1 {
+		t.Fatal("same-cluster resume did not reach upstream")
+	}
+}
+
+func TestKubernetesPodLogSSEOverlapResumeContract(t *testing.T) {
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	at0, at1 := base.Format(time.RFC3339Nano), base.Add(time.Second).Format(time.RFC3339Nano)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Has("sinceTime") && request.URL.Query().Get("sinceTime") != base.Add(-time.Nanosecond).Format(time.RFC3339Nano) {
+			t.Errorf("resume overlap: %v", request.URL.Query())
+		}
+		writer.Write([]byte(at1 + " secret\n" + at0 + " secret\n" + at1 + " secret\n"))
+		if request.URL.Query().Has("sinceTime") {
+			writer.Write([]byte(at0 + " secret\n" + at1 + " secret\n"))
+		}
+	}))
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "org-a", ClusterID: "cluster-a"}, 0)
+	service.SetScrubber(streamTestScrubber{})
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	readEvents := func(cursor string) []kubernetes.PodLogStreamEvent {
+		t.Helper()
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/pods/default/pod/logs/stream?cursor="+cursor, nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var events []kubernetes.PodLogStreamEvent
+		scanner := bufio.NewScanner(response.Body)
+		var eventName string
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				eventName = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "id: "):
+				t.Fatal("cursor duplicated into SSE ID")
+			case strings.HasPrefix(line, "data: "):
+				var event kubernetes.PodLogStreamEvent
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+					t.Fatal(err)
+				}
+				event.Event = eventName
+				events = append(events, event)
+			}
+		}
+		if scanner.Err() != nil {
+			t.Fatal(scanner.Err())
+		}
+		return events
+	}
+	initial := readEvents("")
+	var cursor string
+	for _, event := range initial {
+		if event.Event == "end" {
+			cursor = event.Cursor
+			break
+		}
+	}
+	if cursor == "" {
+		t.Fatal("initial stream has no cursor")
+	}
+	type checkpointView struct {
+		Target      string            `json:"target"`
+		Timestamp   time.Time         `json:"timestamp"`
+		Ordinal     uint64            `json:"ordinal"`
+		Occurrences map[string]uint64 `json:"occurrences"`
+	}
+	decodeCheckpoint := func(encoded string) checkpointView {
+		t.Helper()
+		raw, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var checkpoint checkpointView
+		if err := json.Unmarshal(raw, &checkpoint); err != nil {
+			t.Fatal(err)
+		}
+		return checkpoint
+	}
+	originalCheckpoint := decodeCheckpoint(cursor)
+	resumed := readEvents(cursor)
+	var lines int
+	for _, event := range resumed {
+		if event.Event == "line" {
+			lines++
+			if event.ReplayUncertain || strings.Contains(event.Text, "secret") || event.Ordinal < 2 {
+				t.Fatalf("unsafe or unqualified replay: %+v", event)
+			}
+			if (event.Cursor != "") != (event.Sequence == 1 || event.Sequence%32 == 0) {
+				t.Fatalf("resumed first/every32 checkpoint cadence changed: %+v", event)
+			}
+			if event.Cursor != "" {
+				checkpoint := decodeCheckpoint(event.Cursor)
+				if checkpoint.Target != originalCheckpoint.Target || checkpoint.Occurrences[event.Timestamp] != event.Ordinal || checkpoint.Occurrences[checkpoint.Timestamp.Format(time.RFC3339Nano)] != checkpoint.Ordinal {
+					t.Fatalf("resumed checkpoint lost scoped overlap identity: %+v event=%+v", checkpoint, event)
+				}
+			}
+		}
+	}
+	end := resumed[len(resumed)-1]
+	if lines != 2 || end.Event != "end" || end.Reason != "complete" || end.ReplayUncertain || end.Cursor == "" || end.Cursor == cursor {
+		t.Fatalf("resume terminal contract: %+v", resumed)
+	}
+}
+
+func TestKubernetesTrafficRouteReturnsExplicitOSSUnavailableState(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/traffic?namespace=shop&window=5m", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("traffic route status=%d err=%v", response.StatusCode, err)
+	}
+	var result kubernetes.Traffic
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if result.Available || result.Reason == "" || result.Window != "5m" || len(result.Edges) != 0 {
+		t.Fatalf("traffic response = %+v", result)
+	}
+}
+
+func TestKubernetesGraphRouteForwardsCompleteQueryValidation(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph?complete=true", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("complete graph query status=%d err=%v", response.StatusCode, err)
+	}
+	response.Body.Close()
+	for _, query := range []string{
+		"complete=true&namespace=shop&limit=bad",
+		"complete=true&namespace=shop&max_nodes=bad",
+		"complete=true&namespace=shop&cursor=",
+		"complete=true&namespace=shop&limit=",
+		"complete=true&namespace=shop&max_nodes=",
+		"complete=tru&namespace=shop",
+		"complete=&namespace=shop",
+		"complete=garbage&complete=true&namespace=shop",
+	} {
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph?"+query, nil), -1)
+		if err != nil || response.StatusCode != fiber.StatusBadRequest {
+			t.Errorf("graph query %q status=%d err=%v", query, response.StatusCode, err)
+		}
+		response.Body.Close()
+	}
+}
+
+func TestKubernetesOverviewGraphRouteRejectsQueriesAndRequiresPermission(t *testing.T) {
+	for _, allowed := range []bool{false, true} {
+		app := fiber.New()
+		app.Use(func(ctx *fiber.Ctx) error {
+			middleware.MarkAuthorized(ctx)
+			middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), allowed)
+			return ctx.Next()
+		})
+		NewKubernetesAdminController(kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "test"}, 0)).Register(app.Group("/api"))
+		for _, query := range []string{"namespace=shop", "namespace=", "cursor=", "limit=1", "max_nodes=500", "complete=true", "connected_only=false", "unknown=value"} {
+			response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph/overview?"+query, nil), -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			want := fiber.StatusForbidden
+			if allowed {
+				want = fiber.StatusBadRequest
+			}
+			if response.StatusCode != want {
+				t.Errorf("allowed=%v query=%q status=%d want=%d", allowed, query, response.StatusCode, want)
+			}
+		}
+	}
+}
+
+func TestKubernetesAdminRegistersOnlyGetRoutes(t *testing.T) {
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: "http://127.0.0.1", AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error { middleware.MarkAuthorized(ctx); return ctx.Next() })
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest("POST", "/api/admin/kubernetes/resources", nil), -1)
+	if err != nil || response.StatusCode == fiber.StatusOK {
+		t.Fatalf("POST status=%v err=%v", response.StatusCode, err)
+	}
+	for _, routes := range app.Stack() {
+		for _, route := range routes {
+			if route.Method == http.MethodGet && route.Path == "/api/admin/kubernetes/topology" {
+				t.Fatal("topology route is registered")
+			}
+		}
+	}
+}
+
+func TestKubernetesStreamRequiresInfrastructureView(t *testing.T) {
+	var clusterRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		clusterRequests.Add(1)
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), false)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/stream", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusForbidden || clusterRequests.Load() != 0 {
+		t.Fatalf("stream status=%d cluster requests=%d err=%v", response.StatusCode, clusterRequests.Load(), err)
+	}
+}
+
+func TestKubernetesCrashJournalRoute(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	store := kubechanges.NewStore(provider, kubeindex.Scope{ClusterID: "cluster-a"})
+	now := time.Now().UTC().Add(-time.Second)
+	var events []kubechanges.CrashEvent
+	for _, name := range []string{"first", "second", "third"} {
+		event := kubechanges.CrashEvent{Cluster: "cluster-a", Namespace: "shop", Pod: name, PodUID: name, RootUID: "root", RootKind: "Deployment", RootName: "api", Container: "app", Type: "status", WaitingReason: "CrashLoopBackOff", At: now, ObservedAt: now, TimeSource: "observed_at"}
+		event.ID = kubechanges.CrashID(event)
+		events = append(events, event)
+	}
+	if err := store.CommitCapture(nil, nil, nil, "", now, events, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	allowed := true
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), allowed)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/crashes?cluster=cluster-a&namespace=shop&root_uid=root&limit=1", nil), -1)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("crashes response: %+v %v", response, err)
+	}
+	var page kubernetes.CrashPage
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || len(page.Items) != 1 || page.Next == "" || page.Gaps == nil || len(page.Limitations) == 0 {
+		t.Fatalf("crash contract: %+v %v", page, err)
+	}
+	response.Body.Close()
+	for _, suffix := range []string{"?since=invalid", "?limit=101", "?limit=garbage", "?cursor=bad", "?namespace=wrong&root_uid=root&cursor=" + page.Next, "?since=2026-10-16T12:00:00Z&until=2026-10-15T12:00:00Z"} {
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/crashes"+suffix, nil), -1)
+		if err != nil || response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid query %s: %+v %v", suffix, response, err)
+		}
+		response.Body.Close()
+	}
+	allowed = false
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/crashes", nil), -1)
+	if err != nil || response.StatusCode != http.StatusForbidden {
+		t.Fatalf("permission bypass: %+v %v", response, err)
+	}
+	response.Body.Close()
+}
+
+func TestKubernetesChangesRouteReturnsBoundedDTOAndRejectsInvalidTime(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	store := kubechanges.NewStore(provider, kubeindex.Scope{ClusterID: "cluster-a"})
+	now := time.Now().UTC()
+	if err := store.Append([]kubechanges.Change{
+		{ID: "change-a", Cluster: "cluster-a", Kind: "Deployment", Namespace: "shop", Name: "api-a", UID: "uid-a", Type: kubechanges.Created, At: now.Add(-time.Minute)},
+		{ID: "change-b", Cluster: "cluster-a", Kind: "Deployment", Namespace: "shop", Name: "api-b", UID: "uid-b", Type: kubechanges.Created, At: now},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?limit=1", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("changes status=%d err=%v", response.StatusCode, err)
+	}
+	var body struct {
+		Items     []kubernetes.Change `json:"items"`
+		Next      string              `json:"next"`
+		Truncated bool                `json:"truncated"`
+		Gaps      []any               `json:"gaps"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil || body.Items == nil || body.Gaps == nil || len(body.Items) != 1 || body.Next == "" || body.Truncated {
+		t.Fatalf("changes DTO=%#v decode err=%v", body, err)
+	}
+	response.Body.Close()
+	second, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?limit=1&cursor="+body.Next, nil), -1)
+	if err != nil || second.StatusCode != fiber.StatusOK {
+		t.Fatalf("changes cursor status=%d err=%v", second.StatusCode, err)
+	}
+	var secondPage struct {
+		Items []kubernetes.Change `json:"items"`
+		Next  string              `json:"next"`
+	}
+	if err := json.NewDecoder(second.Body).Decode(&secondPage); err != nil || secondPage.Items == nil || len(secondPage.Items) != 1 || secondPage.Items[0].Name == body.Items[0].Name || secondPage.Next != "" {
+		t.Fatalf("changes cursor DTO=%#v decode err=%v", secondPage, err)
+	}
+	second.Body.Close()
+	bad, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?since=not-a-time", nil), -1)
+	if err != nil || bad.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("invalid time status=%d err=%v", bad.StatusCode, err)
+	}
+}
+
+func TestKubernetesRolloutsListRouteKeepsNameRoute(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{map[string]any{"name": "argoproj.io", "versions": []any{map[string]any{"groupVersion": "argoproj.io/v1alpha1", "version": "v1alpha1"}}, "preferredVersion": map[string]any{"groupVersion": "argoproj.io/v1alpha1", "version": "v1alpha1"}}}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{}})
+		case "/apis/argoproj.io/v1alpha1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "rollouts", "kind": "Rollout", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis/argoproj.io/v1alpha1/namespaces/shop/rollouts":
+			if request.URL.Query().Get("continue") == "page-2" {
+				_ = json.NewEncoder(writer).Encode(map[string]any{"items": []any{map[string]any{"kind": "Rollout", "metadata": map[string]any{"name": "second", "namespace": "shop"}, "status": map[string]any{"phase": "Healthy"}}}})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"metadata": map[string]any{"continue": "page-2"}, "items": []any{map[string]any{"kind": "Rollout", "metadata": map[string]any{"name": "checkout", "namespace": "shop"}, "status": map[string]any{"phase": "Progressing"}}}})
+		case "/apis/argoproj.io/v1alpha1/namespaces/shop/rollouts/checkout":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"kind": "Rollout", "metadata": map[string]any{"name": "checkout", "namespace": "shop"}, "status": map[string]any{"phase": "Progressing"}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster-a"}, 0)).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/rollouts?namespace=shop&limit=1", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("rollouts route status=%d err=%v", response.StatusCode, err)
+	}
+	var page kubernetes.RolloutPage
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || page.Items == nil || len(page.Items) != 1 || page.Next != "page-2" || !page.Truncated {
+		t.Fatalf("rollouts response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/rollouts?namespace=shop&limit=1&cursor=page-2", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("rollouts cursor status=%d err=%v", response.StatusCode, err)
+	}
+	page = kubernetes.RolloutPage{}
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || len(page.Items) != 1 || page.Items[0].Name != "second" || page.Next != "" {
+		t.Fatalf("rollouts cursor response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/rollouts/shop/checkout", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("named rollout route status=%d err=%v", response.StatusCode, err)
+	}
+	var rollout kubernetes.Rollout
+	if err := json.NewDecoder(response.Body).Decode(&rollout); err != nil || rollout.Name != "checkout" {
+		t.Fatalf("named rollout response=%#v decode err=%v", rollout, err)
+	}
+	response.Body.Close()
+}
+
+func TestKubernetesEventsRouteDefaultsWarningAndPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "events", "kind": "Event", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/api/v1/namespaces/shop/events":
+			if request.URL.Query().Get("fieldSelector") != "type=Warning" {
+				t.Errorf("event field selector=%q", request.URL.Query().Get("fieldSelector"))
+			}
+			if request.URL.Query().Get("continue") == "page-2" {
+				_ = json.NewEncoder(writer).Encode(map[string]any{"items": []any{map[string]any{"kind": "Event", "metadata": map[string]any{"name": "second", "namespace": "shop"}, "type": "Warning"}}})
+				return
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"metadata": map[string]any{"continue": "page-2"}, "items": []any{map[string]any{"kind": "Event", "metadata": map[string]any{"name": "first", "namespace": "shop"}, "type": "Warning"}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster-a"}, 0)).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/events?namespace=shop&limit=1", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("events route status=%d err=%v", response.StatusCode, err)
+	}
+	var page kubernetes.EventPage
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Name != "first" || page.Next != "page-2" {
+		t.Fatalf("events response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/events?namespace=shop&limit=1&cursor=page-2", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("events cursor status=%d err=%v", response.StatusCode, err)
+	}
+	page = kubernetes.EventPage{}
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Name != "second" || page.Next != "" {
+		t.Fatalf("events cursor response=%#v decode err=%v", page, err)
+	}
+	response.Body.Close()
+}
+
+func TestChatKubernetesAttachmentRequiresScopedInfrastructurePermission(t *testing.T) {
+	var discoveryRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		discoveryRequests.Add(1)
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := kubernetes.NewServiceRegistry(kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster-a"}, 0))
+	SetChatKubernetesServiceResolver(func(orgID, clusterID string) *kubernetes.Service {
+		service, _ := registry.ResolveCluster(orgID, clusterID)
+		return service
+	})
+	t.Cleanup(func() { SetChatKubernetesServiceResolver(nil); middleware.SetOrgResolver(nil) })
+	middleware.SetOrgResolver(func(ctx *fiber.Ctx) string { return ctx.Get("X-Test-Org") })
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(middleware.OrgInjector())
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-Allow-Infra") == "true")
+		return ctx.Next()
+	})
+	app.Get("/validate", func(ctx *fiber.Ctx) error {
+		attachment := &core.ChatAttachment{Resource: &core.ChatResourceRef{Provider: "kubernetes", Cluster: ctx.Query("cluster"), ResourceID: "core~v1~pods", Namespace: "shop", Name: "checkout"}}
+		if err := validateChatKubernetesAttachment(ctx, attachment); err != nil {
+			return err
+		}
+		return ctx.JSON(attachment)
+	})
+	request := func(cluster, allowed string) (*http.Response, error) {
+		req := httptest.NewRequest(http.MethodGet, "/validate?cluster="+cluster, nil)
+		req.Header.Set("X-Test-Org", "org-a")
+		req.Header.Set("X-Allow-Infra", allowed)
+		return app.Test(req, -1)
+	}
+	allowed, err := request("cluster-a", "true")
+	if err != nil || allowed.StatusCode != fiber.StatusOK {
+		t.Fatalf("allowed attachment status=%d err=%v", allowed.StatusCode, err)
+	}
+	wrongCluster, err := request("cluster-b", "true")
+	if err != nil || wrongCluster.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("foreign cluster status=%d err=%v", wrongCluster.StatusCode, err)
+	}
+	denied, err := request("cluster-a", "false")
+	if err != nil || denied.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("missing permission status=%d err=%v", denied.StatusCode, err)
+	}
+	if discoveryRequests.Load() != 3 {
+		t.Fatalf("unauthorized attachment attempts caused discovery egress: requests=%d", discoveryRequests.Load())
+	}
+}
+
+func TestWriteKubernetesReturnsSafeActionableDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{name: "credentials", err: kubernetes.ErrCredentialUnavailable, status: fiber.StatusBadGateway, code: "credential_unavailable"},
+		{name: "authentication", err: kubernetes.ErrUnauthorized, status: fiber.StatusBadGateway, code: "cluster_authentication_failed"},
+		{name: "permission", err: kubernetes.ErrForbidden, status: fiber.StatusForbidden, code: "cluster_permission_denied"},
+		{name: "configuration", err: kubernetes.ErrInvalidEndpoint, status: fiber.StatusBadRequest, code: "connector_configuration_invalid"},
+		{name: "timeout", err: context.DeadlineExceeded, status: fiber.StatusGatewayTimeout, code: "request_timeout"},
+		{name: "fallback", err: errors.New("provider secret response"), status: fiber.StatusBadGateway, code: "read_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			previous := log.Writer()
+			log.SetOutput(&logs)
+			t.Cleanup(func() { log.SetOutput(previous) })
+			app := fiber.New()
+			app.Get("/", func(ctx *fiber.Ctx) error { return writeKubernetes(ctx, nil, test.err) })
+			response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1)
+			if err != nil || response.StatusCode != test.status {
+				t.Fatalf("status=%d err=%v", response.StatusCode, err)
+			}
+			var body struct {
+				Error     string `json:"error"`
+				Code      string `json:"code"`
+				Action    string `json:"action"`
+				Retryable bool   `json:"retryable"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Code != test.code || body.Error == "" || body.Action == "" {
+				t.Fatalf("body = %+v", body)
+			}
+			if bytes.Contains(logs.Bytes(), []byte("provider secret response")) || body.Error == "provider secret response" || body.Action == "provider secret response" {
+				t.Fatalf("raw cause leaked: body=%+v logs=%q", body, logs.String())
+			}
+			if !bytes.Contains(logs.Bytes(), []byte("code="+test.code)) {
+				t.Fatalf("safe code absent from log: %q", logs.String())
+			}
+		})
+	}
+}
+
+func TestKubernetesHTTPResolvesInjectedOrgThroughSharedServiceRegistry(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster-a", CredentialID: "credential-a"}, 0)
+	registry := kubernetes.NewServiceRegistry(base)
+	controller := NewKubernetesAdminControllerWithRegistry(registry)
+	middleware.SetOrgResolver(func(ctx *fiber.Ctx) string { return ctx.Get("X-Test-Org") })
+	t.Cleanup(func() { middleware.SetOrgResolver(nil) })
+	app := fiber.New()
+	app.Use(middleware.OrgInjector())
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	controller.Register(app.Group("/api"))
+	request := httptest.NewRequest("GET", "/api/admin/kubernetes/resources/discovery", nil)
+	request.Header.Set("X-Test-Org", "org-a")
+	response, err := app.Test(request, -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d err=%v", response.StatusCode, err)
+	}
+	resolved, resolveErr := controller.resolve("org-a", "")
+	if resolveErr != nil || resolved != registry.ResolveOrg("org-a") || resolved.Scope() != (kubernetes.Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "credential-a"}) {
+		t.Fatalf("resolved scope = %#v", resolved.Scope())
+	}
+	other, _ := controller.resolve("org-b", "")
+	if other == resolved {
+		t.Fatal("distinct organizations shared one service instance")
+	}
+	for _, orgID := range []string{"org-a", "org-b"} {
+		request := httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/graph/overview", nil)
+		request.Header.Set("X-Test-Org", orgID)
+		response, err := app.Test(request, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		service, resolveErr := controller.resolve(orgID, "")
+		if response.StatusCode != fiber.StatusOK || resolveErr != nil || service.Scope().OrgID != orgID {
+			t.Fatalf("overview org=%q status=%d scope=%+v", orgID, response.StatusCode, service.Scope())
+		}
+	}
+}
+
+func TestKubernetesAIAndHTTPAdaptersReturnEquivalentResourceFacts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		case "/api/v1/namespaces/payments/pods", "/api/v1/pods":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"items": []any{map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"namespace": "payments", "name": "api"}, "spec": map[string]any{"nodeName": "node-a"}, "status": map[string]any{"phase": "Running"}}}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)
+	if _, _, err := service.IndexSnapshot(t.Context(), "Pod"); err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/resources?resource_id=core~v1~pods&namespace=payments", nil), -1)
+	if err != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("HTTP status=%v err=%v", response.StatusCode, err)
+	}
+	var httpPage kubernetes.ResourcePage
+	if err := json.NewDecoder(response.Body).Decode(&httpPage); err != nil {
+		t.Fatal(err)
+	}
+	authorized := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
+	toolResult, err := k8stools.New(service)[2].Invoke(authorized, json.RawMessage(`{"resource_id":"core~v1~pods","namespace":"payments"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(toolResult.Data)
+	var aiPage kubernetes.ResourcePage
+	if err := json.Unmarshal(encoded, &aiPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(httpPage.Items) != 1 || len(aiPage.Items) != 1 {
+		t.Fatalf("HTTP=%#v AI=%#v", httpPage, aiPage)
+	}
+	httpItem, aiItem := httpPage.Items[0], aiPage.Items[0]
+	if httpItem.ResourceID != aiItem.ResourceID || httpItem.Kind != aiItem.Kind || httpItem.Namespace != aiItem.Namespace || httpItem.Name != aiItem.Name || httpItem.Summary["phase"] != aiItem.Summary["phase"] || httpItem.Summary["node"] != aiItem.Summary["node"] {
+		t.Fatalf("semantic facts differ: HTTP=%#v AI=%#v", httpItem, aiItem)
+	}
+}
+
+func TestKubernetesNamespacedReadsReturnBadRequestWithoutNamespace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"groups": []any{}})
+		case "/api/v1":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		default:
+			t.Fatalf("missing namespace reached cluster path %s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)).Register(app.Group("/api"))
+	for _, path := range []string{
+		"/api/admin/kubernetes/resources/core~v1~pods/api",
+		"/api/admin/kubernetes/resources/core~v1~pods/api/describe",
+		"/api/admin/kubernetes/workloads/Pod/api",
+	} {
+		response, requestErr := app.Test(httptest.NewRequest(http.MethodGet, path, nil), -1)
+		if requestErr != nil || response.StatusCode != fiber.StatusBadRequest {
+			t.Errorf("%s status=%d err=%v", path, response.StatusCode, requestErr)
+		}
+	}
+}
+
+func TestKubernetesPodLogsReturnsBadRequestForMultiContainerPodWithoutContainer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("container") == "" {
+			http.Error(writer, "a container name must be specified", http.StatusBadRequest)
+			return
+		}
+		_, _ = writer.Write([]byte("sidecar log"))
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := fiber.New()
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(kubernetes.NewService(client, kubernetes.Scope{ClusterID: "test"}, 0)).Register(app.Group("/api"))
+	response, requestErr := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/pods/default/multi/logs", nil), -1)
+	if requestErr != nil || response.StatusCode != fiber.StatusBadRequest {
+		t.Fatalf("empty container status=%d err=%v", response.StatusCode, requestErr)
+	}
+	response, requestErr = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/pods/default/multi/logs?container=sidecar", nil), -1)
+	if requestErr != nil || response.StatusCode != fiber.StatusOK {
+		t.Fatalf("explicit container status=%d err=%v", response.StatusCode, requestErr)
+	}
+}
+
+// A not-ready inventory is answered as a retryable server state, so the client
+// retries instead of sending an operator after RBAC that is not the problem.
+func TestInventoryNotReadyIsRetryableServiceUnavailable(t *testing.T) {
+	app := fiber.New()
+	app.Get("/", func(ctx *fiber.Ctx) error {
+		return writeKubernetes(ctx, nil, fmt.Errorf("workload logs unavailable: %w", kubernetes.ErrInventoryNotReady))
+	})
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != fiber.StatusServiceUnavailable || response.Header.Get("Retry-After") == "" {
+		t.Fatalf("status=%d retry-after=%q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	if retryAfter, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr != nil || retryAfter <= 0 || retryAfter > 60 {
+		t.Fatalf("retry-after=%q", response.Header.Get("Retry-After"))
+	}
+	var body struct {
+		Error     string `json:"error"`
+		Code      string `json:"code"`
+		Action    string `json:"action"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "inventory_not_ready" || !body.Retryable || body.Error == "" || body.Action == "" {
+		t.Fatalf("body = %+v", body)
+	}
+}
+
+// The complete sync health is readable over the admin API, is authorized like
+// every other Kubernetes route, names a kind no view asked about, and needs no
+// cluster traffic once the inventory is published.
+func TestKubernetesSyncHealthIsCompleteAndAuthorized(t *testing.T) {
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "fault-forbidden-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(fixture)
+	defer upstream.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	// Secret LIST answers 403 in this scenario while Pod answers normally.
+	if _, _, err := service.IndexSnapshot(t.Context(), "Secret", "Pod"); err != nil {
+		t.Fatal(err)
+	}
+	// The status must not depend on the cluster being reachable: every field is
+	// published already.
+	upstream.Close()
+
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), ctx.Get("X-View") != "deny")
+		ctx.SetUserContext(core.WithCallerAuthorization(ctx.UserContext(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}, Clusters: &core.ClusterScope{IDs: []string{"cluster"}}}))
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	get := func(path, view string) (*http.Response, []byte) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		if view != "" {
+			request.Header.Set("X-View", view)
+		}
+		response, err := app.Test(request, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response, body
+	}
+	if response, body := get("/api/admin/kubernetes/sync?cluster=cluster", "deny"); response.StatusCode != fiber.StatusForbidden {
+		t.Fatalf("missing permission status=%d body=%s", response.StatusCode, body)
+	}
+	if response, body := get("/api/admin/kubernetes/sync?cluster=other", ""); response.StatusCode != fiber.StatusNotFound {
+		t.Fatalf("cluster outside the allow-list status=%d body=%s", response.StatusCode, body)
+	}
+	response, body := get("/api/admin/kubernetes/sync?cluster=cluster", "")
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("status=%d body=%s", response.StatusCode, body)
+	}
+	var health struct {
+		State   string                                `json:"state"`
+		Partial bool                                  `json:"partial"`
+		Kinds   map[string]map[string]json.RawMessage `json:"kinds"`
+		Failing []struct {
+			Kind  string `json:"kind"`
+			Class string `json:"class"`
+		} `json:"failing"`
+		Unreadable []struct {
+			Kind  string `json:"kind"`
+			Class string `json:"class"`
+			Since string `json:"since"`
+		} `json:"unreadable"`
+		TotalKinds      int `json:"total_kinds"`
+		FailingKinds    int `json:"failing_kinds"`
+		UnreadableKinds int `json:"unreadable_kinds"`
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		t.Fatal(err)
+	}
+	secret, known := health.Kinds["Secret"]
+	if !known || string(secret["error"]) != `"forbidden"` || string(secret["state"]) != `"error"` {
+		t.Fatalf("failing Secret missing from the complete status: %s", body)
+	}
+	if pod, known := health.Kinds["Pod"]; !known || string(pod["state"]) != `"ready"` {
+		t.Fatalf("ready Pod missing from the complete status: %s", body)
+	}
+	// A permission gap is a capability limit, not a sync fault: it is named in
+	// the non-blocking group and cannot make the aggregate an error.
+	if health.State == "error" || health.FailingKinds != 0 || len(health.Failing) != 0 {
+		t.Fatalf("a permission gap became a blocking fault: %+v", health)
+	}
+	if health.UnreadableKinds != 1 || len(health.Unreadable) != 1 || health.Unreadable[0].Kind != "Secret" || health.Unreadable[0].Class != "forbidden" || health.Unreadable[0].Since == "" {
+		t.Fatalf("permission gap rows = %+v", health.Unreadable)
+	}
+	if now := string(body); !strings.Contains(now, `"unreadable":[`) || !strings.Contains(now, `"failing":[]`) {
+		t.Fatalf("problem rows incomplete: %s", body)
+	}
+	t.Logf("complete sync health: %s", body)
+	// Reading it again must not touch the cluster, which is already closed.
+	if response, body := get("/api/admin/kubernetes/sync?cluster=cluster", ""); response.StatusCode != fiber.StatusOK || !strings.Contains(string(body), `"forbidden"`) {
+		t.Fatalf("repeat read status=%d body=%s", response.StatusCode, body)
+	}
+}

@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { ToastProvider } from "@/components/Toast";
 import { PatternsPage } from "./PatternsPage";
 import {
@@ -87,7 +87,7 @@ function detail(overrides: Partial<Pattern> = {}): Pattern {
   };
 }
 
-function renderPage() {
+function renderPage(path = "/agent/logs") {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -95,13 +95,20 @@ function renderPage() {
     <QueryClientProvider client={qc}>
       <ToastProvider>
         <MemoryRouter
+          initialEntries={[path]}
           future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
         >
+          <LocationProbe />
           <PatternsPage />
         </MemoryRouter>
       </ToastProvider>
     </QueryClientProvider>,
   );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="search">{location.search}</div>;
 }
 
 async function openPeek(): Promise<HTMLElement> {
@@ -232,6 +239,109 @@ describe("PatternsPage — server-side paging", () => {
     // The second page is fetched and appended.
     expect(await screen.findByText("second page <*>")).toBeTruthy();
     expect(api.listPatternsIndex).toHaveBeenCalledWith({ offset: 1 });
+  });
+});
+
+describe("PatternsPage — group by service and facet filters", () => {
+  const rows = [
+    listRow({ id: "c1", template: "checkout one", service: "checkout" }),
+    listRow({ id: "a1", template: "auth one", service: "auth", rule_name: "auth" }),
+    listRow({ id: "c2", template: "checkout two", service: "checkout" }),
+    listRow({ id: "c3", template: "checkout three", service: "checkout" }),
+  ];
+
+  beforeEach(() => {
+    vi.mocked(api.listServiceOverrides).mockResolvedValue([]);
+    vi.mocked(api.getPattern).mockResolvedValue(detail());
+    vi.mocked(api.listPatternsIndex).mockResolvedValue({
+      patterns: rows,
+      total: rows.length,
+      next_offset: null,
+    });
+  });
+
+  it("previews two rows per service and expands the rest on demand", async () => {
+    renderPage("/agent/logs?group=service");
+    const toggle = await screen.findByRole("button", { name: "Expand checkout (3)" });
+    expect(screen.getByText("checkout one")).toBeTruthy();
+    expect(screen.getByText("checkout two")).toBeTruthy();
+    expect(screen.queryByText("checkout three")).toBeNull();
+    expect(screen.getByText("auth one")).toBeTruthy();
+
+    fireEvent.click(toggle);
+    expect(screen.getByText("checkout three")).toBeTruthy();
+    const collapse = screen.getByRole("button", { name: "Collapse checkout (3)" });
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("reveals hidden rows from the Show more row", async () => {
+    renderPage("/agent/logs?group=service");
+    fireEvent.click(await screen.findByRole("button", { name: "Show 1 more in checkout" }));
+    expect(screen.getByText("checkout three")).toBeTruthy();
+  });
+
+  it("defaults to By service and keeps Flat available as an explicit URL choice", async () => {
+    renderPage();
+    await screen.findByRole("button", { name: "Expand checkout (3)" });
+    expect(screen.getByRole("tab", { name: "By service" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Flat" }).getAttribute("aria-selected")).toBe("false");
+
+    cleanup();
+    renderPage("/agent/logs?group=flat");
+    expect(await screen.findByText("checkout three")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Flat" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByRole("button", { name: /Expand checkout/ })).toBeNull();
+  });
+
+  it("falls back to the grouped default for an unknown group value", async () => {
+    renderPage("/agent/logs?group=unrecognized");
+    await screen.findByRole("button", { name: "Expand checkout (3)" });
+    expect(screen.getByRole("tab", { name: "By service" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Flat" }).getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("keeps unknown scope values inert and preserves them when clearing an unknown facet", async () => {
+    renderPage("/agent/logs?scope=unrecognized&f.service=missing");
+    expect(await screen.findByRole("button", { name: "Remove filter Service: missing" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Ignored/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter Service: missing" }));
+    expect(await screen.findByText("checkout one")).toBeTruthy();
+    expect(screen.getByTestId("search").textContent).toBe("?scope=unrecognized");
+  });
+
+  it("applies a deep-linked facet filter and shows it as a removable chip", async () => {
+    renderPage("/agent/logs?f.service=auth");
+    expect(await screen.findByText("auth one")).toBeTruthy();
+    expect(screen.queryByText("checkout one")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter Service: auth" }));
+    expect(await screen.findByText("checkout one")).toBeTruthy();
+  });
+
+  it("checks a value in the filter panel, including an unassigned service", async () => {
+    vi.mocked(api.listPatternsIndex).mockResolvedValue({
+      patterns: [...rows, listRow({ id: "u1", template: "unassigned one", service: "" })],
+      total: rows.length + 1,
+      next_offset: null,
+    });
+    renderPage();
+    await screen.findByText("auth one");
+    fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
+    const panel = screen.getByRole("dialog", { name: "Filters" });
+    const service = within(panel).getByRole("group", { name: /Service/ });
+
+    const auth = within(service).getByRole("checkbox", { name: /auth/ }) as HTMLInputElement;
+    fireEvent.click(auth);
+    expect(auth.checked).toBe(true);
+    expect(await screen.findByRole("button", { name: "Remove filter Service: auth" })).toBeTruthy();
+    expect(screen.queryByText("checkout one")).toBeNull();
+
+    const boxes = within(service).getAllByRole("checkbox") as HTMLInputElement[];
+    const unassigned = boxes.find((b) => !b.checked && !/auth|checkout/.test(b.closest("label")?.textContent ?? ""));
+    fireEvent.click(unassigned!);
+    expect(unassigned!.checked).toBe(true);
+    expect(await screen.findByText("unassigned one")).toBeTruthy();
   });
 });
 

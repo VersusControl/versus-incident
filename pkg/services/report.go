@@ -14,6 +14,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	m "github.com/VersusControl/versus-incident/pkg/models"
 
@@ -155,18 +156,23 @@ func reportAllow(key string, perMinute int) bool {
 // stable, sorted breakdown.
 var severityBands = []string{"critical", "high", "medium", "low", "unknown"}
 
-// severityBand maps a free-form severity/verdict label to one of the fixed
-// bands. The unknown band catches webhook incidents with no severity so a
-// row is never dropped.
-func severityBand(s string) string {
+// SeverityBand maps a free-form severity/verdict label to one of the fixed
+// bands. The synonym set mirrors the UI's normalizeSeverity (severity.ts) so a
+// severity the UI shows colored never lands in the gray unknown band here. The
+// unknown band still catches webhook incidents with no severity so a row is
+// never dropped. It is exported so every surface that buckets a severity — the
+// report and the service-detail histogram — collapses the same free-form label
+// to the same fixed band, and neither can be fragmented by an arbitrary label
+// arriving in a payload.
+func SeverityBand(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "critical", "fatal", "emergency":
+	case "critical", "fatal", "emergency", "crit", "p1", "sev1":
 		return "critical"
-	case "high", "error", "err":
+	case "high", "error", "err", "major", "p2", "sev2":
 		return "high"
-	case "medium", "warning", "warn":
+	case "medium", "warning", "warn", "med", "p3", "sev3":
 		return "medium"
-	case "low", "info", "notice":
+	case "low", "info", "notice", "informational", "minor", "p4", "p5":
 		return "low"
 	default:
 		return "unknown"
@@ -257,7 +263,7 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 			model.Open++
 		}
 
-		band := severityBand(reportSeverity(rec))
+		band := SeverityBand(reportSeverity(rec))
 		sevCounts[band]++
 		so := sevOriginCounts[band]
 		if origin == storage.OriginAIDetect {
@@ -271,7 +277,7 @@ func BuildAggregateReportModel(recs []*storage.IncidentRecord, window string, st
 		}
 
 		// Service tally (redacted label).
-		svcLabel := scrub(reportServiceName(rec))
+		svcLabel := scrub(ServiceLabel(rec))
 		if svcLabel == "" {
 			svcLabel = "unknown"
 		}
@@ -405,28 +411,38 @@ func buildTrend(recs []*storage.IncidentRecord, start, end time.Time, unit strin
 }
 
 // reportSeverity extracts a best-effort severity for one record from its
-// content (Severity, then Verdict). Raw — the caller bands it.
+// content through the shared extraction, which reads the SAME key set as the
+// UI's severityFromContent (severity.ts). Raw — the caller bands it.
+//
+// When the payload names no real severity, the record's agent verdict is used
+// purely to tint the chart. That fallback is report-local on purpose: a verdict
+// is operator-set free text, so it may colour a bar but must never reach the
+// shared severity that drives suppression floors and dedup fingerprints.
 func reportSeverity(rec *storage.IncidentRecord) string {
-	s := contentString(rec.Content, "Severity", "severity")
-	if s == "" {
-		s = contentString(rec.Content, "Verdict", "verdict")
+	if rec == nil {
+		return ""
 	}
-	return s
+	if s := ExtractSeverity(rec.Content); s != "" {
+		return s
+	}
+	return utils.PayloadString(rec.Content, "Verdict", "verdict")
 }
 
-// reportServiceName resolves the service label for one record: the durable
-// Service field, else a best-effort pull from content.
-func reportServiceName(rec *storage.IncidentRecord) string {
-	if rec.Service != "" {
-		return rec.Service
-	}
-	return contentString(rec.Content, "ServiceName", "Service", "service")
+// ServiceLabel resolves a record's display service through the shared record
+// helper: the durable Service column, else a best-effort pull from content.
+// The incidents list and the report both route through here so a legacy row
+// whose stored column predates the aligned key set still shows the same
+// service the detail derives from content.
+func ServiceLabel(rec *storage.IncidentRecord) string {
+	return rec.ServiceLabel()
 }
 
 // reportTitle resolves a display title for one record when the durable Title
-// is empty.
+// is empty, through the same shared extraction that fills the column, so a
+// legacy row whose column predates the aligned key set still reads the title
+// out of its content.
 func reportTitle(rec *storage.IncidentRecord) string {
-	return contentString(rec.Content, "AlertName", "Summary", "title", "alertname")
+	return ExtractTitle(rec.Content)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,8 +452,7 @@ func reportTitle(rec *storage.IncidentRecord) string {
 // RenderIncidentsReport renders the aggregate report PNG for a window
 // (preview / download). It is read-only over stored state.
 func RenderIncidentsReport(ctx context.Context, window string) (*core.ReportImage, error) {
-	cfg := config.GetConfig()
-	return renderReport(ctx, cfg, store, reportRenderer, reportScrubber(), window)
+	return renderReport(ctx, store, reportRenderer, reportScrubber(), window)
 }
 
 // SendIncidentsReport renders the aggregate report and delivers it to the
@@ -486,10 +501,12 @@ func buildWindowModel(st storage.Provider, scrubber core.Scrubber, settings Repo
 	if err != nil {
 		return core.ReportModel{}, err
 	}
-	return BuildAggregateReportModel(recs, window, start, end, unit, scrubber, settings.IncludeChart, loc), nil
+	model := BuildAggregateReportModel(recs, window, start, end, unit, scrubber, settings.IncludeChart, loc)
+	model.Title = settings.Title
+	return model, nil
 }
 
-func renderReport(ctx context.Context, cfg *config.Config, st storage.Provider, renderer core.ReportRenderer, scrubber core.Scrubber, window string) (*core.ReportImage, error) {
+func renderReport(ctx context.Context, st storage.Provider, renderer core.ReportRenderer, scrubber core.Scrubber, window string) (*core.ReportImage, error) {
 	settings := LoadReportSettings(st)
 	if renderer == nil {
 		return nil, ErrReportNoRenderer
@@ -537,7 +554,14 @@ func sendReport(ctx context.Context, cfg *config.Config, st storage.Provider, re
 	// senders (Teams/Viber/Lark) cannot leak unredacted fields; the
 	// already-redacted caption is the only text that travels.
 	carrier := &m.Incident{ID: "report-" + window}
-	att := core.Attachment{Filename: img.Filename, MIME: img.MIME, Data: img.Data, Caption: caption}
+	// When charts are included the report is a visual dashboard: image-capable
+	// channels get the image with NO caption. With charts off, keep the image +
+	// redacted caption. The caption stays redacted either way (DLP unchanged).
+	attCaption := caption
+	if model.IncludeCharts {
+		attCaption = ""
+	}
+	att := core.Attachment{Filename: img.Filename, MIME: img.MIME, Data: img.Data, Caption: attCaption}
 
 	out := &ReportOutcome{Window: window, Failed: map[string]string{}, Bytes: len(img.Data)}
 	for _, p := range targets {
@@ -550,6 +574,9 @@ func sendReport(ctx context.Context, cfg *config.Config, st storage.Provider, re
 			continue
 		}
 		if ts, ok := p.(core.TextSender); ok {
+			// Text-only channels (Teams/Viber/Lark) cannot render an image, so
+			// they still get the redacted fallback text even when charts are on
+			// — otherwise they'd receive nothing.
 			if err := ts.SendText(carrier, fallbackText); err != nil {
 				out.Failed[p.Name()] = err.Error()
 			} else {
@@ -617,7 +644,12 @@ func resolveReportChannels(explicit, defaultChannel string) []string {
 // redacted aggregate ReportModel — never from raw content.
 func reportCaption(model core.ReportModel) string {
 	var b strings.Builder
-	b.WriteString("Incident report — ")
+	title := strings.TrimSpace(model.Title)
+	if title == "" {
+		title = defaultReportTitle
+	}
+	b.WriteString(title)
+	b.WriteString(" — ")
 	b.WriteString(windowLabel(model.Window))
 	b.WriteString(": ")
 	b.WriteString(fmt.Sprintf("%d incident", model.Total))
@@ -697,31 +729,4 @@ func truncateRunes(s string, n int) string {
 		return string(r)
 	}
 	return string(r[:n]) + "…"
-}
-
-// contentString returns the first non-empty string value found at any of
-// the given keys (exact, then case-insensitive).
-func contentString(content map[string]interface{}, keys ...string) string {
-	if content == nil {
-		return ""
-	}
-	for _, k := range keys {
-		if v, ok := content[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	lower := map[string]interface{}{}
-	for k, v := range content {
-		lower[strings.ToLower(k)] = v
-	}
-	for _, k := range keys {
-		if v, ok := lower[strings.ToLower(k)]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	return ""
 }

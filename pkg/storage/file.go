@@ -1,9 +1,12 @@
 package storage
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // MaxIncidentsDefault is the default rolling cap for the file backend.
@@ -40,6 +45,32 @@ type fileProvider struct {
 	analysesLoaded bool
 }
 
+const fileBlobLockShardCount = 256
+
+const (
+	filePageMaxLimit     = 1000
+	filePageMaxBlobBytes = 1 << 20
+	filePageMaxBytes     = 16 << 20
+	fileTrieNodeBytes    = 33
+)
+
+var (
+	fileBlobLocks                [fileBlobLockShardCount]sync.Mutex
+	fileModelStateNamespaceLocks [fileBlobLockShardCount]sync.Mutex
+)
+
+func fileBlobLock(path string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(path))
+	return &fileBlobLocks[hash.Sum32()%fileBlobLockShardCount]
+}
+
+func fileModelStateNamespaceLock(path string) *sync.Mutex {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(path))
+	return &fileModelStateNamespaceLocks[hash.Sum32()%fileBlobLockShardCount]
+}
+
 // NewFile returns a Provider backed by the local filesystem.
 func NewFile(opts FileOptions) (Provider, error) {
 	dir := opts.DataDir
@@ -48,6 +79,9 @@ func NewFile(opts FileOptions) (Provider, error) {
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("storage: mkdir %s: %w", dir, err)
+	}
+	if err := validateSecureStorageRoot(dir); err != nil {
+		return nil, fmt.Errorf("storage: validate data directory %s: %w", dir, err)
 	}
 	max := opts.MaxIncidents
 	if max <= 0 {
@@ -72,6 +106,16 @@ func (p *fileProvider) blobPath(name string) string {
 }
 
 func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
+	if _, _, ok := parseModelStateName(name); ok {
+		data, err := readSecureModelStateBlob(context.Background(), p.dir, name, -1)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("storage: read blob %s: %w", name, err)
+		}
+		return data, nil
+	}
 	data, err := os.ReadFile(p.blobPath(name))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -83,12 +127,49 @@ func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
 }
 
 func (p *fileProvider) WriteBlob(name string, data []byte) error {
+	if _, _, ok := parseModelStateName(name); ok {
+		if err := writeSecureModelStateBlob(p.dir, name, data, true); err != nil {
+			return fmt.Errorf("storage: write blob %s: %w", name, err)
+		}
+		return nil
+	}
 	target := p.blobPath(name)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("storage: mkdir blob dir: %w", err)
 	}
 	if err := writeFileAtomicSync(target, data, 0o644); err != nil {
 		return fmt.Errorf("storage: write blob %s: %w", name, err)
+	}
+	return nil
+}
+
+func (p *fileProvider) WriteModelStateBlob(name string, data []byte) error {
+	_, key, indexed := parseModelStateName(name)
+	if !indexed || len(key) > 255 {
+		return ErrInvalidModelKey
+	}
+	lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+	lock.Lock()
+	defer lock.Unlock()
+	if err := writeSecureModelStateBlob(p.dir, name, data, true); err != nil {
+		return fmt.Errorf("storage: write blob %s: %w", name, err)
+	}
+	return nil
+}
+
+func (p *fileProvider) DeleteBlob(name string) error {
+	_, key, indexed := parseModelStateName(name)
+	if !indexed || len(key) > 255 {
+		return ErrUnsupported
+	}
+	lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+	lock.Lock()
+	defer lock.Unlock()
+	if err := deleteSecureModelStateBlob(p.dir, name); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("storage: remove blob %s: %w", name, err)
 	}
 	return nil
 }
@@ -102,6 +183,16 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 // untouched and the call returns written==false so the caller re-reads the
 // stored bytes via ReadBlob.
 func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error) {
+	if _, _, ok := parseModelStateName(name); ok {
+		lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+		lock.Lock()
+		defer lock.Unlock()
+		written, err := compareAndSwapSecureModelStateBlob(p.dir, name, nil, data)
+		if err != nil {
+			return false, fmt.Errorf("storage: create blob %s: %w", name, err)
+		}
+		return written, nil
+	}
 	target := p.blobPath(name)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
@@ -133,6 +224,56 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 	return true, nil
 }
 
+// CompareAndSwapBlob serializes updates by canonical blob path. File storage
+// is restricted to one process in HA configurations, so this coordinates all
+// provider instances that can address the same directory.
+func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	if _, _, ok := parseModelStateName(name); ok {
+		lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
+		lock.Lock()
+		defer lock.Unlock()
+		swapped, err := compareAndSwapSecureModelStateBlob(p.dir, name, expected, replacement)
+		if err != nil {
+			return false, fmt.Errorf("storage: compare-and-swap blob %s: %w", name, err)
+		}
+		return swapped, nil
+	}
+	target := p.blobPath(name)
+	lock := fileBlobLock(target)
+	lock.Lock()
+	defer lock.Unlock()
+	current, err := os.ReadFile(target)
+	if errors.Is(err, os.ErrNotExist) {
+		if expected != nil {
+			return false, nil
+		}
+		current = nil
+	} else if err != nil {
+		return false, fmt.Errorf("storage: read blob %s for compare-and-swap: %w", name, err)
+	} else if expected == nil {
+		return false, nil
+	}
+	if expected != nil && !bytes.Equal(current, expected) {
+		return false, nil
+	}
+	if replacement == nil {
+		if expected == nil {
+			return false, nil
+		}
+		if err := os.Remove(target); err != nil {
+			return false, fmt.Errorf("storage: remove blob %s: %w", name, err)
+		}
+		return true, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
+	}
+	if err := writeFileAtomicSync(target, replacement, 0o644); err != nil {
+		return false, fmt.Errorf("storage: compare-and-swap blob %s: %w", name, err)
+	}
+	return true, nil
+}
+
 // ListBlobs walks the data directory and returns every blob whose logical
 // name (the <DataDir>-relative path minus the ".json" suffix) begins with
 // prefix. The one-file-per-blob layout means a namespaced model-state name
@@ -140,6 +281,13 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 // naturally enumerates a whole namespace. In-flight ".json.tmp" files from
 // an atomic write are skipped (they don't carry the ".json" suffix).
 func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
+	if prefix == ModelStateNamespace || strings.HasPrefix(prefix, ModelStateNamespace+"/") {
+		out, err := listSecureModelStateBlobs(p.dir, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("storage: list blobs %q: %w", prefix, err)
+		}
+		return out, nil
+	}
 	var out []Blob
 	err := filepath.WalkDir(p.dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -168,6 +316,20 @@ func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
 	}
 	return out, nil
 }
+
+func (p *fileProvider) ListBlobsPage(ctx context.Context, prefix, cursor string, limit int) ([]Blob, error) {
+	page, err := p.ListBlobsPageBounded(ctx, prefix, cursor, limit)
+	return page.Blobs, err
+}
+
+func (p *fileProvider) ListBlobsPageBounded(ctx context.Context, prefix, cursor string, limit int) (BlobPage, error) {
+	return listSecureModelStatePage(ctx, p.dir, prefix, cursor, limit)
+}
+
+var (
+	errUnsafeFile   = errors.New("storage: unsafe non-regular file")
+	errFileTooLarge = errors.New("storage: file exceeds bounded read")
+)
 
 // writeFileAtomicSync writes data to a sibling tmp file, fsyncs it,
 // then renames over the target. The fsync between write and rename is
@@ -210,6 +372,180 @@ func writeFileAtomicSync(target string, data []byte, mode os.FileMode) error {
 // ---------------------------------------------------------------------------
 
 const incidentsFile = "incidents.json"
+
+const detectionEpisodesFile = "detection_episodes.json"
+
+type detectionEpisodesFileSchema struct {
+	Version  int                       `json:"version"`
+	Episodes []*memoryDetectionEpisode `json:"episodes"`
+	Active   map[string]string         `json:"active"`
+}
+
+func (p *fileProvider) loadDetectionEpisodesLocked(path string) (*memoryProvider, error) {
+	state := &memoryProvider{
+		episodes:          make(map[string]*memoryDetectionEpisode),
+		activeEpisodes:    make(map[string]string),
+		maxClosedEpisodes: p.maxIncidents,
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return state, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: read detection episodes: %w", err)
+	}
+	var file detectionEpisodesFileSchema
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("storage: parse detection episodes: %w", err)
+	}
+	for _, episode := range file.Episodes {
+		if episode != nil && episode.EpisodeID != "" {
+			state.episodes[episode.EpisodeID] = episode
+		}
+	}
+	for fingerprint, episodeID := range file.Active {
+		state.activeEpisodes[fingerprint] = episodeID
+	}
+	return state, nil
+}
+
+func (p *fileProvider) persistDetectionEpisodesLocked(path string, state *memoryProvider) error {
+	episodes := make([]*memoryDetectionEpisode, 0, len(state.episodes))
+	for _, episode := range state.episodes {
+		episodes = append(episodes, episode)
+	}
+	file := detectionEpisodesFileSchema{Version: 1, Episodes: episodes, Active: state.activeEpisodes}
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return fmt.Errorf("storage: marshal detection episodes: %w", err)
+	}
+	if err := writeFileAtomicSync(path, data, 0o644); err != nil {
+		return fmt.Errorf("storage: write detection episodes: %w", err)
+	}
+	return nil
+}
+
+func (p *fileProvider) RecordDetectionOccurrence(occurrence DetectionOccurrence) (DetectionEpisodeDecision, error) {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return DetectionEpisodeDecision{}, err
+	}
+	identity := normalizeDetectionIdentity(occurrence.Identity)
+	fingerprint, _ := DetectionIdentityFingerprint(identity)
+	if active := state.activeDetectionEpisode(fingerprint, identity); active != nil {
+		if incident, err := p.GetIncident(active.IncidentID); err == nil {
+			if incident.Resolved {
+				closed := occurrence.ReceivedAt.UTC()
+				if closed.IsZero() {
+					closed = time.Now().UTC()
+				}
+				active.ClosedAt = &closed
+				delete(state.activeEpisodes, active.Fingerprint)
+			} else {
+				state.incidents = append(state.incidents, incident)
+			}
+		} else if errors.Is(err, ErrNotFound) {
+			if active.PendingToken == "" && detectionNotificationDelivered(active.LastNotificationOutcome) {
+				closed := occurrence.ReceivedAt.UTC()
+				if closed.IsZero() {
+					closed = time.Now().UTC()
+				}
+				active.ClosedAt = &closed
+				delete(state.activeEpisodes, active.Fingerprint)
+			}
+		} else {
+			return DetectionEpisodeDecision{}, err
+		}
+	}
+	decision, err := state.RecordDetectionOccurrence(occurrence)
+	if err != nil {
+		if occurrence.ExistingOnly && errors.Is(err, ErrNotFound) {
+			if persistErr := p.persistDetectionEpisodesLocked(path, state); persistErr != nil {
+				return DetectionEpisodeDecision{}, persistErr
+			}
+		}
+		return DetectionEpisodeDecision{}, err
+	}
+	if err := p.persistDetectionEpisodesLocked(path, state); err != nil {
+		return DetectionEpisodeDecision{}, err
+	}
+	if occurrence.ExistingOnly {
+		incident, err := p.GetIncident(decision.IncidentID)
+		if err == nil {
+			applyDetectionEpisodeDecision(incident, decision)
+			if err := p.SaveDetectionIncident(incident); err != nil {
+				return decision, err
+			}
+		} else if !errors.Is(err, ErrNotFound) {
+			return decision, err
+		}
+	}
+	return decision, nil
+}
+
+func (p *fileProvider) CompleteDetectionNotification(completion DetectionNotificationCompletion) error {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return err
+	}
+	if err := state.CompleteDetectionNotification(completion); err != nil {
+		return err
+	}
+	if err := p.persistDetectionEpisodesLocked(path, state); err != nil {
+		return err
+	}
+	episode := state.episodes[completion.EpisodeID]
+	if episode == nil {
+		return nil
+	}
+	incident, err := p.GetIncident(episode.IncidentID)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	applyDetectionEpisodeDecision(incident, state.detectionEpisodeDecision(episode))
+	return p.SaveDetectionIncident(incident)
+}
+
+func (p *fileProvider) RenewDetectionNotificationClaim(renewal DetectionNotificationRenewal) error {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return err
+	}
+	if err := state.RenewDetectionNotificationClaim(renewal); err != nil {
+		return err
+	}
+	return p.persistDetectionEpisodesLocked(path, state)
+}
+
+func (p *fileProvider) CloseDetectionEpisodeByIncident(incidentID string, closedAt time.Time) error {
+	path := filepath.Join(p.dir, detectionEpisodesFile)
+	lock := fileBlobLock(path)
+	lock.Lock()
+	defer lock.Unlock()
+	state, err := p.loadDetectionEpisodesLocked(path)
+	if err != nil {
+		return err
+	}
+	if err := state.CloseDetectionEpisodeByIncident(incidentID, closedAt); err != nil {
+		return err
+	}
+	return p.persistDetectionEpisodesLocked(path, state)
+}
 
 type incidentsFileSchema struct {
 	Version   int               `json:"version"`
@@ -269,19 +605,41 @@ func (p *fileProvider) SaveIncident(rec *IncidentRecord) error {
 		return fmt.Errorf("storage: SaveIncident: missing id")
 	}
 	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	stored := CloneIncidentRecord(rec)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	// Update in place if the id already exists (e.g. ack flow).
 	for i, existing := range p.incidents {
 		if existing.ID == rec.ID {
-			p.incidents[i] = rec
+			mergeDetectionIncident(existing, stored)
+			p.incidents[i] = stored
 			return p.persistIncidentsLocked()
 		}
 	}
 
 	// Append + trim.
-	p.incidents = append(p.incidents, rec)
+	p.incidents = append(p.incidents, stored)
+	if over := len(p.incidents) - p.maxIncidents; over > 0 {
+		p.incidents = append([]*IncidentRecord(nil), p.incidents[over:]...)
+	}
+	return p.persistIncidentsLocked()
+}
+
+func (p *fileProvider) SaveDetectionIncident(rec *IncidentRecord) error {
+	if rec == nil || rec.ID == "" {
+		return fmt.Errorf("storage: SaveDetectionIncident: missing id")
+	}
+	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for index, existing := range p.incidents {
+		if existing.ID == rec.ID {
+			p.incidents[index] = detectionIncidentUpdate(existing, rec)
+			return p.persistIncidentsLocked()
+		}
+	}
+	p.incidents = append(p.incidents, CloneIncidentRecord(rec))
 	if over := len(p.incidents) - p.maxIncidents; over > 0 {
 		p.incidents = append([]*IncidentRecord(nil), p.incidents[over:]...)
 	}
@@ -306,8 +664,7 @@ func (p *fileProvider) GetIncident(id string) (*IncidentRecord, error) {
 	defer p.mu.RUnlock()
 	for _, rec := range p.incidents {
 		if rec.ID == id {
-			cp := *rec
-			return &cp, nil
+			return CloneIncidentRecord(rec), nil
 		}
 	}
 	return nil, ErrNotFound
@@ -323,8 +680,7 @@ func (p *fileProvider) ListIncidents(limit int) ([]*IncidentRecord, error) {
 	// Newest first.
 	out := make([]*IncidentRecord, 0, n)
 	for i := n - 1; i >= 0; i-- {
-		cp := *p.incidents[i]
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(p.incidents[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -366,6 +722,46 @@ func (p *fileProvider) CountIncidentsByStatus() (IncidentStatusCounts, error) {
 	return StatusCountsOf(p.incidents), nil
 }
 
+// CountIncidentsByStatusSince implements storage.IncidentWindowCounter over the
+// same single pass, dropping rows older than the window.
+func (p *fileProvider) CountIncidentsByStatusSince(since time.Time) (IncidentStatusCounts, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return StatusCountsSince(p.incidents, since), nil
+}
+
+func (p *fileProvider) CountIncidentsByServiceSince(orgID, service string, since time.Time) (int, map[string]int, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	count := 0
+	severities := make(map[string]int)
+	for _, rec := range p.incidents {
+		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
+			continue
+		}
+		count++
+		severities[utils.ExtractSeverity(rec.Content)]++
+	}
+	return count, severities, nil
+}
+
+func (p *fileProvider) ListIncidentsByServiceSince(orgID, service string, since time.Time, limit int) ([]*IncidentRecord, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]*IncidentRecord, 0)
+	for _, rec := range p.incidents {
+		if NormalizeOrgID(rec.OrgID) != NormalizeOrgID(orgID) || rec.ServiceLabel() != service || rec.CreatedAt.Before(since) {
+			continue
+		}
+		out = append(out, CloneIncidentRecord(rec))
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // ListIncidentsPage implements the optional storage.IncidentPager
 // capability: one bounded, newest-first page over the in-memory slice,
 // skipping offset matches and returning at most limit rows. The origin
@@ -391,8 +787,7 @@ func (p *fileProvider) ListIncidentsPage(origin string, offset, limit int) ([]*I
 			skipped++
 			continue
 		}
-		cp := *rec
-		out = append(out, &cp)
+		out = append(out, CloneIncidentRecord(rec))
 		if len(out) >= limit {
 			break
 		}
@@ -466,16 +861,17 @@ func (p *fileProvider) SaveAnalysis(rec *AnalysisRecord) error {
 	if rec == nil || rec.ID == "" {
 		return fmt.Errorf("storage: SaveAnalysis: missing id")
 	}
-	rec.OrgID = NormalizeOrgID(rec.OrgID)
+	stored := CloneAnalysisRecord(rec)
+	stored.OrgID = NormalizeOrgID(stored.OrgID)
 	p.analysesMu.Lock()
 	defer p.analysesMu.Unlock()
 	for i, existing := range p.analyses {
 		if existing.ID == rec.ID {
-			p.analyses[i] = rec
+			p.analyses[i] = stored
 			return p.persistAnalysesLocked()
 		}
 	}
-	p.analyses = append(p.analyses, rec)
+	p.analyses = append(p.analyses, stored)
 	if over := len(p.analyses) - maxAnalysesDefault; over > 0 {
 		p.analyses = append([]*AnalysisRecord(nil), p.analyses[over:]...)
 	}
@@ -487,8 +883,7 @@ func (p *fileProvider) GetAnalysis(id string) (*AnalysisRecord, error) {
 	defer p.analysesMu.RUnlock()
 	for _, rec := range p.analyses {
 		if rec.ID == id {
-			cp := *rec
-			return &cp, nil
+			return CloneAnalysisRecord(rec), nil
 		}
 	}
 	return nil, ErrNotFound
@@ -506,8 +901,7 @@ func (p *fileProvider) ListAnalysesByIncident(incidentID string, limit int) ([]*
 		if p.analyses[i].IncidentID != incidentID {
 			continue
 		}
-		cp := *p.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(p.analyses[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -524,8 +918,7 @@ func (p *fileProvider) ListAnalyses(limit int) ([]*AnalysisRecord, error) {
 	}
 	out := make([]*AnalysisRecord, 0, n)
 	for i := n - 1; i >= 0; i-- {
-		cp := *p.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(p.analyses[i]))
 		if limit > 0 && len(out) >= limit {
 			break
 		}
@@ -560,8 +953,7 @@ func (p *fileProvider) ListAnalysesPage(offset, limit int) ([]*AnalysisRecord, e
 			skipped++
 			continue
 		}
-		cp := *p.analyses[i]
-		out = append(out, &cp)
+		out = append(out, CloneAnalysisRecord(p.analyses[i]))
 		if len(out) >= limit {
 			break
 		}

@@ -72,9 +72,10 @@ const DefaultCatalogPageSize = 1000
 // pattern template/id/service (patterns) or the service name (services); an
 // empty Search returns the unfiltered ordering.
 type CatalogPageOptions struct {
-	Offset int
-	Limit  int
-	Search string
+	Offset  int
+	Limit   int
+	Search  string
+	Service string
 }
 
 // ServiceRow is one ordered service list row: the service name plus its
@@ -106,6 +107,15 @@ type CatalogPager interface {
 	// FirstSeen ascending (name ascending as a stable tie-break), filtered to
 	// opts.Search when set, plus the whole-(filtered-)set total.
 	ListServicesPage(opts CatalogPageOptions) (services []ServiceRow, total int, err error)
+}
+
+// CatalogEntityLookup is the OPTIONAL exact-read capability for consumers
+// that need one logical catalog entity without materializing Snapshot. The
+// returned entity follows the same organization precedence and tombstone
+// rules as Snapshot; a missing or tombstoned entity returns nil, nil.
+type CatalogEntityLookup interface {
+	LookupPattern(id string) (*Pattern, error)
+	LookupService(name string) (*ServiceInfo, error)
 }
 
 // CatalogEditKind discriminates which operator mutation a CatalogEdit carries.

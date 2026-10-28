@@ -52,6 +52,7 @@ export default {
           critical: { DEFAULT: v("sev-critical"), solid: v("sev-critical-solid") },
           high: { DEFAULT: v("sev-high"), solid: v("sev-high-solid") },
           warn: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid") },
+          warning: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid") },
           info: { DEFAULT: v("sev-info"), solid: v("sev-info-solid") },
           ok: { DEFAULT: v("sev-ok"), solid: v("sev-ok-solid") },
         },

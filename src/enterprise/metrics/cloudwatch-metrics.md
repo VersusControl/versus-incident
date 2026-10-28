@@ -12,7 +12,7 @@ baseline, and moving through the three modes.
 
 ## What you'll build
 
-![Versus Incident Metrics](../../docs/images/cloudwatch-metrics-guide.png)
+![CloudWatch metrics flow: Versus reads AWS CloudWatch namespaces over a read only connection. Inside Versus Enterprise the cloudwatch_metrics source calls ListMetrics and GetMetricData, standing intelligence learns each baseline, and the detect worker classifies deviations with AI before raising an incident to the admin UI and on call channels](../../docs/images/cloudwatch-metrics-guide.svg)
 
 You give the source a **region**. It scans CloudWatch on a cadence, picks a
 bounded set of metrics to watch, learns what each
@@ -284,7 +284,7 @@ docker compose -f docker-compose.cloudwatch.yml down -v
 
 | Symptom | Cause / fix |
 |---|---|
-| `requires Versus Enterprise` on every tick, `sources=0`, `mode=community` | The license is missing the **`intelligence`** feature (or you're on an OSS build). Mint a key that includes `intelligence`. This is the open-core line: OSS keeps only the on-demand `query_metrics` tool, not the standing source. |
+| `requires Versus Enterprise` on every tick, `sources=0`, `mode=community` | The license is missing the **`intelligence`** feature (or you're on an OSS build). |
 | Boot fails with an invalid-region / credential error | `AWS_REGION` must be set and **unquoted** in `.env` (a quoted value like `"us-east-1"` is treated as an invalid region). Confirm the credentials resolve — `aws sts get-caller-identity` in the same shell — and that the IAM principal has `cloudwatch:ListMetrics` + `cloudwatch:GetMetricData`. |
 | `discovered 0 signal(s)` | The region has no CloudWatch metrics the source can attribute to a service, or your IAM lacks `ListMetrics`. Pick a region with live resources; metrics with **no dimensions are skipped** (no deterministic service). |
 | Signals discovered, but baselines never reach **Ready to detect** | The discovered metrics have **no recent datapoints** (common on idle accounts). Point at a region/service with live traffic, or verify with `aws cloudwatch get-metric-data` for one discovered service. |

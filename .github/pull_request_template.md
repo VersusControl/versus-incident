@@ -29,7 +29,6 @@ motivation if no issue exists. -->
 
 - [ ] `go test ./...` passes locally
 - [ ] `go vet ./...` is clean
-- [ ] Code is `gofmt`'d
 - [ ] Added or updated tests for the change
 - [ ] Updated user-facing docs under `src/` if behavior changes
 - [ ] Updated `ROADMAP.md` if this closes a roadmap item

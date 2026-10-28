@@ -28,7 +28,7 @@ admins — a control to turn the feature on and set how often it re-reviews.
 
 ## How it works
 
-![Versus Incident SLO Flow](../docs/images/versus-incident-slo-flow.png)
+![From learned signals to an adopted objective: Versus proposes an SLI, the number you measure such as the share of requests that succeed, then sets an SLO, the target for that number such as 99.9% over 30 days, and you decide whether to adopt it. Advisory only, Versus never fires on an SLO](../docs/images/versus-incident-slo-flow.svg)
 
 On its cadence, for every service the agent has seen, it gathers a **redacted,
 derived** bundle of that service's signals — no raw logs, no raw metric series,
@@ -59,6 +59,13 @@ The advisor needs AI. Enable it and set an API key from the admin UI — see
 [Getting Started → activate the AI key](./getting-started.md). Until AI is on
 and a key is present, the enable toggle on the **SLOs** page stays disabled and
 shows the reason.
+
+When changing to OpenAI, DeepSeek, Qwen, Claude, or Gemini, enter a new key for
+the selected provider in the same save. A provider-only change is rejected with
+HTTP 422 and `code: provider_key_required`, leaving the previous provider, key,
+and enabled state active. Switching to Ollama clears the stored runtime key.
+Use **Revert to YAML floor** to remove the override and return to the provider
+and key configured in YAML.
 
 ## 2. Enable the feature and set the cadence
 

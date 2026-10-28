@@ -19,6 +19,7 @@ func cloneConfig(src *Config) *Config {
 		Redis:         cloneRedisConfig(src.Redis),
 		Storage:       cloneStorageConfig(src.Storage),
 		Agent:         cloneAgentConfig(src.Agent),
+		Connectors:    cloneConnectorsConfig(src.Connectors),
 	}
 
 	return cloned
@@ -63,10 +64,11 @@ func cloneAlertConfig(src AlertConfig) AlertConfig {
 // Helper function to deep clone the SlackConfig struct
 func cloneSlackConfig(src SlackConfig) SlackConfig {
 	return SlackConfig{
-		Enable:       src.Enable,
-		Token:        src.Token,
-		ChannelID:    src.ChannelID,
-		TemplatePath: src.TemplatePath,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		Token:                       src.Token,
+		ChannelID:                   src.ChannelID,
+		TemplatePath:                src.TemplatePath,
 		MessageProperties: SlackMessageProperties{
 			DisableButton: src.MessageProperties.DisableButton,
 			ButtonText:    src.MessageProperties.ButtonText,
@@ -78,38 +80,41 @@ func cloneSlackConfig(src SlackConfig) SlackConfig {
 // Helper function to deep clone the TelegramConfig struct
 func cloneTelegramConfig(src TelegramConfig) TelegramConfig {
 	return TelegramConfig{
-		Enable:       src.Enable,
-		BotToken:     src.BotToken,
-		ChatID:       src.ChatID,
-		TemplatePath: src.TemplatePath,
-		UseProxy:     src.UseProxy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		BotToken:                    src.BotToken,
+		ChatID:                      src.ChatID,
+		TemplatePath:                src.TemplatePath,
+		UseProxy:                    src.UseProxy,
 	}
 }
 
 // Helper function to deep clone the ViberConfig struct
 func cloneViberConfig(src ViberConfig) ViberConfig {
 	return ViberConfig{
-		Enable:       src.Enable,
-		APIType:      src.APIType,
-		BotToken:     src.BotToken,
-		UserID:       src.UserID,
-		TemplatePath: src.TemplatePath,
-		ChannelID:    src.ChannelID,
-		UseProxy:     src.UseProxy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		APIType:                     src.APIType,
+		BotToken:                    src.BotToken,
+		UserID:                      src.UserID,
+		TemplatePath:                src.TemplatePath,
+		ChannelID:                   src.ChannelID,
+		UseProxy:                    src.UseProxy,
 	}
 }
 
 // Helper function to deep clone the EmailConfig struct
 func cloneEmailConfig(src EmailConfig) EmailConfig {
 	return EmailConfig{
-		Enable:       src.Enable,
-		SMTPHost:     src.SMTPHost,
-		SMTPPort:     src.SMTPPort,
-		Username:     src.Username,
-		Password:     src.Password,
-		To:           src.To,
-		Subject:      src.Subject,
-		TemplatePath: src.TemplatePath,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		SMTPHost:                    src.SMTPHost,
+		SMTPPort:                    src.SMTPPort,
+		Username:                    src.Username,
+		Password:                    src.Password,
+		To:                          src.To,
+		Subject:                     src.Subject,
+		TemplatePath:                src.TemplatePath,
 	}
 }
 
@@ -125,10 +130,11 @@ func cloneMSTeamsConfig(src MSTeamsConfig) MSTeamsConfig {
 	}
 
 	return MSTeamsConfig{
-		Enable:           src.Enable,
-		TemplatePath:     src.TemplatePath,
-		PowerAutomateURL: src.PowerAutomateURL,
-		OtherPowerURLs:   otherPowerURLsCopy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		TemplatePath:                src.TemplatePath,
+		PowerAutomateURL:            src.PowerAutomateURL,
+		OtherPowerURLs:              otherPowerURLsCopy,
 	}
 }
 
@@ -144,11 +150,12 @@ func cloneLarkConfig(src LarkConfig) LarkConfig {
 	}
 
 	return LarkConfig{
-		Enable:           src.Enable,
-		WebhookURL:       src.WebhookURL,
-		TemplatePath:     src.TemplatePath,
-		OtherWebhookURLs: otherWebhookURLsCopy,
-		UseProxy:         src.UseProxy,
+		KubernetesIssueTemplatePath: src.KubernetesIssueTemplatePath,
+		Enable:                      src.Enable,
+		WebhookURL:                  src.WebhookURL,
+		TemplatePath:                src.TemplatePath,
+		OtherWebhookURLs:            otherWebhookURLsCopy,
+		UseProxy:                    src.UseProxy,
 	}
 }
 
@@ -337,6 +344,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		AI: AgentAIConfig{
 			Enable:          src.AI.Enable,
 			Provider:        src.AI.Provider,
+			BaseURL:         src.AI.BaseURL,
 			APIKey:          src.AI.APIKey,
 			Model:           src.AI.Model,
 			Temperature:     src.AI.Temperature,
@@ -345,6 +353,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			CacheTTL:        src.AI.CacheTTL,
 			Detect:          cloneAgentAITaskConfig(src.AI.Detect),
 			Analyze:         cloneAgentAIAnalyzeConfig(src.AI.Analyze),
+			Chat:            cloneAgentAITaskConfig(src.AI.Chat),
 		},
 	}
 
@@ -358,16 +367,19 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 		cloned.Sources = make([]AgentSourceConfig, len(src.Sources))
 		for i, s := range src.Sources {
 			c := AgentSourceConfig{
-				Name:   s.Name,
-				Type:   s.Type,
-				Enable: s.Enable,
+				Name:              s.Name,
+				Type:              s.Type,
+				Enable:            s.Enable,
+				KubernetesCluster: s.KubernetesCluster,
 				Elasticsearch: AgentElasticsearchSourceConfig{
 					Username:           s.Elasticsearch.Username,
 					Password:           s.Elasticsearch.Password,
 					APIKey:             s.Elasticsearch.APIKey,
 					InsecureSkipVerify: s.Elasticsearch.InsecureSkipVerify,
+					AllowLoopback:      s.Elasticsearch.AllowLoopback,
 					Index:              s.Elasticsearch.Index,
 					TimeField:          s.Elasticsearch.TimeField,
+					TieBreakerField:    s.Elasticsearch.TieBreakerField,
 					Query:              s.Elasticsearch.Query,
 					MessageField:       s.Elasticsearch.MessageField,
 					SeverityField:      s.Elasticsearch.SeverityField,
@@ -394,6 +406,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					BearerToken:        s.Loki.BearerToken,
 					InsecureSkipVerify: s.Loki.InsecureSkipVerify,
 					Query:              s.Loki.Query,
+					ServiceLabel:       s.Loki.ServiceLabel,
 					SeverityField:      s.Loki.SeverityField,
 					PageSize:           s.Loki.PageSize,
 				},
@@ -403,6 +416,7 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					LogStreamPrefix: s.CloudWatchLogs.LogStreamPrefix,
 					FilterPattern:   s.CloudWatchLogs.FilterPattern,
 					PageSize:        s.CloudWatchLogs.PageSize,
+					ReorderWindow:   s.CloudWatchLogs.ReorderWindow,
 				},
 				Graylog: AgentGraylogSourceConfig{
 					Address:            s.Graylog.Address,
@@ -417,6 +431,8 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					PageSize:           s.Graylog.PageSize,
 				},
 				Splunk: AgentSplunkSourceConfig{
+					Owner:              s.Splunk.Owner,
+					App:                s.Splunk.App,
 					Address:            s.Splunk.Address,
 					Token:              s.Splunk.Token,
 					Username:           s.Splunk.Username,
@@ -427,6 +443,18 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 					MessageField:       s.Splunk.MessageField,
 					SeverityField:      s.Splunk.SeverityField,
 					PageSize:           s.Splunk.PageSize,
+				},
+				Signoz: AgentSignozSourceConfig{
+					Address:              s.Signoz.Address,
+					APIKey:               s.Signoz.APIKey,
+					InsecureSkipVerify:   s.Signoz.InsecureSkipVerify,
+					AllowLoopback:        s.Signoz.AllowLoopback,
+					AllowPrivateNetworks: s.Signoz.AllowPrivateNetworks,
+					Query:                s.Signoz.Query,
+					MessageField:         s.Signoz.MessageField,
+					SeverityField:        s.Signoz.SeverityField,
+					PageSize:             s.Signoz.PageSize,
+					ReorderWindow:        s.Signoz.ReorderWindow,
 				},
 			}
 			if s.Elasticsearch.Addresses != nil {
@@ -446,6 +474,12 @@ func cloneAgentConfig(src AgentConfig) AgentConfig {
 			}
 			if s.Splunk.ExtraFields != nil {
 				c.Splunk.ExtraFields = append([]string(nil), s.Splunk.ExtraFields...)
+			}
+			if s.Signoz.ExtraFields != nil {
+				c.Signoz.ExtraFields = append([]string(nil), s.Signoz.ExtraFields...)
+			}
+			if s.Signoz.RootCAs != nil {
+				c.Signoz.RootCAs = s.Signoz.RootCAs.Clone()
 			}
 			if s.Options != nil {
 				c.Options = cloneAnyMap(s.Options)
@@ -479,8 +513,18 @@ func cloneToolsConfig(src ToolsConfig) ToolsConfig {
 		}
 	}
 	out.FindRunbook = src.FindRunbook
-	out.QueryMetrics = src.QueryMetrics
-	out.QueryTraces = src.QueryTraces
+	return out
+}
+
+func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
+	out := src
+	out.Kubernetes.ChangeCapture = src.Kubernetes.ChangeCapture
+	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
+	out.Kubernetes.Clusters = append([]KubernetesClusterConfig(nil), src.Kubernetes.Clusters...)
+	for index := range out.Kubernetes.Clusters {
+		out.Kubernetes.Clusters[index].ChangeCapture = src.Kubernetes.Clusters[index].ChangeCapture
+		out.Kubernetes.Clusters[index].EndpointCIDRs = append([]string(nil), src.Kubernetes.Clusters[index].EndpointCIDRs...)
+	}
 	return out
 }
 

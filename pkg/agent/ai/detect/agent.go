@@ -10,6 +10,7 @@ package detect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -26,7 +27,8 @@ import (
 // Agent is the detect-kind AIAgent. It binds the resolved per-task
 // config, the Eino chat model, and a sample extractor.
 type Agent struct {
-	cfg config.AgentAIConfig
+	cfg     config.AgentAIConfig
+	runtime einowrap.RuntimeAI
 	// chat is the holder that lazily (re)builds the tool-free Eino base
 	// chat model. We type its artifact as BaseChatModel (not
 	// ToolCallingChatModel) so the compiler — and the structural guard in
@@ -52,10 +54,9 @@ type Options struct {
 	BaseURL string
 	// Timeout caps each chat call. Defaults to 30s.
 	Timeout time.Duration
-	// AuthKeyFunc is an OPTIONAL per-request Authorization override passed
-	// straight to the chat model's transport. Nil (the OSS default) leaves
-	// the YAML-keyed header untouched.
-	AuthKeyFunc func(ctx context.Context) (key string, ok bool)
+	// RuntimeKeyFunc is an optional per-request provider credential override.
+	// Nil keeps the configured YAML credential.
+	RuntimeKeyFunc func(ctx context.Context) (key string, ok bool)
 
 	// Runtime folds optional runtime overrides (provider / enabled / key
 	// state) into the model holder's rebuild signature. The zero value (the
@@ -67,19 +68,20 @@ type Options struct {
 // detect task (see config.AgentAIConfig.Resolve).
 func New(ctx context.Context, cfg config.AgentAIConfig, opts Options) (*Agent, error) {
 	holder := einowrap.NewChatModelHolder(cfg, einowrap.Options{
-		HTTPClient:  opts.HTTPClient,
-		BaseURL:     opts.BaseURL,
-		Timeout:     opts.Timeout,
-		AuthKeyFunc: opts.AuthKeyFunc,
+		HTTPClient:     opts.HTTPClient,
+		BaseURL:        opts.BaseURL,
+		Timeout:        opts.Timeout,
+		RuntimeKeyFunc: opts.RuntimeKeyFunc,
 	}, opts.Runtime)
 	// Build once up front so a bad config (empty model, explicitly-set
 	// unknown provider) still fails fast at construction, exactly as the
 	// pre-holder wiring did.
 	if _, err := holder.Get(ctx); err != nil {
-		return nil, err
+		return nil, safeDetectProviderError(ctx, effectiveProvider(ctx, cfg.Provider, opts.Runtime), cfg.Model, err)
 	}
 	return &Agent{
 		cfg:      cfg,
+		runtime:  opts.Runtime,
 		chat:     holder,
 		SampleFn: defaultSampleFn,
 	}, nil
@@ -132,7 +134,7 @@ func (a *Agent) analyze(ctx context.Context, r core.AgentResult) (*core.AICallRe
 	// so a steady tick reuses the cached model at no cost.
 	chat, err := a.chat.Get(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("detect: build chat model: %w", err)
+		return nil, safeDetectProviderError(ctx, effectiveProvider(ctx, a.cfg.Provider, a.runtime), a.cfg.Model, err)
 	}
 
 	start := time.Now()
@@ -142,7 +144,7 @@ func (a *Agent) analyze(ctx context.Context, r core.AgentResult) (*core.AICallRe
 	})
 	durationMs := time.Since(start).Milliseconds()
 	if err != nil {
-		return nil, fmt.Errorf("detect: chat: %w", err)
+		return nil, safeDetectProviderError(ctx, effectiveProvider(ctx, a.cfg.Provider, a.runtime), a.cfg.Model, err)
 	}
 	if out == nil {
 		return nil, fmt.Errorf("detect: empty response")
@@ -168,6 +170,28 @@ func (a *Agent) analyze(ctx context.Context, r core.AgentResult) (*core.AICallRe
 		DurationMs:  durationMs,
 		Model:       a.cfg.Model,
 	}, nil
+}
+
+func effectiveProvider(ctx context.Context, configured string, runtime einowrap.RuntimeAI) string {
+	if runtime.Provider != nil {
+		if provider, ok := runtime.Provider(ctx); ok && einowrap.IsSupportedProvider(provider) {
+			return provider
+		}
+	}
+	if strings.TrimSpace(configured) == "" {
+		return einowrap.DefaultProvider
+	}
+	return configured
+}
+
+func safeDetectProviderError(ctx context.Context, provider, model string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("detect: run timed out: %w", context.DeadlineExceeded)
+	}
+	return einowrap.SafeProviderError(provider, model, err)
 }
 
 func defaultSampleFn(r core.AgentResult) []string {

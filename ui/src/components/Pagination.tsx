@@ -1,6 +1,6 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import clsx from "clsx";
-import type { PaginationState } from "@/lib/pagination";
+import type { CursorPaginationState, PaginationState } from "@/lib/pagination";
 
 // Pagination — the single client-side pager wired into every agent admin
 // table. Page size is fixed at 100 (PAGE_SIZE): the founder hit a 2000+ row
@@ -10,9 +10,12 @@ import type { PaginationState } from "@/lib/pagination";
 // renders nothing when everything fits on one page so small tables stay clean.
 export function Pagination({
   state,
+  noun,
   className,
 }: {
   state: PaginationState;
+  // noun names what is counted when it isn't rows, e.g. "services".
+  noun?: string;
   className?: string;
 }) {
   const { page, pageCount, total, start, end, setPage } = state;
@@ -30,6 +33,7 @@ export function Pagination({
     >
       <span className="tabular-nums">
         {fmt(displayStart)}–{fmt(end)} of {fmt(total)}
+        {noun ? ` ${noun}` : null}
       </span>
       <div className="flex items-center gap-1">
         <button
@@ -55,5 +59,25 @@ export function Pagination({
         </button>
       </div>
     </div>
+  );
+}
+
+export function CursorPagination({ state, next, className, busy = false }: { state: CursorPaginationState; next?: string; className?: string; busy?: boolean }) {
+  // A list with one page has nowhere to go: "Page 1" beside two disabled
+  // buttons is a control that cannot act, so the pager only appears once
+  // another page exists in either direction.
+  if (!next && !state.canPrevious) return null;
+  return (
+    <nav aria-label="Page navigation" className={clsx("flex items-center justify-between gap-2 border-t border-ink-500/40 px-3 py-2 text-2xs text-ink-300", className)}>
+      <span className="tabular-nums">Page {state.page}</span>
+      <div className="flex items-center gap-1">
+        <button type="button" className="btn px-2 py-1" disabled={busy || !state.canPrevious} onClick={state.previousPage} aria-label="Previous page">
+          <ChevronLeft size={12} aria-hidden /> Prev
+        </button>
+        <button type="button" className="btn px-2 py-1" disabled={busy || !next || next === state.cursor} onClick={() => state.nextPage(next)} aria-label="Next page">
+          Next <ChevronRight size={12} aria-hidden />
+        </button>
+      </div>
+    </nav>
   );
 }

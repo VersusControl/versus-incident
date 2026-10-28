@@ -84,6 +84,8 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      # Local Redis is plaintext — dial without TLS (matches the run harness).
+      REDIS_TLS: "false"
       SLACK_ENABLE: ${SLACK_ENABLE:-false}
       SLACK_TOKEN: ${SLACK_TOKEN:-}
       SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}

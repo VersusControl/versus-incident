@@ -1,0 +1,331 @@
+package kubernetes
+
+import (
+	"context"
+	"math"
+	"math/big"
+	"sort"
+	"strings"
+	"time"
+
+	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+)
+
+type SyncStatus struct {
+	State      string  `json:"state"`
+	AgeSeconds float64 `json:"age_s"`
+	Partial    bool    `json:"partial"`
+	// Progress is present only during a cluster's first sync.
+	Progress *SyncProgress `json:"progress,omitempty"`
+	// Pending lists resource IDs this view needs that are still loading after
+	// the core generation; PendingKinds counts all resource types still loading.
+	Pending      []string `json:"pending,omitempty"`
+	PendingKinds int      `json:"pending_kinds,omitempty"`
+}
+
+type IssueOptions struct {
+	unpaged        bool
+	Namespace      string
+	Severity       string
+	Kind           string
+	Limit          int
+	Cursor         string
+	Broken         bool
+	IncludeChanges bool
+	RootUID        string
+	targetObject   *ObjectRef
+}
+
+type Issue struct {
+	Root          ObjectRef                 `json:"root"`
+	Rule          string                    `json:"rule"`
+	Severity      string                    `json:"severity"`
+	Count         int                       `json:"count"`
+	Examples      []ObjectRef               `json:"examples,omitempty"`
+	FirstSeen     time.Time                 `json:"first_seen,omitempty"`
+	LastSeen      time.Time                 `json:"last_seen,omitempty"`
+	Broken        bool                      `json:"broken,omitempty"`
+	Of            int                       `json:"of,omitempty"`
+	BrokeAt       *time.Time                `json:"broke_at,omitempty"`
+	BrokeAtSource string                    `json:"broke_at_source,omitempty"`
+	Evidence      *kubebreaks.Evidence      `json:"evidence,omitempty"`
+	Changes       []kubebreaks.LinkedChange `json:"changes,omitempty"`
+	MoreChanges   int                       `json:"more_changes,omitempty"`
+	History       string                    `json:"history,omitempty"`
+	Gaps          []kubechanges.Gap         `json:"gaps,omitempty"`
+	Rebuilt       []string                  `json:"rebuilt,omitempty"`
+	Untracked     []string                  `json:"untracked,omitempty"`
+	Partial       bool                      `json:"partial,omitempty"`
+	// Pending lists resource IDs whose evidence is still loading; History
+	// and Changes may fill in once they are listed.
+	Pending []string `json:"pending,omitempty"`
+}
+
+type BrokenTotals struct {
+	Total      int            `json:"total"`
+	BySeverity map[string]int `json:"by_severity"`
+}
+
+type IssuePage struct {
+	Items     []Issue          `json:"items"`
+	Totals    map[string]int   `json:"totals"`
+	Truncated bool             `json:"truncated"`
+	Next      string           `json:"next,omitempty"`
+	Partial   []PartialFailure `json:"partial_failures,omitempty"`
+	Sync      SyncStatus       `json:"sync"`
+	Broken    BrokenTotals     `json:"broken"`
+}
+
+type TopOptions struct {
+	Kind      string
+	Namespace string
+	Sort      string
+	Limit     int
+}
+
+type TopItem struct {
+	ResourceUsage
+	RequestCPU    string     `json:"request_cpu,omitempty"`
+	RequestMemory string     `json:"request_memory,omitempty"`
+	Owner         *ObjectRef `json:"owner,omitempty"`
+}
+
+type TopPage struct {
+	Items        []TopItem        `json:"items"`
+	Total        int              `json:"total"`
+	Truncated    bool             `json:"truncated"`
+	Availability string           `json:"availability"`
+	Fresh        bool             `json:"fresh"`
+	Partial      []PartialFailure `json:"partial_failures,omitempty"`
+	Sync         SyncStatus       `json:"sync"`
+}
+
+// Issues returns bounded findings from projected cluster resources.
+func (service *Service) Issues(ctx context.Context, options IssueOptions) (IssuePage, error) {
+	return service.issuesSnapshot(ctx, options)
+}
+
+// Top returns the highest-usage pods or nodes from the Metrics API.
+func (service *Service) Top(ctx context.Context, options TopOptions) (TopPage, error) {
+	if options.Sort == "" {
+		options.Sort = "cpu"
+	}
+	if options.Kind != "pod" && options.Kind != "node" || options.Namespace != "" && !safeSegment(options.Namespace) || options.Sort != "cpu" && options.Sort != "memory" {
+		return TopPage{}, ErrInvalidArguments
+	}
+	if options.Kind == "node" && options.Namespace != "" {
+		return TopPage{}, ErrInvalidArguments
+	}
+	if options.Limit <= 0 || options.Limit > 50 {
+		options.Limit = 20
+	}
+	usage, err := service.cachedUsage(ctx, options.Namespace, true)
+	if err != nil {
+		return TopPage{}, err
+	}
+	items := usage.Pods
+	status := usage.PodMetrics
+	if options.Kind == "node" {
+		items = usage.Nodes
+		status = usage.NodeMetrics
+	}
+	result := TopPage{Availability: status.Availability, Fresh: status.Fresh, Partial: append([]PartialFailure(nil), usage.Partial...), Sync: SyncStatus{State: "direct", Partial: !status.Fresh || len(usage.Partial) > 0}}
+	if usage.Availability == "syncing" {
+		result.Availability, result.Sync = "syncing", service.withSyncProgress(SyncStatus{State: "syncing"})
+		return result, nil
+	}
+	result.Total = len(items)
+	for _, item := range items {
+		result.Items = append(result.Items, TopItem{ResourceUsage: item})
+	}
+	if options.Kind == "pod" && len(result.Items) > 0 {
+		pods, listErr := service.cachedList(ctx, ListOptions{ResourceID: "core~v1~pods", Namespace: options.Namespace})
+		if listErr != nil {
+			result.Partial = append(result.Partial, PartialFailure{ResourceID: "core~v1~pods", Class: errorClass(listErr)})
+			result.Sync.Partial = true
+		} else {
+			lookup := make(map[string]ProjectedResource, len(pods.Items))
+			for _, pod := range pods.Items {
+				lookup[pod.Namespace+"/"+pod.Name] = pod
+			}
+			for index := range result.Items {
+				pod, exists := lookup[result.Items[index].Namespace+"/"+result.Items[index].Name]
+				if !exists {
+					continue
+				}
+				result.Items[index].RequestCPU = summaryString(pod.Summary, "requested_cpu")
+				result.Items[index].RequestMemory = summaryString(pod.Summary, "requested_memory")
+				if len(pod.Owners) > 0 {
+					owner := pod.Owners[0]
+					owner.Namespace = pod.Namespace
+					result.Items[index].Owner = &owner
+				}
+			}
+			result.Partial = append(result.Partial, pods.Partial...)
+			result.Sync.Partial = result.Sync.Partial || pods.Truncated || len(pods.Partial) > 0
+		}
+	}
+	sort.SliceStable(result.Items, func(i, j int) bool {
+		left := triageQuantity(result.Items[i].CPU)
+		right := triageQuantity(result.Items[j].CPU)
+		if options.Sort == "memory" {
+			left = triageQuantity(result.Items[i].Memory)
+			right = triageQuantity(result.Items[j].Memory)
+		}
+		if left == nil {
+			left = new(big.Rat)
+		}
+		if right == nil {
+			right = new(big.Rat)
+		}
+		return left.Cmp(right) > 0
+	})
+	if len(result.Items) > options.Limit {
+		result.Items = result.Items[:options.Limit]
+		result.Truncated = true
+	}
+	result.Truncated = result.Truncated || usage.Truncated
+	return result, nil
+}
+
+func triageQuantity(value string) *big.Rat {
+	if quantity, ok := new(big.Rat).SetString(value); ok {
+		return quantity
+	}
+	quantity, err := ParseQuantity(value)
+	if err != nil {
+		return nil
+	}
+	return quantity
+}
+
+type issueFinding struct {
+	root     ObjectRef
+	example  ObjectRef
+	rule     string
+	severity string
+	count    int
+	at       time.Time
+}
+
+func classifyIssue(resource ProjectedResource) []issueFinding {
+	ref := ObjectRef{APIVersion: resource.APIVersion, Kind: resource.Kind, Namespace: resource.Namespace, Name: resource.Name, UID: resource.UID}
+	root := ref
+	if len(resource.Owners) > 0 {
+		root = resource.Owners[0]
+		if root.Namespace == "" {
+			root.Namespace = resource.Namespace
+		}
+	}
+	var findings []issueFinding
+	add := func(rule, severity string, count int, at time.Time) {
+		findings = append(findings, issueFinding{root: root, example: ref, rule: rule, severity: severity, count: count, at: at})
+	}
+	switch resource.Kind {
+	case "Pod":
+		phase := summaryString(resource.Summary, "phase")
+		switch phase {
+		case "Failed":
+			add("pod.failed", "critical", 1, resourceTime(resource.Summary))
+		case "Pending":
+			add("pod.pending", "warning", 1, resourceTime(resource.Summary))
+		}
+	case "Deployment", "StatefulSet", "DaemonSet":
+		desiredKeys := []string{"desired_replicas", "replicas"}
+		if resource.Kind == "DaemonSet" {
+			desiredKeys = []string{"desiredNumberScheduled", "desired_number_scheduled"}
+		}
+		desired, desiredKnown := triageSummaryInt(resource.Summary, desiredKeys...)
+		available, availableKnown := triageSummaryInt(resource.Summary, "availableReplicas", "available_replicas", "numberReady", "number_ready", "readyReplicas", "ready_replicas")
+		if desiredKnown && availableKnown && available >= 0 && available < desired {
+			add("workload.unavailable", "warning", triageIssueCount(desired-available), resourceTime(resource.Summary))
+		}
+	case "Job":
+		if failed := triageSummaryIntValue(resource.Summary, "failed"); failed > 0 {
+			add("job.failed", "critical", triageIssueCount(failed), resourceTime(resource.Summary))
+		}
+	case "Node":
+		ready := false
+		for _, condition := range resource.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				ready = true
+			}
+			if strings.HasSuffix(condition.Type, "Pressure") && condition.Status == "True" {
+				add("node.pressure", "warning", 1, time.Time{})
+			}
+		}
+		if !ready {
+			add("node.not_ready", "critical", 1, time.Time{})
+		}
+	case "Event":
+		if summaryString(resource.Summary, "type") == "Warning" {
+			if involved, ok := resource.Summary["involved_object"].(ObjectRef); ok && involved.Name != "" {
+				root = involved
+				if root.Namespace == "" {
+					root.Namespace = resource.Namespace
+				}
+			}
+			count := triageIssueCount(triageSummaryIntValue(resource.Summary, "count"))
+			if count <= 0 {
+				count = 1
+			}
+			add("event.warning", "warning", count, resourceTime(resource.Summary))
+		}
+	}
+	for index := range findings {
+		findings[index].root = root
+	}
+	return findings
+}
+
+func triageIssueCount(value int64) int {
+	if value <= 0 {
+		return 0
+	}
+	if value > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(value)
+}
+
+func triageSummaryIntValue(summary map[string]any, keys ...string) int64 {
+	value, _ := triageSummaryInt(summary, keys...)
+	return value
+}
+
+func triageSummaryInt(summary map[string]any, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		switch value := summary[key].(type) {
+		case float64:
+			return int64(value), true
+		case int64:
+			return value, true
+		case int:
+			return int64(value), true
+		}
+	}
+	return 0, false
+}
+
+func resourceTime(summary map[string]any) time.Time {
+	for _, key := range []string{"lastTimestamp", "created_at", "firstTimestamp"} {
+		if value := summaryString(summary, key); value != "" {
+			if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+				return parsed
+			}
+		}
+	}
+	return time.Time{}
+}
+
+func severityRank(severity string) int {
+	switch severity {
+	case "critical":
+		return 0
+	case "warning":
+		return 1
+	default:
+		return 2
+	}
+}

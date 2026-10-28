@@ -1,0 +1,15 @@
+{{ if eq .Severity "critical" }}🔴{{ else }}🟡{{ end }} <b>Kubernetes issue</b> {{ escapeHTML (or .AlertName "Detected issue") }}
+<b>Severity:</b> {{ escapeHTML (or .KubernetesSeverity .Severity "warning") }}
+<b>Cluster:</b> {{ escapeHTML (or .Cluster "") }}
+<b>Namespace:</b> {{ escapeHTML (or .Namespace "") }}
+<b>Workload:</b> {{ escapeHTML (or .WorkloadKind "") }} {{ escapeHTML (or .Workload "") }}
+<b>Affected:</b> {{ escapeHTML (or .Affected "") }}
+<b>Broke at:</b> {{ escapeHTML (or .BrokeAt "") }}{{ if .BrokeAgo }}, {{ escapeHTML .BrokeAgo }}{{ end }}
+<b>What we saw</b>
+{{ range .Evidence }}• {{ escapeHTML . }}
+{{ end }}{{ if or .Changes .HistoryIncomplete }}<b>Changes before the break</b>
+{{ range .Changes }}• {{ escapeHTML . }}
+{{ end }}{{ if .HistoryIncomplete }}Change history is incomplete
+{{ end }}{{ end }}{{ if .AckURL }}<a href="{{ escapeHTML .AckURL }}">Acknowledge</a>
+{{ end }}{{ range .Links }}<a href="{{ escapeHTML .url }}">{{ escapeHTML .label }}</a>
+{{ end }}

@@ -28,6 +28,7 @@ import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
+import { SettingsCard } from "@/components/settings/SettingsCard";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useToast } from "@/components/toastContext";
 
@@ -579,7 +580,7 @@ function ConnectionEditor({
               type={showSecret ? "text" : "password"}
               autoComplete="off"
               placeholder={
-                view?.client_secret_set ? "•••• stored — blank keeps it" : "client secret"
+                view?.client_secret_set ? "•••• stored" : "client secret"
               }
               value={secretInput}
               disabled={busy}
@@ -888,15 +889,8 @@ function SSOEnforcementControl({
   );
 }
 
-// ConnShell — the card chrome every state renders inside.
+// ConnShell — the surface every state renders inside; the section heading comes
+// from the Admin settings layout.
 function ConnShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="card mb-4">
-      <div className="card-header">
-        <h2 className="card-title">Identity providers</h2>
-        <span className="text-2xs text-ink-400">Enterprise control</span>
-      </div>
-      <div className="card-body">{children}</div>
-    </div>
-  );
+  return <SettingsCard>{children}</SettingsCard>;
 }

@@ -11,8 +11,8 @@
 # published on :4318. There is no in-compose generator — all fake data comes
 # from scripts/generate_fake_metrics.py.
 #
-# Note: there is still NO tools.yaml — the `query_traces` analyze tool is
-# AUTO-WIRED from the `traces` source config, exactly like `query_metrics`.
+# No tools.yaml is needed: the licensed `traces` source contributes
+# `discover_trace_fields` and `read_trace_spans` to Chat and Analyze.
 services:
   tempo:
     image: grafana/tempo:2.5.0

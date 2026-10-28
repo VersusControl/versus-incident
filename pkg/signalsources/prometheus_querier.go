@@ -5,22 +5,22 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/providerhttp"
 )
 
 // -----------------------------------------------------------------------------
 // PrometheusQuerier — a thin read-only client over Prometheus' HTTP query API.
 //
-// It is shared OSS infrastructure: the analyze `query_metrics` tool consumes it
-// (via a bridge in pkg/agent), and the enterprise metric data source reuses the
-// exact same client so detect-path and analyze-path both speak to Prometheus
-// through one code path. It only ever issues GET query requests — there is no
-// write surface.
+// It is shared OSS infrastructure used by metric data sources and read-only
+// metric tools. It only ever issues GET query requests; there is no write surface.
 // -----------------------------------------------------------------------------
 
 // MetricSample is one (timestamp, value) point of a metric series.
@@ -46,23 +46,70 @@ type PrometheusAuth struct {
 // PrometheusQuerier issues instant and range PromQL queries against a
 // Prometheus HTTP endpoint. Construct it once and reuse it.
 type PrometheusQuerier struct {
-	address string
-	auth    PrometheusAuth
-	client  *http.Client
+	address          string
+	auth             PrometheusAuth
+	client           *http.Client
+	maxResponseBytes int64
+	bounded          bool
+}
+
+// ErrPrometheusResponseTooLarge reports that a bounded read exceeded its
+// configured transport limit.
+var ErrPrometheusResponseTooLarge = errors.New("prometheus response too large")
+
+// PrometheusReadLimits applies only to queriers built for bounded on-demand
+// reads. The original constructor remains unchanged for standing sources.
+type PrometheusReadLimits struct {
+	Timeout          time.Duration
+	MaxResponseBytes int64
+	AllowLoopback    bool
+	AllowPrivate     bool
 }
 
 // NewPrometheusQuerier validates the address and returns a ready querier.
 func NewPrometheusQuerier(address string, auth PrometheusAuth, insecureSkipVerify bool) (*PrometheusQuerier, error) {
+	return newPrometheusQuerier(address, auth, insecureSkipVerify, PrometheusReadLimits{Timeout: 30 * time.Second})
+}
+
+// NewBoundedPrometheusQuerier constructs a querier with explicit transport
+// limits for interactive reads.
+func NewBoundedPrometheusQuerier(address string, auth PrometheusAuth, insecureSkipVerify bool, limits PrometheusReadLimits) (*PrometheusQuerier, error) {
+	if limits.Timeout <= 0 || limits.MaxResponseBytes <= 0 {
+		return nil, fmt.Errorf("prometheus: positive timeout and response limit are required")
+	}
+	return newPrometheusQuerier(address, auth, insecureSkipVerify, limits)
+}
+
+func newPrometheusQuerier(address string, auth PrometheusAuth, insecureSkipVerify bool, limits PrometheusReadLimits) (*PrometheusQuerier, error) {
 	if address == "" {
 		return nil, fmt.Errorf("prometheus: address is required")
+	}
+	if limits.MaxResponseBytes > 0 {
+		normalized, err := providerhttp.NormalizeOrigin(address)
+		if err != nil {
+			return nil, fmt.Errorf("prometheus: invalid address")
+		}
+		parsed, _ := url.Parse(normalized)
+		policy := providerhttp.Policy{AllowLoopback: limits.AllowLoopback, AllowPrivate: limits.AllowPrivate, InsecureSkipVerify: insecureSkipVerify}
+		if !providerhttp.HostAllowed(parsed.Hostname(), policy) {
+			return nil, fmt.Errorf("prometheus: address host is not permitted")
+		}
+		return &PrometheusQuerier{
+			address:          normalized,
+			auth:             auth,
+			client:           &http.Client{Transport: providerhttp.NewTransport(policy), Timeout: limits.Timeout, CheckRedirect: providerhttp.RefuseRedirects},
+			maxResponseBytes: limits.MaxResponseBytes,
+			bounded:          true,
+		}, nil
 	}
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: insecureSkipVerify},
 	}
 	return &PrometheusQuerier{
-		address: address,
-		auth:    auth,
-		client:  &http.Client{Transport: tr, Timeout: 30 * time.Second},
+		address:          address,
+		auth:             auth,
+		client:           &http.Client{Transport: tr, Timeout: limits.Timeout},
+		maxResponseBytes: limits.MaxResponseBytes,
 	}, nil
 }
 
@@ -103,11 +150,20 @@ func (q *PrometheusQuerier) do(ctx context.Context, u string) ([]MetricSeries, e
 
 	resp, err := q.client.Do(req)
 	if err != nil {
+		if q.bounded {
+			return nil, q.safeReadError(ctx, err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	if q.bounded && (resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+		return nil, fmt.Errorf("prometheus read failed: status %d", resp.StatusCode)
+	}
+	body, err := q.readBody(resp.Body)
 	if err != nil {
+		if q.bounded {
+			return nil, q.safeReadError(ctx, err)
+		}
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
@@ -116,9 +172,15 @@ func (q *PrometheusQuerier) do(ctx context.Context, u string) ([]MetricSeries, e
 
 	var out promQueryResponse
 	if err := json.Unmarshal(body, &out); err != nil {
+		if q.bounded {
+			return nil, fmt.Errorf("decode prometheus response")
+		}
 		return nil, fmt.Errorf("decode prometheus response: %w", err)
 	}
 	if out.Status != "success" {
+		if q.bounded {
+			return nil, fmt.Errorf("prometheus query failed")
+		}
 		return nil, fmt.Errorf("prometheus query failed: %s %s", out.ErrorType, out.Error)
 	}
 	return out.Data.toSeries()
@@ -183,8 +245,25 @@ type MetricMeta struct {
 // Grafana Cloud) return empty for the metadata/label/series endpoints unless an
 // explicit window is supplied. Pass the zero time for either to omit it.
 func (q *PrometheusQuerier) Metadata(ctx context.Context, start, end time.Time) (map[string]MetricMeta, error) {
+	return q.metadata(ctx, "", start, end)
+}
+
+// MetadataFor returns metadata for exactly one metric name. Prometheus applies
+// the metric parameter server-side, so scoped discovery does not require a
+// source-wide metadata response.
+func (q *PrometheusQuerier) MetadataFor(ctx context.Context, metric string, start, end time.Time) (map[string]MetricMeta, error) {
+	if metric == "" {
+		return nil, fmt.Errorf("prometheus: metric name is required")
+	}
+	return q.metadata(ctx, metric, start, end)
+}
+
+func (q *PrometheusQuerier) metadata(ctx context.Context, metric string, start, end time.Time) (map[string]MetricMeta, error) {
 	v := url.Values{}
 	setTimeRange(v, start, end)
+	if metric != "" {
+		v.Set("metric", metric)
+	}
 	u := q.address + "/api/v1/metadata"
 	if enc := v.Encode(); enc != "" {
 		u += "?" + enc
@@ -206,6 +285,9 @@ func (q *PrometheusQuerier) Metadata(ctx context.Context, start, end time.Time) 
 		return nil, fmt.Errorf("decode prometheus metadata: %w", err)
 	}
 	if out.Status != "success" {
+		if q.bounded {
+			return nil, fmt.Errorf("prometheus metadata failed")
+		}
 		return nil, fmt.Errorf("prometheus metadata failed: %s", out.Error)
 	}
 	meta := make(map[string]MetricMeta, len(out.Data))
@@ -225,11 +307,24 @@ func (q *PrometheusQuerier) Metadata(ctx context.Context, start, end time.Time) 
 // start/end bound the read to a time window (see Metadata for why this matters
 // on Prometheus-compatible backends). Pass the zero time for either to omit it.
 func (q *PrometheusQuerier) LabelValues(ctx context.Context, label string, start, end time.Time, matchers ...string) ([]string, error) {
+	return q.labelValues(ctx, label, start, end, 0, matchers...)
+}
+
+// LabelValuesLimited applies a server-side result limit for bounded
+// interactive discovery. A non-positive limit preserves LabelValues behavior.
+func (q *PrometheusQuerier) LabelValuesLimited(ctx context.Context, label string, start, end time.Time, limit int, matchers ...string) ([]string, error) {
+	return q.labelValues(ctx, label, start, end, limit, matchers...)
+}
+
+func (q *PrometheusQuerier) labelValues(ctx context.Context, label string, start, end time.Time, limit int, matchers ...string) ([]string, error) {
 	if label == "" {
 		return nil, fmt.Errorf("prometheus: label name is required")
 	}
 	v := url.Values{}
 	setTimeRange(v, start, end)
+	if limit > 0 {
+		v.Set("limit", strconv.Itoa(limit))
+	}
 	for _, m := range matchers {
 		if m != "" {
 			v.Add("match[]", m)
@@ -252,6 +347,9 @@ func (q *PrometheusQuerier) LabelValues(ctx context.Context, label string, start
 		return nil, fmt.Errorf("decode prometheus label values: %w", err)
 	}
 	if out.Status != "success" {
+		if q.bounded {
+			return nil, fmt.Errorf("prometheus label values failed")
+		}
 		return nil, fmt.Errorf("prometheus label values failed: %s", out.Error)
 	}
 	return out.Data, nil
@@ -290,6 +388,9 @@ func (q *PrometheusQuerier) Series(ctx context.Context, start, end time.Time, ma
 		return nil, fmt.Errorf("decode prometheus series: %w", err)
 	}
 	if out.Status != "success" {
+		if q.bounded {
+			return nil, fmt.Errorf("prometheus series failed")
+		}
 		return nil, fmt.Errorf("prometheus series failed: %s", out.Error)
 	}
 	return out.Data, nil
@@ -308,17 +409,50 @@ func (q *PrometheusQuerier) get(ctx context.Context, u string) ([]byte, error) {
 
 	resp, err := q.client.Do(req)
 	if err != nil {
+		if q.bounded {
+			return nil, q.safeReadError(ctx, err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	if q.bounded && (resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+		return nil, fmt.Errorf("prometheus read failed: status %d", resp.StatusCode)
+	}
+	body, err := q.readBody(resp.Body)
 	if err != nil {
+		if q.bounded {
+			return nil, q.safeReadError(ctx, err)
+		}
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("prometheus %s: %d %s", u, resp.StatusCode, truncate(string(body), 256))
 	}
 	return body, nil
+}
+
+func (q *PrometheusQuerier) safeReadError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, ErrPrometheusResponseTooLarge) {
+		return ErrPrometheusResponseTooLarge
+	}
+	return fmt.Errorf("prometheus read failed")
+}
+
+func (q *PrometheusQuerier) readBody(body io.Reader) ([]byte, error) {
+	if q.maxResponseBytes <= 0 {
+		return io.ReadAll(body)
+	}
+	result, err := io.ReadAll(io.LimitReader(body, q.maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(result)) > q.maxResponseBytes {
+		return nil, ErrPrometheusResponseTooLarge
+	}
+	return result, nil
 }
 
 // -----------------------------------------------------------------------------

@@ -1,0 +1,26 @@
+# Proxy configured, with the three channels that can route through it.
+# The proxy block must reach config.yaml (so use_proxy points at something)
+# and the credentials must live in the Secret, not the ConfigMap.
+gatewaySecret: "test-secret-do-not-use-in-prod"
+
+proxy:
+  url: "http://proxy.example.com:8080"
+  username: "proxy-user"
+  password: "s3cr3t-proxy-password"
+
+alert:
+  telegram:
+    enable: true
+    botToken: "tg-token"
+    chatId: "-100123"
+    useProxy: true
+  viber:
+    enable: true
+    botToken: "viber-token"
+    userId: "viber-user"
+    channelId: "viber-channel"
+    useProxy: true
+  lark:
+    enable: true
+    webhookUrl: "https://open.larksuite.com/open-apis/bot/v2/hook/default"
+    useProxy: true

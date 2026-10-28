@@ -1,6 +1,9 @@
 name: versus
 host: 0.0.0.0
 port: 3000
+
+# HTTP(S) origin for links, secure cookies, and exact-origin
+# CSRF checks behind rewriting or TLS-terminating proxies.
 public_host: ''
 
 # Shared secret required by all admin endpoints (`/api/admin/*` and
@@ -23,6 +26,7 @@ alert:
     token: ${SLACK_TOKEN}
     channel_id: ${SLACK_CHANNEL_ID}
     template_path: "config/slack_message.tmpl"
+    kubernetes_issue_template_path: "" # Optional; defaults to config/kubernetes_issue_slack.tmpl
     message_properties:
       button_text: "Acknowledge Alert" # Custom text for the acknowledgment button
       button_style: "primary" # Button style: "primary" (default blue), "danger" (red), or empty for default gray
@@ -33,6 +37,7 @@ alert:
     bot_token: ${TELEGRAM_BOT_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
     template_path: "config/telegram_message.tmpl"
+    kubernetes_issue_template_path: "" # Optional; defaults to config/kubernetes_issue_telegram.tmpl
     use_proxy: false # Set to true to use global proxy settings for Telegram API calls
 
   viber:
@@ -42,6 +47,7 @@ alert:
     user_id: ${VIBER_USER_ID}
     channel_id: ${VIBER_CHANNEL_ID}
     template_path: "config/viber_message.tmpl"
+    kubernetes_issue_template_path: "" # Optional; defaults to config/kubernetes_issue_viber.tmpl
     use_proxy: false # Set to true to use global proxy settings for Viber API calls
 
   email:
@@ -53,11 +59,13 @@ alert:
     to: ${EMAIL_TO}
     subject: ${EMAIL_SUBJECT}
     template_path: "config/email_message.tmpl"
+    kubernetes_issue_template_path: "" # Optional; defaults to config/kubernetes_issue_email.tmpl
 
   msteams:
     enable: false # Default value, will be overridden by MSTEAMS_ENABLE env var
     power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL} # Power Automate HTTP trigger URL (required)
     template_path: "config/msteams_message.tmpl"
+    kubernetes_issue_template_path: "" # Optional; defaults to config/kubernetes_issue_msteams.tmpl
     other_power_urls: # Optional: Enable overriding the default Power Automate flow using query parameters, eg /api/incidents?msteams_other_power_url=qc
       qc: ${MSTEAMS_OTHER_POWER_URL_QC}
       
@@ -65,6 +73,7 @@ alert:
     enable: false # Default value, will be overridden by LARK_ENABLE env var
     webhook_url: ${LARK_WEBHOOK_URL} # Lark webhook URL (required)
     template_path: "config/lark_message.tmpl"
+    kubernetes_issue_template_path: "" # Optional; defaults to config/kubernetes_issue_lark.tmpl
     use_proxy: false # Set to true to use global proxy settings for Lark API calls
     other_webhook_urls: # Optional: Enable overriding the default webhook URL using query parameters, eg /api/incidents?lark_other_webhook_url=dev
       dev: ${LARK_OTHER_WEBHOOK_URL_DEV}
@@ -244,12 +253,8 @@ agent:
     # (default http://localhost:4000/v1), api_key is the proxy virtual key, and
     # model is the LiteLLM model alias (e.g. "gpt-5" or "claude-sonnet").
     provider: openai                # model backend (env: AGENT_AI_PROVIDER)
+    base_url: ""                    # custom OpenAI-compatible endpoint; overrides provider (env: AGENT_AI_BASE_URL)
     api_key: ${AGENT_AI_API_KEY}
-    # base_url overrides the endpoint for OpenAI-compatible backends (litellm,
-    # openai, self-hosted vLLM/LocalAI). Point it at a shared/remote gateway,
-    # e.g. https://litellm.internal.corp/v1. Empty keeps the provider default
-    # (for litellm, the local proxy above). Env: AGENT_AI_BASE_URL.
-    # base_url: ""
     model: "gpt-5.4-mini"
     # temperature: 0.0–2.0 (default 0.2). Set a NEGATIVE value (e.g. -1) to
     # omit temperature so the provider uses its own default.
@@ -267,6 +272,13 @@ agent:
     # true; the block below only tunes it.
     analyze:
       # model: "gpt-4o"             # override the shared `ai.model` for analyze deep dives
+
+    # ChatAgent — powers the read-only DevOps/SRE conversation API under
+    # /api/admin/chat. Empty fields inherit the shared ai.* values.
+    chat:
+      # model: "gpt-4o"             # optional chat-specific model
+      # max_tokens: 4096
+      # max_calls_per_hour: 60
 
   # New-service grace: when a previously unseen service starts emitting logs
   # in detect mode, it enters an implicit training window so the catalog can

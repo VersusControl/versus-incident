@@ -11,9 +11,17 @@ import {
   Sparkles,
 } from "lucide-react";
 import { ApiError, api, AI_PROVIDERS, type AISettingsView } from "@/lib/api";
-import { keySetLabel, noEncryptionKeyMessage, providerKeyNotice } from "@/lib/agentAI";
+import {
+  effectiveAITransportLabel,
+  buildAISettingsSave,
+  keySetLabel,
+  noEncryptionKeyMessage,
+  projectAISettingsProvider,
+} from "@/lib/agentAI";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
+import { SaveBar, SettingsCard } from "@/components/settings/SettingsCard";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
 import { useToast } from "@/components/toastContext";
@@ -21,8 +29,8 @@ import { useToast } from "@/components/toastContext";
 // AgentAISettingsControl — the operator surface for the Enterprise runtime
 // AI-settings override. It reads /enterprise/api/agent/ai-settings on
 // mount, shows the EFFECTIVE enable (override or YAML floor), whether a key is
-// set (masked — last4 only, NEVER the key), and lets an admin toggle AI and
-// rotate the key (PUT) or revert to the YAML floor (DELETE).
+// set (masked — last4 only, NEVER the key), and lets an admin choose a provider
+// or custom OpenAI-compatible endpoint.
 //
 // Like the mode control, every request rides the SSO session cookie and is
 // authorized by the caller's RBAC role (runtime:manage) — NOT a static admin
@@ -36,10 +44,6 @@ import { useToast } from "@/components/toastContext";
 // The AI key is NEVER persisted to localStorage/sessionStorage. It lives in a
 // transient React state field, is sent on the single PUT, then cleared. The
 // server never returns it.
-
-// AGENT_AI_SETTINGS_ANCHOR is the DOM id the mode control scrolls to when its
-// detect guard reports AI is off (the cross-wire in AgentModeControl).
-export const AGENT_AI_SETTINGS_ANCHOR = "agent-ai-settings";
 
 export function AgentAISettingsControl() {
   const qc = useQueryClient();
@@ -161,18 +165,36 @@ function SettingsBody({
   // fresh authoritative view arrives. The key field is transient (in-memory
   // only) and never seeded from the (masked) server view.
   const [enabled, setEnabled] = useState(view.enabled);
-  const [provider, setProvider] = useState(view.provider ?? "");
+  const [provider, setProvider] = useState(projectAISettingsProvider(view));
+  const [baseURL, setBaseURL] = useState(view.base_url ?? "");
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
 
   useEffect(() => {
     setEnabled(view.enabled);
-    setProvider(view.provider ?? "");
-  }, [view.enabled, view.source, view.key_set, view.last4, view.provider]);
+    setProvider(projectAISettingsProvider({
+      provider: view.provider,
+      base_url: view.base_url,
+    }));
+    setBaseURL(view.base_url ?? "");
+  }, [
+    view.enabled,
+    view.source,
+    view.key_set,
+    view.last4,
+    view.provider,
+    view.base_url,
+    view.base_url_inherited,
+  ]);
 
   const save = useMutation({
-    mutationFn: (vars: { enabled: boolean; provider: string; apiKey: string }) =>
-      api.setAISettings(vars.enabled, vars.provider, vars.apiKey),
+    mutationFn: (vars: {
+      enabled: boolean;
+      provider: string;
+      apiKey: string;
+      baseURL: string;
+    }) => api.setAISettings(vars.enabled, vars.provider, vars.apiKey, vars.baseURL),
     onSuccess: () => {
       toast.push({ title: "AI settings saved", tone: "ok" });
       setKeyInput(""); // drop the transient key the moment the PUT lands
@@ -199,6 +221,7 @@ function SettingsBody({
     mutationFn: () => api.clearAISettings(),
     onSuccess: () => {
       toast.push({ title: "Reverted to YAML floor", tone: "ok" });
+      setConfirmClear(false);
       setKeyInput("");
       setShowKey(false);
       invalidate();
@@ -216,27 +239,23 @@ function SettingsBody({
   const busy = save.isPending || clear.isPending;
   const onOverride = view.source === "override";
   const noKeyMsg = noEncryptionKeyMessage(save.error);
-
-  // When the operator stages a provider change
-  // without entering the matching key, warn that the previous key would be
-  // reused (Bearer providers) or fall back to the YAML key (claude/gemini
-  // header-auth). Save then asks for an explicit confirmation.
-  const providerNotice = providerKeyNotice(
-    view.provider ?? "",
+  const {
+    input,
+    providerNotice,
+    endpointNotice,
+    requireKey,
+    customEndpointMissing,
+  } = buildAISettingsSave(
+    view,
+    enabled,
     provider,
-    keyInput.trim().length > 0,
+    keyInput,
+    baseURL,
   );
 
   const onSave = () => {
-    if (
-      providerNotice.requireKey &&
-      !window.confirm(
-        `${providerNotice.message}\n\nSave anyway and reuse the existing key?`,
-      )
-    ) {
-      return; // operator backed out — let them enter the matching key first
-    }
-    save.mutate({ enabled, provider, apiKey: keyInput.trim() });
+    if (requireKey || customEndpointMissing) return;
+    save.mutate(input);
   };
 
   return (
@@ -255,7 +274,7 @@ function SettingsBody({
         </span>
         <span className="inline-flex items-center gap-1.5 text-2xs text-ink-300">
           <Cpu size={12} aria-hidden className="text-ink-400" />
-          provider: {view.provider ? view.provider : "config default"}
+          effective transport: {effectiveAITransportLabel(view.base_url, view.provider)}
         </span>
       </div>
 
@@ -271,13 +290,9 @@ function SettingsBody({
         Enable AI for this org
       </label>
 
-      {/* Model provider — a change rebuilds the model at runtime (no restart) */}
       <div>
         <label className="field-label" htmlFor="ai-provider">
-          Model provider{" "}
-          <span className="font-normal text-ink-400">
-            (enter the matching key below when you switch)
-          </span>
+          Provider
         </label>
         <select
           id="ai-provider"
@@ -286,13 +301,30 @@ function SettingsBody({
           onChange={(e) => setProvider(e.target.value)}
           className="input h-9 max-w-sm text-sm"
         >
-          <option value="">Use config default</option>
           {AI_PROVIDERS.map((p) => (
             <option key={p} value={p}>
               {p}
             </option>
           ))}
+          <option value="custom">Custom</option>
         </select>
+        {provider === "custom" && (
+          <div className="mt-3 max-w-xl">
+            <label className="field-label" htmlFor="ai-base-url">
+              OpenAI-compatible base URL
+            </label>
+            <input
+              id="ai-base-url"
+              type="url"
+              autoComplete="url"
+              placeholder="https://api.example.com/v1"
+              value={baseURL}
+              disabled={busy}
+              onChange={(e) => setBaseURL(e.target.value)}
+              className="input h-9 w-full text-sm"
+            />
+          </div>
+        )}
         {providerNotice.show && (
           <div
             role={providerNotice.tone === "warn" ? "alert" : undefined}
@@ -314,6 +346,27 @@ function SettingsBody({
             <p className="text-ink-200">{providerNotice.message}</p>
           </div>
         )}
+        {endpointNotice.show && (
+          <div
+            role={endpointNotice.requireKey ? "alert" : undefined}
+            className={clsx(
+              "mt-2 flex items-start gap-2 rounded-control border p-2.5 text-2xs",
+              endpointNotice.requireKey
+                ? "border-sev-warn/40 bg-sev-warn/10"
+                : "border-link/30 bg-link/10",
+            )}
+          >
+            <AlertCircle
+              size={13}
+              aria-hidden
+              className={clsx(
+                "mt-0.5 shrink-0",
+                endpointNotice.requireKey ? "text-sev-warn" : "text-link",
+              )}
+            />
+            <p className="text-ink-200">{endpointNotice.message}</p>
+          </div>
+        )}
       </div>
 
       {/* Masked API key (transient — never persisted to browser storage) */}
@@ -321,7 +374,11 @@ function SettingsBody({
         <label className="field-label" htmlFor="ai-api-key">
           API key{" "}
           <span className="font-normal text-ink-400">
-            (leave blank to keep the current key)
+            {requireKey
+              ? `(required for ${provider})`
+              : provider === "ollama"
+                ? "(cleared when saved)"
+                : "(leave blank to keep the current key)"}
           </span>
         </label>
         <div className="relative max-w-sm">
@@ -329,7 +386,7 @@ function SettingsBody({
             id="ai-api-key"
             type={showKey ? "text" : "password"}
             autoComplete="off"
-            placeholder={view.key_set ? "•••• stored — blank keeps it" : "sk-…"}
+            placeholder={view.key_set ? "•••• stored" : "sk-…"}
             value={keyInput}
             disabled={busy}
             onChange={(e) => setKeyInput(e.target.value)}
@@ -363,48 +420,59 @@ function SettingsBody({
         </div>
       )}
 
-      {/* Actions */}
-      <div className="flex flex-wrap gap-2">
+      {onOverride && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-control border border-sev-critical/30 p-3">
+          <div>
+            <p className="text-xs font-medium text-ink-100">Clear runtime override</p>
+            <p className="mt-0.5 text-2xs text-ink-400">
+              Revert enable, provider, endpoint, and key to the YAML configuration.
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setConfirmClear(true)}
+            className="btn"
+          >
+            Clear override
+          </button>
+        </div>
+      )}
+
+      <SaveBar>
+        <p className="mr-auto text-2xs text-ink-400">Detect mode requires AI to be enabled.</p>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || requireKey || customEndpointMissing}
           onClick={onSave}
           className="btn btn-primary"
         >
           {save.isPending ? "Saving…" : "Save"}
         </button>
-        {onOverride && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => clear.mutate()}
-            className="btn"
-            title="Clear the override and follow the YAML floor"
-          >
-            Clear override
-          </button>
-        )}
-      </div>
+      </SaveBar>
 
-      <p className="text-2xs text-ink-400">
-        Detect mode requires AI to be enabled.
-      </p>
+      {confirmClear && (
+        <ConfirmDialog
+          title="Clear the AI settings override?"
+          tone="danger"
+          confirmLabel="Clear override"
+          busy={clear.isPending}
+          error={clear.error instanceof Error ? clear.error : null}
+          onClose={() => {
+            if (!clear.isPending) setConfirmClear(false);
+          }}
+          onConfirm={() => clear.mutate()}
+          message="The stored runtime key is deleted and the agent follows the YAML AI configuration again."
+        />
+      )}
     </div>
   );
 }
 
-// AIShell — the consistent card chrome every state renders inside. Carries the
-// scroll anchor the mode control's detect cross-wire targets.
+// AIShell — the surface every state renders inside; the section heading comes
+// from the Admin settings layout.
 function AIShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div id={AGENT_AI_SETTINGS_ANCHOR} className="card mb-4 scroll-mt-4">
-      <div className="card-header">
-        <h2 className="card-title">AI settings</h2>
-        <span className="text-2xs text-ink-400">Enterprise control</span>
-      </div>
-      <div className="card-body">{children}</div>
-    </div>
-  );
+  return <SettingsCard>{children}</SettingsCard>;
 }
 
 // EnabledBadge — icon + text chip (state never conveyed by color alone).

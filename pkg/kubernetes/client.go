@@ -1,0 +1,616 @@
+// Package kubernetes provides bounded, read-only access to Kubernetes APIs.
+package kubernetes
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"path"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+const (
+	defaultTimeout      = 10 * time.Second
+	defaultMaxBodyBytes = int64(4 << 20)
+	maxTokenBytes       = int64(64 << 10)
+	maxCABytes          = int64(4 << 20)
+)
+
+var (
+	ErrInvalidEndpoint       = errors.New("kubernetes: invalid endpoint")
+	ErrUnauthorized          = errors.New("kubernetes: unauthorized")
+	ErrForbidden             = errors.New("kubernetes: forbidden")
+	ErrNotFound              = errors.New("kubernetes: not found")
+	ErrResponseTooLarge      = errors.New("kubernetes: response too large")
+	errPreviousUnavailable   = errors.New("kubernetes: previous container unavailable")
+	ErrRedirect              = errors.New("kubernetes: redirect refused")
+	ErrInvalidArguments      = errors.New("kubernetes: invalid arguments")
+	ErrOperationBudget       = errors.New("kubernetes: operation budget exhausted")
+	ErrGraphIncomplete       = errors.New("kubernetes: complete graph could not be verified")
+	ErrCompleteGraphLimit    = errors.New("kubernetes: complete graph safety limit exceeded")
+	ErrCredentialUnavailable = errors.New("kubernetes: credential unavailable")
+)
+
+// Config defines one Kubernetes API connection. Credentials are read from
+// TokenFile for every request so projected service-account rotation is honored.
+type Config struct {
+	Namespace            string
+	Endpoint             string
+	TokenFile            string
+	CAFile               string
+	CAData               []byte
+	ServerName           string
+	Credentials          CredentialSource
+	Timeout              time.Duration
+	MaxBodyBytes         int64
+	AllowLoopbackHTTP    bool
+	AllowLoopback        bool
+	AllowPrivateNetworks bool
+	EndpointCIDRs        []string
+}
+
+type endpointPolicy struct {
+	allowLoopback bool
+	allowPrivate  bool
+	allowedCIDRs  []*net.IPNet
+}
+
+type ipResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
+}
+
+type contextDialer interface {
+	DialContext(context.Context, string, string) (net.Conn, error)
+}
+
+// Client is a read-only, bounded Kubernetes API transport.
+type Client struct {
+	namespace      string
+	base           *url.URL
+	credentials    CredentialSource
+	timeout        time.Duration
+	maxBodyBytes   int64
+	http           *http.Client
+	streamHTTP     *http.Client
+	indexLimiter   *rate.Limiter
+	metadataMu     sync.Mutex
+	metadataDenied map[metadataDenyKey]metadataDenyMemo
+	now            func() time.Time
+	backoffMu      sync.Mutex
+	backoffUntil   time.Time
+	authMu         sync.Mutex
+	authGeneration atomic.Uint64
+	authContext    context.Context
+	authCancel     context.CancelFunc
+}
+
+func (client *Client) credentialEpochContext() (context.Context, context.CancelFunc) {
+	client.authMu.Lock()
+	defer client.authMu.Unlock()
+	if client.authContext == nil {
+		client.authContext, client.authCancel = context.WithCancel(context.Background())
+	}
+	return context.WithCancel(client.authContext)
+}
+
+func (client *Client) rejectCredential() {
+	client.authMu.Lock()
+	defer client.authMu.Unlock()
+	client.authGeneration.Add(1)
+	if client.authCancel != nil {
+		client.authCancel()
+	}
+	client.authContext, client.authCancel = nil, nil
+}
+
+type captureReadContextKey struct{}
+
+func captureReadContext(ctx context.Context, owner string) context.Context {
+	return context.WithValue(ctx, captureReadContextKey{}, owner)
+}
+
+// NewClient validates transport policy and constructs a read-only API client.
+func NewClient(config Config) (*Client, error) {
+	if config.Namespace != "" && (!safeSegment(config.Namespace) || len(config.Namespace) > 63) {
+		return nil, ErrInvalidArguments
+	}
+	policy, err := newEndpointPolicy(config)
+	if err != nil {
+		return nil, err
+	}
+	base, err := validateEndpoint(config.Endpoint, policy)
+	if err != nil {
+		return nil, err
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: strings.TrimSpace(config.ServerName)}
+	if config.CAFile != "" && len(config.CAData) > 0 {
+		return nil, errors.New("kubernetes: conflicting CA configuration")
+	}
+	caPEM := config.CAData
+	if config.CAFile != "" {
+		caPEM, err = readBoundedFile(config.CAFile, maxCABytes)
+		if err != nil {
+			return nil, errors.New("kubernetes: CA unavailable")
+		}
+	}
+	if len(caPEM) > int(maxCABytes) {
+		return nil, errors.New("kubernetes: CA unavailable")
+	}
+	if len(caPEM) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, errors.New("kubernetes: CA file contains no certificates")
+		}
+		tlsConfig.RootCAs = pool
+	}
+	credentials := config.Credentials
+	if credentials != nil && config.TokenFile != "" {
+		return nil, errors.New("kubernetes: conflicting credential configuration")
+	}
+	if credentials == nil && config.TokenFile != "" {
+		credentials = tokenFileCredential(config.TokenFile)
+	}
+	if credentials != nil {
+		tlsConfig.GetClientCertificate = credentials.ClientCertificate
+	}
+	timeout := config.Timeout
+	if timeout <= 0 || timeout > time.Minute {
+		timeout = defaultTimeout
+	}
+	maxBodyBytes := config.MaxBodyBytes
+	if maxBodyBytes <= 0 || maxBodyBytes > 32<<20 {
+		maxBodyBytes = defaultMaxBodyBytes
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	transport.Proxy = nil
+	transport.DialContext = guardedDialContext(&net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}, net.DefaultResolver, policy)
+	streamTransport := transport.Clone()
+	streamTransport.DialContext = guardedDialContext(&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}, net.DefaultResolver, policy)
+	streamTransport.TLSHandshakeTimeout = 10 * time.Second
+	streamTransport.ResponseHeaderTimeout = 10 * time.Second
+	streamTransport.MaxResponseHeaderBytes = 64 << 10
+	client := &Client{
+		namespace: config.Namespace,
+		base:      base, credentials: credentials, timeout: timeout, maxBodyBytes: maxBodyBytes,
+		indexLimiter: rate.NewLimiter(2, 4), metadataDenied: map[metadataDenyKey]metadataDenyMemo{},
+		http:       &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
+		streamHTTP: &http.Client{Transport: streamTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
+	}
+	if source, ok := credentials.(*tokenFileSource); ok {
+		client.credentials = &tokenFileSource{path: source.path, verifier: &projectedTokenVerifier{client: client}}
+	}
+	return client, nil
+}
+
+// GetJSON performs one authenticated, bounded GET and decodes its JSON body.
+func (client *Client) GetJSON(ctx context.Context, apiPath string, output any) error {
+	data, err := client.get(ctx, apiPath, "application/json")
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, output); err != nil {
+		return errors.New("kubernetes: invalid API response")
+	}
+	return nil
+}
+
+func (client *Client) GetMetadataJSON(ctx context.Context, apiPath string, output any) error {
+	data, err := client.get(ctx, apiPath, "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1")
+	if err != nil {
+		return err
+	}
+	var envelope struct {
+		Kind       string                       `json:"kind"`
+		APIVersion string                       `json:"apiVersion"`
+		Items      []map[string]json.RawMessage `json:"items"`
+	}
+	if json.Unmarshal(data, &envelope) != nil || envelope.Kind != "PartialObjectMetadataList" || envelope.APIVersion != "meta.k8s.io/v1" {
+		return errors.New("kubernetes: metadata negotiation failed")
+	}
+	for _, item := range envelope.Items {
+		for key := range item {
+			if key != "kind" && key != "apiVersion" && key != "metadata" {
+				return errors.New("kubernetes: metadata negotiation failed")
+			}
+		}
+		var kind, version string
+		if raw, exists := item["kind"]; exists {
+			if json.Unmarshal(raw, &kind) != nil || kind != "PartialObjectMetadata" {
+				return errors.New("kubernetes: metadata negotiation failed")
+			}
+		}
+		if raw, exists := item["apiVersion"]; exists {
+			if json.Unmarshal(raw, &version) != nil || version != "meta.k8s.io/v1" {
+				return errors.New("kubernetes: metadata negotiation failed")
+			}
+		}
+		if raw := item["metadata"]; len(raw) == 0 || string(raw) == "null" {
+			return errors.New("kubernetes: metadata negotiation failed")
+		}
+	}
+	if err := json.Unmarshal(data, output); err != nil {
+		return errors.New("kubernetes: invalid metadata API response")
+	}
+	return nil
+}
+
+func (client *Client) get(ctx context.Context, apiPath, accept string) ([]byte, error) {
+	data, truncated, err := client.getBounded(ctx, apiPath, accept, client.maxBodyBytes)
+	if err != nil {
+		return nil, err
+	}
+	if truncated {
+		return nil, ErrResponseTooLarge
+	}
+	return data, nil
+}
+
+func (client *Client) waitBackoff(ctx context.Context) error {
+	for {
+		client.backoffMu.Lock()
+		until := client.backoffUntil
+		client.backoffMu.Unlock()
+		delay := time.Until(until)
+		if delay <= 0 {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return ctx.Err()
+}
+
+func (client *Client) getBounded(ctx context.Context, apiPath, accept string, maxBytes int64) ([]byte, bool, error) {
+	if client == nil || client.http == nil {
+		return nil, false, errors.New("kubernetes: client unavailable")
+	}
+	ctx, cancelOperation := ensureOperationBudget(ctx)
+	defer cancelOperation()
+	if err := client.waitBackoff(ctx); err != nil {
+		return nil, false, err
+	}
+	if _, background := ctx.Value(captureReadContextKey{}).(string); background && client.indexLimiter != nil {
+		if err := client.indexLimiter.Wait(ctx); err != nil {
+			return nil, false, err
+		}
+	}
+	budget := operationBudgetFrom(ctx)
+	if !budget.takeRequest() {
+		return nil, false, ErrOperationBudget
+	}
+	requestURL, err := client.requestURL(apiPath)
+	if err != nil {
+		return nil, false, err
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, client.timeout)
+	defer cancel()
+	if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
+		stopIdentity := context.AfterFunc(service.identity.ctx, cancel)
+		defer stopIdentity()
+	}
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("kubernetes: create request: %w", err)
+	}
+	request.Header.Set("Accept", accept)
+	if client.credentials != nil {
+		authorization, credentialErr := client.credentials.Authorization(requestCtx)
+		if credentialErr != nil {
+			return nil, false, credentialErr
+		}
+		if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
+			if err := service.acceptCredential(ctx, authorization); err != nil {
+				return nil, false, err
+			}
+		}
+		if authorization != "" {
+			request.Header.Set("Authorization", authorization)
+		}
+	}
+	response, err := client.http.Do(request)
+	if err != nil {
+		if errors.Is(err, ErrRedirect) {
+			return nil, false, ErrRedirect
+		}
+		if budget.expired() {
+			return nil, false, ErrOperationBudget
+		}
+		return nil, false, fmt.Errorf("kubernetes: request failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusUnauthorized {
+			client.rejectCredential()
+		}
+		if response.StatusCode == http.StatusTooManyRequests {
+			delay := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+			client.backoffMu.Lock()
+			client.backoffUntil = maxTime(client.backoffUntil, time.Now().UTC().Add(delay))
+			client.backoffMu.Unlock()
+			return nil, false, &ErrThrottled{RetryAfter: delay}
+		}
+		if response.StatusCode == http.StatusBadRequest {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+			message := strings.ToLower(string(body))
+			if strings.Contains(message, "previous terminated container") && strings.Contains(message, "not found") {
+				return nil, false, errPreviousUnavailable
+			}
+		}
+		if response.StatusCode == http.StatusForbidden {
+			// Only the denied verb, resource, namespace and user are kept; the
+			// body itself never leaves this function.
+			body, readErr := io.ReadAll(io.LimitReader(response.Body, forbiddenStatusLimit+1))
+			if readErr == nil {
+				if denied := permissionDeniedFromStatus(body); denied != nil {
+					return nil, false, denied
+				}
+			}
+			return nil, false, ErrForbidden
+		}
+		return nil, false, classifyStatus(response.StatusCode)
+	}
+	if maxBytes <= 0 || maxBytes > client.maxBodyBytes {
+		maxBytes = client.maxBodyBytes
+	}
+	limited := io.LimitReader(response.Body, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, false, fmt.Errorf("kubernetes: read response: %w", err)
+	}
+	if !budget.takeBytes(int64(len(data))) {
+		return nil, false, ErrOperationBudget
+	}
+	truncated := int64(len(data)) > maxBytes
+	if truncated {
+		data = data[:maxBytes]
+	}
+	if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
+		if err := service.validateCredential(ctx); err != nil {
+			return nil, false, err
+		}
+	}
+	return data, truncated, nil
+}
+
+func (client *Client) requestURL(apiPath string) (string, error) {
+	if !strings.HasPrefix(apiPath, "/") || strings.ContainsAny(apiPath, "\r\n") {
+		return "", ErrInvalidEndpoint
+	}
+	reference, err := url.Parse(apiPath)
+	if err != nil || reference.IsAbs() || reference.Host != "" {
+		return "", ErrInvalidEndpoint
+	}
+	result := *client.base
+	result.Path = path.Clean("/" + strings.TrimPrefix(reference.Path, "/"))
+	result.RawQuery = reference.RawQuery
+	return result.String(), nil
+}
+
+func newEndpointPolicy(config Config) (endpointPolicy, error) {
+	policy := endpointPolicy{allowLoopback: config.AllowLoopbackHTTP || config.AllowLoopback, allowPrivate: config.AllowPrivateNetworks}
+	for _, value := range config.EndpointCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(value))
+		if err != nil {
+			return endpointPolicy{}, ErrInvalidEndpoint
+		}
+		policy.allowedCIDRs = append(policy.allowedCIDRs, network)
+	}
+	return policy, nil
+}
+
+func validateEndpoint(value string, policy endpointPolicy) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return nil, ErrInvalidEndpoint
+	}
+	if parsed.Scheme != "https" {
+		if parsed.Scheme != "http" || !policy.allowLoopback || !isLoopbackHost(parsed.Hostname()) {
+			return nil, ErrInvalidEndpoint
+		}
+	}
+	if address := net.ParseIP(parsed.Hostname()); address != nil && !policy.allows(address) {
+		return nil, ErrInvalidEndpoint
+	}
+	parsed.Path = ""
+	return parsed, nil
+}
+
+func guardedDialContext(dialer contextDialer, resolver ipResolver, policy endpointPolicy) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, ErrInvalidEndpoint
+		}
+		addresses := []net.IPAddr{{IP: net.ParseIP(host)}}
+		if addresses[0].IP == nil {
+			addresses, err = resolver.LookupIPAddr(ctx, host)
+			if err != nil {
+				return nil, &connectionError{cause: err}
+			}
+			if len(addresses) == 0 {
+				return nil, ErrInvalidEndpoint
+			}
+		}
+		for _, candidate := range addresses {
+			if !policy.allows(candidate.IP) {
+				return nil, ErrInvalidEndpoint
+			}
+		}
+		var lastErr error
+		for _, candidate := range addresses {
+			connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+			if dialErr == nil {
+				return connection, nil
+			}
+			lastErr = dialErr
+		}
+		return nil, lastErr
+	}
+}
+
+func (policy endpointPolicy) allows(address net.IP) bool {
+	if address == nil || address.IsUnspecified() || address.IsMulticast() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() {
+		return false
+	}
+	if address.IsLoopback() {
+		return policy.allowLoopback
+	}
+	if !address.IsPrivate() {
+		return true
+	}
+	if policy.allowPrivate {
+		return true
+	}
+	for _, network := range policy.allowedCIDRs {
+		if network.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
+}
+
+func classifyStatus(status int) error {
+	switch status {
+	case http.StatusBadRequest:
+		return ErrInvalidArguments
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
+	case http.StatusForbidden:
+		return ErrForbidden
+	case http.StatusNotFound:
+		return ErrNotFound
+	case http.StatusTooManyRequests:
+		return &ErrThrottled{RetryAfter: 30 * time.Second}
+	default:
+		return fmt.Errorf("kubernetes: API status %d", status)
+	}
+}
+
+// metadataDenyKey scopes a permission memo to one organization, cluster,
+// credential epoch, kind, and namespace, so a denial observed for one tenant can
+// never suppress a read for another.
+type metadataDenyKey struct {
+	OrgID        string
+	ClusterID    string
+	CredentialID string
+	Kind         string
+	Namespace    string
+}
+
+// metadataDenyMemo is how long a metadata permission memo keeps its answer. It
+// is always bounded: a granted permission has to become visible without waiting
+// for a restart, and a denied one must not be re-attempted on every retry cycle.
+type metadataDenyMemo struct {
+	Until time.Time
+	// Err is the denial the memo remembered. It is replayed as-is, so a dead
+	// credential is never re-reported as a missing permission.
+	Err error
+}
+
+const (
+	// metadataDenyTTL is the longest a denial suppresses a retry. It is four
+	// retry cycles, so a grant is picked up within a minute while a persistent
+	// denial costs at most one cluster request per kind per minute.
+	metadataDenyTTL = time.Minute
+	// maxMetadataDenyEntries bounds the memo map itself.
+	maxMetadataDenyEntries = 512
+)
+
+// clock returns the client's time source, so a test can move time.
+func (client *Client) clock() time.Time {
+	if client != nil && client.now != nil {
+		return client.now()
+	}
+	return time.Now()
+}
+
+// metadataDenial reports the denial a memo still honours, and whether it
+// applies. The remembered error keeps its own class.
+func (client *Client) metadataDenial(key metadataDenyKey) (error, bool) {
+	client.metadataMu.Lock()
+	defer client.metadataMu.Unlock()
+	memo, exists := client.metadataDenied[key]
+	if !exists || !client.clock().Before(memo.Until) {
+		return nil, false
+	}
+	if memo.Err == nil {
+		return ErrForbidden, true
+	}
+	return memo.Err, true
+}
+
+// memoMetadataDenial records a denial for a bounded time.
+func (client *Client) memoMetadataDenial(key metadataDenyKey, denial error) {
+	client.metadataMu.Lock()
+	defer client.metadataMu.Unlock()
+	if client.metadataDenied == nil {
+		client.metadataDenied = map[metadataDenyKey]metadataDenyMemo{}
+	}
+	if len(client.metadataDenied) >= maxMetadataDenyEntries {
+		// Bounded bookkeeping: forgetting every memo costs at most one probe per
+		// key, which is exactly what the next retry cycle does anyway.
+		clear(client.metadataDenied)
+	}
+	client.metadataDenied[key] = metadataDenyMemo{Until: client.clock().Add(metadataDenyTTL), Err: denial}
+}
+
+// clearMetadataDenial forgets a denial once a read succeeds.
+func (client *Client) clearMetadataDenial(key metadataDenyKey) {
+	client.metadataMu.Lock()
+	defer client.metadataMu.Unlock()
+	delete(client.metadataDenied, key)
+}
+
+type ErrThrottled struct{ RetryAfter time.Duration }
+
+func (*ErrThrottled) Error() string { return "kubernetes: API throttled" }
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil {
+		if seconds <= 0 {
+			return time.Second
+		}
+		if seconds >= 300 {
+			return 5 * time.Minute
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		delay := at.Sub(now)
+		if delay <= 0 {
+			return time.Second
+		}
+		if delay > 5*time.Minute {
+			return 5 * time.Minute
+		}
+		return delay
+	}
+	return 30 * time.Second
+}

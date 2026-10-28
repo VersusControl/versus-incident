@@ -87,12 +87,14 @@ func TestWorker_EmitDetect_HappyPath(t *testing.T) {
 	var emitted struct {
 		called  int
 		finding *core.AIFinding
+		result  core.AgentResult
 		source  string
 		service string
 	}
-	emitter := func(f *core.AIFinding, _ core.AgentResult, source, service string) error {
+	emitter := func(f *core.AIFinding, result core.AgentResult, source, service string) error {
 		emitted.called++
 		emitted.finding = f
+		emitted.result = result
 		emitted.source = source
 		emitted.service = service
 		return nil
@@ -107,8 +109,8 @@ func TestWorker_EmitDetect_HappyPath(t *testing.T) {
 	signals := []core.Signal{{Message: "boom", Source: "svc-x"}}
 	outcome := w.emitDetect(
 		context.Background(),
-		"test", "pid-1", "boom",
-		"svc-x", signals,
+		"test", "logs", "pid-1", "boom",
+		"svc-x", 500, signals,
 		core.VerdictUnknown,
 		0, 0, 0, "",
 	)
@@ -127,6 +129,30 @@ func TestWorker_EmitDetect_HappyPath(t *testing.T) {
 	}
 	if emitted.source != "test" || emitted.service != "svc-x" {
 		t.Fatalf("emitter args = (%q,%q), want (test,svc-x)", emitted.source, emitted.service)
+	}
+	if emitted.result.Frequency != 500 || emitted.result.AgentKind != "detect" || emitted.result.SignalKind != "logs" {
+		t.Fatalf("emitter result metadata = %+v", emitted.result)
+	}
+}
+
+func TestWorker_EmitDetect_CacheHitStillInvokesEmitter(t *testing.T) {
+	finding := &core.AIFinding{Title: "Cached finding", Severity: "medium"}
+	detector := &fakeAgent{finding: finding}
+	cache := ai.NewResultCache(time.Hour, nil)
+	var emitted atomic.Int32
+	worker := newWorkerForTest(t, AIBundle{Detect: detector, Cache: cache}, func(*core.AIFinding, core.AgentResult, string, string) error {
+		emitted.Add(1)
+		return nil
+	})
+	for index := 0; index < 2; index++ {
+		outcome := worker.emitDetect(context.Background(), "source", "logs", "pattern", "template", "service", 1,
+			[]core.Signal{{Message: "sample"}}, core.VerdictUnknown, 0, 0, 0, "")
+		if index == 0 && outcome != "emitted" || index == 1 && outcome != "cached" {
+			t.Fatalf("outcome[%d]=%q", index, outcome)
+		}
+	}
+	if detector.calls != 1 || emitted.Load() != 2 {
+		t.Fatalf("model calls=%d emitter calls=%d, want 1/2", detector.calls, emitted.Load())
 	}
 }
 
@@ -148,7 +174,7 @@ func TestWorker_EmitDetect_TemplatedWhenNoAgent(t *testing.T) {
 
 	outcome := w.emitDetect(
 		context.Background(),
-		"test", "pid-2", "boom", "svc-x",
+		"test", "logs", "pid-2", "boom", "svc-x", 1,
 		[]core.Signal{{Message: "boom"}},
 		core.VerdictUnknown,
 		0, 0, 0, "",
@@ -213,8 +239,8 @@ func TestWorker_EmitDetect_HonorsDeclaredSeverityFloor(t *testing.T) {
 			}}
 			outcome := w.emitDetect(
 				context.Background(),
-				"demo-prom", "pid-sev", "metric <*> = <*>",
-				"svc", signals,
+				"demo-prom", "metrics", "pid-sev", "metric <*> = <*>",
+				"svc", 1, signals,
 				core.VerdictSpike,
 				0, 0, 0, "",
 			)
@@ -229,6 +255,22 @@ func TestWorker_EmitDetect_HonorsDeclaredSeverityFloor(t *testing.T) {
 				t.Fatalf("emitted severity = %q, want %q", got.Severity, tc.wantSeverity)
 			}
 		})
+	}
+}
+
+func TestWorker_EmitDetect_UsesSeverityComputedBeforeSampleTruncation(t *testing.T) {
+	agent := &fakeAgent{finding: &core.AIFinding{Title: "t", Severity: "low"}}
+	var got *core.AIFinding
+	w := newWorkerForTest(t, AIBundle{Detect: agent}, func(finding *core.AIFinding, _ core.AgentResult, _, _ string) error {
+		got = finding
+		return nil
+	})
+	outcome := w.emitDetect(
+		context.Background(), "source", "logs", "condition", "template", "checkout", 10,
+		[]core.Signal{{Severity: "low"}}, core.VerdictSpike, 0, 0, 0, "", "critical",
+	)
+	if outcome != "emitted" || got == nil || got.Severity != "critical" {
+		t.Fatalf("outcome=%q finding=%+v, want emitted critical", outcome, got)
 	}
 }
 
@@ -259,7 +301,7 @@ func TestWorker_EmitDetect_TemplatedOnQuota(t *testing.T) {
 
 	outcome := w.emitDetect(
 		context.Background(),
-		"test", "pid-quota", "boom", "svc-x",
+		"test", "logs", "pid-quota", "boom", "svc-x", 1,
 		[]core.Signal{{Message: "boom"}},
 		core.VerdictSpike,
 		0, 6, 1, "",
@@ -298,7 +340,7 @@ func TestWorker_EmitDetect_TemplatedOnAIError(t *testing.T) {
 
 	outcome := w.emitDetect(
 		context.Background(),
-		"test", "pid-err", "boom", "svc-x",
+		"test", "logs", "pid-err", "boom", "svc-x", 1,
 		[]core.Signal{{Message: "boom"}},
 		core.VerdictSpike,
 		0, 6, 1, "",

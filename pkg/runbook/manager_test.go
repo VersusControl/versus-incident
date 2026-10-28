@@ -19,9 +19,9 @@ func newTestManager(t *testing.T, embedder *fakeEmbedder) (*Manager, storage.Pro
 		emb = embedder
 	}
 	if emb == nil {
-		return NewManager(s, nil), prov
+		return NewManager(s, nil, "manager-org", nil), prov
 	}
-	return NewManager(s, emb), prov
+	return NewManager(s, emb, "manager-org", nil), prov
 }
 
 func TestManager_UploadListGetDelete(t *testing.T) {
@@ -32,7 +32,7 @@ func TestManager_UploadListGetDelete(t *testing.T) {
 		{Name: "pool.md", Content: []byte("---\ntitle: Pool Exhaustion\nservice: api\n---\nRestart the pool.")},
 		{Name: "disk.md", Content: []byte("# Disk Full\nFree space.")},
 	}
-	n, err := mgr.Upload(context.Background(), files, "")
+	n, err := mgr.Upload(context.Background(), files)
 	if err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
@@ -59,6 +59,9 @@ func TestManager_UploadListGetDelete(t *testing.T) {
 	}
 	if len(rec.Vector) == 0 {
 		t.Error("uploaded record has no vector despite embedder")
+	}
+	if rec.OrgID != "manager-org" {
+		t.Errorf("uploaded record org = %q, want manager-org", rec.OrgID)
 	}
 
 	// Persistence: reload the corpus from storage.
@@ -102,7 +105,7 @@ func TestManager_IndexSearchableAfterUpload(t *testing.T) {
 
 	if _, err := mgr.Upload(context.Background(), []UploadFile{
 		{Name: "api.md", Content: []byte("---\ntitle: API Restart\nservice: api\n---\nbody")},
-	}, ""); err != nil {
+	}); err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
 
@@ -118,7 +121,7 @@ func TestManager_IndexSearchableAfterUpload(t *testing.T) {
 	// A second upload is immediately searchable (live index swap).
 	if _, err := mgr.Upload(context.Background(), []UploadFile{
 		{Name: "db.md", Content: []byte("# DB\nbody")},
-	}, ""); err != nil {
+	}); err != nil {
 		t.Fatalf("Upload 2: %v", err)
 	}
 	if got := len(mgr.Index().Search([]float32{1, 0, 0}, "", 5)); got != 2 {
@@ -134,7 +137,7 @@ func TestManager_UploadWithoutEmbedder(t *testing.T) {
 
 	n, err := mgr.Upload(context.Background(), []UploadFile{
 		{Name: "x.md", Content: []byte("# X\nbody")},
-	}, "")
+	})
 	if err != nil {
 		t.Fatalf("Upload without embedder: %v", err)
 	}
@@ -157,7 +160,7 @@ func TestManager_UploadWithoutEmbedder(t *testing.T) {
 
 func TestManager_IngestDirNoopWithoutEmbedder(t *testing.T) {
 	mgr, _ := newTestManager(t, nil)
-	n, err := mgr.IngestDir(context.Background(), t.TempDir(), "")
+	n, err := mgr.IngestDir(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatalf("IngestDir: %v", err)
 	}
@@ -173,7 +176,7 @@ func TestManager_UploadNameSanitizesAndAddsExt(t *testing.T) {
 	if _, err := mgr.Upload(context.Background(), []UploadFile{
 		{Name: "../../etc/passwd", Content: []byte("# Evil\nbody")},
 		{Name: "noext", Content: []byte("# NoExt\nbody")},
-	}, ""); err != nil {
+	}); err != nil {
 		t.Fatalf("Upload: %v", err)
 	}
 	if _, err := mgr.Get("passwd.md"); err != nil {

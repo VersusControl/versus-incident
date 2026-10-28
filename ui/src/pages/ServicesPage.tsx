@@ -6,7 +6,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { Loader2, Plus, Search, Trash2, Eye } from "lucide-react";
+import { Loader2, Plus, Trash2, Eye } from "lucide-react";
 import { api, type ServiceInfo } from "@/lib/api";
 import { fmtAbs, fmtRel } from "@/lib/format";
 import { TopBar } from "@/components/TopBar";
@@ -15,6 +15,8 @@ import { InfoHint } from "@/components/InfoHint";
 import { SortHeader } from "@/components/SortHeader";
 import { tsValue, useSortableRows } from "@/lib/sortRows";
 import { SegmentedControl } from "@/components/SegmentedControl";
+import { FilterBar } from "@/components/FilterBar";
+import { SearchInput } from "@/components/SearchInput";
 import { AutoRefreshControl } from "@/components/AutoRefreshControl";
 import { useAutoRefresh } from "@/lib/useAutoRefresh";
 import { EmptyState } from "@/components/feedback";
@@ -26,6 +28,8 @@ import { Pagination } from "@/components/Pagination";
 import { PeekPanel, PeekField } from "@/components/PeekPanel";
 import { usePagination } from "@/lib/pagination";
 import { useToast } from "@/components/toastContext";
+import { useServiceIntelQuery } from "@/lib/useServiceIntelQuery";
+import { countWindowLabel } from "@/lib/countWindow";
 import {
   BulkActionBar,
   RowSelectCheckbox,
@@ -110,6 +114,7 @@ export function ServicesPage() {
     queryFn: () => api.getServiceDetail(peekName as string),
     enabled: !!peekName,
   });
+  const peekIntel = useServiceIntelQuery(peekName ?? "");
 
   // Enterprise Disable-Learn ("ignore") controls — gated to a licensed admin,
   // hidden on community / viewer. Drives the Ignore/Resume bulk actions and the
@@ -342,18 +347,24 @@ export function ServicesPage() {
         bulk.clear();
         break;
       }
-      case "ignore":
-        bulk.selectedKeys
-          .filter((name) => !ignore.isServiceExcluded(name))
-          .forEach((name) => ignore.toggleService(name, true));
+      case "ignore": {
+        // Sends only intent; the server merges it under a per-org lock, so
+        // concurrent writers compose instead of clobbering each other.
+        const toIgnore = bulk.selectedKeys.filter(
+          (name) => !ignore.isServiceExcluded(name),
+        );
+        if (toIgnore.length > 0) ignore.toggleServices(toIgnore, true);
         bulk.clear();
         break;
-      case "resume":
-        bulk.selectedKeys
-          .filter((name) => ignore.isServiceExcluded(name))
-          .forEach((name) => ignore.toggleService(name, false));
+      }
+      case "resume": {
+        const toResume = bulk.selectedKeys.filter((name) =>
+          ignore.isServiceExcluded(name),
+        );
+        if (toResume.length > 0) ignore.toggleServices(toResume, false);
         bulk.clear();
         break;
+      }
       case "rename":
         if (selectedManual.length === 1) setRenameTarget(selectedManual[0]);
         break;
@@ -378,7 +389,7 @@ export function ServicesPage() {
         title="Services"
         subtitle={total != null ? `${total.toLocaleString()} discovered` : undefined}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               className="btn btn-primary"
               onClick={() => setShowAdd(true)}
@@ -399,38 +410,34 @@ export function ServicesPage() {
       />
 
       <main className="flex-1 overflow-auto p-6">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {ignore.visible && (
-            <SegmentedControl
-              param={SCOPE_PARAM}
-              defaultValue="active"
-              aria-label="Learning scope"
-              options={[
-                { value: "active", label: "Active", badge: scopeCounts.active },
-                {
-                  value: "ignored",
-                  label: "Ignored",
-                  badge: scopeCounts.ignored,
-                },
-              ]}
-            />
-          )}
-          <div className="relative w-full max-w-md sm:w-auto sm:flex-1">
-            <Search
-              size={12}
-              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400"
-            />
-            <input
-              data-page-search
-              className="input pl-7"
-              placeholder="Search service…  ( / )"
+        <FilterBar
+          tabs={
+            ignore.visible ? (
+              <SegmentedControl
+                param={SCOPE_PARAM}
+                defaultValue="active"
+                aria-label="Learning scope"
+                options={[
+                  { value: "active", label: "Active", badge: scopeCounts.active },
+                  {
+                    value: "ignored",
+                    label: "Ignored",
+                    badge: scopeCounts.ignored,
+                  },
+                ]}
+              />
+            ) : undefined
+          }
+          search={
+            <SearchInput
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={setQ}
+              className="w-full max-w-md sm:w-auto sm:flex-1"
+              placeholder="Search service…"
             />
-          </div>
-
-          <AutoRefreshControl state={refresh} />
-        </div>
+          }
+          actions={<AutoRefreshControl state={refresh} />}
+        />
 
         {isError && (
           <div className="mb-3">
@@ -732,7 +739,9 @@ export function ServicesPage() {
                   </span>
                 )}
               </PeekField>
-              <PeekField label="Incidents">
+              <PeekField
+                label={`Incidents (${countWindowLabel(peekDetail.data?.incidents.count_window, "short")})`}
+              >
                 {peekDetail.isLoading ? (
                   <span className="text-ink-400">…</span>
                 ) : (
@@ -741,6 +750,20 @@ export function ServicesPage() {
                   </span>
                 )}
               </PeekField>
+              {peekIntel.isSuccess && (
+                <>
+                  <PeekField label="Metrics">
+                    <span className="tabular-nums">
+                      {peekIntel.data.metrics?.length ?? 0}
+                    </span>
+                  </PeekField>
+                  <PeekField label="Traces">
+                    <span className="tabular-nums">
+                      {peekIntel.data.traces?.length ?? 0}
+                    </span>
+                  </PeekField>
+                </>
+              )}
             </dl>
 
             {peekDetail.isError && (

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,9 @@ func TestReportSettings_DefaultsWhenAbsent(t *testing.T) {
 	for _, got := range []ReportSettings{LoadReportSettings(nil), LoadReportSettings(storage.NewMemory())} {
 		if got.ScheduleEnabled || got.SendTime != "09:00" || got.Timezone != "UTC" {
 			t.Fatalf("scheduler defaults = %+v, want off/09:00/UTC", got)
+		}
+		if got.Title != "Incident report" {
+			t.Fatalf("default title = %q, want \"Incident report\"", got.Title)
 		}
 	}
 }
@@ -41,6 +45,12 @@ func TestReportSettings_SaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDefaultReportSettings_Title(t *testing.T) {
+	if got := DefaultReportSettings().Title; got != "Incident report" {
+		t.Fatalf("DefaultReportSettings().Title = %q, want \"Incident report\"", got)
+	}
+}
+
 func TestReportSettings_Sanitize(t *testing.T) {
 	st := storage.NewMemory()
 	// A bogus window is normalized to today; a negative rate is clamped to 0.
@@ -57,6 +67,29 @@ func TestReportSettings_Sanitize(t *testing.T) {
 	// Empty send-time/timezone fall back to the built-in defaults.
 	if got.SendTime != "09:00" || got.Timezone != "UTC" {
 		t.Fatalf("empty send_time/timezone not defaulted: %+v", got)
+	}
+	// A blank title defaults to "Incident report".
+	if got.Title != "Incident report" {
+		t.Fatalf("blank title not defaulted: %q", got.Title)
+	}
+}
+
+func TestReportSettings_Sanitize_TitleTrimAndClamp(t *testing.T) {
+	st := storage.NewMemory()
+	// A padded title is trimmed.
+	if err := SaveReportSettings(st, ReportSettings{Enable: true, Title: "  Weekly Ops Digest  "}); err != nil {
+		t.Fatalf("SaveReportSettings: %v", err)
+	}
+	if got := LoadReportSettings(st); got.Title != "Weekly Ops Digest" {
+		t.Fatalf("title not trimmed: %q", got.Title)
+	}
+	// An over-long title is clamped to 80 runes.
+	long := strings.Repeat("x", 200)
+	if err := SaveReportSettings(st, ReportSettings{Enable: true, Title: long}); err != nil {
+		t.Fatalf("SaveReportSettings: %v", err)
+	}
+	if got := LoadReportSettings(st); len([]rune(got.Title)) != 80 {
+		t.Fatalf("over-long title not clamped: %d runes", len([]rune(got.Title)))
 	}
 }
 

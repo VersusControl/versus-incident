@@ -17,7 +17,10 @@ export function SegmentedControl({
   "aria-label": string;
 }) {
   const [params, setParams] = useSearchParams();
-  const current = params.get(param) ?? defaultValue;
+  const requested = params.get(param);
+  const current = options.some((option) => option.value === requested)
+    ? requested
+    : defaultValue;
 
   return (
     <div

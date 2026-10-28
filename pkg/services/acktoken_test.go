@@ -3,6 +3,9 @@ package services
 import (
 	"bytes"
 	neturl "net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -138,6 +141,78 @@ func TestAckURL_ExpReflectsTTL(t *testing.T) {
 	// The embedded exp must verify under the same key.
 	if err := VerifyAckToken(testAckKey, "inc-1", exp, u.Query().Get("sig"), time.Now()); err != nil {
 		t.Fatalf("VerifyAckToken on generated url: %v", err)
+	}
+}
+
+func TestAckURL_FromLoadedPublicHost(t *testing.T) {
+	const scenarioEnv = "VERSUS_ACK_URL_CONFIG_SCENARIO"
+	if scenario := os.Getenv(scenarioEnv); scenario != "" {
+		testAckURLFromLoadedPublicHost(t, scenario)
+		return
+	}
+
+	for _, scenario := range []string{"normalized-origin", "custom-port", "empty-origin"} {
+		t.Run(scenario, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestAckURL_FromLoadedPublicHost$")
+			cmd.Env = append(os.Environ(), scenarioEnv+"="+scenario)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("config-loaded ack URL subprocess failed: %v\n%s", err, output)
+			}
+		})
+	}
+}
+
+func testAckURLFromLoadedPublicHost(t *testing.T, scenario string) {
+	publicHost := map[string]string{
+		"normalized-origin": "HTTPS://Console.Example:443/",
+		"custom-port":       "https://Console.Example:8443/",
+		"empty-origin":      "",
+	}[scenario]
+	if _, ok := map[string]bool{"normalized-origin": true, "custom-port": true, "empty-origin": true}[scenario]; !ok {
+		t.Fatalf("unknown scenario %q", scenario)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("public_host: '"+publicHost+"'\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := config.LoadConfig(path); err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg := config.GetConfig()
+
+	SetAckSigningKey(nil)
+	wantBare := map[string]string{
+		"normalized-origin": "https://console.example/api/ack/inc-1",
+		"custom-port":       "https://console.example:8443/api/ack/inc-1",
+		"empty-origin":      "/api/ack/inc-1",
+	}[scenario]
+	if got := AckURL(cfg, "inc-1", 30*time.Minute); got != wantBare {
+		t.Fatalf("bare ack URL = %q, want %q", got, wantBare)
+	}
+
+	if scenario != "normalized-origin" {
+		return
+	}
+	SetAckSigningKey(testAckKey)
+	signed := AckURL(cfg, "inc-1", 30*time.Minute)
+	parsed, err := neturl.Parse(signed)
+	if err != nil {
+		t.Fatalf("parse signed ack URL: %v", err)
+	}
+	if parsed.Scheme != "https" || parsed.Host != "console.example" || parsed.Path != "/api/ack/inc-1" {
+		t.Fatalf("signed ack URL target = %s://%s%s, want https://console.example/api/ack/inc-1", parsed.Scheme, parsed.Host, parsed.Path)
+	}
+	query := parsed.Query()
+	if len(query) != 2 || query.Get("exp") == "" || query.Get("sig") == "" {
+		t.Fatalf("signed ack URL query = %q, want exactly exp and sig", parsed.RawQuery)
+	}
+	exp, err := strconv.ParseInt(query.Get("exp"), 10, 64)
+	if err != nil {
+		t.Fatalf("parse signed ack URL expiry: %v", err)
+	}
+	if err := VerifyAckToken(testAckKey, "inc-1", exp, query.Get("sig"), time.Now()); err != nil {
+		t.Fatalf("verify signed ack URL: %v", err)
 	}
 }
 

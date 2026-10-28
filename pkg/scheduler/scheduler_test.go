@@ -42,6 +42,40 @@ func TestScheduler_RunsAtInterval(t *testing.T) {
 	}
 }
 
+func TestScheduler_ResolvesIntervalWithoutDuplicateRegistration(t *testing.T) {
+	var interval atomic.Int64
+	interval.Store(int64(40 * time.Millisecond))
+	runs := make(chan time.Time, 4)
+	s := scheduler.New([]scheduler.Job{{
+		Name:     "dynamic",
+		Interval: time.Hour,
+		ResolveInterval: func() time.Duration {
+			return time.Duration(interval.Load())
+		},
+		Run: func(context.Context) error {
+			runs <- time.Now()
+			return nil
+		},
+	}}).SetJitter(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+
+	first := <-runs
+	interval.Store(int64(5 * time.Millisecond))
+	second := <-runs
+	third := <-runs
+	if second.Sub(first) < 25*time.Millisecond {
+		t.Fatalf("in-flight wait changed early: %s", second.Sub(first))
+	}
+	if third.Sub(second) > 25*time.Millisecond {
+		t.Fatalf("new interval not applied: %s", third.Sub(second))
+	}
+	if got := s.Len(); got != 1 {
+		t.Fatalf("jobs = %d, want 1", got)
+	}
+}
+
 func TestScheduler_SingleFlight(t *testing.T) {
 	var (
 		concurrent int32

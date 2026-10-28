@@ -1,4 +1,5 @@
 import { RefreshCw } from "lucide-react";
+import { ApiError } from "@/lib/api";
 
 // RetryableError replaces every bare ErrorBox on query failures — the audit
 // found zero retry affordances in the entire app. Message + cause + a Retry
@@ -16,6 +17,9 @@ export function RetryableError({
   context?: string;
 }) {
   const msg = error instanceof Error ? error.message : String(error);
+  const action = error instanceof ApiError && error.body && typeof error.body === "object" && "action" in error.body && typeof error.body.action === "string"
+    ? error.body.action
+    : "";
   return (
     <div
       role="alert"
@@ -24,6 +28,7 @@ export function RetryableError({
       <div className="min-w-0 text-xs">
         {context && <div className="font-medium text-ink-50">{context}</div>}
         <div className="mt-0.5 break-words text-sev-critical">{msg}</div>
+        {action && <div className="mt-1 break-words text-ink-200">{action}</div>}
       </div>
       <button className="btn shrink-0" onClick={onRetry} disabled={retrying}>
         <RefreshCw size={12} className={retrying ? "animate-spin" : undefined} />

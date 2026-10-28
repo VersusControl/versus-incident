@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import {
@@ -19,7 +20,7 @@ import {
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { EnterpriseLockedBody } from "@/components/EnterpriseLocked";
-import { AGENT_AI_SETTINGS_ANCHOR } from "@/components/AgentAISettingsControl";
+import { SettingsCard } from "@/components/settings/SettingsCard";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
 import { detectAiDisabledRemedy } from "@/lib/agentAI";
@@ -55,6 +56,7 @@ const MODE_BLURB: Record<AgentMode, string> = {
 export function AgentModeControl() {
   const qc = useQueryClient();
   const toast = useToast();
+  const navigate = useNavigate();
   const access = useEffectiveRole();
   const gate = adminGateState({
     loading: access.loading,
@@ -276,7 +278,7 @@ export function AgentModeControl() {
                     onClick={() => {
                       setPendingDetect(false);
                       setMode.reset();
-                      scrollToAISettings();
+                      navigate({ search: "?section=ai" });
                     }}
                   >
                     Go to AI settings
@@ -304,17 +306,10 @@ export function AgentModeControl() {
   );
 }
 
-// ModeShell — the consistent card chrome every state renders inside.
+// ModeShell — the surface every state renders inside; the section heading comes
+// from the Admin settings layout.
 function ModeShell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="card mb-4">
-      <div className="card-header">
-        <h2 className="card-title">Runtime mode</h2>
-        <span className="text-2xs text-ink-400">Enterprise control</span>
-      </div>
-      <div className="card-body">{children}</div>
-    </div>
-  );
+  return <SettingsCard>{children}</SettingsCard>;
 }
 
 // ModeBadge — icon + text chip (state never conveyed by color alone).
@@ -354,14 +349,5 @@ function LockedCard() {
       </EnterpriseLockedBody>
     </ModeShell>
   );
-}
-
-// scrollToAISettings brings the AI-settings control (rendered on the same
-// /agent page) into view when the operator follows the detect-blocked remedy.
-function scrollToAISettings() {
-  const el = document.getElementById(AGENT_AI_SETTINGS_ANCHOR);
-  if (el) {
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-  }
 }
 
