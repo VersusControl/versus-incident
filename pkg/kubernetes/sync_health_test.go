@@ -319,6 +319,31 @@ func TestSyncHealthMarksUnlistedKindsAsPending(t *testing.T) {
 	}
 }
 
+func TestSyncHealthKindsPreservesPublishedStatuses(t *testing.T) {
+	now := time.Now().UTC()
+	pod := kubeindex.KindStatus{State: "ready", Records: 3, ObservedAt: now}
+	secret := kubeindex.KindStatus{State: "error", Error: "forbidden", Partial: true, ObservedAt: now}
+	custom := kubeindex.KindStatus{State: "absent", Absent: true}
+	input := map[string]kubeindex.KindStatus{"Pod": pod, "Secret": secret, "Custom": custom}
+	kinds := syncHealthKinds(inventoryGeneration{View: kubeindex.Snapshot{Kinds: input}})
+	if len(kinds) != len(indexedResourceIDs)+1 || kinds["Pod"] != pod || kinds["Secret"] != secret || kinds["Custom"] != custom {
+		t.Fatalf("published statuses changed: %+v", kinds)
+	}
+	for kind := range indexedResourceIDs {
+		if _, exists := input[kind]; !exists && kinds[kind] != (kubeindex.KindStatus{State: "pending"}) {
+			t.Fatalf("%s = %+v, want pending", kind, kinds[kind])
+		}
+	}
+	kinds["Pod"] = kubeindex.KindStatus{State: "pending"}
+	if len(input) != 3 || input["Pod"] != pod || input["Secret"] != secret || input["Custom"] != custom {
+		t.Fatalf("published input mutated: %+v", input)
+	}
+	empty := syncHealthKinds(inventoryGeneration{})
+	if empty == nil || len(empty) != len(indexedResourceIDs) {
+		t.Fatalf("empty generation kinds = %+v", empty)
+	}
+}
+
 // A kind the cluster does not serve is reported, and cannot hold the gate back:
 // the surface must be able to tell "not served" from "not loaded yet".
 func TestSyncHealthSeparatesAbsentFromFailing(t *testing.T) {

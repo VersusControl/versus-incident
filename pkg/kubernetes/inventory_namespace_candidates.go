@@ -221,7 +221,7 @@ func (service *Service) discoverNamespaceCandidates(ctx context.Context, cache *
 			return false, err
 		}
 	}
-	proofs := make(map[string]time.Time, len(generation.NamespaceProof)+len(verified))
+	proofs := make(map[string]time.Time)
 	for ns, at := range generation.NamespaceProof {
 		if now.Sub(at) <= namespaceObservationTTL {
 			proofs[ns] = at

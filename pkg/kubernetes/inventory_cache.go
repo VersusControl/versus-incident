@@ -335,7 +335,7 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 	if len(pending) > 0 {
 		// A kind the published generation has not listed yet is loading, never
 		// empty: report it as pending so views neither show zero nor complete.
-		states := make(map[string]kubeindex.KindStatus, len(generation.View.Kinds)+len(pending))
+		states := make(map[string]kubeindex.KindStatus)
 		for kind, state := range generation.View.Kinds {
 			states[kind] = state
 		}
@@ -372,12 +372,10 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 		status.Progress = service.coldSyncProgress()
 	}
 	requested := make(map[string]bool, len(kinds))
-	capacity := 0
 	for _, kind := range kinds {
 		requested[kind] = true
-		capacity += generation.View.Kinds[kind].Records
 	}
-	records := make([]kubeindex.Record, 0, min(capacity, len(generation.View.Records)))
+	records := make([]kubeindex.Record, 0)
 	for _, record := range generation.View.Records {
 		state := generation.View.Kinds[record.Kind]
 		if requested[record.Kind] && state.Error != "forbidden" && state.Error != "unauthorized" {

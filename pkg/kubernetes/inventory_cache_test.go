@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,87 @@ func seedInventory(t *testing.T, service *Service, records []kubeindex.Record) {
 	service.changes.inventories[service.indexScope()] = &inventoryCache{
 		generation: inventoryGeneration{View: kubeindex.Snapshot{Records: records, Kinds: kinds}},
 		done:       done, cancel: func() {},
+	}
+}
+
+func TestCachedNamespaceSnapshotIgnoresRecordCounts(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	for _, test := range []struct {
+		name              string
+		pods, deployments int
+		empty             bool
+	}{
+		{name: "negative", pods: -1},
+		{name: "minimum", pods: -maxInt - 1},
+		{name: "maximum", pods: maxInt},
+		{name: "overflow", pods: maxInt, deployments: 1},
+		{name: "undercounted"},
+		{name: "empty", pods: -1, empty: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+			input := []kubeindex.Record{
+				{UID: "pod-a", Kind: "Pod", Namespace: "shop"},
+				{UID: "node", Kind: "Node"},
+				{UID: "deployment", Kind: "Deployment", Namespace: "shop"},
+				{UID: "secret", Kind: "Secret", Namespace: "shop"},
+				{UID: "pod-b", Kind: "Pod", Namespace: "shop"},
+			}
+			want := []kubeindex.Record{input[0], input[2], input[4]}
+			if test.empty {
+				input = input[1:2]
+				want = []kubeindex.Record{}
+			}
+			seedInventory(t, service, input)
+			cache := service.changes.inventories[service.indexScope()]
+			now := time.Now().UTC()
+			kinds := map[string]kubeindex.KindStatus{
+				"Pod":        {State: "ready", Records: test.pods, ObservedAt: now},
+				"Deployment": {State: "ready", Records: test.deployments, ObservedAt: now},
+				"Secret":     {State: "partial", Error: "forbidden", Partial: true, ObservedAt: now},
+			}
+			pending := []string{indexedResourceIDs["ConfigMap"]}
+			cache.generation.View.Kinds, cache.generation.Pending = kinds, pending
+			beforeRecords := append([]kubeindex.Record(nil), input...)
+			beforeKinds := make(map[string]kubeindex.KindStatus)
+			for kind, state := range kinds {
+				beforeKinds[kind] = state
+			}
+
+			snapshot, status, err := service.CachedNamespaceSnapshot(t.Context(), "", "Pod", "Deployment", "Secret", "ConfigMap")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.Records == nil || !reflect.DeepEqual(snapshot.Records, want) {
+				t.Fatalf("records = %+v, want %+v (non-nil)", snapshot.Records, want)
+			}
+			if status.State != "partial" || !status.Partial || !reflect.DeepEqual(status.Pending, pending) {
+				t.Fatalf("status = %+v", status)
+			}
+			for kind, state := range beforeKinds {
+				if snapshot.Kinds[kind] != state || status.Kinds[kind] != state {
+					t.Fatalf("%s status was overwritten: snapshot=%+v status=%+v", kind, snapshot.Kinds[kind], status.Kinds[kind])
+				}
+			}
+			if snapshot.Kinds["ConfigMap"] != (kubeindex.KindStatus{State: "pending"}) || status.Kinds["ConfigMap"] != snapshot.Kinds["ConfigMap"] {
+				t.Fatalf("pending status = %+v", status.Kinds["ConfigMap"])
+			}
+			if !reflect.DeepEqual(kinds, beforeKinds) || !reflect.DeepEqual(input, beforeRecords) ||
+				!reflect.DeepEqual(cache.generation.Pending, []string{indexedResourceIDs["ConfigMap"]}) {
+				t.Fatal("snapshot read mutated published input")
+			}
+			snapshot.Kinds["Pod"] = kubeindex.KindStatus{State: "error"}
+			status.Kinds["Deployment"] = kubeindex.KindStatus{State: "error"}
+			if !reflect.DeepEqual(kinds, beforeKinds) {
+				t.Fatal("returned kind maps alias published input")
+			}
+			if len(snapshot.Records) > 0 {
+				snapshot.Records[0].UID = "changed"
+				if !reflect.DeepEqual(input, beforeRecords) {
+					t.Fatal("returned records alias published input")
+				}
+			}
+		})
 	}
 }
 

@@ -205,7 +205,7 @@ func syncFailureClass(err error) string {
 // would let one demand-loaded kind report a whole cluster ready before its first
 // generation was ever published.
 func syncHealthKinds(generation inventoryGeneration) map[string]kubeindex.KindStatus {
-	kinds := make(map[string]kubeindex.KindStatus, len(generation.View.Kinds)+len(indexedResourceIDs))
+	kinds := make(map[string]kubeindex.KindStatus)
 	for kind, state := range generation.View.Kinds {
 		kinds[kind] = state
 	}
