@@ -245,6 +245,8 @@ type Scrubber interface{ Scrub(string) string }
 
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
+	inventoryRestore       *inventoryRestoreAuthority
+	recovery               *clusterRecovery
 	issueAlertSink         func(context.Context, IssueAlert) (Outcome, error)
 	client                 *Client
 	scope                  Scope
@@ -292,7 +294,7 @@ func newService(parent context.Context, client *Client, scope Scope, discoveryTT
 		ctx, cancel = client.credentialEpochContext()
 	}
 	configured := scope.CredentialID
-	service := &Service{client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewUnboundedRegistry(16), inventoryLog: newInventoryKindLog(), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
+	service := &Service{inventoryRestore: &inventoryRestoreAuthority{}, client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewUnboundedRegistry(16), inventoryLog: newInventoryKindLog(), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
 	service.usageHistory = newUsageHistoryState()
 	if client != nil && client.credentials != nil {
 		initialization, stop := context.WithTimeout(parent, 10*time.Second)
@@ -327,6 +329,8 @@ func (service *Service) Scoped(scope Scope) *Service {
 		scope.CredentialID = service.scope.CredentialID
 	}
 	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, inventoryLog: service.inventoryLog, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.logSources}
+	scoped.inventoryRestore = service.inventoryRestore
+	scoped.recovery = service.recovery
 	scoped.issueAlertSink = service.issueAlertSink
 	scoped.usageHistory = service.usageHistory
 	if configured != service.configuredCredentialID && service.client != nil {
@@ -368,6 +372,7 @@ type ServiceRegistry struct {
 	closeDone      chan struct{}
 	resolveLocks   sync.Map
 	usageHistory   *usageHistoryState
+	recoveries     map[string]*clusterRecovery
 }
 
 func NewServiceRegistry(base *Service) *ServiceRegistry {
@@ -396,6 +401,7 @@ func NewClusterRegistry(multiple bool, entries []ClusterEntry) *ServiceRegistry 
 func NewClusterRegistryWithScope(multiple bool, entries []ClusterEntry, scope tenancy.OrgScope) *ServiceRegistry {
 	registry := &ServiceRegistry{multiple: multiple, entries: append([]ClusterEntry(nil), entries...), services: make(map[string]*Service), summaries: make(map[string]clusterSummaryCache), summarySlots: make(chan struct{}, 4), summaryTimeout: 5 * time.Second}
 	registry.bootScope = scope.Normalized()
+	registry.recoveries = make(map[string]*clusterRecovery)
 	registry.usageHistory = newUsageHistoryState()
 	for _, entry := range registry.entries {
 		if entry.Service != nil && entry.Service.usageHistory != nil {
@@ -411,6 +417,12 @@ func NewClusterRegistryWithScope(multiple bool, entries []ClusterEntry, scope te
 			registry.base = entry.Service
 		}
 		if entry.Service != nil {
+			r := registry.recoveries[entry.Info.ID]
+			if r == nil {
+				r = &clusterRecovery{}
+				registry.recoveries[entry.Info.ID] = r
+			}
+			entry.Service.recovery = r
 			entry.Service.usageHistory = registry.usageHistory
 			entry.Service.readOrgs = tenancy.TrustedOrgScope(registry.bootScope, entry.Service.scope.OrgID).OrgIDs()
 			registry.services[entry.Service.cacheKey()] = entry.Service
@@ -542,6 +554,9 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 	if closed || previous == nil {
 		return nil, ErrClusterUnavailable
 	}
+	if previous.identity.ctx.Err() != nil && time.Now().Before(previous.recovery.deadline()) {
+		return nil, ErrCredentialUnavailable
+	}
 	fresh := previous
 	if err := previous.validateCredential(ctx); err != nil {
 		if ctx.Err() != nil {
@@ -549,15 +564,42 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		}
 		previous.identity.mu.Lock()
 		retired := previous.identity.retired
+		renewal := previous.identity.renewal
 		previous.identity.mu.Unlock()
 		if !retired {
 			return nil, err
 		}
+		if time.Now().Before(previous.recovery.deadline()) {
+			return nil, ErrCredentialUnavailable
+		}
+		previous.recovery.reserveReplacement(renewal)
 		scope := previous.Scope()
+		// Replacements fence delayed responses even when a provider returns the same bearer.
+		previous.client.authGeneration.Add(1)
 		fresh = newService(ctx, previous.client, scope, previous.ttl)
+		fresh.recovery = previous.recovery
 		if err := fresh.validateCredential(ctx); err != nil {
 			fresh.identity.cancel()
+			previous.recovery.failed(err, previous.client)
 			return nil, err
+		}
+		if fresh.client.http != nil && !renewal {
+			// Local token availability is not proof that Kubernetes accepted it.
+			probeCtx, cancelProbe := fresh.credentialContext(ctx)
+			var probe struct {
+				Items []json.RawMessage `json:"items"`
+			}
+			namespace := fresh.client.namespace
+			if namespace == "" {
+				namespace = "default"
+			}
+			probeErr := fresh.client.GetMetadataJSON(probeCtx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods?limit=1", &probe)
+			cancelProbe()
+			if probeErr != nil {
+				fresh.identity.cancel()
+				previous.recovery.failed(probeErr, previous.client)
+				return nil, probeErr
+			}
 		}
 		fresh.scrubber, fresh.captureMode, fresh.logStreamContext = previous.scrubber, previous.captureMode, previous.logStreamContext
 		fresh.issueAlertSink = previous.issueAlertSink
@@ -567,6 +609,9 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		provider := previous.changes.provider
 		previous.changes.mu.Unlock()
 		fresh.SetChangeStorage(provider)
+		previous.changes.mu.Lock()
+		fresh.changes.evidenceEnabled = previous.changes.evidenceEnabled
+		previous.changes.mu.Unlock()
 		registry.mu.Lock()
 		oldServices := []*Service{}
 		for _, old := range registry.services {
@@ -964,6 +1009,11 @@ func (service *Service) listPage(ctx context.Context, options ListOptions) (Reso
 }
 
 func (service *Service) Overview(ctx context.Context) (Overview, error) {
+	generationPinned, pinErr := service.readInventory(ctx)
+	if pinErr != nil {
+		return Overview{}, pinErr
+	}
+	ctx = pinInventory(ctx, generationPinned)
 	ctx, cancel := ensureOperationBudgetRequests(ctx, overviewOperationRequests)
 	defer cancel()
 	result := Overview{Connector: "kubernetes", ClusterID: service.scope.ClusterID, ObservedAt: time.Now().UTC(), UsageSource: "unavailable", MetricsStatus: "unavailable", Sync: SyncStatus{State: "direct"}}
@@ -976,6 +1026,7 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 	if generationErr != nil {
 		return result, generationErr
 	}
+	result.ObservedAt = snapshotObservedAt(generation)
 	result.Partial = append(result.Partial, generation.DiscoveryPartial...)
 	usage, usageErr := service.cachedUsage(ctx, "", false)
 	if usageErr != nil {
@@ -2372,11 +2423,16 @@ func pinnedGroupVersion(resourceID string) string {
 	return parts[0] + "~" + parts[1]
 }
 func errorClass(err error) string {
+	var evidence *evidenceReadError
+	if errors.As(err, &evidence) {
+		return errorClass(evidence.cause)
+	}
 	var throttled *ErrThrottled
 	if errors.As(err, &throttled) {
 		return "throttled"
 	}
 	var conflict commitConflictError
+	var indexed indexReadError
 	switch {
 	case errors.As(err, &conflict):
 		return "commit_conflict"
@@ -2398,6 +2454,8 @@ func errorClass(err error) string {
 		return "record_rejected"
 	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "deadline"):
 		return "timeout"
+	case errors.As(err, &indexed):
+		return inventoryCycleClass(indexed.class)
 	default:
 		return "unavailable"
 	}

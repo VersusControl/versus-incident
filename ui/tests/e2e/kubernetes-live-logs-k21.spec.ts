@@ -1107,15 +1107,53 @@ for (const viewport of viewports.filter((entry) => entry.width !== 1024)) {
 // ===========================================================================
 // S4 durability: first_ready_at survives a versus restart.
 // ===========================================================================
-test("S4 first_ready_at survives a versus restart", async ({ browser, request }) => {
+for (const viewport of viewports.filter((entry) => entry.width !== 1024)) for (const theme of themes) {
+test(`S4 first_ready_at survives a versus restart ${viewport.width} ${theme}`, async ({ browser, request }, testInfo) => {
   test.setTimeout(240_000);
-  const viewport = viewports[0];
-  const theme: Theme = "dark";
   const page = await newPage(browser, viewport, theme);
   await openKubernetes(page, "resources");
   const before = await realSyncReport(request);
   expect(before.first_ready_at, "first_ready_at before restart").toBeTruthy();
+  await watchPreparationFlashes(page);
+  // Compare the explicit cluster wire query with the default scope used by the
+  // seed, so a fixture scope mismatch cannot be misreported as lost inventory.
+  const sample = async (stage: string) => {
+    for (const scope of [`cluster=${encodeURIComponent(cluster)}&`, ""]) {
+      const response = await page.request.get(`/api/admin/kubernetes/workloads?${scope}limit=20`);
+      const body = await response.json();
+      const restored = response.ok() && body.items?.length > 0 && Boolean(body.sync?.state);
+      const unavailable = !response.ok() && response.status() >= 400
+        && typeof body.code === "string" && body.code.length > 0;
+      const truthful = stage === "before" || stage === "settled" || stage === "manual-refresh"
+        ? restored : restored || unavailable;
+      record("restart", viewport.width, theme, `${stage} ${scope ? "explicit" : "default"} scope`, truthful, {
+        at: new Date().toISOString(), endpoint: `/api/admin/kubernetes/workloads?${scope}limit=20`,
+        status: response.status(), code: body.code, retry_after: response.headers()["retry-after"] ?? null,
+        ...(!response.ok() ? { error_body: body } : {}),
+        items: body.items?.length, total: body.total, counts: body.counts, sync: body.sync,
+      });
+      expect.soft(truthful, `${stage}: authorized nonzero publication or explicit not-ready/failure, never successful empty`).toBe(true);
+    }
+    record("restart", viewport.width, theme, `${stage} sync report`, true, await realSyncReport(request));
+  };
+  const provenance = async (stage: string, proofs = false) => {
+    if (process.env.E2E_K22_PROVENANCE !== "1") return;
+    const response = await page.request.get(`${controlURL}/restart-provenance${proofs ? "?proof=1" : ""}`);
+    expect(response.ok(), "run-owned provenance capture must be observable").toBe(true);
+    await testInfo.attach(`restart-provenance-${stage}`, { body: JSON.stringify(await response.json()), contentType: "application/json" });
+  };
+  await sample("before");
   if (!controlURL) throw new Error("E2E_K22_CONTROL_URL is required for the restart proof");
+  if (process.env.E2E_K22_PROVENANCE === "1") {
+    // Recreate the preceding successful epoch-changing case once, then admit
+    // the same-token restart on rendered recovery rather than a global sleep.
+    expect((await page.request.post(`${controlURL}/renew-credential`, { timeout: 120_000 })).ok()).toBe(true);
+    expect((await page.request.post(`${controlURL}/restart`, { timeout: 120_000 })).ok()).toBe(true);
+    await openKubernetes(page, "resources");
+    await selectView(page, "Workloads");
+    await expect.poll(() => page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]').count(), { timeout: 60_000 }).toBeGreaterThan(0);
+    await sample("primed-same-credential");
+  }
   const renewal = await page.request.post(`${controlURL}/renew-credential`, { timeout: 120_000 });
   expect(renewal.ok()).toBe(true);
   const renewed = await renewal.json() as { first_ready_at?: string };
@@ -1124,13 +1162,731 @@ test("S4 first_ready_at survives a versus restart", async ({ browser, request })
   expect(restart.ok(), `restart HTTP ${restart.status()}`).toBe(true);
   const after = await restart.json() as { restarted?: boolean; first_ready_at?: string | null };
   soft("S4", viewport.width, theme, "first_ready_at survives the versus restart", Boolean(after.restarted) && after.first_ready_at === before.first_ready_at, { before: before.first_ready_at, after });
+  await provenance("before-response");
+  await sample("after");
   await openKubernetes(page, "resources");
   await selectView(page, "Workloads");
-  await expect.poll(async () => page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]').count(), { timeout: 60_000 }).toBeGreaterThan(0);
+  const workloadResponse = await page.request.get(`/api/admin/kubernetes/workloads?cluster=${encodeURIComponent(cluster)}&limit=20`);
+  const workloadBody = await workloadResponse.json();
+  const initialTruthful = workloadResponse.ok()
+    ? workloadBody.items?.length > 0 && Boolean(workloadBody.sync?.state)
+    : workloadResponse.status() === 503 && workloadBody.code === "inventory_not_ready" && workloadBody.retryable === true;
+  record("restart", viewport.width, theme, "actual workload response", initialTruthful, { at: new Date().toISOString(), status: workloadResponse.status(), code: workloadBody.code, retryable: workloadBody.retryable, retry_after: workloadResponse.headers()["retry-after"] ?? null, ...(!workloadResponse.ok() ? { error_body: workloadBody } : {}), items: workloadBody.items?.length, total: workloadBody.total, counts: workloadBody.counts, sync: workloadBody.sync });
+  await provenance("after-response-and-diagnostic-proofs", true);
+  expect.soft(initialTruthful, "initial restart read must be authorized nonzero or typed retryable not-ready").toBe(true);
+  await saveCapture(page, "published-restart", viewport.width, theme, "real-workloads");
+  try {
+    await expect.poll(async () => page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]').count(), { timeout: 60_000 }).toBeGreaterThan(0);
+  } finally {
+    await sample("settled");
+    await saveCapture(page, "published-restart", viewport.width, theme, "settled-workloads");
+    // Distinguish an endpoint still serving zeros from a cached initial empty
+    // response after the producer commits a nonempty replacement.
+    await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+    await page.waitForTimeout(1500);
+    await sample("manual-refresh");
+    record("restart", viewport.width, theme, "rows after explicit refresh", true,
+      await page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]').count());
+    await saveCapture(page, "published-restart", viewport.width, theme, "manual-refresh");
+  }
   soft("S4", viewport.width, theme, "Preparing does not come back after the restart",
     (await page.locator("[data-sync-health]").count()) === 0 && !(await page.locator("body").innerText()).includes("Preparing the cluster"),
     "after restart");
+  expect(await page.evaluate(() => sessionStorage.getItem("unexpected-preparation"))).toBeNull();
   await saveCapture(page, "k22-sync", viewport.width, theme, "after-restart");
+});
+}
+
+type CaptureSnapshot = {
+  [field: string]: unknown;
+  surface: string;
+  snapshot: string | null;
+  broken: string | null;
+  cpu: Record<string, string | undefined> | null;
+  memory: Record<string, string | undefined> | null;
+  issue_rows: Array<string | null> | null;
+  timeline_rows: string[] | null;
+  preparing: number;
+  strips: number;
+  topbar: number;
+  overflow: boolean;
+  false_empty: boolean;
+};
+type CaptureHoldState = {
+  surface: string; active: boolean; frozen: CaptureSnapshot | null; frozenUntil: number;
+  violations: Array<{ at: string; reasons: string[]; value: CaptureSnapshot }>;
+};
+declare global {
+  interface Window {
+    __captureHoldObservation: { state: CaptureHoldState; snapshot: () => CaptureSnapshot; check: () => void };
+  }
+}
+type ObservedIdentity = { uid?: string; kind: string; namespace?: string; name: string };
+type ObservedKind = { state?: string; partial?: boolean; error?: string; cycle_failure?: boolean; completed_at?: string; last_attempt_at?: string };
+type PublicationCandidate = {
+  scope_hash: string; head_revision: string; payload_revision: string; scope: Record<string, string>;
+  first_ready_at?: string; kinds: Record<string, ObservedKind>; row_identities?: ObservedIdentity[];
+  namespace_coverage?: Record<string, Record<string, ObservedKind>>;
+  namespace_row_identities?: Record<string, ObservedIdentity[]>;
+};
+type DiagnosticSnapshot = PublicationCandidate & { namespace_targets: string[]; namespace_kind_upper: string[] };
+type FixtureDiagnostics = {
+  observed_at: string; process_id: string | number; expected_physical_uid: string; token_file_stat: unknown;
+  observer_budget: { remaining_ms: number };
+  after: { observed_at: string; snapshots: DiagnosticSnapshot[] };
+  reads: Array<{ at: string; path: string; limit: string; completed_at?: string; monotonic_ms: number; authorization_header_sha256: string }>;
+  producer: { events: Array<{ at?: string; stage?: string; reason?: string }> };
+};
+type CaptureHoldResponse = {
+  state: string; elapsed_ms: number; observed_at: string; started_monotonic_ms: number; released_monotonic_ms: number;
+  publication_at_start: { snapshots: DiagnosticSnapshot[] };
+  requests: Array<{ wave: number; aborted: boolean; status: number; completed_at: string; total_request_ms: number; shape: { json_valid: boolean; items_type: string } }>;
+};
+type ObservedResponseBody = {
+  state?: string; class?: string; kinds?: Record<string, ObservedKind>;
+  items?: ObservedIdentity[] | null; counts?: Record<string, number>; sync?: unknown;
+};
+type UiResponseProof = {
+  path: string; at: string; request_at?: string; requested_cluster: string | null; status: number;
+  body: ObservedResponseBody; before: FixtureDiagnostics | null; after: FixtureDiagnostics;
+};
+type PartialAdmissionInput = {
+  candidate?: PublicationCandidate | null; originalScope: Pick<PublicationCandidate, "scope_hash" | "scope">;
+  initialRevisions: string[]; report?: { status: number; body: ObservedResponseBody } | null;
+  reportRevision?: string | null; rowsBeforeRevision?: string | null; rowsAfterRevision?: string | null;
+  rows?: ObservedIdentity[] | null; authorizationAt: string;
+};
+type AdmittedPublication = {
+  observed_at: string; render_deadline: number; revision: string; scope: Record<string, string>;
+  report: UiResponseProof; workload: UiResponseProof; row_coverage: unknown[];
+};
+
+for (const width of [1440, 390]) {
+  test(`published capacity, issues and timeline survive a real multi-wave capture hold at ${width}`, async ({ browser }, testInfo) => {
+    test.skip(process.env.E2E_K22_CAPTURE_HOLD !== "1", "requires the isolated hold-only60s request profile");
+    test.setTimeout(240_000);
+    const viewport = { name: width === 1440 ? "desktop" : "mobile", width, height: width === 1440 ? 900 : 844 };
+    const overview = await newPage(browser, viewport as Viewport, "dark");
+    await openKubernetes(overview, "overview");
+    const issues = await overview.context().newPage();
+    await openKubernetes(issues, "issues");
+    const timeline = await overview.context().newPage();
+    await openKubernetes(timeline, "timeline");
+    const surfaces = [{ page: overview, name: "overview" }, { page: issues, name: "issues" }, { page: timeline, name: "timeline" }];
+    for (const { page, name } of surfaces) {
+      await page.evaluate((surface) => {
+        const state: CaptureHoldState = { surface, active: false, frozen: null, frozenUntil: 0, violations: [] };
+        const snapshot = () => {
+          const panel = document.querySelector("#kubernetes-view-panel");
+          const capacity = (title: string) => {
+            const heading = [...document.querySelectorAll("h2")].find((element) => element.textContent?.trim() === title);
+            return Object.fromEntries([...heading?.closest("section")?.querySelectorAll("dl > div") ?? []].map((element) => [element.querySelector("dt")?.textContent?.trim(), element.querySelector("dd")?.textContent?.trim()]));
+          };
+          const health = document.querySelector('[aria-label="Cluster health"]');
+          return { surface, snapshot: health?.querySelector("p")?.textContent?.trim() ?? null,
+            broken: surface === "overview" ? [...health?.querySelectorAll("button") ?? []].map((element) => element.textContent?.trim()).find((text) => /broken$/.test(text ?? "")) ?? null : null,
+            cpu: surface === "overview" ? capacity("CPU capacity") : null, memory: surface === "overview" ? capacity("Memory capacity") : null,
+            issue_rows: surface === "issues" ? [...document.querySelectorAll('[aria-label="Kubernetes issues"] article[aria-label]')].map((element) => element.getAttribute("aria-label")).sort() : null,
+            timeline_rows: surface === "timeline" ? [...document.querySelectorAll('[data-timeline-list] [id^="timeline-row-"]')].map((element) => element.id).sort() : null,
+            preparing: document.querySelectorAll("[data-preparing-panel], [data-sync-health]").length,
+            strips: document.querySelectorAll("[data-sync-strip]").length,
+            topbar: document.querySelectorAll("[data-sync-state]").length,
+            overflow: document.documentElement.scrollWidth > innerWidth,
+            false_empty: /No broken workloads|No issues match these filters|No changes or crashes in this range/.test(panel?.textContent ?? "") };
+        };
+        const check = () => {
+          if (!state.active) return;
+          const value = snapshot();
+          const reasons = [];
+          if (value.preparing || value.strips || value.false_empty) reasons.push("extra-loading-error-or-empty-surface");
+          if (surface === "overview" && (!value.broken || /^0 broken$/.test(value.broken))) reasons.push("lost-broken-count");
+          if (surface === "issues" && !value.issue_rows?.length) reasons.push("lost-issues");
+          if (surface === "timeline" && !value.timeline_rows?.length) reasons.push("lost-timeline");
+          if (state.frozen && performance.now() <= state.frozenUntil) {
+            for (const key of ["snapshot", "broken", "cpu", "memory", "issue_rows", "timeline_rows"]) {
+              if (JSON.stringify(value[key as keyof typeof value]) !== JSON.stringify(state.frozen[key])) reasons.push(`changed-${key}`);
+            }
+          }
+          if (reasons.length && state.violations.length < 20) state.violations.push({ at: new Date().toISOString(), reasons, value });
+        };
+        new MutationObserver(check).observe(document, { childList: true, subtree: true, characterData: true, attributes: true });
+        window.__captureHoldObservation = { state, snapshot, check };
+      }, name);
+    }
+    const read = async (page: Page) => page.evaluate(() => window.__captureHoldObservation.snapshot());
+    const number = (value: string | null | undefined) => Number(value?.match(/\d+(?:\.\d+)?/)?.[0] ?? "NaN");
+    await expect.poll(async () => number((await read(overview)).broken)).toBeGreaterThan(0);
+    await expect.poll(async () => number((await read(overview)).cpu!.Allocatable)).toBeGreaterThan(0);
+    await expect.poll(async () => number((await read(overview)).cpu!.Usage)).toBeGreaterThan(0);
+    await expect.poll(async () => number((await read(overview)).memory!.Allocatable)).toBeGreaterThan(0);
+    await expect.poll(async () => number((await read(overview)).memory!.Usage)).toBeGreaterThan(0);
+    await expect.poll(async () => (await read(issues)).issue_rows!.length).toBeGreaterThan(0);
+    await expect.poll(async () => (await read(timeline)).timeline_rows!.length).toBeGreaterThan(0);
+    await expect.poll(async () => {
+      const response = await overview.request.get(`${controlURL}/fixture-diagnostics`);
+      const data: FixtureDiagnostics = await response.json();
+      const core = ["Pod", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Event"];
+      return data.after.snapshots.some((snapshot: DiagnosticSnapshot) => new Set(core.map((kind) => snapshot.kinds[kind]?.last_attempt_at)).size === 1 && core.every((kind) => {
+        const state = snapshot.kinds[kind];
+        return state?.state === "ready" && !state.partial && !state.error && Date.now() - Date.parse(state.last_attempt_at!) < 10_000;
+      }));
+    }, { timeout: 90_000 }).toBe(true);
+    const capture = async (phase: string) => {
+      for (const { page, name } of surfaces) {
+        const value = await read(page);
+        expect(value.preparing).toBe(0); expect(value.strips).toBe(0); expect(value.false_empty).toBe(false);
+        expect(value.topbar).toBe(1); expect(value.overflow).toBe(false);
+        await page.screenshot({ path: capturePath(`capture-hold-${name}`, width, "dark", phase), fullPage: true, animations: "disabled" });
+      }
+    };
+    const before = await Promise.all(surfaces.map(async ({ page, name }) => ({ name, value: await read(page) })));
+    await capture("before");
+    for (const { page } of surfaces) await page.evaluate(() => { window.__captureHoldObservation.state.active = true; });
+    const holdState = async (): Promise<CaptureHoldResponse> => (await overview.request.get(`${controlURL}/capture-hold`)).json();
+    let anchor: Array<{ name: string; value: CaptureSnapshot }> = [];
+    const samples: unknown[] = [];
+    let completed: CaptureHoldResponse | null = null;
+    let afterDiagnostics: FixtureDiagnostics | null = null;
+    try {
+    const armed = await overview.request.post(`${controlURL}/capture-hold/arm`);
+    expect(armed.ok()).toBe(true);
+    await expect.poll(async () => (await holdState()).state, { timeout: 45_000 }).toBe("holding");
+    const started = await holdState();
+    const initialHeads = started.publication_at_start.snapshots.map((item: DiagnosticSnapshot) => [item.scope_hash, item.head_revision]);
+    anchor = await Promise.all(surfaces.map(async ({ page, name }) => ({ name, value: await read(page) })));
+    for (let index = 0; index < surfaces.length; index++) {
+      await surfaces[index].page.evaluate(({ value, remaining }) => {
+        const state = window.__captureHoldObservation.state;
+        state.frozen = value; state.frozenUntil = performance.now() + remaining;
+      }, { value: anchor[index].value, remaining: Math.max(0, 60_000 - started.elapsed_ms) });
+    }
+    let held = started;
+    while (true) {
+      held = await holdState();
+      expect(held.state).toBe("holding");
+      const diagnostics: FixtureDiagnostics = await (await overview.request.get(`${controlURL}/fixture-diagnostics`)).json();
+      expect(diagnostics.after.snapshots.map((item: DiagnosticSnapshot) => [item.scope_hash, item.head_revision])).toEqual(initialHeads);
+      const values = await Promise.all(surfaces.map(async ({ page, name }) => ({ name, value: await read(page) })));
+      for (let index = 0; index < values.length; index++) {
+        for (const key of ["snapshot", "broken", "cpu", "memory", "issue_rows", "timeline_rows"]) expect(values[index].value[key]).toEqual(anchor[index].value[key]);
+        expect(values[index].value.preparing).toBe(0); expect(values[index].value.strips).toBe(0); expect(values[index].value.false_empty).toBe(false);
+      }
+      samples.push({ elapsed_ms: held.elapsed_ms, at: held.observed_at, heads: initialHeads, values });
+      if (held.elapsed_ms >= 60_000) break;
+      await overview.waitForTimeout(1000);
+    }
+    expect(held.elapsed_ms).toBeGreaterThanOrEqual(60_000);
+    await capture("held60s");
+    await expect.poll(async () => (await holdState()).state, { timeout: 10_000 }).toBe("released");
+    await expect.poll(async () => {
+      afterDiagnostics = await (await overview.request.get(`${controlURL}/fixture-diagnostics`)).json();
+      return afterDiagnostics!.after.snapshots.some((item: DiagnosticSnapshot) => item.head_revision === item.payload_revision && !initialHeads.some((old: string[]) => old[0] === item.scope_hash && old[1] === item.head_revision));
+    }, { timeout: 60_000 }).toBe(true);
+    for (const current of afterDiagnostics!.after.snapshots) {
+      const prior = started.publication_at_start.snapshots.find((item: DiagnosticSnapshot) => item.scope_hash === current.scope_hash);
+      expect(current.first_ready_at).toBe(prior!.first_ready_at);
+    }
+    await expect.poll(async () => (await read(overview)).snapshot, { timeout: 30_000 }).not.toBe(anchor[0].value.snapshot);
+    completed = await holdState();
+    expect(completed.released_monotonic_ms - completed.started_monotonic_ms).toBeGreaterThanOrEqual(65_000);
+    expect(completed.requests.filter((entry: CaptureHoldResponse["requests"][number]) => entry.wave === 1).length).toBe(4);
+    expect(completed.requests.some((entry: CaptureHoldResponse["requests"][number]) => entry.wave === 2)).toBe(true);
+    for (const request of completed.requests) {
+      expect(request.aborted).toBe(false); expect(request.status).toBe(200); expect(request.completed_at).toBeTruthy();
+      expect(request.total_request_ms).toBeLessThan(60_000);
+      expect(request.shape).toMatchObject({ json_valid: true, items_type: "array" });
+    }
+    for (const { page } of surfaces) {
+      const violations = await page.evaluate(() => window.__captureHoldObservation.state.violations);
+      expect(violations).toEqual([]);
+    }
+    await capture("after");
+    } finally {
+      const finalHold = await holdState();
+      const observations = await Promise.all(surfaces.map(async ({ page, name }) => ({ name, violations: await page.evaluate(() => window.__captureHoldObservation.state.violations) })));
+      await testInfo.attach("real-capture-hold-proof", { body: JSON.stringify({ before, anchor, samples, completed: completed ?? finalHold, finalHold, afterDiagnostics, observations, profile: "hold-only60s-client/65s-cycle/55s-per-request; ordinary10s unchanged" }), contentType: "application/json" });
+    }
+  });
+}
+
+function scopedPartialAdmission(input: PartialAdmissionInput) {
+  const reasons: string[] = [];
+  const candidate = input.candidate;
+  const report = input.report?.body;
+  const authClass = (value: unknown) => value === "forbidden" || value === "unauthorized";
+  if (!candidate || candidate.head_revision !== candidate.payload_revision || input.initialRevisions.includes(candidate.head_revision)) reasons.push("missing-new-stable-commit");
+  if (!candidate || candidate.scope_hash !== input.originalScope.scope_hash
+    || ["org_id", "cluster_id", "cluster_uid"].some((key) => candidate.scope?.[key] !== input.originalScope.scope[key])) reasons.push("scope-mismatch");
+  if (input.report?.status !== 200 || !["ready", "partial"].includes(report?.state as string)
+    || authClass(report?.class) || Object.values(report?.kinds ?? {}).some((state: ObservedKind) => state.cycle_failure && authClass(state.error))) reasons.push("whole-auth-or-unknown-report");
+  if (input.reportRevision !== candidate?.head_revision || input.rowsBeforeRevision !== candidate?.head_revision || input.rowsAfterRevision !== candidate?.head_revision) reasons.push("unbound-response-revision");
+  if (!input.rows?.length) reasons.push("missing-row-proof");
+  const identity = (row: ObservedIdentity) => [row.uid, row.kind, row.namespace ?? "", row.name].join("\u0000");
+  const committedRows = new Set((candidate?.row_identities ?? []).map(identity));
+  for (const row of input.rows ?? []) {
+    if (!row.uid || !committedRows.has(identity(row))) { reasons.push("row-not-in-commit"); continue; }
+    const global = candidate?.kinds?.[row.kind];
+    const scoped = candidate?.namespace_coverage?.[row.namespace ?? ""]?.[row.kind];
+    const currentComplete = (state: ObservedKind | undefined) => state?.state === "ready" && !state.partial && !state.error && Date.parse(state.completed_at ?? "") >= Date.parse(input.authorizationAt);
+    if (currentComplete(global)) continue;
+    const scopedRows = new Set((candidate!.namespace_row_identities?.[row.namespace ?? ""] ?? []).map(identity));
+    if (!currentComplete(scoped) || !scopedRows.has(identity(row))) reasons.push("missing-exact-kind-namespace-uid-coverage");
+  }
+  return { admitted: reasons.length === 0, reasons: [...new Set(reasons)] };
+}
+
+const phaseAdmittedCompletion = process.env.E2E_K22_PHASE_COMPLETION === "1";
+test(phaseAdmittedCompletion
+  ? "phase-admitted warm authority collection commits then rendered recovery completes"
+  : "warm same-scope authority loss clears protected views and recovers without restart", async ({ browser, request }, testInfo) => {
+  test.skip(process.env.E2E_K22_RESTART_CONTROLS !== "1", "requires the existing isolated synthetic authority fixture");
+  test.setTimeout(phaseAdmittedCompletion ? 15 * 60_000 : 180_000);
+  if (phaseAdmittedCompletion) {
+    // Pure observer checks only; none of these fixtures enter app/cache state.
+    const row = { uid: "observer-row", kind: "Deployment", namespace: "shop", name: "observer" };
+    const candidate = { scope_hash: "observer-scope", head_revision: "new", payload_revision: "new",
+      scope: { org_id: "org", cluster_id: "cluster", cluster_uid: "physical" },
+      kinds: { Deployment: { state: "partial", error: "namespace_scope", partial: true } }, row_identities: [row],
+      namespace_coverage: { shop: { Deployment: { state: "ready", partial: false, completed_at: "2026-10-28T00:00:01Z" } } },
+      namespace_row_identities: { shop: [row] } };
+    const input = { candidate, originalScope: { scope_hash: candidate.scope_hash, scope: candidate.scope }, initialRevisions: ["old"],
+      report: { status: 200, body: { state: "partial", kinds: { Deployment: { state: "partial", error: "namespace_scope" } } } },
+      reportRevision: "new", rowsBeforeRevision: "new", rowsAfterRevision: "new", rows: [row], authorizationAt: "2026-10-28T00:00:00Z" };
+    expect(scopedPartialAdmission(input).admitted).toBe(true);
+    expect(scopedPartialAdmission({ ...input, report: { status: 503, body: { state: "error", class: "unavailable" } } }).admitted).toBe(false);
+    expect(scopedPartialAdmission({ ...input, candidate: { ...candidate, namespace_row_identities: {} } }).admitted).toBe(false);
+    expect(scopedPartialAdmission({ ...input, report: { status: 200, body: { state: "partial", kinds: { Node: { error: "forbidden", cycle_failure: true } } } } }).admitted).toBe(false);
+    expect(scopedPartialAdmission({ ...input, rows: [{ ...row, namespace: "other" }] }).admitted).toBe(false);
+    await testInfo.attach("observer-negative-self-checks", { body: JSON.stringify({ authorized_exact_scoped_partial: true, unknown_fenced: true, missing_uid_proof_fenced: true, whole_cycle_auth_fenced: true, foreign_namespace_fenced: true }), contentType: "application/json" });
+  }
+  const page = await newPage(browser, viewports[0], "dark");
+  const passiveSamples: FixtureDiagnostics[] = [];
+  const uiTraffic: UiResponseProof[] = [];
+  const passiveErrors: string[] = [];
+  const samplePassive = async () => {
+    const response = await page.request.get(`${controlURL}/fixture-diagnostics`, { timeout: 5000 });
+    expect(response.ok()).toBe(true);
+    const value: FixtureDiagnostics = await response.json();
+    passiveSamples.push(value);
+    if (passiveSamples.length > 128) passiveSamples.shift();
+    return value;
+  };
+  const uiRequestSnapshots = new WeakMap<import("@playwright/test").Request, { at: string; previous: FixtureDiagnostics | undefined; pending: Promise<FixtureDiagnostics | null> }>();
+  if (phaseAdmittedCompletion) {
+    await samplePassive();
+    page.on("request", (entry) => {
+      const path = new URL(entry.url()).pathname;
+      if (!["/api/admin/kubernetes/sync", "/api/admin/kubernetes/workloads"].includes(path)) return;
+      const at = new Date().toISOString();
+      const previous = passiveSamples.at(-1);
+      const pending = samplePassive().catch(() => { passiveErrors.push("request-bracket-unavailable"); return null; });
+      uiRequestSnapshots.set(entry, { at, previous, pending });
+    });
+    page.on("response", (response) => {
+      const path = new URL(response.url()).pathname;
+      if (!["/api/admin/kubernetes/sync", "/api/admin/kubernetes/workloads"].includes(path)) return;
+      void (async () => {
+        const at = new Date().toISOString();
+        const origin = uiRequestSnapshots.get(response.request());
+        const body: ObservedResponseBody = await response.json();
+        const requestBracket = await origin?.pending;
+        const before = [origin?.previous, requestBracket].filter((item) => item && item.after.observed_at <= at).sort((a, b) => b!.after.observed_at.localeCompare(a!.after.observed_at))[0] ?? null;
+        const after = await samplePassive();
+        const identities = path.endsWith("/workloads") && response.ok() ? (body.items ?? []).map((row: ObservedIdentity) => ({ uid: row.uid, kind: row.kind, namespace: row.namespace ?? "", name: row.name })) : null;
+        uiTraffic.push({ path, at, request_at: origin?.at, requested_cluster: new URL(response.url()).searchParams.get("cluster"), status: response.status(),
+          body: path.endsWith("/sync") ? body : response.ok() ? { items: identities, counts: body.counts, sync: body.sync } : body,
+          before, after });
+      })().catch(() => { passiveErrors.push("ui-response-bracket-unavailable"); });
+    });
+  }
+  await openKubernetes(page, "resources");
+  await selectView(page, "Workloads");
+  const rows = page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]');
+  await expect.poll(() => rows.count()).toBeGreaterThan(0);
+  const before = await realSyncReport(request);
+  expect(before.state).toBe("ready");
+  expect(before.first_ready_at).toBeTruthy();
+  await page.evaluate(() => {
+    new MutationObserver(() => {
+      if (document.querySelector("[data-preparing-panel]")) sessionStorage.setItem("warm-authority-preparing-flash", "true");
+    }).observe(document, { childList: true, subtree: true });
+  });
+  const window = `since=${encodeURIComponent(new Date(Date.now() - 3600_000).toISOString())}&until=${encodeURIComponent(new Date().toISOString())}`;
+  const paths = [
+    `/api/admin/kubernetes/workloads?cluster=${cluster}&limit=20`,
+    "/api/admin/kubernetes/workloads?limit=20",
+    `/api/admin/kubernetes/issues?cluster=${cluster}&limit=20`,
+    `/api/admin/kubernetes/issues?cluster=${cluster}&${window}&limit=20`,
+    `/api/admin/kubernetes/timeline?cluster=${cluster}&${window}&limit=20`,
+  ];
+  for (const path of paths.slice(0, 4)) {
+    const response = await page.request.get(path);
+    expect(response.ok()).toBe(true);
+    const body = await response.json();
+    expect(body.items.length).toBeGreaterThan(0);
+    if (phaseAdmittedCompletion && path.includes("/workloads")) {
+      expect(body.items.length).toBe(20);
+      expect(Object.values(body.counts).reduce<number>((sum, value) => sum + Number(value), 0)).toBe(74);
+    }
+  }
+  await saveCapture(page, "warm-authority", 1440, "dark", "published");
+  // Same process, token file, physical UID and query scope throughout.
+  // No restart, token rotation, Refresh click or browser route interception.
+  expect((await page.request.post(`${controlURL}/fixture-phase/denied`)).ok()).toBe(true);
+  await expect.poll(async () => {
+    const report = await realSyncReport(request);
+    return report.state === "error" && (report.failing ?? []).some((item) => item.class === "forbidden");
+  }, { timeout: 60_000 }).toBe(true);
+  const failed = await realSyncReport(request);
+  expect(failed.first_ready_at).toBe(before.first_ready_at);
+  expect(failed.failing_kinds).toBeGreaterThan(0);
+  const errors = [];
+  for (const path of paths) {
+    const response = await page.request.get(path);
+    const body = await response.json();
+    errors.push({ at: new Date().toISOString(), path, status: response.status(), retry_after: response.headers()["retry-after"] ?? null, body: response.ok() ? { items: body.items?.length, sync: body.sync } : body });
+    expect.soft(response.status(), `terminal forbidden ${path}`).toBe(403);
+    expect.soft(body).toMatchObject({ code: "cluster_permission_denied", retryable: false });
+    expect.soft(body.items).toBeUndefined();
+  }
+  await testInfo.attach("warm-current-authority-http", { body: JSON.stringify({ first_ready_at: before.first_ready_at, failed, errors }), contentType: "application/json" });
+  await expect(page.locator('[data-sync-state="failed"]')).toHaveText("Failed", { timeout: 20_000 });
+  await expect(rows).toHaveCount(0);
+  await expect(page.locator("#kubernetes-view-panel")).not.toContainText("bulk-app");
+  await expect(page.getByText("No workloads in this scope.", { exact: true })).toHaveCount(0);
+  const notice = page.locator('[data-sync-strip="failed"]');
+  await expect(notice).toContainText("Cluster sync failed");
+  await expect(notice).toContainText("permission denied");
+  await saveCapture(page, "warm-authority", 1440, "dark", "forbidden");
+  // Keep the asserted neutral notice as text; a separate element screenshot
+  // can detach during the real query refresh and must not abort recovery checks.
+  await testInfo.attach("warm-authority-visible-notice", { body: await notice.innerText(), contentType: "text/plain" });
+  const fencedReads: string[] = [];
+  const observeFencedRead = (entry: import("@playwright/test").Request) => {
+    const path = new URL(entry.url()).pathname;
+    if (path.startsWith("/api/admin/kubernetes/")) fencedReads.push(path);
+  };
+  page.on("request", observeFencedRead);
+  const statusPoll = await page.waitForResponse((response) => new URL(response.url()).pathname === "/api/admin/kubernetes/sync" && response.status() === 200, { timeout: 10_000 });
+  expect((await statusPoll.json()).state).toBe("error");
+  page.off("request", observeFencedRead);
+  expect(fencedReads).toContain("/api/admin/kubernetes/sync");
+  expect(fencedReads.filter((path) => path !== "/api/admin/kubernetes/sync")).toEqual([]);
+  await testInfo.attach("protected-fence-status-only-poll", { body: JSON.stringify(fencedReads), contentType: "application/json" });
+  const audit = await (await page.request.get(`${controlURL}/fixture-authority`)).json();
+  expect(audit.identity_uid).toBe("k22-physical-cluster");
+  expect(audit.namespace_list_uid).toBe(audit.identity_uid);
+  // Natural cached discovery need not perform another discovery request:
+  // require an actual material/identity denial, not forced cache expiry.
+  expect(audit.reads.some((entry: { phase: string; path: string; status: number }) => entry.phase === "denied" && ["/api/v1/pods", "/apis/apps/v1/deployments", "/api/v1/namespaces/kube-system"].includes(entry.path) && entry.status === 403)).toBe(true);
+  await testInfo.attach("warm-authority-phase-audit", { body: JSON.stringify(audit), contentType: "application/json" });
+  const beforeAuthorization = await page.request.get(`${controlURL}/fixture-diagnostics`);
+  const preAuthorization: FixtureDiagnostics = await beforeAuthorization.json();
+  await testInfo.attach("pre-reauthorization-passive-diagnostics", { body: JSON.stringify(preAuthorization), contentType: "application/json" });
+  if (phaseAdmittedCompletion) {
+    expect(preAuthorization.observer_budget?.remaining_ms).toBeGreaterThan(0);
+    const snapshots = preAuthorization.after.snapshots;
+    const namespaces = [...new Set(snapshots.flatMap((item: { namespace_targets: string[] }) => item.namespace_targets))];
+    const kindUpper = Math.max(...snapshots.map((item: { namespace_kind_upper: string[] }) => item.namespace_kind_upper.length));
+    await testInfo.attach("completion-budget-derivation", { body: JSON.stringify({
+      observer: preAuthorization.observer_budget, namespace_targets: namespaces, namespace_count: namespaces.length,
+      namespaced_kind_upper: kindUpper, scoped_request_upper: namespaces.length * kindUpper,
+      historical_observed_kinds: 15, historical_additional_reads: 6, material_reads_per_second: 2,
+      paced_work_estimate_ms: (namespaces.length * kindUpper + 6) / 2 * 1000,
+      qualification: "Work estimate only, not a deadline/SLA; actual scoped requests/pages observed passively. Earliest pre-launch observer cap/producer cancellation wins. Render60s is truncated by remaining observer budget.",
+    }), contentType: "application/json" });
+  }
+  const authorization = await page.request.post(`${controlURL}/fixture-phase/authorized`);
+  expect(authorization.ok()).toBe(true);
+  const authorizationAck = await authorization.json();
+  await testInfo.attach("reauthorization-transition", { body: JSON.stringify(authorizationAck), contentType: "application/json" });
+  let remainingObserverMs = preAuthorization.observer_budget?.remaining_ms ?? 60_000;
+  let admittedPublication: AdmittedPublication | null = null;
+  if (phaseAdmittedCompletion) {
+    const initialRevisions = new Set(preAuthorization.after.snapshots.map((item: { head_revision: string }) => item.head_revision));
+    const originalScope = preAuthorization.after.snapshots.find((item: DiagnosticSnapshot) => item.scope.cluster_uid === preAuthorization.expected_physical_uid)!;
+    expect(originalScope).toBeTruthy();
+    const initialCredentialHashes = new Set(preAuthorization.reads.map((entry: FixtureDiagnostics["reads"][number]) => entry.authorization_header_sha256));
+    const stableResponseRevision = (record: UiResponseProof | null | undefined, scopeHash: string) => {
+      if (!record?.before || !record?.after || record.before.after.observed_at > record.at || record.after.after.observed_at < record.at) return null;
+      const before = record.before.after.snapshots.find((item: DiagnosticSnapshot) => item.scope_hash === scopeHash);
+      const after = record.after.after.snapshots.find((item: DiagnosticSnapshot) => item.scope_hash === scopeHash);
+      return before && after && before.head_revision === before.payload_revision && before.head_revision === after.head_revision && after.head_revision === after.payload_revision ? after.head_revision : null;
+    };
+    const collectionTimeline: unknown[] = [];
+    let provisionalPublicationAt: string | null = null;
+    let provisionalRenderDeadline = 0;
+    const protectedDuringCollection: Array<{ at: string; path: string }> = [];
+    const collectionFenceViolations: unknown[] = [];
+    const observeProtectedDuringCollection = (entry: import("@playwright/test").Request) => {
+      const path = new URL(entry.url()).pathname;
+      if (path.startsWith("/api/admin/kubernetes/") && path !== "/api/admin/kubernetes/sync") protectedDuringCollection.push({ at: new Date().toISOString(), path });
+    };
+    page.on("request", observeProtectedDuringCollection);
+    let latestCollection: FixtureDiagnostics | null = null;
+    try {
+      const collectionTimeout = Math.max(1, Math.floor(preAuthorization.observer_budget.remaining_ms));
+      await expect.poll(async () => {
+        latestCollection = await samplePassive();
+        remainingObserverMs = latestCollection.observer_budget.remaining_ms;
+        if (remainingObserverMs <= 0) throw new Error("Pre-launch observer cap reached; no collection extension");
+        expect(latestCollection.process_id).toBe(authorizationAck.process_id);
+        const postReads = latestCollection.reads.filter((entry: { monotonic_ms: number }) => entry.monotonic_ms >= authorizationAck.monotonic_ms);
+        const scopePairs = new Set(postReads.filter((entry: { path: string; limit: string; completed_at?: string }) => entry.limit === "500" && entry.completed_at && /\/namespaces\/[^/]+\/[^/]+$/.test(entry.path)).map((entry: { path: string }) => entry.path));
+        const stageEvents = latestCollection.producer.events.filter((event: { at?: string }) => event.at && Date.parse(event.at) >= Date.parse(authorizationAck.at));
+        const canceledOrFailed = stageEvents.find((event: { stage?: string; reason?: string }) => event.stage === "namespace" && event.reason !== "ready");
+        if (canceledOrFailed) throw new Error(`Namespace collection ended unsuccessfully: ${canceledOrFailed.reason}`);
+        expect(latestCollection.token_file_stat).toEqual(preAuthorization.token_file_stat);
+        expect(latestCollection.reads.every((entry: FixtureDiagnostics["reads"][number]) => initialCredentialHashes.has(entry.authorization_header_sha256))).toBe(true);
+        const committed = latestCollection.after.snapshots.find((item: DiagnosticSnapshot) => !initialRevisions.has(item.head_revision)
+          && item.head_revision === item.payload_revision && item.scope_hash === originalScope.scope_hash
+          && ["org_id", "cluster_id", "cluster_uid"].every((key) => item.scope[key] === originalScope.scope[key]));
+        const postUi = uiTraffic.filter((item) => item.at >= authorizationAck.at && [null, cluster].includes(item.requested_cluster));
+        const report = committed ? postUi.filter((item) => item.path.endsWith("/sync") && stableResponseRevision(item, committed.scope_hash) === committed.head_revision).at(-1) : null;
+        const workload = committed ? postUi.filter((item) => item.path.endsWith("/workloads") && item.status === 200 && item.body.items?.length && stableResponseRevision(item, committed.scope_hash) === committed.head_revision).at(-1) : null;
+        const admission = scopedPartialAdmission({ candidate: committed, originalScope, initialRevisions: [...initialRevisions],
+          report, reportRevision: report && stableResponseRevision(report, originalScope.scope_hash),
+          rowsBeforeRevision: workload && stableResponseRevision(workload, originalScope.scope_hash),
+          rowsAfterRevision: workload && stableResponseRevision(workload, originalScope.scope_hash), rows: workload?.body.items,
+          authorizationAt: authorizationAck.at });
+        const knownCurrentAuthority = committed && report && !admission.reasons.some((reason) => ["missing-new-stable-commit", "scope-mismatch", "whole-auth-or-unknown-report"].includes(reason));
+        if (knownCurrentAuthority && !provisionalPublicationAt) {
+          // This starts an EARLIER render/proof deadline, not acceptance or a
+          // grant. Actual UI row/UID proof is still mandatory before admission.
+          provisionalPublicationAt = new Date().toISOString();
+          provisionalRenderDeadline = Date.parse(provisionalPublicationAt) + Math.min(60_000, Math.floor(remainingObserverMs));
+        }
+        if (provisionalRenderDeadline && Date.now() > provisionalRenderDeadline) throw new Error("Scoped commit observed but passive row/render proof did not complete within the original 60s window");
+        collectionTimeline.push({ at: latestCollection.observed_at, remaining_ms: remainingObserverMs,
+          observed_postauth_reads: postReads.length, observed_completed_scope_pairs: scopePairs.size,
+          last_path: postReads.at(-1)?.path, last_response_at: postReads.at(-1)?.at,
+          revisions: latestCollection.after.snapshots.map((item: { head_revision: string }) => item.head_revision),
+          stages: stageEvents, committed_revision: committed?.head_revision ?? null, admission,
+          raw_report_state: report?.body.state, observed_ui_report: !!report, observed_ui_workloads: !!workload });
+        if (admission.admitted) {
+          admittedPublication = { observed_at: provisionalPublicationAt ?? new Date().toISOString(), render_deadline: provisionalRenderDeadline, revision: committed!.head_revision, scope: committed!.scope, report, workload,
+            row_coverage: workload!.body.items!.map((row: ObservedIdentity) => ({ ...row, global: committed!.kinds[row.kind], scoped: committed!.namespace_coverage?.[row.namespace!]?.[row.kind] })) } as AdmittedPublication;
+          return true;
+        }
+        if (committed) {
+          const observedUnboundRows = postUi.filter((item) => item.path.endsWith("/workloads") && item.status === 200 && item.body.items?.length).at(-1);
+          if (report && observedUnboundRows && !workload) throw new Error("Observed workload response lacks a stable same-revision passive bracket; no admission");
+          // A completed scoped-partial commit is not unfinished collection.
+          // Await only actual passive report/row proof; never declare success
+          // from the UI label or authorize an extra protected test request.
+          if (report && workload) throw new Error(`Scoped commit admission failed: ${admission.reasons.join(",")}`);
+          return false;
+        }
+        // No protected wakeup or Refresh while collection remains unpublished.
+        const failedLabels = await page.locator('[data-sync-state="failed"]').count();
+        const protectedRows = await rows.count();
+        const healthyEmpty = await page.getByText("No workloads in this scope.", { exact: true }).count();
+        if (protectedDuringCollection.length || failedLabels !== 1 || protectedRows !== 0 || healthyEmpty !== 0) {
+          collectionFenceViolations.push({ at: latestCollection.observed_at, failedLabels, protectedRows, healthyEmpty, protected_requests: [...protectedDuringCollection] });
+        }
+        expect(collectionFenceViolations).toEqual([]);
+        return false;
+      }, { timeout: collectionTimeout, intervals: [1000, 2000] }).toBe(true);
+    } finally {
+      page.off("request", observeProtectedDuringCollection);
+      await testInfo.attach("phase-collection-protected-ui-requests", { body: JSON.stringify({ requests: protectedDuringCollection, violations: collectionFenceViolations }), contentType: "application/json" });
+      await testInfo.attach("phase-collection-progress", { body: JSON.stringify(collectionTimeline), contentType: "application/json" });
+      await testInfo.attach("phase-collection-final-passive", { body: JSON.stringify(latestCollection), contentType: "application/json" });
+      await testInfo.attach("passive-ui-report-and-row-proofs", { body: JSON.stringify({ responses: uiTraffic, errors: passiveErrors }), contentType: "application/json" });
+      await testInfo.attach("admitted-scoped-publication", { body: JSON.stringify(admittedPublication), contentType: "application/json" });
+    }
+    expect(collectionFenceViolations).toEqual([]);
+  }
+  const renderedRecoveryDeadline = phaseAdmittedCompletion ? admittedPublication!.render_deadline : Date.now() + 60_000;
+  const recoveryPolls: unknown[] = [];
+  let lastRecoveryReport: unknown = null;
+  try {
+    if (phaseAdmittedCompletion) {
+      // Admission already used the actual existing UI /sync response. Partial
+      // is usable only with the complete scoped row proof above, not UI text.
+      expect(admittedPublication).toBeTruthy();
+      lastRecoveryReport = { at: admittedPublication!.report.at, status: admittedPublication!.report.status, body: admittedPublication!.report.body, source: "passive-existing-ui-poll" };
+    } else {
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/admin/kubernetes/sync?cluster=${encodeURIComponent(cluster)}`);
+      const body = await response.json();
+      lastRecoveryReport = { at: new Date().toISOString(), status: response.status(), retry_after: response.headers()["retry-after"] ?? null, body };
+      recoveryPolls.push({ at: new Date().toISOString(), status: response.status(), state: body.state, class: body.class,
+        failing_kinds: body.failing_kinds, pending_kinds: body.pending_kinds, retry_after: response.headers()["retry-after"] ?? null });
+      return response.ok() ? body.state : `http_${response.status()}`;
+    }, { timeout: 60_000 }).toBe("ready");
+    }
+  } catch (error) {
+    // Passive metadata/observed upstream response shapes only: no additional
+    // protected reads, identity re-probes, restart or recovery wakeup.
+    await testInfo.attach("postauth-last-full-sync-report", { body: JSON.stringify(lastRecoveryReport), contentType: "application/json" });
+    await testInfo.attach("postauth-status-poll-attempts", { body: JSON.stringify(recoveryPolls), contentType: "application/json" });
+    try {
+      const diagnostics = await page.request.get(`${controlURL}/fixture-diagnostics`, { timeout: 5000 });
+      await testInfo.attach("postauth-failure-passive-diagnostics", { body: JSON.stringify(await diagnostics.json()), contentType: "application/json" });
+    } catch {
+      await testInfo.attach("postauth-passive-diagnostics-unavailable", { body: "Passive metadata capture unavailable; original recovery failure retained.", contentType: "text/plain" });
+    }
+    throw error;
+  }
+  await testInfo.attach("postauth-last-full-sync-report", { body: JSON.stringify(lastRecoveryReport), contentType: "application/json" });
+  await testInfo.attach("postauth-status-poll-attempts", { body: JSON.stringify(recoveryPolls), contentType: "application/json" });
+  if (phaseAdmittedCompletion) {
+    await expect.poll(() => rows.count(), { timeout: Math.max(1, renderedRecoveryDeadline - Date.now()) }).toBe(20);
+    const projectedRows = admittedPublication!.workload.body.items!;
+    expect(projectedRows).toHaveLength(20);
+    expect(Object.values(admittedPublication!.workload.body.counts!).reduce<number>((sum, value) => sum + Number(value), 0)).toBe(74);
+    const expectedLabels = projectedRows.map((row: ObservedIdentity) => `Select ${row.kind} ${row.namespace ? `${row.namespace}/` : ""}${row.name}`).sort();
+    const renderedLabels = await rows.getByRole("button", { name: /^Select / }).evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")).sort());
+    expect(new Set(expectedLabels).size).toBe(20);
+    expect(renderedLabels).toEqual(expectedLabels);
+    const recoveredHistoryCounts = [];
+    for (const path of [paths[2], paths[3]]) {
+      const response = await page.request.get(path, { timeout: Math.max(1, renderedRecoveryDeadline - Date.now()) });
+      expect(response.ok()).toBe(true);
+      const body = await response.json();
+      expect(body.items.length).toBeGreaterThan(0);
+      recoveredHistoryCounts.push({ path, status: response.status(), items: body.items.length });
+    }
+    expect(Date.now()).toBeLessThanOrEqual(renderedRecoveryDeadline);
+    await testInfo.attach("phase-admitted-rendered-recovery", { body: JSON.stringify({ rows: await rows.count(), row_identities: projectedRows, rendered_labels: renderedLabels, history: recoveredHistoryCounts, raw_report_state: admittedPublication!.report.body.state, revision: admittedPublication!.revision, remaining_render_ms: renderedRecoveryDeadline - Date.now() }), contentType: "application/json" });
+  } else {
+    await expect.poll(() => rows.count(), { timeout: 30_000 }).toBeGreaterThan(0);
+  }
+  expect((await realSyncReport(request)).first_ready_at).toBe(before.first_ready_at);
+  await expect(page.locator('[data-sync-state="failed"]')).toHaveCount(0);
+  expect(await page.evaluate(() => sessionStorage.getItem("warm-authority-preparing-flash"))).toBeNull();
+  await saveCapture(page, "warm-authority", 1440, "dark", "recovered-without-restart");
+});
+
+test("restart authority, physical identity and complete-empty controls", async ({ browser, request }, testInfo) => {
+  test.skip(process.env.E2E_K22_RESTART_CONTROLS !== "1", "requires the existing isolated synthetic authority fixture");
+  test.setTimeout(300_000);
+  const page = await newPage(browser, viewports[0], "light");
+  await openKubernetes(page, "resources");
+  await selectView(page, "Workloads");
+  const rows = () => page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]');
+  const phase = async (value: string) => {
+    const response = await page.request.post(`${controlURL}/fixture-phase/${value}`);
+    expect(response.ok()).toBe(true);
+  };
+  const restart = async () => {
+    const response = await page.request.post(`${controlURL}/restart`, { timeout: 120_000 });
+    expect(response.ok()).toBe(true);
+  };
+  const scopedReads = async () => {
+    const answers = [];
+    for (const scope of [`cluster=${encodeURIComponent(cluster)}&`, ""]) {
+      const path = `/api/admin/kubernetes/workloads?${scope}limit=20`;
+      const response = await page.request.get(path);
+      const body = await response.json();
+      answers.push({ path, status: response.status(), body, retry_after: response.headers()["retry-after"] ?? null });
+    }
+    return answers;
+  };
+  const recovered = async () => {
+    await expect.poll(async () => {
+      const response = await page.request.get(`/api/admin/kubernetes/workloads?cluster=${cluster}&limit=20`);
+      return response.ok() ? (await response.json()).items.length : 0;
+    }, { timeout: 60_000 }).toBeGreaterThan(0);
+  };
+  const attachErrors = async (name: string, answers: Awaited<ReturnType<typeof scopedReads>>) => {
+    // Only error envelopes are attached, never protected success payloads.
+    await testInfo.attach(name, { body: JSON.stringify(answers.map(({ path, status, body, retry_after }) => ({ path, status, retry_after, body: status >= 400 ? body : { items: body.items?.length, sync: body.sync } }))), contentType: "application/json" });
+  };
+  await expect.poll(() => rows().count()).toBeGreaterThan(0);
+  const identityResponse = await page.request.get(`${controlURL}/fixture-authority`);
+  const identity = await identityResponse.json();
+  expect(identity.identity_uid).toBe("k22-physical-cluster");
+  expect(identity.namespace_list_uid).toBe(identity.identity_uid);
+  const missing = await page.request.get(`/api/admin/kubernetes/workloads/Pod/definitely-absent?cluster=${cluster}&namespace=payments`);
+  expect(missing.status()).toBe(404);
+  expect(await missing.json()).toMatchObject({ code: "resource_unavailable", retryable: false });
+
+  await phase("denied");
+  await restart();
+  // Admit the read only once the denied producer has stored its failed cycle.
+  await expect.poll(async () => {
+    const report = await realSyncReport(request);
+    return report.state === "error" && (report.failing ?? []).some((item) => item.class === "forbidden");
+  }, { timeout: 30_000 }).toBe(true);
+  const denied = await scopedReads();
+  for (const answer of denied) {
+    expect(answer.status).toBe(403);
+    expect(answer.body).toMatchObject({ code: "cluster_permission_denied", retryable: false });
+  }
+  await attachErrors("stored-cycle-permission-denial", denied);
+  const deniedOverview = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/admin/kubernetes/overview" && response.status() === 403);
+  await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+  await (await deniedOverview).finished();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await expect(page.locator('[data-sync-state="failed"]')).toHaveText("Failed");
+  await expect(rows()).toHaveCount(0);
+  await expect(page.locator("#kubernetes-view-panel")).not.toContainText("bulk-app");
+  await expect(page.getByLabel("Loading Kubernetes overview", { exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-sync-strip="failed"]')).toBeVisible();
+  await expect(page.locator('[data-sync-strip="failed"]')).toContainText("Cluster sync failed");
+  await saveCapture(page, "restart-controls", 1440, "light", "permission-denied");
+
+  await phase("authorized");
+  await restart();
+  await recovered();
+  await phase("identity-missing");
+  await restart();
+  const missingIdentity = await scopedReads();
+  for (const answer of missingIdentity) {
+    expect(answer.status).toBe(404);
+    expect(answer.body).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(answer.body.items).toBeUndefined();
+  }
+  await attachErrors("missing-physical-identity", missingIdentity);
+
+  await phase("identity-changed");
+  await restart();
+  const changed = await scopedReads();
+  for (const answer of changed) {
+    expect(answer.status).toBe(503);
+    expect(answer.body.items).toBeUndefined();
+    expect(["connector_unreachable", "inventory_not_ready"]).toContain(answer.body.code);
+    expect(answer.body.retryable).toBe(true);
+  }
+  await attachErrors("changed-physical-identity-no-replay", changed);
+  const changedIdentity = await (await page.request.get(`${controlURL}/fixture-authority`)).json();
+  expect(changedIdentity.identity_uid).toBe("k22-replacement-physical-cluster");
+  expect(changedIdentity.namespace_list_uid).toBe(changedIdentity.identity_uid);
+  await phase("authorized");
+  await restart();
+  await recovered();
+  await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+  await expect.poll(() => rows().count()).toBeGreaterThan(0);
+  const capture = await (await page.request.get(`${controlURL}/restart-provenance`)).json();
+  expect(capture.after.snapshots.some((item: { scope: { cluster_uid?: string } }) => item.scope.cluster_uid === "k22-replacement-physical-cluster")).toBe(true);
+  await testInfo.attach("fresh-replacement-identity-capture", { body: JSON.stringify(capture), contentType: "application/json" });
+  await saveCapture(page, "restart-controls", 1440, "light", "recollected-new-identity");
+
+  const window = `since=${encodeURIComponent(new Date(Date.now() - 3600_000).toISOString())}&until=${encodeURIComponent(new Date().toISOString())}`;
+  const historicalPath = `/api/admin/kubernetes/issues?cluster=${cluster}&${window}&limit=100`;
+  await expect.poll(async () => {
+    const response = await page.request.get(historicalPath);
+    return response.ok() ? (await response.json()).items.length : 0;
+  }, { timeout: 30_000 }).toBeGreaterThan(0);
+  await phase("empty");
+  await restart();
+  await expect.poll(async () => {
+    const response = await page.request.get(`/api/admin/kubernetes/workloads?cluster=${cluster}&limit=20`);
+    if (!response.ok()) return false;
+    const body = await response.json();
+    return body.items.length === 0 && body.sync.state === "ready" && Object.values(body.counts).every((value) => value === 0);
+  }, { timeout: 60_000 }).toBe(true);
+  await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+  await expect(rows()).toHaveCount(0);
+  await expect(page.getByText("No workloads in this scope.", { exact: true })).toBeVisible();
+  const historical = await page.request.get(historicalPath);
+  expect(historical.ok()).toBe(true);
+  expect((await historical.json()).items.length).toBeGreaterThan(0);
+  await saveCapture(page, "restart-controls", 1440, "light", "complete-empty-retains-history");
+  const audit = await (await page.request.get(`${controlURL}/fixture-authority`)).json();
+  await testInfo.attach("synthetic-authority-phase-audit", { body: JSON.stringify(audit), contentType: "application/json" });
 });
 
 // ===========================================================================
@@ -1956,6 +2712,7 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
           if (state === "ended") await expect(card.locator(".log-status")).toHaveText("Ended");
           const factsToggle = drawer(page).getByRole("button", { name: /Details and conditions/ });
           if (await factsToggle.isVisible() && await factsToggle.getAttribute("aria-expanded") === "false") await factsToggle.click();
+          await expect(drawer(page).locator(".resource-facts")).toBeVisible();
           await card.scrollIntoViewIfNeeded();
           const geometry = await card.evaluate((element) => {
             const rect = (node: Element) => { const box = node.getBoundingClientRect(); return { left: box.left, right: box.right, width: box.width }; };

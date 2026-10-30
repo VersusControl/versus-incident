@@ -38,7 +38,21 @@ Alerts use your configured notification channels and on-call routing. With `publ
 
 ## Reconstruct The Incident In Timeline
 
-Open **Timeline**, or use **Full timeline** from the overview. Choose **15m**, **1h**, **6h**, or **24h**, then use **Namespace** and **Kind** to narrow the history.
+The existing Timeline time selector supports **15m**, **1h**, **6h**, **24h**,
+**7d**, **30d**, **90d**, and **All retained**. Namespace, kind and resource
+filters still narrow the history; the resource drawer also supports retained
+ranges. A time range selects captured evidence, not a retention policy.
+
+Issues and Timeline evidence is captured even without an open browser or enabled
+issue alerts. File and PostgreSQL storage preserve new captures across restarts;
+coverage depends on capture mode, permissions, uptime and the
+[storage policy](configuration.md#history-storage). Missing intervals do not mean
+nothing failed.
+
+Current Issues and active broken-workload counts describe the current snapshot.
+Historical issue observations may include repeated observations and resolved
+occurrences; historical totals are not current active counts. History remains
+subject to current product permissions and Kubernetes cluster/namespace authority.
 
 ![Timeline overview with separate resource lanes and change markers](../../docs/images/kubernetes-auto-detect-timeline-overview.png)
 

@@ -526,7 +526,11 @@ func (service *Service) prepareIssueAlertEnrichment(ctx context.Context, items [
 			to = at
 		}
 	}
-	result.history, err = service.changeStore().ReadWindow(from, to, now)
+	if service.evidenceStore() != nil {
+		result.history, err = service.evidenceChangeWindow(ctx, from, to, "")
+	} else {
+		result.history, err = service.changeStore().ReadWindow(from, to, now)
+	}
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return result, contextErr

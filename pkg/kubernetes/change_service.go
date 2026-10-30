@@ -31,6 +31,7 @@ type changeStoreState struct {
 	issueAlerts       map[kubeindex.Scope]*issueAlertWindow
 	mu                sync.Mutex
 	provider          storage.Provider
+	evidenceEnabled   bool
 	stores            map[kubeindex.Scope]*kubechanges.Store
 	captureLocks      map[kubeindex.Scope]*sync.Mutex
 	refreshes         map[indexRefreshKey]*indexRefreshCall
@@ -88,6 +89,9 @@ func (service *Service) SetChangeStorage(provider storage.Provider) {
 		return
 	}
 	service.changes.provider = provider
+	if service.inventoryRestore != nil {
+		service.inventoryRestore.validated.Store(false)
+	}
 	service.changes.stores = make(map[kubeindex.Scope]*kubechanges.Store)
 	service.changes.captureLocks = make(map[kubeindex.Scope]*sync.Mutex)
 	service.changes.journalFailed = make(map[kubeindex.Scope]bool)
@@ -116,6 +120,11 @@ func (service *Service) changeStore() *kubechanges.Store {
 		return existing
 	}
 	created := kubechanges.NewStore(service.changes.provider, scope)
+	if service.changes.evidenceEnabled {
+		if provider, ok := service.changes.provider.(storage.EvidenceStore); ok && provider.EvidencePolicy().Mode != "unsupported" {
+			created = kubechanges.NewCaptureState(service.changes.provider, scope)
+		}
+	}
 	if created != nil {
 		service.changes.stores[scope] = created
 	}
@@ -124,6 +133,9 @@ func (service *Service) changeStore() *kubechanges.Store {
 
 // Changes returns the bounded timeline for the service's org/cluster scope.
 func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangePage, error) {
+	if service.evidenceStore() != nil {
+		return service.evidenceChanges(ctx, query)
+	}
 	if err := service.validateCredential(ctx); err != nil {
 		return ChangePage{}, err
 	}

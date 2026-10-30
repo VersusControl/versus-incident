@@ -214,7 +214,7 @@ func (cluster *fakeCluster) ServeHTTP(writer http.ResponseWriter, request *http.
 		extra[header] = true
 	}
 	served := cluster.served[resource]
-	items := append([]map[string]any(nil), cluster.objects[resource]...)
+	items := append([]map[string]any{}, cluster.objects[resource]...)
 	pods := append([]string(nil), cluster.pods...)
 	cluster.mu.Unlock()
 	writer.Header().Set("Content-Type", "application/json")
@@ -814,8 +814,8 @@ func TestUnreachableClusterDoesNotDelayOrBlockAnotherClustersPublish(t *testing.
 	}
 }
 
-// W2: a cluster answering 403 to every list publishes a truthful permission
-// failure with no records, and the other cluster publishes complete data.
+// A cluster denying every list reports an authoritative failed cycle without
+// publishing data, while an independent healthy cluster publishes complete data.
 func TestForbiddenClusterReportsPermissionFailureWithoutBlockingAnother(t *testing.T) {
 	base := storage.NewMemory()
 	fleet := newBootFleet(t, "acme", base, "boot")
@@ -826,35 +826,24 @@ func TestForbiddenClusterReportsPermissionFailureWithoutBlockingAnother(t *testi
 	healthyCluster := fleet.add("b-healthy", healthy, staticCredential(t, "healthy-token"), 0)
 	origin := time.Now()
 	fleet.startWithin(2 * time.Second)
-	permissionFailure := 0
-	waitUntil(t, 10*time.Second, "the forbidden cluster to publish a permission failure", func() bool {
-		generation, ok := fleet.generation(forbiddenCluster)
-		if !ok || generation.View.Kinds["Pod"].State == "" {
-			return false
+	forbiddenService := fleet.resolve(forbiddenCluster)
+	waitUntil(t, 10*time.Second, "current forbidden-cycle diagnostics", func() bool {
+		report, err := forbiddenService.SyncHealth(t.Context())
+		if carried, ok := SyncHealthReport(err); ok {
+			report = carried
 		}
-		state := generation.View.Kinds["Pod"]
-		permissionFailure = 0
-		if state.Error == "forbidden" || state.Error == "unauthorized" {
-			permissionFailure++
-		}
-		return true
+		state := report.Kinds["Pod"]
+		return report.State == "error" && report.FailingKinds > 0 && report.ReadyKinds == 0 && state.Error == "forbidden" && state.CycleFailure
 	})
-	if permissionFailure != 1 {
-		t.Fatalf("the forbidden cluster did not record a permission failure")
+	if generation, ok := fleet.generation(forbiddenCluster); ok && len(generation.View.Records) != 0 {
+		t.Fatalf("forbidden cluster published protected records: %v", podNames(generation))
 	}
-	generation, ok := fleet.generation(forbiddenCluster)
-	if !ok {
-		t.Fatal("the forbidden cluster published no generation")
-	}
-	if len(podNames(generation)) != 0 || generation.View.Kinds["Pod"].Records != 0 {
-		t.Fatalf("the forbidden cluster published records: %v", podNames(generation))
+	if elapsed := fleet.waitPublished(healthyCluster, origin, 5*time.Second); elapsed > 2*time.Second {
+		t.Fatalf("healthy cluster published only after %s", elapsed)
 	}
 	healthyGeneration, ok := fleet.generation(healthyCluster)
 	if !ok {
-		t.Fatal("the healthy cluster published no generation")
-	}
-	if elapsed := fleet.waitPublished(healthyCluster, origin, 5*time.Second); elapsed > 2*time.Second {
-		t.Fatalf("the healthy cluster published only after %s", elapsed)
+		t.Fatal("healthy cluster published no generation")
 	}
 	if names := podNames(healthyGeneration); len(names) != 1 || names[0] != "visible-api" {
 		t.Fatalf("the healthy generation was corrupted: %v", names)
@@ -864,7 +853,7 @@ func TestForbiddenClusterReportsPermissionFailureWithoutBlockingAnother(t *testi
 	}
 	// A permission failure is not a slow sync: it is visible to a reader.
 	overview, err := fleet.resolve(forbiddenCluster).Overview(t.Context())
-	if err != nil || overview.Pods != 0 {
+	if !errors.Is(err, ErrForbidden) || overview.Pods != 0 {
 		t.Fatalf("the forbidden cluster read as %+v err=%v", overview, err)
 	}
 }
@@ -969,6 +958,10 @@ func TestCredentialRotationTouchesOnlyItsOwnCluster(t *testing.T) {
 	fleet.waitPublished(alphaCluster, origin, 10*time.Second)
 	fleet.waitPublished(steadyCluster, origin, 10*time.Second)
 	fleet.settle(steadyCluster, 150*time.Millisecond, 5*time.Second)
+	waitUntil(t, 5*time.Second, "steady full publication", func() bool {
+		generation, ok := fleet.generation(steadyCluster)
+		return ok && !generation.FirstReadyAt.IsZero()
+	})
 	steadyBefore, ok := fleet.generation(steadyCluster)
 	if !ok {
 		t.Fatal("the steady cluster published no generation")
@@ -989,10 +982,12 @@ func TestCredentialRotationTouchesOnlyItsOwnCluster(t *testing.T) {
 	// It returns with a rotated token for the same cluster.
 	alphaCredential.rotate("beta-token")
 	rotating.rotateToken("beta-token")
-	rotatedService, err := fleet.registry.ResolveCluster(fleet.org, alphaCluster.id)
-	if err != nil {
-		t.Fatalf("the rotated credential was not accepted: %v", err)
-	}
+	var rotatedService *Service
+	waitUntil(t, 10*time.Second, "rotated credential recovery after cooldown", func() bool {
+		var err error
+		rotatedService, err = fleet.registry.ResolveCluster(fleet.org, alphaCluster.id)
+		return err == nil
+	})
 	if rotatedService == alphaService {
 		t.Fatal("rotation reused the retired service instance")
 	}
@@ -1300,12 +1295,28 @@ func TestRelayedGenerationKeepsAnUnservedKindUnlistedForTheJournal(t *testing.T)
 		time.Sleep(wait)
 	}
 	late.serve("configmaps", fixtureObject("v1", "ConfigMap", "shop", "late-config"))
+	service.changes.mu.Lock()
 	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
 	cache.mu.Lock()
-	due := cache.generation.View.Kinds["ConfigMap"]
+	// Workers retain published generations after dropping the cache lock. A
+	// scheduling override must replace an owned copy, never edit that snapshot.
+	published := cache.generation
+	before := published.View.Kinds["ConfigMap"]
+	next, cloneErr := cloneInventoryGeneration(published)
+	if cloneErr != nil {
+		cache.mu.Unlock()
+		t.Fatal(cloneErr)
+	}
+	due := next.View.Kinds["ConfigMap"]
 	due.LastAttemptAt = time.Now().Add(-time.Hour)
-	cache.generation.View.Kinds["ConfigMap"] = due
+	next.View.Kinds["ConfigMap"] = due
+	cache.generation = next
+	unchanged := published.View.Kinds["ConfigMap"] == before
 	cache.mu.Unlock()
+	if !unchanged {
+		t.Fatal("scheduling the next collection mutated a retained published snapshot")
+	}
 	waitUntil(t, 10*time.Second, "the late kind to be published with content", func() bool {
 		generation, ok := fleet.generation(cluster)
 		if !ok {

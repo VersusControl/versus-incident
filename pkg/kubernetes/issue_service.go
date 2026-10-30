@@ -29,6 +29,11 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 	defer cancelIdentity()
 	ctx, cancel := ensureOperationBudgetRequests(ctx, overviewOperationRequests)
 	defer cancel()
+	generation, err := service.readInventory(ctx)
+	if err != nil {
+		return IssuePage{}, err
+	}
+	ctx = pinInventory(ctx, generation)
 	kinds := []string{"Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "Event"}
 	if options.IncludeChanges {
 		kinds = append(kinds, "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "ServiceAccount", "ControllerRevision")
@@ -41,7 +46,11 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 	// failed tracks real coverage failures; kinds still loading keep the page
 	// partial (so nothing is resolved or claimed complete) but are not failures.
 	failed := false
-	page.Sync.Partial = len(status.Pending) > 0
+	if generation.EvidenceFailure != "" {
+		page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: inventoryCycleClass(generation.EvidenceFailure)})
+		page.Sync.Partial = true
+	}
+	page.Sync.Partial = page.Sync.Partial || len(status.Pending) > 0
 	for _, kind := range kinds {
 		state, exists := status.Kinds[kind]
 		if !exists && status.State == "syncing" || state.State == "pending" {
@@ -62,7 +71,10 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 			failed = true
 		}
 	}
-	now := time.Now().UTC()
+	_, now, _ := issueObservationBounds(snapshot)
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
 	records := make([]kubeindex.Record, 0, len(snapshot.Records))
 	requestedKinds := map[string]bool{}
 	for _, kind := range kinds {
@@ -112,7 +124,9 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		}
 	}
 	broken := kubebreaks.Classify(records, now)
-	service.rememberBreaks(broken, options.Namespace, now, page.Sync.Partial)
+	if !options.captureOnly {
+		service.rememberBreaks(broken, options.Namespace, now, page.Sync.Partial)
+	}
 	brokenByRoot := map[string]kubebreaks.Break{}
 	matches := func(root ObjectRef, severity string) bool {
 		return (options.RootUID == "" || root.UID == options.RootUID) && (options.Kind == "" || root.Kind == options.Kind) && (options.Severity == "" || severity == options.Severity) && (options.Namespace == "" || root.Namespace == options.Namespace)
@@ -239,7 +253,19 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		if err := service.validateCredential(ctx); err != nil {
 			return IssuePage{}, err
 		}
-		if store := service.changeStore(); store != nil {
+		if service.evidenceStore() != nil {
+			history, err = service.evidenceChangeWindow(ctx, earliest.Add(-30*time.Minute), now.Add(2*time.Minute), options.Namespace)
+			if err != nil || history.Next != "" {
+				class := "budget_exhausted"
+				if err != nil {
+					class = errorClass(err)
+				}
+				page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: class})
+				page.Sync.Partial = true
+				failed = true
+			}
+		}
+		if store := service.changeStore(); store != nil && service.evidenceStore() == nil {
 			if err := service.commitCredential(ctx, func() error {
 				return store.Append(kubechanges.Reconstruct(service.scope.ClusterID, records, now), now)
 			}); err != nil && !errors.Is(err, kubechanges.ErrLeaseLost) {

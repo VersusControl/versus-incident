@@ -286,7 +286,7 @@ describe("Basic workload log viewer", () => {
       }),
     ).toBeNull();
   });
-  it("shows one dim unreadable-Pod line and keeps other sources live", async () => {
+  it.each([false, true])("keeps one dim unreadable-Pod notice through repeated denials and keeps other sources live (already flushed: %s)", async (flushed) => {
     const live = connection();
     render(<PodLogViewer resource={resource} />);
     const status: KubernetesWorkloadLogEvent = {
@@ -297,7 +297,10 @@ describe("Basic workload log viewer", () => {
       text: "",
     };
     live.emit(membership([firstPod, secondPod]));
+    live.emit(line(secondPod, "previous output from denied Pod"));
+    if (flushed) await screen.findByText("previous output from denied Pod");
     live.emit(status);
+    if (flushed) await screen.findByText("logs not available: forbidden");
     live.emit(status);
     live.emit(line());
     await waitFor(() =>
@@ -306,7 +309,9 @@ describe("Basic workload log viewer", () => {
     expect(screen.getAllByText("logs not available: forbidden")).toHaveLength(
       1,
     );
-    expect(screen.getByText("served request")).toBeTruthy();
+    expect(await screen.findByText("served request")).toBeTruthy();
+    expect(screen.queryByText("previous output from denied Pod")).toBeNull();
+    expect(live.stream).toHaveBeenCalledTimes(1);
     expect(
       screen
         .getByText("logs not available: forbidden")

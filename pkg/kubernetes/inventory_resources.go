@@ -11,7 +11,8 @@ import (
 // Unknown API kinds use the same safe allowlist projection as generic reads.
 // They are indexed by canonical resource ID, so equal kind names in different
 // API groups do not overwrite each other.
-func (service *Service) loadAdditionalInventory(ctx context.Context, definition ResourceDefinition, namespaces ...string) ([]ProjectedResource, error) {
+func (service *Service) loadAdditionalInventory(ctx context.Context, definition ResourceDefinition, namespaces ...string) (recordsResult []ProjectedResource, resultErr error) {
+	defer func() { recordInventoryMaterialResult(ctx, resultErr) }()
 	ctx, cancel := context.WithTimeout(ctx, inventoryLoadTimeout)
 	defer cancel()
 	namespace := ""
@@ -37,7 +38,7 @@ func (service *Service) loadAdditionalInventory(ctx context.Context, definition 
 				Continue string `json:"continue"`
 			} `json:"metadata"`
 		}
-		if err := service.inventoryRead(ctx, apiPath+"?"+query.Encode(), &page, false); err != nil {
+		if err := service.inventoryListRead(ctx, apiPath+"?"+query.Encode(), &page, false); err != nil {
 			if errors.Is(err, ErrResponseTooLarge) && limit > minimumPageSize {
 				limit = max(minimumPageSize, limit/2)
 				continue

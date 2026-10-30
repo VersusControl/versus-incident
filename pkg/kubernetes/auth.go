@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,8 @@ type expiringBearerSource struct {
 	header    string
 	expires   time.Time
 	principal string
+	retryAt   time.Time
+	failures  int
 }
 
 func (source *expiringBearerSource) credentialPrincipal() string { return source.principal }
@@ -51,6 +54,7 @@ type credentialEpoch struct {
 	principal   [32]byte
 	known       bool
 	retired     bool
+	renewal     bool
 }
 
 type credentialEpochContextKey struct{}
@@ -71,7 +75,7 @@ func (service *Service) captureCredentialID() string {
 	if service.client.base != nil {
 		endpoint = service.client.base.String()
 	}
-	encoded, _ := json.Marshal([]string{"capture-scope-v1", endpoint, service.configuredCredentialID, mode, hex.EncodeToString(identity[:])})
+	encoded, _ := json.Marshal([]string{"capture-scope-v1", endpoint, service.configuredCredentialID, mode, hex.EncodeToString(identity[:]), strconv.FormatUint(service.client.authGeneration.Load(), 10)})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }
@@ -219,6 +223,7 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 	sameFingerprint := subtle.ConstantTimeCompare(fingerprint[:], epoch.fingerprint[:]) == 1
 	samePrincipal := subtle.ConstantTimeCompare(principalHash[:], epoch.principal[:]) == 1
 	if epoch.initialized && ((!sameFingerprint && !(known && epoch.known && samePrincipal)) || known != epoch.known || !samePrincipal) {
+		epoch.renewal = true
 		epoch.retired = true
 		epoch.cancel()
 		return ErrCredentialUnavailable
@@ -242,6 +247,9 @@ func (source *expiringBearerSource) Authorization(ctx context.Context) (string, 
 	}
 	defer func() { source.lock <- struct{}{} }()
 	now := source.now()
+	if now.Before(source.retryAt) {
+		return "", ErrCredentialUnavailable
+	}
 	if source.header != "" && now.Add(source.skew).Before(source.expires) {
 		return source.header, nil
 	}
@@ -250,6 +258,8 @@ func (source *expiringBearerSource) Authorization(ctx context.Context) (string, 
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", err
 		}
+		source.failures++
+		source.retryAt = now.Add(time.Second * time.Duration(1<<min(source.failures-1, 6)))
 		return "", ErrCredentialUnavailable
 	}
 	header, err := bearerHeader(token)
@@ -258,7 +268,21 @@ func (source *expiringBearerSource) Authorization(ctx context.Context) (string, 
 	}
 	source.header = header
 	source.expires = expires
+	source.retryAt, source.failures = time.Time{}, 0
 	return header, nil
+}
+
+// rejectBearer invalidates only the token that actually received the rejection.
+// Waiting for an in-progress refresh cannot invalidate its newer result.
+func (source *expiringBearerSource) rejectBearer(header string) bool {
+	source.lockOnce.Do(func() { source.lock = make(chan struct{}, 1); source.lock <- struct{}{} })
+	<-source.lock
+	defer func() { source.lock <- struct{}{} }()
+	if header == "" || subtle.ConstantTimeCompare([]byte(header), []byte(source.header)) != 1 {
+		return false
+	}
+	source.header, source.expires = "", time.Time{}
+	return true
 }
 
 func (source *expiringBearerSource) ClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
@@ -305,6 +329,12 @@ func (source *tokenFileSource) Authorization(ctx context.Context) (string, error
 		return "", ErrCredentialUnavailable
 	}
 	return bearerHeader(string(data))
+}
+
+func (source *tokenFileSource) rejectBearer(rejected string) bool {
+	current, err := source.Authorization(context.Background())
+	// An unavailable file still retires the rejected epoch. A newer file does not.
+	return err != nil || subtle.ConstantTimeCompare([]byte(current), []byte(rejected)) == 1
 }
 
 func (source *tokenFileSource) ClientCertificate(*tls.CertificateRequestInfo) (*tls.Certificate, error) {

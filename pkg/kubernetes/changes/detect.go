@@ -53,6 +53,9 @@ type Change struct {
 	warning         *warningObservation
 }
 
+// Valid reports whether the change has the typed shape accepted by the journal.
+func (change Change) Valid() bool { return validChange(change) }
+
 type warningObservation struct {
 	UID         string
 	Count       int64

@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"sort"
@@ -11,21 +12,27 @@ import (
 
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // Projected data is published by the revision in a separate small scoped lease.
 // Readers retain this immutable generation until a newer revision is available.
 type inventoryGeneration struct {
-	View             kubeindex.Snapshot
-	Usage            Usage
-	Resources        map[string][]ProjectedResource
-	ResourceStatus   map[string]kubeindex.KindStatus
-	Revision         string
-	Namespaces       map[string]kubeindex.Snapshot
-	Crashes          []kubechanges.CrashEvent
-	PodSampledAt     time.Time
-	DiscoveryPartial []PartialFailure
-	NamespaceProof   map[string]time.Time
+	liveAuthorityOnly bool
+	Discovery         *Discovery
+	EvidenceScope     storage.EvidenceScope
+	EvidenceBatch     *storage.EvidenceBatch
+	EvidenceFailure   string
+	View              kubeindex.Snapshot
+	Usage             Usage
+	Resources         map[string][]ProjectedResource
+	ResourceStatus    map[string]kubeindex.KindStatus
+	Revision          string
+	Namespaces        map[string]kubeindex.Snapshot
+	Crashes           []kubechanges.CrashEvent
+	PodSampledAt      time.Time
+	DiscoveryPartial  []PartialFailure
+	NamespaceProof    map[string]time.Time
 	// Pending lists indexed resource IDs this generation has not listed yet,
 	// and PendingDiscovery marks that the cluster's other API groups have not
 	// been discovered yet. Both clear once the full set is published.
@@ -39,19 +46,36 @@ type inventoryGeneration struct {
 	FirstReadyAt time.Time `json:",omitempty"`
 }
 
+func cloneInventoryGeneration(generation inventoryGeneration) (inventoryGeneration, error) {
+	raw, err := json.Marshal(generation)
+	if err != nil {
+		return inventoryGeneration{}, err
+	}
+	var copy inventoryGeneration
+	err = json.Unmarshal(raw, &copy)
+	copy.liveAuthorityOnly = generation.liveAuthorityOnly
+	if generation.Discovery != nil {
+		discovery := cloneDiscovery(*generation.Discovery)
+		copy.Discovery = &discovery
+	}
+	return copy, err
+}
+
 type inventoryCache struct {
-	mu           sync.RWMutex
-	generation   inventoryGeneration
-	cancel       context.CancelFunc
-	done         chan struct{}
-	failed       bool
-	failedClass  string
-	started      bool
-	namespaces   map[string]bool
-	wake         chan struct{}
-	scopePending bool
-	candidates   namespaceCandidateManifest
-	progress     inventoryProgress
+	mu               sync.RWMutex
+	generation       inventoryGeneration
+	cancel           context.CancelFunc
+	done             chan struct{}
+	failed           bool
+	failedClass      string
+	authorityFailure error
+	authorityProof   inventoryAuthorityProofState
+	started          bool
+	namespaces       map[string]bool
+	wake             chan struct{}
+	scopePending     bool
+	candidates       namespaceCandidateManifest
+	progress         inventoryProgress
 }
 
 func inventoryKey(scope Scope) string {
@@ -96,18 +120,26 @@ func (service *Service) startInventory(parent context.Context) {
 }
 
 func (service *Service) readInventory(ctx context.Context) (inventoryGeneration, error) {
+	if pinned, ok := ctx.Value(inventoryReadContextKey{}).(inventoryGeneration); ok {
+		if err := service.validateCredential(ctx); err != nil {
+			return inventoryGeneration{}, err
+		}
+		return pinned, nil
+	}
 	if err := service.validateCredential(ctx); err != nil {
 		return inventoryGeneration{}, err
 	}
 	service.changes.mu.Lock()
 	cache := service.changes.inventories[service.indexScope()]
-	started := cache != nil && cache.started
 	provider := service.changes.provider
 	service.changes.mu.Unlock()
 	if cache != nil {
 		cache.mu.RLock()
-		generation, failed, failedClass := cache.generation, cache.failed, cache.failedClass
+		generation, failed, failedClass, authorityFailure := cache.generation, cache.failed, cache.failedClass, cache.authorityFailure
 		cache.mu.RUnlock()
+		if authorityFailure != nil {
+			return inventoryGeneration{}, authorityFailure
+		}
 		if len(generation.View.Kinds) > 0 {
 			if failed {
 				generation.View.Kinds = failedInventoryKinds(generation.View.Kinds, failedClass)
@@ -128,7 +160,7 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 			return generation, nil
 		}
 	}
-	if provider != nil && !started {
+	if provider != nil {
 		// Upgrade precedence is explicit; never combine generations from different
 		// orgs or credential epochs.
 		orgs := service.readOrgs
@@ -145,6 +177,9 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 			generation = withFirstReady(generation, record)
 			if len(generation.View.Kinds) > 0 {
 				if err := service.validateCredential(ctx); err != nil {
+					return inventoryGeneration{}, err
+				}
+				if err := service.authorizeInventoryRestore(ctx, generation); err != nil {
 					return inventoryGeneration{}, err
 				}
 				return generation, nil
@@ -190,7 +225,7 @@ func failedInventoryKinds(kinds map[string]kubeindex.KindStatus, class string) m
 	result := make(map[string]kubeindex.KindStatus, len(kinds))
 	for kind, state := range kinds {
 		state.State, state.Partial, state.CycleFailure = "error", true, true
-		if state.Error == "" {
+		if state.Error == "" || class == "forbidden" || class == "unauthorized" {
 			state.Error = inventoryCycleClass(class)
 		}
 		result[kind] = state
@@ -267,6 +302,34 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 			}
 		}
 		generation.View = kubeindex.Snapshot{Records: records, Kinds: states}
+	}
+	observed, forbidden, unauthorized := false, false, false
+	cycleForbidden, cycleUnauthorized := false, false
+	for _, state := range generation.View.Kinds {
+		observed = observed || !state.ObservedAt.IsZero()
+	}
+	for _, kind := range kinds {
+		state := generation.View.Kinds[kind]
+		observed = observed || !state.ObservedAt.IsZero()
+		forbidden = forbidden || state.Error == "forbidden"
+		unauthorized = unauthorized || state.Error == "unauthorized"
+		cycleForbidden = cycleForbidden || state.CycleFailure && state.Error == "forbidden"
+		cycleUnauthorized = cycleUnauthorized || state.CycleFailure && state.Error == "unauthorized"
+	}
+	if cycleUnauthorized {
+		return kubeindex.Snapshot{}, kubeindex.Status{}, ErrUnauthorized
+	}
+	if cycleForbidden {
+		return kubeindex.Snapshot{}, kubeindex.Status{}, ErrForbidden
+	}
+	if !observed && !service.recordedFirstReadyAt().IsZero() {
+		if unauthorized {
+			return kubeindex.Snapshot{}, kubeindex.Status{}, ErrUnauthorized
+		}
+		if forbidden {
+			return kubeindex.Snapshot{}, kubeindex.Status{}, ErrForbidden
+		}
+		return kubeindex.Snapshot{}, kubeindex.Status{}, ErrInventoryNotReady
 	}
 	pending := generation.pendingResources(kinds)
 	if len(pending) > 0 {
@@ -394,7 +457,7 @@ func (service *Service) collectInventoryUsage(ctx context.Context, previous Usag
 				} `json:"metadata"`
 			}
 			pageCtx := context.WithValue(ctx, operationBudgetKey{}, (*operationBudget)(nil))
-			loadErr = service.inventoryRead(pageCtx, "/apis/metrics.k8s.io/v1beta1/"+source.resource+"?"+query.Encode(), &page, false)
+			loadErr = service.inventoryListRead(pageCtx, "/apis/metrics.k8s.io/v1beta1/"+source.resource+"?"+query.Encode(), &page, false)
 			if source.kind == "Pod" && errors.Is(loadErr, ErrForbidden) {
 				namespaces, _ := ctx.Value(inventoryNamespacesContextKey{}).([]string)
 				readable := false
@@ -500,6 +563,10 @@ func (service *Service) inventoryRead(ctx context.Context, path string, value an
 			err = service.client.GetMetadataJSON(pageContext, path, value)
 		} else {
 			err = service.client.GetJSON(pageContext, path, value)
+		}
+		var invalid *inventoryListValidationError
+		if errors.As(err, &invalid) {
+			return err
 		}
 		if err == nil || !DiagnoseError(err).Retryable || errors.Is(err, ErrResponseTooLarge) || attempt == 2 {
 			return err

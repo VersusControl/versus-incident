@@ -1,7 +1,8 @@
-import { createContext, useContext } from "react";
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { createContext, useContext, useEffect } from "react";
+import { useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import { api, createKubernetesApi, type KubernetesClusters, type KubernetesCrashQuery } from "./api";
 import { useCursorPagination } from "./pagination";
+import { hasKubernetesPublication, kubernetesAccessLost, retainKubernetesPublication } from "./kubernetesContinuity";
 
 export function kubernetesKey(cluster: string | undefined, ...parts: readonly unknown[]) {
   return ["kubernetes", cluster ?? "_", ...parts] as const;
@@ -37,7 +38,26 @@ export function useKubernetesCluster(): ClusterContext {
 
 export function useKubernetesQuery<T>(options: UseQueryOptions<T, Error, T, readonly unknown[]>) {
   const { key } = useKubernetesCluster();
-  return useQuery({ ...options, queryKey: key(...options.queryKey) });
+  const cache = useQueryClient();
+  const query = useQuery({
+    ...options,
+    queryKey: key(...options.queryKey),
+    structuralSharing: (previous, incoming) => retainKubernetesPublication(
+      kubernetesAccessLost(cache.getQueryState(key(...options.queryKey))?.error) ? undefined : previous as T | undefined,
+      incoming as T,
+    ),
+  });
+  const accessLost = kubernetesAccessLost(query.error);
+  const scopedKey = JSON.stringify(key(...options.queryKey));
+  useEffect(() => {
+    if (!accessLost) return;
+    // Keep the authoritative error, but discard its now-unauthorized cache.
+    cache.getQueryCache().find({ queryKey: JSON.parse(scopedKey) as readonly unknown[], exact: true })?.setState({ data: undefined });
+  }, [accessLost, cache, scopedKey]);
+  const missingPublication = query.data !== undefined && !hasKubernetesPublication(query.data);
+  const unpublished = missingPublication && (query.data as { sync?: { state?: string } }).sync?.state === "syncing";
+  const hidden = accessLost || missingPublication;
+  return { ...query, unpublished, data: hidden ? undefined : query.data };
 }
 
 export function useBrokenIssues(enabled = true) {

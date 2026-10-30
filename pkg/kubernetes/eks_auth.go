@@ -100,6 +100,10 @@ func newEKSCredentialSourceWithSTSFactory(options AuthOptions, newSTS eksSTSFact
 }
 
 func nativeAWSCredentialProvider(region string, profile map[string]string, profileFound bool, newSTS eksSTSFactory) (aws.CredentialsProvider, error) {
+	return nativeAWSCredentialProviderWithHTTP(region, profile, profileFound, newSTS, fixedCredentialHTTPClient())
+}
+
+func nativeAWSCredentialProviderWithHTTP(region string, profile map[string]string, profileFound bool, newSTS eksSTSFactory, httpClient aws.HTTPClient) (aws.CredentialsProvider, error) {
 	accessKey, secretKey := os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY")
 	if accessKey != "" || secretKey != "" || os.Getenv("AWS_SESSION_TOKEN") != "" {
 		if accessKey == "" || secretKey == "" {
@@ -141,7 +145,7 @@ func nativeAWSCredentialProvider(region string, profile map[string]string, profi
 			return nil, errors.New("invalid container authorization token file")
 		}
 		provider := endpointcreds.New(endpoint, func(options *endpointcreds.Options) {
-			options.HTTPClient = fixedCredentialHTTPClient()
+			options.HTTPClient = httpClient
 			if tokenFile != "" {
 				options.AuthorizationTokenProvider = endpointcreds.TokenProviderFunc(func() (string, error) {
 					data, err := readSecureBoundedFile(tokenFile, maxTokenBytes)
@@ -161,7 +165,7 @@ func nativeAWSCredentialProvider(region string, profile map[string]string, profi
 	imdsClient := imds.New(imds.Options{
 		Endpoint:          awsIMDSEndpoint,
 		EndpointMode:      imds.EndpointModeStateIPv4,
-		HTTPClient:        fixedCredentialHTTPClient(),
+		HTTPClient:        httpClient,
 		ClientEnableState: imds.ClientEnabled,
 		EnableFallback:    aws.FalseTernary,
 	})
@@ -356,6 +360,15 @@ func newEKSSource(clusterName, region string, provider aws.CredentialsProvider, 
 		if err != nil {
 			return "", time.Time{}, errors.New("kubernetes: EKS credentials unavailable")
 		}
+		if credential.CanExpire && !credential.Expires.After(now().Add(time.Minute)) {
+			if cache, ok := provider.(interface{ Invalidate() }); ok {
+				cache.Invalidate()
+				credential, err = provider.Retrieve(ctx)
+				if err != nil {
+					return "", time.Time{}, ErrCredentialUnavailable
+				}
+			}
+		}
 		requestURL, _ := url.Parse(awsSTSEndpoint(region) + "/")
 		query := requestURL.Query()
 		query.Set("Action", "GetCallerIdentity")
@@ -368,7 +381,16 @@ func newEKSSource(clusterName, region string, provider aws.CredentialsProvider, 
 			return "", time.Time{}, errors.New("kubernetes: EKS token signing failed")
 		}
 		token := "k8s-aws-v1." + base64.RawURLEncoding.EncodeToString([]byte(signedURL))
-		return token, now().Add(14 * time.Minute), nil
+		expires := now().Add(14 * time.Minute)
+		if credential.CanExpire {
+			if !credential.Expires.After(now()) {
+				return "", time.Time{}, ErrCredentialUnavailable
+			}
+			if credential.Expires.Before(expires) {
+				expires = credential.Expires
+			}
+		}
+		return token, expires, nil
 	}
 	return source
 }

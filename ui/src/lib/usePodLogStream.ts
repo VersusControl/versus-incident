@@ -296,6 +296,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
     let frameIsAnimation = false;
     let pending: DisplayLine[] = [];
     let retries = 0;
+    let attempt = 0;
     const sourceStatuses = new Set<string>();
     const flush = () => {
       frame = undefined;
@@ -322,8 +323,24 @@ export function usePodLogStream(options: ResourceLogOptions) {
       else clearTimeout(frame as ReturnType<typeof setTimeout>);
       frame = undefined;
     };
+    const discardProtectedLines = (source?: { source_id?: string; pod_uid?: string; pod?: string }) => {
+      // Scoped denials remove raw output, not the connector's safe failure notices.
+      // Otherwise a duplicate denial erases its notice before deduplication can keep it.
+      const allowed = (line: DisplayLine) => Boolean(source && line.neutral) || (source?.source_id ? Boolean(line.source_id && line.source_id !== source.source_id)
+        : source?.pod_uid ? Boolean(line.pod_uid && line.pod_uid !== source.pod_uid) : source?.pod ? Boolean(line.pod && line.pod !== source.pod) : false);
+      pending = pending.filter(allowed);
+      clearFlush();
+      const lines = session.current.buffer.lines.filter(allowed);
+      const buffer = { ...session.current.buffer, lines, bytes: lines.reduce((total, line) => total + line.bytes, 0) };
+      // Replacing the session also fences any earlier-history read in flight.
+      session.current = { ...session.current, buffer };
+      setBuffer(buffer);
+      setReceived(lines.some((line) => !line.neutral));
+      if (pending.length) scheduleFlush();
+    };
     const run = async (rotatingRead = false) => {
       if (disposed) return;
+      const currentAttempt = ++attempt;
       let terminal = false;
       // The position this connection started from, and the lines already shown
       // when it began: a rotation that adds nothing is measured against both.
@@ -361,7 +378,9 @@ export function usePodLogStream(options: ResourceLogOptions) {
           ...(resume ?? { ...(since !== undefined ? { since_seconds: since } : {}), tail_lines: tail }),
         };
         const onEvent = (event: KubernetesWorkloadLogEvent) => {
-          if (disposed) return;
+          if (disposed || currentAttempt !== attempt || terminal && event.event !== "end") return;
+          const positionAdvanced = Boolean(event.cursor && event.cursor !== session.current.cursor)
+            || Boolean(event.timestamp && Date.parse(event.timestamp) > (session.current.newestLineAt ?? -Infinity));
           if (!terminal && !admitted && (event.event === "heartbeat" || event.event === "line" || event.event === "sources")) {
             admitted = true;
             session.current.admissionRetries = 0;
@@ -400,6 +419,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
             }
             session.current.liveSources = live;
           } else if (event.event === "source_status") {
+            if (["forbidden", "unauthorized", "credential_unavailable"].includes(event.code ?? "")) discardProtectedLines(event);
             if (event.code === "source_limit" || event.reason === "source_limit") return;
             const key = JSON.stringify([event.source_id, event.pod_uid, event.pod, event.container, event.code, event.message]);
             if (!sourceStatuses.has(key)) {
@@ -415,7 +435,6 @@ export function usePodLogStream(options: ResourceLogOptions) {
             setReceived(true);
             // A line is evidence the read works, for a Pod and for a workload
             // alike; a workload has no cursor to signal that.
-            retries = 0;
             if (event.timestamp) {
               const epoch = Date.parse(event.timestamp);
               if (Number.isFinite(epoch)) {
@@ -438,6 +457,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
               session.current.replayUncertain = true;
               setReplayUncertain(true);
             }
+            if (positionAdvanced || Date.now() - readStartedAt >= 10_000) retries = 0;
             pending.push({ text: event.text, container: event.container, timestamp: event.timestamp, pod: event.pod, pod_uid: event.pod_uid, source_id: event.source_id });
             session.current.linesAccepted++;
             session.current.cursorAtNewestLine = event.cursor ?? "";
@@ -461,6 +481,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
               return;
             }
             terminal = true;
+            if (["forbidden", "unauthorized", "credential_unavailable"].includes(event.code ?? "")) discardProtectedLines();
             // A terminal limit can arrive without a usable cursor, and a live
             // Pod read then strands on a stopped state the reader cannot leave.
             // Every line carries its time, so the newest retained line rotates
@@ -530,13 +551,17 @@ export function usePodLogStream(options: ResourceLogOptions) {
           const body = failure instanceof ApiError ? failure.body : undefined;
           const payload = body && typeof body === "object" && "error" in body && body.error && typeof body.error === "object" ? body.error : body;
           const code = payload && typeof payload === "object" && "code" in payload ? payload.code : undefined;
+          if (failure instanceof ApiError && [401, 403].includes(failure.status) || ["forbidden", "unauthorized", "credential_unavailable"].includes(String(code))) discardProtectedLines();
           admissionBusy = code === "log_stream_busy" && failure instanceof ApiError && (failure.status === 429 || failure.status >= 500);
           retryAfterMs = failure instanceof ApiError ? failure.retryAfterMs : undefined;
           retryable = code !== "previous_unavailable" && (!(failure instanceof ApiError) || failure.status === 429 || failure.status >= 500);
           failureMessage = failure instanceof ApiError ? failure.message : "Pod log connection interrupted.";
           const action = payload && typeof payload === "object" && "action" in payload && typeof payload.action === "string" ? payload.action : undefined;
           const retryableHint = payload && typeof payload === "object" && "retryable" in payload && typeof payload.retryable === "boolean" ? payload.retryable : undefined;
-          setNotice({ action, retryable: retryableHint ?? retryable });
+          retryable = retryable && retryableHint !== false && !["forbidden", "unauthorized", "invalid_arguments"].includes(String(code));
+          failureMessage = [code, failureMessage].filter(Boolean).join(" ");
+          if (!retryable) session.current.stopped = { status: "error", message: failureMessage };
+          setNotice({ action, retryable });
           setStatus("error");
           setMessage(failureMessage);
         }
@@ -614,7 +639,15 @@ export function usePodLogStream(options: ResourceLogOptions) {
       }
       setStatus("reconnecting");
       setMessage(`${failureMessage ? `${failureMessage} ` : ""}Connection interrupted. ${resumePoint() ? "Resuming from the last line read." : "Retrying the log connection."}`);
-      retryTimer = setTimeout(() => { retries++; void run(); }, 1000 * 2 ** retries);
+      const delay = Math.max(1000 * 2 ** retries, retryAfterMs ?? 0);
+      if (delay > 60_000) {
+        const stoppedMessage = `${failureMessage} Retry delay exceeds this log read budget. Reload logs to retry.`;
+        session.current.stopped = { status: "error", message: stoppedMessage };
+        setStatus("error");
+        setMessage(stoppedMessage);
+        return;
+      }
+      retryTimer = setTimeout(() => { retries++; void run(); }, delay);
     };
     void run();
     return () => {
@@ -652,5 +685,11 @@ export function usePodLogStream(options: ResourceLogOptions) {
       target.loadingEarlier = false;
     }
   };
-  return { buffer, status, message, notice, replayUncertain, gap, pods, truncated, received, earlier, loadEarlier };
+  const current = session.current.identity === identity;
+  return {
+    buffer: current ? buffer : emptyBuffer(), status: current ? status : "connecting" as const,
+    message: current ? message : "", notice: current ? notice : { retryable: false },
+    replayUncertain: current && replayUncertain, gap: current ? gap : "", pods: current ? pods : undefined,
+    truncated: current && truncated, received: current && received, earlier: current ? earlier : "idle" as const, loadEarlier,
+  };
 }

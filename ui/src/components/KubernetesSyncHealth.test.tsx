@@ -29,7 +29,8 @@ describe("Sync health surface", () => {
     const block = document.querySelector('[data-sync-health="preparing"]')!;
     expect(block.textContent).toContain("Preparing");
     expect(block.querySelectorAll("[data-step]")).toHaveLength(4);
-    expect(Array.from(block.querySelectorAll("[data-step]"), row => row.getAttribute("data-state"))).toEqual(["unknown", "unknown", "unknown", "unknown"]);
+    expect(Array.from(block.querySelectorAll("[data-step]"), row => row.getAttribute("data-state"))).toEqual(["waiting", "waiting", "waiting", "waiting"]);
+    expect(block.querySelector('[aria-current="step"]')).toBeNull();
     const bar = screen.getByRole("progressbar", { name: "Waiting for preparation progress" });
     expect(block.querySelectorAll("[role=progressbar]")).toHaveLength(1);
     expect(bar.hasAttribute("aria-valuenow")).toBe(false);
@@ -182,7 +183,8 @@ it("uses one listing bar measured in types, not overall startup percent", () => 
   expect(container.querySelectorAll("[role=progressbar]")).toHaveLength(1);
   expect(bar.getAttribute("aria-valuenow")).toBe("12");
   expect(bar.getAttribute("aria-valuemax")).toBe("20");
-  expect(bar.getAttribute("aria-valuetext")).toBe("12 / 20 resource types listed");
+  expect(bar.getAttribute("aria-valuetext")).toBe("12 / 20 resource types checked");
+  expect(bar.getAttribute("aria-valuetext")).not.toContain("types listed");
   expect(container.textContent).not.toMatch(/60%|Usually under|ETA/);
   expect(container.querySelector("ol")?.hasAttribute("aria-live")).toBe(false);
 });

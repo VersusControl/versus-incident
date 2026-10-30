@@ -10,7 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // gateway secret come from env, never the repo. CI can inject the same vars
 // directly. Nothing here is secret-by-default — the OSS gateway secret is a
 // local single-admin credential, and the .env file is gitignored.
-dotenv.config({ path: path.resolve(__dirname, ".env") });
+const fixtureOnly = process.env.E2E_UI_FIXTURES === "1";
+if (!fixtureOnly) dotenv.config({ path: path.resolve(__dirname, ".env") });
 
 // Robustness lesson carried over from the management-platform harness: a bare
 // `?? default` does NOT fall back when the var is present-but-empty. Treat an
@@ -23,7 +24,7 @@ function nonEmpty(value: string | undefined, fallback: string): string {
 
 // The default targets a locally run binary on :8080. `plans/harness-run/harness.sh e2e ui`
 // sets E2E_BASE_URL and credentials for the active harness app (OSS or Enterprise).
-const baseURL = nonEmpty(process.env.E2E_BASE_URL, "http://localhost:8080");
+const baseURL = fixtureOnly ? "http://127.0.0.1:4175" : nonEmpty(process.env.E2E_BASE_URL, "http://localhost:8080");
 const headful = (process.env.E2E_HEADFUL ?? "").toLowerCase() === "true";
 
 // This config drives a REAL running instance like an operator, unless a spec
@@ -32,6 +33,12 @@ const headful = (process.env.E2E_HEADFUL ?? "").toLowerCase() === "true";
 //   • or locally: build ui/dist, then `go run ./cmd` from versus-incident/
 // Review-first: read the spec + README before running against any instance.
 export default defineConfig({
+  webServer: fixtureOnly ? {
+    command: "npm run dev -- --host 127.0.0.1 --port 4175 --strictPort",
+    cwd: path.resolve(__dirname, "../.."),
+    url: baseURL,
+    reuseExistingServer: false,
+  } : undefined,
   testDir: ".",
   testMatch: "**/*.spec.ts",
   // Local admin surfaces settle quickly, but a cold instance + first API round

@@ -255,7 +255,7 @@ func (service *Service) probeNamespaceCandidate(parent context.Context, namespac
 				Metadata struct{ Name, Namespace string } `json:"metadata"`
 			} `json:"items"`
 		}
-		if service.inventoryRead(ctx, source.prefix+url.PathEscape(namespace)+"/"+source.resource+"?limit=1", &page, false) == nil {
+		if service.inventoryListRead(ctx, source.prefix+url.PathEscape(namespace)+"/"+source.resource+"?limit=1", &page, false) == nil {
 			for _, item := range page.Items {
 				if item.Metadata.Namespace == namespace && safeSegment(item.Metadata.Name) {
 					return true

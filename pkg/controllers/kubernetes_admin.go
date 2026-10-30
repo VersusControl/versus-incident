@@ -484,7 +484,7 @@ func deltaMatchesNamespace(delta kubernetesindex.Delta, namespace string) bool {
 }
 func (controller *KubernetesAdminController) issues(ctx *fiber.Ctx) error {
 	args := ctx.Context().QueryArgs()
-	for _, key := range []string{"broken", "include", "root_uid"} {
+	for _, key := range []string{"broken", "include", "root_uid", "context"} {
 		if len(args.PeekMulti(key)) > 1 {
 			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 		}
@@ -502,12 +502,24 @@ func (controller *KubernetesAdminController) issues(ctx *fiber.Ctx) error {
 		broken = parsed
 	}
 	root := strings.Clone(ctx.Query("root_uid"))
-	if args.Has("root_uid") && (root == "" || include != "changes") {
+	contextMode := strings.Clone(ctx.Query("context"))
+	if args.Has("context") && contextMode != "persisted" {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	if args.Has("root_uid") && (root == "" || include != "changes" && contextMode != "persisted") {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	since, timeErr := parseKubernetesTime(ctx.Query("since"))
+	if timeErr != nil {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	until, timeErr := parseKubernetesTime(ctx.Query("until"))
+	if timeErr != nil {
 		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 	}
 	value, err := requestKubernetesService(ctx).Issues(ctx.UserContext(), kubernetes.IssueOptions{
-		Namespace: ctx.Query("namespace"), Severity: ctx.Query("severity"), Kind: ctx.Query("kind"), Limit: queryInt(ctx, "limit"), Cursor: ctx.Query("cursor"),
-		Broken: broken, IncludeChanges: include == "changes", RootUID: root,
+		Since: since, Until: until, Namespace: ctx.Query("namespace"), Severity: ctx.Query("severity"), Kind: ctx.Query("kind"), Limit: queryInt(ctx, "limit"), Cursor: ctx.Query("cursor"),
+		Broken: broken, IncludeChanges: include == "changes", RootUID: root, Context: contextMode,
 	})
 	return writeKubernetes(ctx, value, err)
 }

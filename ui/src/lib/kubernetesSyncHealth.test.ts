@@ -7,6 +7,20 @@ const zero = "0001-01-01T00:00:00Z";
 const kind = (overrides: Partial<KubernetesKindStatus> = {}): KubernetesKindStatus => ({ state: "ready", observed_at: "2026-10-26T08:30:00Z", completed_at: "2026-10-26T08:30:01Z", last_attempt_at: "2026-10-26T08:30:00Z", records: 10, partial: false, ...overrides });
 
 describe("Cluster sync health", () => {
+  it("does not classify a known credential or publication fault as warming", () => {
+    for (const error of ["credential_unavailable", "publication_failed"]) {
+      const health = syncHealth({ sync: { state: "syncing", age_s: 100, partial: false }, kinds: { Pod: kind({ state: "warming", partial: true, error }) } });
+      expect(health.state).toBe("degraded");
+      expect(health.problems[0].error).toBe(error);
+      expect(health.problems[0].reason).not.toMatch(/being listed|last sync attempt/);
+    }
+  });
+
+  it("uses the report fault class over a successful-looking aggregate state", () => {
+    const health = reportSyncHealth({ class: "unauthorized", state: "syncing", age_s: 30, partial: false, kinds: {}, total_kinds: 0, ready_kinds: 0, failing_kinds: 0, pending_kinds: 0, truncated: false, first_ready_at: "2026-10-28T00:00:00Z" });
+    expect(health.state).toBe("failed");
+    expect(health.firstReadyAt).toBe("2026-10-28T00:00:00Z");
+  });
   it("is ready when every served kind is ready and clean", () => {
     const health = syncHealth({ sync: ready, kinds: { Pod: kind({ records: 507 }), Deployment: kind() } });
     expect(health.state).toBe("ready");
@@ -139,7 +153,7 @@ describe("Cluster sync health", () => {
     expect(kindFailureReason({ error: "incomplete_pages" })).toBe("the listing could not be paged through");
     expect(kindFailureReason({ error: "commit_conflict" })).toBe("credentials rotated mid-sync, retrying");
     expect(kindFailureReason({ error: "forbidden" })).toBe("permission denied");
-    expect(kindFailureReason({ error: "unauthorized" })).toBe("permission denied");
+    expect(kindFailureReason({ error: "unauthorized" })).toBe("cluster credentials are unavailable or rejected");
     expect(kindFailureReason({ error: "timeout" })).toBe("the cluster is slow or rate-limiting reads");
     expect(kindFailureReason({ error: "throttled" })).toBe("the cluster is slow or rate-limiting reads");
     expect(kindFailureReason({ error: "unavailable" })).toBe("the cluster read failed");

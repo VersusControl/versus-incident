@@ -362,7 +362,7 @@ func TestKubernetesIssuesQueryValidationAndInvestigate(t *testing.T) {
 	for _, test := range []struct {
 		query string
 		want  int
-	}{{"?include=other", 400}, {"?include=", 400}, {"?broken=maybe", 400}, {"?include=changes&root_uid=bad%2Fuid", 400}, {"?root_uid=deployment-checkout", 400}, {"?include=changes&root_uid=", 400}, {"?include=changes&include=changes", 400}, {"?include=changes&root_uid=deployment-checkout&namespace=payments", 404}, {"?include=changes&root_uid=deployment-checkout&namespace=shop", 200}, {"?broken=true&include=changes&limit=1", 200}} {
+	}{{"?include=other", 400}, {"?include=", 400}, {"?broken=maybe", 400}, {"?include=changes&root_uid=bad%2Fuid", 400}, {"?root_uid=deployment-checkout", 400}, {"?include=changes&root_uid=", 400}, {"?include=changes&include=changes", 400}, {"?context=other&root_uid=deployment-checkout", 400}, {"?context=persisted&context=persisted&root_uid=deployment-checkout", 400}, {"?context=persisted", 400}, {"?context=persisted&root_uid=bad%2Fuid", 400}, {"?context=persisted&root_uid=deployment-checkout&since=2026-10-01T00:00:00Z", 400}, {"?include=changes&root_uid=deployment-checkout&namespace=payments", 404}, {"?include=changes&root_uid=deployment-checkout&namespace=shop", 200}, {"?broken=true&include=changes&limit=1", 200}} {
 		response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/issues"+test.query, nil), -1)
 		if err != nil || response.StatusCode != test.want {
 			t.Fatalf("query %s: %+v %v", test.query, response, err)

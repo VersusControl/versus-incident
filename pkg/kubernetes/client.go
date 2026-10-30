@@ -116,6 +116,26 @@ func (client *Client) rejectCredential() {
 	client.authContext, client.authCancel = nil, nil
 }
 
+// rejectRequestCredential fences delayed failures from a previous client epoch.
+func (client *Client) rejectRequestCredential(header string, generation uint64, recoveries ...*clusterRecovery) {
+	client.authMu.Lock()
+	defer client.authMu.Unlock()
+	if client.authGeneration.Load() != generation {
+		return
+	}
+	if source, ok := client.credentials.(interface{ rejectBearer(string) bool }); ok && !source.rejectBearer(header) {
+		return
+	}
+	if len(recoveries) > 0 {
+		recoveries[0].failed(ErrUnauthorized, client)
+	}
+	client.authGeneration.Add(1)
+	if client.authCancel != nil {
+		client.authCancel()
+	}
+	client.authContext, client.authCancel = nil, nil
+}
+
 type captureReadContextKey struct{}
 
 func captureReadContext(ctx context.Context, owner string) context.Context {
@@ -202,7 +222,14 @@ func (client *Client) GetJSON(ctx context.Context, apiPath string, output any) e
 	if err != nil {
 		return err
 	}
+	if list, ok := output.(*validatedInventoryList); ok {
+		return list.UnmarshalJSON(data)
+	}
 	if err := json.Unmarshal(data, output); err != nil {
+		var invalid *inventoryListValidationError
+		if errors.As(err, &invalid) {
+			return invalid
+		}
 		return errors.New("kubernetes: invalid API response")
 	}
 	return nil
@@ -213,42 +240,19 @@ func (client *Client) GetMetadataJSON(ctx context.Context, apiPath string, outpu
 	if err != nil {
 		return err
 	}
-	var envelope struct {
-		Kind       string                       `json:"kind"`
-		APIVersion string                       `json:"apiVersion"`
-		Items      []map[string]json.RawMessage `json:"items"`
+	if err = validateInventoryListEnvelope(data, true); err != nil {
+		return err
 	}
-	if json.Unmarshal(data, &envelope) != nil || envelope.Kind != "PartialObjectMetadataList" || envelope.APIVersion != "meta.k8s.io/v1" {
-		return errors.New("kubernetes: metadata negotiation failed")
-	}
-	for _, item := range envelope.Items {
-		for key := range item {
-			if key != "kind" && key != "apiVersion" && key != "metadata" {
-				return errors.New("kubernetes: metadata negotiation failed")
-			}
-		}
-		var kind, version string
-		if raw, exists := item["kind"]; exists {
-			if json.Unmarshal(raw, &kind) != nil || kind != "PartialObjectMetadata" {
-				return errors.New("kubernetes: metadata negotiation failed")
-			}
-		}
-		if raw, exists := item["apiVersion"]; exists {
-			if json.Unmarshal(raw, &version) != nil || version != "meta.k8s.io/v1" {
-				return errors.New("kubernetes: metadata negotiation failed")
-			}
-		}
-		if raw := item["metadata"]; len(raw) == 0 || string(raw) == "null" {
-			return errors.New("kubernetes: metadata negotiation failed")
-		}
-	}
-	if err := json.Unmarshal(data, output); err != nil {
-		return errors.New("kubernetes: invalid metadata API response")
+	if json.Unmarshal(data, output) != nil {
+		return invalidInventoryList()
 	}
 	return nil
 }
 
 func (client *Client) get(ctx context.Context, apiPath, accept string) ([]byte, error) {
+	if client == nil {
+		return nil, ErrCredentialUnavailable
+	}
 	data, truncated, err := client.getBounded(ctx, apiPath, accept, client.maxBodyBytes)
 	if err != nil {
 		return nil, err
@@ -312,6 +316,7 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 		return nil, false, fmt.Errorf("kubernetes: create request: %w", err)
 	}
 	request.Header.Set("Accept", accept)
+	authGeneration := client.authGeneration.Load()
 	if client.credentials != nil {
 		authorization, credentialErr := client.credentials.Authorization(requestCtx)
 		if credentialErr != nil {
@@ -338,8 +343,14 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if hint := response.Header.Get("Retry-After"); hint != "" {
+			delay := parseRetryAfter(hint, time.Now().UTC())
+			client.backoffMu.Lock()
+			client.backoffUntil = maxTime(client.backoffUntil, time.Now().Add(delay))
+			client.backoffMu.Unlock()
+		}
 		if response.StatusCode == http.StatusUnauthorized {
-			client.rejectCredential()
+			client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx))
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
 			delay := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
@@ -613,4 +624,11 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return delay
 	}
 	return 30 * time.Second
+}
+
+func recoveryFromContext(ctx context.Context) *clusterRecovery {
+	if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
+		return service.recovery
+	}
+	return nil
 }

@@ -39,6 +39,8 @@ func inventoryDue(state kubeindex.KindStatus, cadence time.Duration, now time.Ti
 }
 
 func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCache) {
+	stopWorker := service.recovery.workerStarted()
+	defer stopWorker()
 	owner := uuid.NewString()
 	var ownedLease *inventoryLease
 	defer func() {
@@ -50,8 +52,13 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 	}()
 	var index *kubeindex.Index
 	var loadedRevision string
+	var evidenceCommitted string
 	backoff := 100 * time.Millisecond
 	for ctx.Err() == nil {
+		if err := waitRecovery(ctx, service.recovery); err != nil {
+			return
+		}
+		service.recovery.attempted()
 		provider := service.usageProvider()
 		cache.mu.RLock()
 		generation := cache.generation
@@ -88,9 +95,14 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			}
 		}
 		if err == nil && (index == nil || loadedRevision != generation.Revision) {
+			if restoreErr := service.authorizeInventoryRestore(ctx, generation); restoreErr != nil {
+				err = restoreErr
+			}
 			// Validate into a new index before replacing the worker's last-good
 			// index. Malformed stored data is retryable, never a permanent exit.
-			index, err = hydrateInventory(generation.View)
+			if err == nil {
+				index, err = hydrateInventory(generation.View)
+			}
 			if err == nil {
 				loadedRevision = generation.Revision
 				cache.mu.Lock()
@@ -133,13 +145,30 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				continue
 			}
 		}
+
 		if err == nil {
 			var lease *inventoryLease
 			var owned bool
 			lease, owned, err = service.claimInventory(ctx, provider, owner)
 			if err == nil && owned {
 				ownedLease = lease
-				err = service.inventoryOwnedCycle(ctx, cache, lease, index, &generation)
+				if generation.EvidenceBatch != nil && evidenceCommitted != generation.Revision {
+					lease.mu.Lock()
+					guard := append([]byte(nil), lease.expected...)
+					lease.mu.Unlock()
+					pending := *generation.EvidenceBatch
+					pending.GuardKey = inventoryKey(service.scope)
+					pending.GuardExpected = guard
+					pendingGeneration := generation
+					pendingGeneration.EvidenceBatch = &pending
+					err = service.commitEvidence(ctx, pendingGeneration)
+					if err == nil {
+						evidenceCommitted = generation.Revision
+					}
+				}
+				if err == nil {
+					err = service.inventoryOwnedCycle(ctx, cache, lease, index, &generation)
+				}
 				if err == nil {
 					loadedRevision = generation.Revision
 				}
@@ -149,11 +178,30 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				cache.mu.Unlock()
 			}
 		}
+		if ctx.Err() != nil {
+			return
+		}
 		wait := time.Second
 		if err != nil {
+			class := errorClass(err)
+			// Stable credential bytes do not imply unchanged Kubernetes permissions.
+			var unverified *inventoryAuthorityUnavailable
+			if service.inventoryRestore != nil && (class == "forbidden" || class == "unauthorized" || errors.As(err, &unverified)) {
+				service.inventoryRestore.validated.Store(false)
+			}
+			service.identity.mu.Lock()
+			renewal := service.identity.renewal
+			service.identity.mu.Unlock()
+			if !renewal {
+				service.recovery.failed(err, service.client)
+			}
+			index = nil
 			service.logInventoryCycle(err)
 			cache.mu.Lock()
-			cache.failed, cache.failedClass = true, errorClass(err)
+			cache.failed, cache.failedClass = true, class
+			if class == "forbidden" || class == "unauthorized" {
+				cache.authorityFailure = nil
+			}
 			cache.mu.Unlock()
 			wait, backoff = backoff, min(15*time.Second, backoff*2)
 		} else {
@@ -173,10 +221,54 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 }
 
 func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inventoryCache, lease *inventoryLease, index *kubeindex.Index, generation *inventoryGeneration) error {
+	now := time.Now().UTC()
+	cache.mu.RLock()
+	due := cache.scopePending
+	cache.mu.RUnlock()
+	due = due || len(generation.View.Kinds) < len(indexedResourceIDs) || generation.Usage.ObservedAt.IsZero() || now.Sub(generation.Usage.ObservedAt) >= 30*time.Second
+	for kind, state := range generation.View.Kinds {
+		due = due || inventoryDue(state, inventoryCadence(kind), now)
+	}
+	for _, state := range generation.ResourceStatus {
+		due = due || inventoryDue(state, 5*time.Minute, now)
+	}
+	promoted := false
+	if !due {
+		probe := *generation
+		probeCtx := context.WithValue(parent, credentialEpochContextKey{}, service)
+		var err error
+		promoted, err = service.discoverNamespaceCandidates(probeCtx, cache, &probe, now)
+		if err != nil {
+			return err
+		}
+		if !promoted {
+			return nil
+		}
+		// The proof map is freshly allocated by discovery, not shared with readers.
+		generation.NamespaceProof = probe.NamespaceProof
+	}
+	// The candidate owns all mutable maps; committed readers never see collection.
+	destination := generation
+	candidate, cloneErr := cloneInventoryGeneration(*generation)
+	if cloneErr != nil {
+		return cloneErr
+	}
+	generation = &candidate
 	ctx, cancel := context.WithTimeout(captureReadContext(parent, lease.record.Owner), 15*time.Minute)
 	defer cancel()
 	ctx = context.WithValue(ctx, credentialEpochContextKey{}, service)
+	ctx = context.WithValue(ctx, inventoryNamespacePromotedContextKey{}, promoted)
 	renewDone := make(chan struct{})
+	renewErrors := make(chan error, 1)
+	ownedError := func(err error) error {
+		select {
+		case renewalErr := <-renewErrors:
+			return renewalErr
+		default:
+			return err
+		}
+	}
+
 	go func() {
 		defer close(renewDone)
 		timer := time.NewTicker(time.Minute)
@@ -186,7 +278,11 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 			case <-ctx.Done():
 				return
 			case <-timer.C:
-				if err := lease.renew(ctx, service); err != nil {
+				renewStarted := time.Now()
+				err := lease.renew(ctx, service)
+				service.recovery.stage("lease", renewStarted, err)
+				if err != nil {
+					renewErrors <- err
 					cancel()
 					return
 				}
@@ -198,31 +294,44 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 		if err := lease.publish(ctx, service, current); err != nil {
 			return err
 		}
+		committed, err := cloneInventoryGeneration(*current)
+		if err != nil {
+			return err
+		}
 		cache.mu.Lock()
-		cache.generation, cache.failed = *current, false
+		if service.inventoryRestore != nil {
+			service.inventoryRestore.validated.Store(true)
+		}
+		cache.generation, cache.failed = committed, false
+		cache.authorityFailure = nil
+		*destination = committed
+		service.recovery.published(*current, service.scope.OrgID)
 		cache.mu.Unlock()
-		return nil
+		return lease.commitJournal(ctx, service, committed)
 	}
 	dirty, err := service.collectInventoryCycle(ctx, cache, index, generation, publishCore)
 	if err != nil {
-		return err
+		return ownedError(err)
 	}
 	if !dirty {
-		cache.mu.Lock()
-		cache.generation, cache.failed = *generation, false
-		cache.mu.Unlock()
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return ownedError(err)
 	}
 	if err := lease.publish(ctx, service, generation); err != nil {
-		return err
+		return ownedError(err)
 	}
 	cache.mu.Lock()
+	if service.inventoryRestore != nil {
+		service.inventoryRestore.validated.Store(true)
+	}
 	cache.generation, cache.failed = *generation, false
+	cache.authorityFailure = nil
+	*destination = *generation
+	service.recovery.published(*generation, service.scope.OrgID)
 	cache.mu.Unlock()
-	return nil
+	return lease.commitJournal(ctx, service, *generation)
 }
 
 // Discovery already tries the preferred version first. Defensively select one
@@ -256,7 +365,8 @@ func canonicalInventoryResources(resources []ResourceDefinition) []ResourceDefin
 
 func (service *Service) collectInventoryCycle(ctx context.Context, cache *inventoryCache, index *kubeindex.Index, generation *inventoryGeneration, publishCore ...func(*inventoryGeneration) error) (bool, error) {
 	now := time.Now().UTC()
-	discovered := false
+	ctx = context.WithValue(ctx, inventoryCollectionAuthorityKey{}, &inventoryCollectionAuthority{})
+	discovered, _ := ctx.Value(inventoryNamespacePromotedContextKey{}).(bool)
 	var err error
 	kinds := []string{}
 	cache.mu.Lock()
@@ -326,14 +436,37 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		states[id] = state
 	}
 	var discovery Discovery
+	discoveryStarted := time.Now()
+	degradedDiscovery := false
+	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 10*time.Second)
 	if cold {
-		discovery, err = service.coreDiscovery(ctx)
+		discovery, err = service.coreDiscovery(discoveryCtx)
 	} else {
-		discovery, err = service.Discover(ctx)
+		discovery, err = service.Discover(discoveryCtx)
 	}
+	cancelDiscovery()
+	service.recovery.stage("discovery", discoveryStarted, err)
 	if err != nil {
-		return false, err
+		discoveryFailureClass := inventoryCycleClass(errorClass(err))
+		if cold || ctx.Err() != nil || service.identity.ctx.Err() != nil || errors.Is(err, ErrForbidden) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrCredentialUnavailable) {
+			return false, err
+		}
+		if generation.Discovery != nil {
+			discovery = cloneDiscovery(*generation.Discovery)
+		} else {
+			fallbackCtx, cancelFallback := context.WithTimeout(ctx, 10*time.Second)
+			discovery, err = service.coreDiscovery(fallbackCtx)
+			cancelFallback()
+			if err != nil {
+				return false, err
+			}
+		}
+		degradedDiscovery = true
+		discovery.Partial = append(discovery.Partial, PartialFailure{ResourceID: "kubernetes.discovery", Class: discoveryFailureClass})
 	}
+	storedDiscovery := cloneDiscovery(discovery)
+	generation.Discovery = &storedDiscovery
+
 	// Use the discovered preferred version for known resources as well.
 	preferred := make(map[string]ResourceDefinition)
 	for _, definition := range discovery.Resources {
@@ -356,7 +489,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		progress.complete("connected", time.Now().UTC())
 		progress.advance("listing", time.Now().UTC())
 	}
-	if cold {
+	if cold || degradedDiscovery {
 		// Resolve core kinds against core discovery only: a core kind whose
 		// group the cluster does not serve is absent, not a reason to walk
 		// every API group before the first publication.
@@ -367,6 +500,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	generation.DiscoveryPartial = append([]PartialFailure(nil), discovery.Partial...)
 	crashes := &crashCaptureBatch{}
 	ctx = context.WithValue(ctx, crashCaptureContextKey{}, crashes)
+	indexedStarted := time.Now()
 	var workers sync.WaitGroup
 	var resultMu sync.Mutex
 	sem := make(chan struct{}, 4)
@@ -403,6 +537,41 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			}
 		}()
 	}
+	workers.Wait()
+	service.recovery.stage("indexed", indexedStarted, ctx.Err())
+	// Publish usable indexed observations before the optional API tail. The
+	// candidate is cloned by the publisher, so later stages cannot mutate it.
+	indexedPublished := false
+	generation.View = index.Snapshot()
+	if currentCollectionIdentityVerified(*generation, now) {
+		generation.liveAuthorityOnly = false
+	}
+	materialDenied := currentMaterialDenied(*generation, now)
+	if inventoryCollectionValidationError(ctx) != nil {
+		generation.liveAuthorityOnly = true
+	}
+	if err := collectionEnvelopeAuthorityError(ctx, cache, materialDenied); err != nil {
+		return false, err
+	}
+	if materialDenied && generation.EvidenceScope.ClusterUID != "" {
+		if err := service.verifyCurrentInventoryAuthority(ctx, cache, *generation, now); err != nil {
+			return false, err
+		}
+		generation.liveAuthorityOnly = inventoryCollectionValidationError(ctx) != nil || !currentCollectionIdentityVerified(*generation, now)
+	}
+	cache.mu.RLock()
+	authorityUnverified := cache.authorityFailure != nil
+	cache.mu.RUnlock()
+	if !materialDenied && !authorityUnverified && !cold && !generation.FirstReadyAt.IsZero() && len(kinds) > 0 && len(publishCore) > 0 {
+		generation.Pending, generation.PendingDiscovery = pendingInventoryKinds(generation.View), degradedDiscovery
+		if err := publishCore[0](generation); err != nil {
+			return false, err
+		}
+		indexedPublished = true
+	}
+	additionalStarted := time.Now()
+	optionalCtx, cancelOptional := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelOptional()
 	additional := canonicalInventoryResources(discovery.Resources)
 	if cold {
 		additional = nil
@@ -419,11 +588,17 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			defer workers.Done()
 			select {
 			case sem <- struct{}{}:
-			case <-ctx.Done():
+			case <-optionalCtx.Done():
+				resultMu.Lock()
+				state := states[definition.ID]
+				state.State, state.Partial, state.Error = "error", true, "timeout"
+				state.LastAttemptAt = now
+				states[definition.ID] = state
+				resultMu.Unlock()
 				return
 			}
 			defer func() { <-sem }()
-			items, err := service.loadAdditionalInventory(ctx, definition)
+			items, err := service.loadAdditionalInventory(optionalCtx, definition)
 			resultMu.Lock()
 			defer resultMu.Unlock()
 			state := states[definition.ID]
@@ -438,6 +613,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		}()
 	}
 	workers.Wait()
+	service.recovery.stage("additional", additionalStarted, optionalCtx.Err())
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -450,7 +626,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	}
 	generation.View = index.Snapshot()
 	service.logInventoryKinds(generation.View.Kinds)
-	generation.Pending, generation.PendingDiscovery = pendingInventoryKinds(generation.View), cold
+	generation.Pending, generation.PendingDiscovery = pendingInventoryKinds(generation.View), cold || degradedDiscovery
 	recordNamespaceProofs(generation)
 	promoted, err := service.discoverNamespaceCandidates(ctx, cache, generation, now)
 	if err != nil {
@@ -472,10 +648,25 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			}
 		}
 	}
-	if err := service.collectScopedInventory(ctx, cache, generation, scopeKinds, now); err != nil {
-		return false, err
+	namespaceStarted := time.Now()
+	namespaceErr := service.collectScopedInventory(ctx, cache, generation, scopeKinds, now)
+	service.recovery.stage("namespace", namespaceStarted, namespaceErr)
+	if namespaceErr != nil {
+		return false, namespaceErr
 	}
 	recordNamespaceProofs(generation)
+	if inventoryCollectionValidationError(ctx) != nil {
+		generation.liveAuthorityOnly = true
+	}
+	if err := collectionEnvelopeAuthorityError(ctx, cache, materialDenied || currentMaterialDenied(*generation, now)); err != nil {
+		return false, err
+	}
+	if materialDenied || currentMaterialDenied(*generation, now) {
+		if err := service.verifyCurrentInventoryAuthority(ctx, cache, *generation, now); err != nil {
+			return false, err
+		}
+		generation.liveAuthorityOnly = inventoryCollectionValidationError(ctx) != nil || !currentCollectionIdentityVerified(*generation, now)
+	}
 	if crashes.attempted && crashes.read {
 		events, _, _ := crashes.resolve(generation.View, time.Now().UTC())
 		generation.Crashes, generation.PodSampledAt = events, now
@@ -487,7 +678,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		// A first ready publication must not wait for optional usage reads, even
 		// when the cold core-only publication left other inventory kinds pending.
 		state, _, _, _, _ := summarizeSyncHealth(syncHealthKinds(*generation))
-		if inventoryChanged && (cold || generation.FirstReadyAt.IsZero() && state == "ready") && len(publishCore) > 0 {
+		if !indexedPublished && inventoryChanged && (cold || state == "ready" || !generation.FirstReadyAt.IsZero()) && len(publishCore) > 0 {
 			if err := publishCore[0](generation); err != nil {
 				return false, err
 			}
@@ -503,7 +694,11 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			}
 		}
 		cache.mu.RUnlock()
-		generation.Usage = service.collectInventoryUsage(context.WithValue(ctx, inventoryNamespacesContextKey{}, namespaces), generation.Usage)
+		usageStarted := time.Now()
+		usageCtx, cancelUsage := context.WithTimeout(ctx, 10*time.Second)
+		generation.Usage = service.collectInventoryUsage(context.WithValue(usageCtx, inventoryNamespacesContextKey{}, namespaces), generation.Usage)
+		service.recovery.stage("usage", usageStarted, usageCtx.Err())
+		cancelUsage()
 		if progress != nil {
 			if generation.Usage.PodMetrics.Complete && generation.Usage.NodeMetrics.Complete {
 				progress.complete("metrics", time.Now().UTC())
@@ -892,3 +1087,5 @@ func (service *Service) clearInventoryCycleLog() {
 	}
 	service.inventoryLog.cycleSucceeded(service.indexScope())
 }
+
+type inventoryNamespacePromotedContextKey struct{}

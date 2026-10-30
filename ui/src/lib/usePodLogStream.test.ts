@@ -19,6 +19,81 @@ const completedResponse = (text = "retained output") => new Response(
 );
 
 describe("Pod log stream lifecycle", () => {
+  it("discards denied workload-source lines without erasing still-authorized source output", async () => {
+    vi.useFakeTimers();
+    let emit!: (event: KubernetesWorkloadLogEvent) => void;
+    vi.spyOn(api, "kubernetesWorkloadLogStream").mockImplementation(async (_kind, _namespace, _pod, _uid, _options, callback, signal) => {
+      emit = callback;
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+    const { result } = renderHook(() => usePodLogStream({ ...options, kind: "Deployment", uid: "root" }));
+    act(() => {
+      emit({ event: "line", text: "protected", container: "app", pod: "api-0", pod_uid: "denied-pod", source_id: "denied" });
+      emit({ event: "line", text: "allowed", container: "app", pod: "api-1", pod_uid: "allowed-pod", source_id: "allowed" });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    act(() => emit({ event: "source_status", text: "", container: "app", code: "forbidden", pod: "api-0", pod_uid: "denied-pod", source_id: "denied" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    const lines = result.current.buffer.lines.map((line) => line.text);
+    expect(lines).not.toContain("protected");
+    expect(lines).toContain("allowed");
+  });
+
+  it("rejects callbacks from a retired reconnect attempt without discarding the active read", async () => {
+    vi.useFakeTimers();
+    let retired!: (event: KubernetesPodLogEvent) => void;
+    const stream = vi.spyOn(api, "kubernetesPodLogStream")
+      .mockImplementationOnce(async (_namespace, _pod, _options, emit) => { retired = emit; throw new ApiError(502, "interrupted"); })
+      .mockImplementationOnce(async (_namespace, _pod, _options, emit, signal) => {
+        emit({ event: "line", text: "current", container: "app", cursor: "current-position" });
+        return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      });
+    const { result } = renderHook(() => usePodLogStream(options));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1100); });
+    act(() => retired({ event: "line", text: "retired", container: "app", cursor: "old-position" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(result.current.buffer.lines.map((line) => line.text)).toEqual(["current"]);
+  });
+  it.each([false, true])("honors permanent credential failure hints without reconnecting (workload: %s)", async (workload) => {
+    vi.useFakeTimers();
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ error: "Cluster credentials unavailable", code: "credential_unavailable", retryable: false }), { status: 502 }));
+    const { result } = renderHook(() => usePodLogStream({ ...options, ...(workload ? { kind: "Deployment", uid: "root" } : {}) }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("error");
+    expect(result.current.message).toContain("credential_unavailable");
+  });
+
+  it("recovers transient credential renewal from its resume position within a bounded retry budget", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Cluster credentials unavailable", code: "credential_unavailable", retryable: true }), { status: 502, headers: { "Retry-After": "2" } }))
+      .mockResolvedValueOnce(completedResponse("renewed output"));
+    const { result } = renderHook(() => usePodLogStream(options));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1999); });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe("ended");
+    expect(result.current.buffer.lines.map((line) => line.text)).toContain("renewed output");
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds repeated short admitted failures even when each connection replays a line", async () => {
+    vi.useFakeTimers();
+    const stream = vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => {
+      emit({ event: "line", text: "replayed", container: "app", timestamp: "2026-10-28T00:00:00Z", ordinal: 1 });
+      throw new ApiError(502, "renewal unavailable", { code: "credential_unavailable", retryable: true });
+    });
+    const { result } = renderHook(() => usePodLogStream(options));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(stream).toHaveBeenCalledTimes(4);
+    expect(result.current.status).toBe("error");
+    expect(result.current.message).toMatch(/credential_unavailable.*exhausted/);
+    expect(result.current.buffer.lines).toEqual([]);
+  });
   it("replenishes admission retries after an admitted read later rotates within the same selection", async () => {
     vi.useFakeTimers();
     const encoder = new TextEncoder();

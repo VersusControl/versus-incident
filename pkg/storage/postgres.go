@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
@@ -31,7 +32,11 @@ type PostgresOptions struct {
 }
 
 type postgresProvider struct {
-	db *sql.DB
+	evidenceQueryMu         sync.Mutex
+	evidenceQueries         map[string]evidenceCountSnapshot
+	evidenceQueryGeneration uint64
+	evidenceDeleting        int
+	db                      *sql.DB
 }
 
 var (

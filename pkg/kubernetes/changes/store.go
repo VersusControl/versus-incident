@@ -114,6 +114,17 @@ func NewStore(provider storage.Provider, scope index.Scope) *Store {
 	return &Store{provider: provider, key: "kubernetes/changes/" + hex.EncodeToString(digest[:]) + ".json", retention: defaultRetention}
 }
 
+// NewCaptureState isolates leases and bounded sensitive capture controls from
+// the old timeline blob. Durable evidence is owned by the provider capability.
+func NewCaptureState(provider storage.Provider, scope index.Scope) *Store {
+	store := NewStore(provider, scope)
+	if store == nil {
+		return nil
+	}
+	store.key = strings.Replace(store.key, "kubernetes/changes/", "kubernetes/capture-state/", 1)
+	return store
+}
+
 // Append adds projected changes and evicts only the oldest records as required by bounds.
 func (store *Store) Append(changes []Change, now time.Time) error {
 	return store.Commit(changes, nil, nil, "", now)

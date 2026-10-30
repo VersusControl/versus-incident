@@ -8,6 +8,73 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("fetches persisted UID context independently of history dates and keeps its envelope separate", async () => {
+    const root = { kind: "Deployment", namespace: "shop", name: "retained-root", uid: "root-uid" };
+    const page = { items: [], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false }, root_context: { root, occurrence: { root, rule: "resource.context", severity: "info", count: 0 }, retained: true } };
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(page)));
+    const controller = new AbortController();
+    const result = await createKubernetesApi("east").kubernetesIssues({ root_uid: "root-uid", namespace: "shop", context: "persisted" }, controller.signal);
+    const url = new URL(String(fetch.mock.calls[0][0]), "http://localhost");
+    expect(url.pathname).toBe("/api/admin/kubernetes/issues");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ cluster: "east", root_uid: "root-uid", namespace: "shop", context: "persisted" });
+    expect(fetch.mock.calls[0][1]?.signal).toBe(controller.signal);
+    expect(result).toEqual(page);
+    expect(result.items).toEqual([]);
+    expect(result.totals).toEqual({});
+  });
+  it.each(["issues", "timeline", "changes", "crashes"] as const)("follows empty %s evidence pages without changing opaque scope, filters or windows", async (route) => {
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], next: "opaque+/=position", gaps: [{ from: "start", to: "end" }] })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ id: "retained" }], total: 90000, next: "another+position" })));
+    const client = createKubernetesApi("east");
+    const options = { since: "2020-01-01T00:00:00Z", until: "2026-10-28T00:00:00Z", namespace: "shop", root_uid: "root", limit: 10000 };
+    const result = route === "issues" ? await client.kubernetesIssues({ ...options, severity: "critical", broken: true })
+      : route === "timeline" ? await client.kubernetesTimeline({ ...options, breaks: 1 })
+      : route === "changes" ? await client.kubernetesChanges({ ...options, kind: "Deployment", type: "deleted" })
+      : await client.kubernetesCrashes({ ...options, pod_uid: "pod" });
+    expect(result.items).toEqual([{ id: "retained" }]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const first = new URL(String(fetch.mock.calls[0][0]), "http://localhost");
+    const next = new URL(String(fetch.mock.calls[1][0]), "http://localhost");
+    expect(next.searchParams.get("cursor")).toBe("opaque+/=position");
+    next.searchParams.delete("cursor");
+    expect(next.toString()).toBe(first.toString());
+    expect(first.searchParams.get("cluster")).toBe("east");
+    expect(first.searchParams.get("since")).toBe(options.since);
+    expect(first.searchParams.get("until")).toBe(options.until);
+    expect(first.searchParams.get("limit")).toBe("500");
+    if (route === "timeline") expect(result).toMatchObject({ gaps: [{ from: "start", to: "end" }], total: 90000 });
+  });
+
+  it("restarts an expired file cursor once without mutating history and retains the exact query", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Invalid query" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ id: "retained" }] })));
+    await createKubernetesApi("west").kubernetesChanges({ since: "2020-01-01T00:00:00Z", namespace: "shop", cursor: "expired", type: "deleted" });
+    const restarted = new URL(String(fetch.mock.calls[1][0]), "http://localhost");
+    expect(restarted.searchParams.has("cursor")).toBe(false);
+    expect(restarted.searchParams.get("since")).toBe("2020-01-01T00:00:00Z");
+    expect(restarted.searchParams.get("namespace")).toBe("shop");
+    expect(restarted.searchParams.get("cluster")).toBe("west");
+    expect(fetch.mock.calls.every((call) => !call[1]?.method || call[1]?.method === "GET")).toBe(true);
+  });
+
+  it("bounds empty-page work and rejects a nonadvancing continuation", async () => {
+    let page = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ items: [], next: `cursor-${++page}` })));
+    const result = await api.kubernetesChanges();
+    expect(fetch).toHaveBeenCalledTimes(16);
+    expect(result.next).toBe("cursor-16");
+    fetch.mockReset().mockImplementation(async () => new Response(JSON.stringify({ items: [], next: "repeated" })));
+    await expect(api.kubernetesChanges()).rejects.toThrow("History continuation did not advance");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("never follows history continuations after permission or credential denial", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: "denied", code: "credential_unavailable" }), { status: 502 }));
+    await expect(api.kubernetesTimeline({ since: "2020-01-01T00:00:00Z", until: "2026-10-28T00:00:00Z", cursor: "position" })).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it("scopes issue alert reads and writes and sends only editable fields", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response("{}")));
     const client = createKubernetesApi("prod/eu+one");
@@ -51,7 +118,7 @@ describe("Kubernetes resource API", () => {
   });
 
   it("scopes crash journal filters and requests only one retained page", async () => {
-    const page = { items: [], next: "next-page", retention_basis: "observed_at" };
+    const page = { items: [{ id: "retained" }], next: "next-page", retention_basis: "observed_at" };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(page)));
     const result = await createKubernetesApi("prod-eu").kubernetesCrashes({ namespace: "shop", root_uid: "root/one", since: "2026-10-16T10:00:00Z", until: "2026-10-16T11:00:00Z", limit: 100, cursor: "opaque+cursor" });
     const url = new URL(String(fetchMock.mock.calls[0][0]), "http://localhost");
@@ -221,7 +288,7 @@ describe("Kubernetes resource API", () => {
   });
 
   it("requests one scoped Timeline snapshot with exact resource identity and an unchanged opaque cursor", async () => {
-    const payload = { items: [], next: "snapshot.cursor", total: 2400, crash_count: 600, counts: { change: 1600, crash: 600, break: 200 }, since: "2026-10-23T07:00:00Z", until: "2026-10-23T08:00:00Z", gaps: [], sync: { state: "ready", age_s: 0, partial: false } };
+    const payload = { items: [{ id: "retained" }], next: "snapshot.cursor", total: 2400, crash_count: 600, counts: { change: 1600, crash: 600, break: 200 }, since: "2026-10-23T07:00:00Z", until: "2026-10-23T08:00:00Z", gaps: [], sync: { state: "ready", age_s: 0, partial: false } };
     const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify(payload), { status: 200 }));
     const client = createKubernetesApi("east");
     const signal = new AbortController().signal;

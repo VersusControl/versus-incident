@@ -1281,3 +1281,86 @@ func TestProjectedVerifierRejectsUntrustedKeysAndDiscovery(t *testing.T) {
 		})
 	}
 }
+
+func TestRejectedBearerRefreshCoalescesAndStaleRejectionCannotRetireSuccessor(t *testing.T) {
+	var calls atomic.Int32
+	source := &expiringBearerSource{now: time.Now, skew: time.Minute, refresh: func(context.Context) (string, time.Time, error) {
+		count := calls.Add(1)
+		return "synthetic-" + string(rune('a'+count)), time.Now().Add(time.Hour), nil
+	}}
+	first, err := source.Authorization(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &Client{credentials: source}
+	original, _ := client.credentialEpochContext()
+	generation := client.authGeneration.Load()
+	var workers sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		workers.Add(1)
+		go func() { defer workers.Done(); client.rejectRequestCredential(first, generation) }()
+	}
+	workers.Wait()
+	if original.Err() == nil {
+		t.Fatal("rejected epoch was not canceled")
+	}
+	second, err := source.Authorization(t.Context())
+	if err != nil || second == first {
+		t.Fatal("source reused rejected bearer")
+	}
+	successor, _ := client.credentialEpochContext()
+	client.rejectRequestCredential(first, generation)
+	if successor.Err() != nil {
+		t.Fatal("stale rejection retired successor")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("refresh count=%d", calls.Load())
+	}
+	if source.rejectBearer(first) {
+		t.Fatal("stale bearer invalidated current cache")
+	}
+	current, err := source.Authorization(t.Context())
+	if err != nil || current != second {
+		t.Fatal("new bearer was discarded")
+	}
+}
+
+func TestRecoveryCooldownSurvivesRequestWakesAndOnlyPublicationResets(t *testing.T) {
+	r := &clusterRecovery{}
+	r.failed(ErrCredentialUnavailable, nil)
+	deadline := r.deadline()
+	for i := 0; i < 100; i++ {
+		r.failed(ErrCredentialUnavailable, nil)
+	}
+	if !r.deadline().Equal(deadline) || r.failures != 1 {
+		t.Fatal("concurrent failures reset or multiplied cooldown")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := waitRecovery(ctx, r); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation=%v", err)
+	}
+	r.committed("committed-revision")
+	if !r.deadline().IsZero() || r.failures != 0 {
+		t.Fatal("publication did not reset recovery")
+	}
+}
+
+func TestUncommittedCredentialReplacementsKeepTheirStableCooldown(t *testing.T) {
+	recovery := &clusterRecovery{}
+	recovery.reserveReplacement(true)
+	first := recovery.deadline()
+	recovery.reserveReplacement(true)
+	if recovery.replacementStreak != 2 || !recovery.deadline().After(first) {
+		t.Fatal("success-less epoch changes reset replacement backoff")
+	}
+	reserved := recovery.deadline()
+	recovery.failed(ErrUnauthorized, nil)
+	if recovery.deadline().Before(reserved) {
+		t.Fatal("a rejection shortened the stable replacement cooldown")
+	}
+	recovery.committed("publication")
+	if recovery.replacementStreak != 0 || !recovery.deadline().IsZero() {
+		t.Fatal("committed recovery did not reset the replacement cooldown")
+	}
+}
