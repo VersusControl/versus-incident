@@ -469,6 +469,11 @@ func scopedIndexStatus(status kubeindex.Status, requested []string) kubeindex.St
 }
 
 func (service *Service) loadIndexKind(ctx context.Context, kind string, namespaces ...string) (recordsResult []kubeindex.Record, completeResult bool, resultErr error) {
+	defer func() {
+		if resultErr != nil || completeResult {
+			recordInventoryMaterialResult(ctx, resultErr)
+		}
+	}()
 	if kind == "Pod" {
 		if batch, ok := ctx.Value(crashCaptureContextKey{}).(*crashCaptureBatch); ok {
 			batch.attempted = true
@@ -570,7 +575,7 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 					Continue string `json:"continue"`
 				} `json:"metadata"`
 			}
-			if err := service.inventoryRead(ctx, pagePath, &page, false); err != nil {
+			if err := service.inventoryListRead(ctx, pagePath, &page, false); err != nil {
 				if errors.Is(err, ErrResponseTooLarge) && pageLimit > minimumPageSize {
 					pageLimit = max(minimumPageSize, pageLimit/2)
 					continue
@@ -608,7 +613,7 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 			continueToken = page.Metadata.Continue
 		} else if metadataOnlyIndexKinds[kind] {
 			var page metadataIndexPage
-			if err := service.inventoryRead(ctx, pagePath, &page, true); err != nil {
+			if err := service.inventoryListRead(ctx, pagePath, &page, true); err != nil {
 				if errors.Is(err, ErrForbidden) || errors.Is(err, ErrUnauthorized) {
 					// Any denial on a metadata-only kind is memoized for a bounded
 					// time, so a grant becomes visible on the next probe instead of
@@ -638,7 +643,7 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 					Continue string `json:"continue"`
 				} `json:"metadata"`
 			}
-			if err := service.inventoryRead(ctx, pagePath, &page, false); err != nil {
+			if err := service.inventoryListRead(ctx, pagePath, &page, false); err != nil {
 				if errors.Is(err, ErrResponseTooLarge) && pageLimit > minimumPageSize {
 					pageLimit = max(minimumPageSize, pageLimit/2)
 					continue

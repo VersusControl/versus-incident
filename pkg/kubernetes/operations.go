@@ -696,14 +696,17 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		indexKinds = append(indexKinds, candidate.Kind)
 	}
 	view, status, indexErr := service.CachedNamespaceSnapshot(ctx, options.Namespace, indexKinds...)
+	if indexErr != nil {
+		// An unavailable or unauthorized cold snapshot is not an empty LIST.
+		// Falling back would discard this error and manufacture successful zeros.
+		return WorkloadPage{}, indexErr
+	}
 	result.Sync = SyncStatus{State: status.State, Partial: status.Partial, AgeSeconds: status.AgeSeconds, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}
-	indexReady := indexErr == nil
-	if indexReady {
-		for _, candidate := range workloadResources {
-			if status.Kinds[candidate.Kind].State != "ready" {
-				indexReady = false
-				break
-			}
+	indexReady := true
+	for _, candidate := range workloadResources {
+		if status.Kinds[candidate.Kind].State != "ready" {
+			indexReady = false
+			break
 		}
 	}
 	if indexReady {

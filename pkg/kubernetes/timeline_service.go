@@ -110,6 +110,20 @@ func (service *Service) Timeline(ctx context.Context, query TimelineQuery) (Time
 	if len(query.Cursor) > 4096 {
 		return TimelinePage{}, ErrInvalidArguments
 	}
+
+	if service.evidenceStore() != nil {
+		now := time.Now().UTC()
+		if query.Cursor == "" && query.Until.IsZero() {
+			query.Until = now
+		}
+		if query.Cursor == "" && query.Since.IsZero() {
+			query.Since = query.Until.Add(-24 * time.Hour)
+		}
+		if !query.Since.IsZero() && !query.Until.IsZero() && query.Since.After(query.Until) || query.Until.After(now.Add(time.Minute)) {
+			return TimelinePage{}, ErrInvalidArguments
+		}
+		return service.evidenceTimeline(ctx, query)
+	}
 	binding := timelineBinding(service, query)
 	var snapshot *timelineSnapshot
 	cursor := timelineCursor{Binding: binding}

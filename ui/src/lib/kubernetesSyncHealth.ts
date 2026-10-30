@@ -77,7 +77,9 @@ const failureReasons: Record<string, string> = {
   incomplete_pages: "the listing could not be paged through",
   commit_conflict: "credentials rotated mid-sync, retrying",
   forbidden: "permission denied",
-  unauthorized: "permission denied",
+  unauthorized: "cluster credentials are unavailable or rejected",
+  credential_unavailable: "cluster credentials are unavailable or rejected",
+  publication_failed: "the latest snapshot could not be published",
   timeout: "the cluster is slow or rate-limiting reads",
   throttled: "the cluster is slow or rate-limiting reads",
   unavailable: "the cluster read failed",
@@ -115,6 +117,7 @@ const served = (kind: KubernetesKindStatus) => !kind.absent;
  */
 export function kindFailed(kind: KubernetesKindStatus): boolean {
   if (!served(kind)) return false;
+  if (kind.error && kind.error !== "syncing") return true;
   if (kind.state === "pending" || kind.state === "warming") return false;
   return kind.state === "error" || kind.state === "partial" || kind.partial;
 }
@@ -219,6 +222,7 @@ export function firstReadyAt(report?: { first_ready_at?: string }): string | und
 
 /** The durable cluster facts a failed sync-health read still carries. */
 export interface KubernetesSyncFailure {
+  class?: string;
   firstReadyAt?: string;
   ageSeconds?: number;
 }
@@ -248,6 +252,8 @@ export function syncFailureReport(body: unknown): KubernetesSyncFailure {
   const first = field("first_ready_at");
   const age = field("age_s");
   const failure: KubernetesSyncFailure = {};
+  const code = field("class") ?? field("code");
+  if (typeof code === "string") failure.class = code;
   if (typeof first === "string" && !isZeroTime(first)) failure.firstReadyAt = first;
   if (typeof age === "number" && Number.isFinite(age) && age >= 0) failure.ageSeconds = age;
   return Object.keys(failure).length ? failure : noFailure;
@@ -261,7 +267,7 @@ export function syncFailureReport(body: unknown): KubernetesSyncFailure {
  */
 export function reportSyncHealth(report?: KubernetesSyncHealthReport, progress?: KubernetesSyncProgress): KubernetesSyncHealth {
   return syncHealth({
-    sync: report ? { ...clusterSyncEnvelope(report)!, progress: report.progress ?? progress } : undefined,
+    sync: report ? { ...clusterSyncEnvelope(report)!, state: report.class ? "error" : report.state, progress: report.progress ?? progress } : undefined,
     kinds: report?.kinds,
     unreadable: report?.unreadable,
     failing: report?.failing,

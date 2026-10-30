@@ -276,6 +276,9 @@ func (service *Service) logCursor(options PodLogStreamOptions) (logResumeCursor,
 }
 
 func (client *Client) openPodLogStream(ctx context.Context, apiPath string, previous bool) (io.ReadCloser, error) {
+	if err := client.waitBackoff(ctx); err != nil {
+		return nil, err
+	}
 	requestURL, err := client.requestURL(apiPath)
 	if err != nil {
 		return nil, err
@@ -285,6 +288,7 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 		return nil, ErrInvalidArguments
 	}
 	request.Header.Set("Accept", "*/*")
+	authGeneration := client.authGeneration.Load()
 	if client.credentials != nil {
 		credentialContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 		authorization, credentialErr := client.credentials.Authorization(credentialContext)
@@ -312,7 +316,7 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
 		if response.StatusCode == http.StatusUnauthorized {
-			client.rejectCredential()
+			client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx))
 		}
 		if previous && response.StatusCode == http.StatusBadRequest {
 			body, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))

@@ -46,15 +46,15 @@ export function KubernetesPreparingPanel({ progress, cluster }: { progress?: Kub
         const detail = step.id === "connected" && done && serverVersion ? `Kubernetes ${serverVersion}`
           : listed.length ? undefined
             : progress?.phase_status?.[step.id] ?? (active ? step.id === "listing" ? "counting" : "in progress" : done ? "done" : "waiting");
-        return <li key={step.id} data-step={step.id} data-state={state} aria-current={active ? "step" : undefined} className="flex min-w-0 items-center gap-3 px-4 py-3 text-sm sm:px-6">
+        return <li key={step.id} data-step={step.id} data-state={state} aria-current={active ? "step" : undefined} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm sm:flex-nowrap sm:gap-3 sm:px-6">
           <span aria-hidden="true" className={`inline-flex size-6 shrink-0 items-center justify-center rounded-full ${done ? "bg-sev-ok/15 text-sev-ok" : active ? "bg-accent-subtle text-link" : "bg-ink-700 text-ink-400"}`}>
             {done ? <Check size={14} /> : active ? <Loader2 size={14} data-preparing-motion className="animate-spin motion-reduce:animate-none" /> : <span className="size-1.5 rounded-full bg-current" />}
           </span>
           <span className={`min-w-0 flex-1 ${done ? "text-ink-100" : active ? "font-medium text-ink-50" : "text-ink-400"}`} data-first-sync-step-label>{done ? step.label : active ? step.active : step.label}<span className="sr-only">: {state === "done" ? "done" : state === "active" ? "in progress" : progress?.phase_status?.[step.id] ?? state}</span></span>
-          <span className={`min-w-0 text-right text-xs tabular-nums ${active ? "text-ink-200" : "text-ink-400"}`}>
+          <span className={`min-w-0 text-right text-xs tabular-nums ${listed.length ? "basis-full pl-9 sm:basis-auto sm:pl-0" : ""} ${active ? "text-ink-200" : "text-ink-400"}`}>
             {/* Spacing alone sets the counts apart, so their name is one phrase
                 read with commas rather than one run-on word. */}
-            {listed.length ? <span data-first-sync-counts role="group" aria-label={listed.join(", ")} className="flex flex-wrap justify-end gap-x-2">{listed.map((count) => <span key={count} aria-hidden="true" data-first-sync-count>{count}</span>)}</span> : detail}
+            {listed.length ? <span data-first-sync-counts role="group" aria-label={listed.join(", ")} className="flex flex-wrap justify-start gap-x-2 gap-y-1 sm:justify-end">{listed.map((count) => <span key={count} aria-hidden="true" data-first-sync-count className="max-w-full break-words">{count}</span>)}</span> : detail}
           </span>
         </li>;
       })}

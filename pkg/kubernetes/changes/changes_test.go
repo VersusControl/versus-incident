@@ -21,6 +21,35 @@ func crashFixture(position int, at time.Time) CrashEvent {
 	return event
 }
 
+func TestChangeValidUsesJournalShape(t *testing.T) {
+	change := Change{ID: "synthetic", Cluster: "cluster", Kind: "Secret", Namespace: "shop", Name: "synthetic", UID: "synthetic-uid", Type: Created, Source: "observed", At: time.Now().UTC()}
+	if !change.Valid() {
+		t.Fatal("complete typed observation was rejected")
+	}
+	for _, scenario := range []string{"missing-id", "missing-name", "missing-time", "unknown-type", "unknown-source", "invalid-field"} {
+		t.Run(scenario, func(t *testing.T) {
+			invalid := change
+			switch scenario {
+			case "missing-id":
+				invalid.ID = ""
+			case "missing-name":
+				invalid.Name = ""
+			case "missing-time":
+				invalid.At = time.Time{}
+			case "unknown-type":
+				invalid.Type = "unsupported"
+			case "unknown-source":
+				invalid.Source = "unsupported"
+			case "invalid-field":
+				invalid.Fields = []FieldChange{{Path: ""}}
+			}
+			if invalid.Valid() {
+				t.Fatal("incomplete or unsupported journal shape was accepted")
+			}
+		})
+	}
+}
+
 func TestCrashJournalPagingDedupAndIsolation(t *testing.T) {
 	provider := storage.NewMemory()
 	scope := index.Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "principal"}
@@ -1250,5 +1279,38 @@ func TestStoreMarksTimelineGap(t *testing.T) {
 	}
 	if err := store.MarkGap(Gap{From: now.Add(time.Minute), To: now}); err != ErrInvalidQuery {
 		t.Fatalf("invalid gap error=%v", err)
+	}
+}
+
+func TestCaptureStateDoesNotReadOrRewriteLegacyTimelineEvidence(t *testing.T) {
+	provider := storage.NewMemory()
+	scope := index.Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "credential"}
+	now := time.Now().UTC()
+	legacy := NewStore(provider, scope)
+	change := Change{ID: "old", Cluster: "cluster", Kind: "Pod", Namespace: "shop", UID: "pod", Name: "pod", Type: Created, At: now}
+	if err := legacy.Append([]Change{change}, now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := provider.ReadBlob(legacy.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := NewCaptureState(provider, scope)
+	if current == nil || current.key == legacy.key {
+		t.Fatal("capture controls reused the old history key")
+	}
+	if err = current.ClaimLease("owner", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	page, err := current.ReadWindow(now.Add(-time.Hour), now.Add(time.Hour), now)
+	if err != nil || len(page.Items) != 0 {
+		t.Fatal("capture control state imported old history")
+	}
+	after, err := provider.ReadBlob(legacy.key)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("new capture controls rewrote legacy history")
+	}
+	if NewCaptureState(nil, scope) != nil || NewCaptureState(provider, index.Scope{}) != nil {
+		t.Fatal("invalid capture control scope accepted")
 	}
 }

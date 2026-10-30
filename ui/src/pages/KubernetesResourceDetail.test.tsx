@@ -263,6 +263,20 @@ describe("Resource detail surfaces", () => {
     fireEvent.click(hpa);
     expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ kind: "HorizontalPodAutoscaler", namespace: "shop" }));
   });
+  it("keeps published relationships through a transport failure but removes projected and cached data on denial", async () => {
+    const { client, container } = mount(<ResourceRelations resource={pod} related={[{ kind: "ConfigMap", name: "checkout-config" }]} onOpen={vi.fn()} />);
+    await waitFor(() => expect(container.querySelector('[data-relationship-node="pod"]')).toBeTruthy());
+    vi.mocked(api.kubernetesRelated).mockRejectedValue(new ApiError(503, "unavailable"));
+    await act(async () => { await client.invalidateQueries(); });
+    expect(container.querySelector('[data-relationship-node="pod"]')).toBeTruthy();
+    await screen.findByText("Relationship health is unavailable; projected references are shown.");
+    vi.mocked(api.kubernetesRelated).mockRejectedValue(new ApiError(403, "permission reduced"));
+    await act(async () => { await client.invalidateQueries(); });
+    await screen.findByText("Relationship health is unavailable.");
+    expect(container.querySelector("[data-relationship-node]")).toBeNull();
+    expect(screen.queryByText("checkout-config")).toBeNull();
+  });
+
   it("keeps projected references when the relationship graph request fails", async () => {
     vi.mocked(api.kubernetesRelated).mockRejectedValue(new ApiError(503, "unavailable"));
     mount(<ResourceRelations resource={pod} related={[{ kind: "ConfigMap", name: "checkout-config" }, { kind: "Service", name: "checkout-svc" }]} onOpen={vi.fn()} />);
@@ -401,8 +415,9 @@ describe("Resource detail surfaces", () => {
       gaps: kind === "gap" ? [{ from: "2026-10-21T04:00:00Z", to: now }] : [],
       partial_failures: kind === "permission" ? [{ resource_id: "core~v1~pods", class: "forbidden" }] : [],
     }));
-    mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
-    await screen.findByText("No changes or crashes in this range.");
+    const { client } = mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    await waitFor(() => expect(client.getQueryCache().getAll().find((query) => query.queryKey.includes("resource-detail-timeline"))?.state.status).toBe("success"));
+    expect(screen.queryByText("No changes or crashes in this range.")).toBeNull();
     expect(screen.queryByText(/Partial history; capture gaps or bounded results/)).toBeNull();
     expect(screen.queryAllByRole("button", { name: "Resource coverage" })).toHaveLength(kind === "next" ? 0 : 1);
     expect(screen.queryByText(/^No history before/)).toBeNull();
@@ -799,7 +814,35 @@ describe("Resource detail surfaces", () => {
       screen.queryByRole("button", { name: "View logs before crash" }),
     ).toBeNull();
   });
-  it("keeps a syncing resource snapshot loading instead of claiming an empty range", async () => {
+  it("keeps same-scope drawer history through a storage fault but discards it after a permission reduction", async () => {
+    vi.mocked(api.kubernetesTimeline).mockResolvedValue(timelinePage([{ type: "crash", id: crash.id, at: crash.at, crash }]));
+    const { client } = mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    await screen.findByRole("button", { name: "View logs before crash" });
+    vi.mocked(api.kubernetesTimeline).mockRejectedValue(new ApiError(503, "Storage unavailable"));
+    await act(async () => { await client.invalidateQueries(); });
+    await screen.findByRole("button", { name: "Retry history" });
+    expect(screen.getByRole("button", { name: "View logs before crash" })).toBeTruthy();
+    vi.mocked(api.kubernetesTimeline).mockRejectedValue(new ApiError(403, "Permission reduced"));
+    await act(async () => { await client.invalidateQueries(); });
+    await screen.findByText("History unavailable.");
+    expect(screen.queryByRole("button", { name: "View logs before crash" })).toBeNull();
+    expect(screen.queryByText("No changes or crashes in this range.")).toBeNull();
+  });
+
+  it("uses the existing drawer time selector for all retained evidence without unbounding the page", async () => {
+    vi.mocked(api.kubernetesTimeline).mockResolvedValue(timelinePage([{ type: "crash", id: crash.id, at: crash.at, crash }], { next: "retained-position" }));
+    mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    await screen.findByRole("button", { name: "View logs before crash" });
+    fireEvent.click(screen.getByRole("button", { name: "All retained" }));
+    await waitFor(() => expect(api.kubernetesTimeline).toHaveBeenLastCalledWith(expect.objectContaining({ since: "1970-01-01T00:00:00.000Z", limit: 100, resource_uid: pod.uid, namespace: pod.namespace }), expect.any(AbortSignal)));
+    const lane = await screen.findByLabelText("Resource timeline lane");
+    expect(lane.textContent).toContain(new Date(0).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }));
+    expect(lane.innerHTML).not.toMatch(/NaN|Infinity/);
+    fireEvent.click(await screen.findByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(api.kubernetesTimeline).toHaveBeenLastCalledWith(expect.objectContaining({ since: "1970-01-01T00:00:00.000Z", limit: 100, cursor: "retained-position", resource_uid: pod.uid }), expect.any(AbortSignal)));
+  });
+
+  it("keeps a first resource snapshot loading instead of claiming an empty range", async () => {
     vi.mocked(api.kubernetesTimeline).mockResolvedValue(timelinePage([], { sync: { state: "syncing", age_s: 0, partial: false } }));
     const { client } = mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
     await waitFor(() => expect(client.getQueryCache().getAll().find((query) => query.queryKey.includes("resource-detail-timeline"))?.state.status).toBe("success"));

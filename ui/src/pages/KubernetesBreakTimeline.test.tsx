@@ -5,12 +5,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, type KubernetesBreakLogPage, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesCrashPage, type KubernetesGraph, type KubernetesIssue, type KubernetesTimelineEntry, type KubernetesTimelinePage } from "@/lib/api";
+import { api, ApiError, type KubernetesBreakLogPage, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesCrashPage, type KubernetesIssue, type KubernetesIssuePage, type KubernetesTimelineEntry, type KubernetesTimelinePage } from "@/lib/api";
 import { KubernetesClusterContext, kubernetesKey, useKubernetesCrashes } from "@/lib/useKubernetesCluster";
 import { BreakRow, BreakTimelineLane, CrashJournal, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
 import { KubernetesExplorerTabContent } from "./KubernetesExplorerViews";
 import { KubernetesWarnings } from "./KubernetesWarnings";
 import { KubernetesBreakLogs, KubernetesBreakLogsProvider } from "./KubernetesBreakLogs";
+import { ToastProvider } from "@/components/Toast";
 import { breakLogWindow } from "@/lib/useKubernetesBreakLogs";
 
 const issue: KubernetesIssue = { root: { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" }, rule: "pod.crash_loop", severity: "critical", count: 7, of: 7, broken: true, broke_at: "2026-10-14T12:04:00Z", history: "complete", evidence: { terminations: [{ reason: "OOMKilled", exit_code: 137, count: 6, last: "2026-10-14T12:05:00Z" }], warning_events: 3, from: "2026-10-14T11:34:00Z", to: "2026-10-14T12:06:00Z" } };
@@ -27,6 +28,12 @@ function timelinePage(items: KubernetesTimelineEntry[] = [], overrides: Partial<
   };
 }
 const changeEntry = (value = change): KubernetesTimelineEntry => ({ type: "change", id: value.id, at: value.at, change: value });
+function persistedRootPage(value = issue, sync: KubernetesIssuePage["sync"] = { state: "ready", age_s: 0, partial: false }): KubernetesIssuePage {
+  return { items: [], totals: {}, truncated: false, sync, root_context: { root: value.root, occurrence: value, retained: true } };
+}
+function rootIssueResponses(page: KubernetesIssuePage) {
+  return async (options: Parameters<typeof api.kubernetesIssues>[0]) => options?.context === "persisted" ? persistedRootPage(page.items[0] ?? issue, page.sync) : page;
+}
 function Location() { const location = useLocation(); return <output aria-label="Location">{location.pathname}{location.search}</output>; }
 function mount(element: React.ReactNode, cluster = "east") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -556,7 +563,7 @@ describe("Break timeline", () => {
   it("shows retained journal evidence without current issue or change data for a selected root", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&center=${issue.broke_at}&root_uid=checkout-uid&namespace=shop`);
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(journalPage);
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, truncated: false, sync: journalPage.sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [], totals: {}, truncated: false, sync: journalPage.sync }));
     vi.spyOn(api, "kubernetesChanges").mockRejectedValue(new Error("Unavailable"));
     const graph = vi.spyOn(api, "kubernetesGraph");
     const related = vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync: journalPage.sync });
@@ -564,7 +571,7 @@ describe("Break timeline", () => {
     await waitFor(() => expect(screen.getByRole("region", { name: "Captured crash evidence" }).textContent).toContain("checkout-old"));
     expect(container.querySelectorAll('[data-marker="crash"]')).toHaveLength(1);
     expect(graph).not.toHaveBeenCalled();
-    expect(related).toHaveBeenCalledWith({ resource_id: resource.resource_id, namespace: "shop", name: "checkout" }, expect.any(AbortSignal));
+    expect(related).not.toHaveBeenCalled();
   });
 
   it("clamps centered journal requests to now without changing the change-chart window", async () => {
@@ -573,7 +580,7 @@ describe("Break timeline", () => {
     const center = "2026-10-16T11:55:00Z";
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${center}`);
     const lookup = vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...journalPage, items: [] });
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [{ ...issue, broke_at: center }], totals: {}, truncated: false, sync: journalPage.sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [{ ...issue, broke_at: center }], totals: {}, truncated: false, sync: journalPage.sync }));
     vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync: journalPage.sync });
     const changes = vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync: journalPage.sync });
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
@@ -599,7 +606,7 @@ describe("Break timeline", () => {
       nodes: [{ reason: "MemoryPressure", count: 3 }], warning_events: 12,
       warning_reasons: [{ reason: "FailedScheduling", count: 8 }, { reason: "Other", count: 4 }],
     } };
-    const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [enriched], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [enriched], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } }));
     const { container } = mount(<BreakRow issue={enriched} resource={resource} onSelectResource={vi.fn()} collapsed={collapsed} />);
     const toggle = screen.getByRole("button", { name: "+2 more evidence for checkout" });
     const extra = document.getElementById(toggle.getAttribute("aria-controls")!)!;
@@ -717,7 +724,7 @@ describe("Break timeline", () => {
     const linked = Array.from({ length: 24 }, (_, index) => ({ ...change, id: `linked-${index}`, kind: "ConfigMap", name: `settings-${index}`, uid: `config-${index}`, type: "config_changed" as const }));
     const detail = { ...issue, changes: linked.slice(0, 3).map((item) => ({ change: item, relation: "used_by", lead_seconds: 240 })), more_changes: 21 };
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [detail], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [detail], totals: {}, truncated: false, sync }));
     const graph = vi.spyOn(api, "kubernetesGraph");
     const related = vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
@@ -735,7 +742,7 @@ describe("Break timeline", () => {
     expect(await screen.findByRole("button", { name: /ConfigMap settings-19:.* at / })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /unrelated-0:/ })).toBeNull();
     expect(graph).not.toHaveBeenCalled();
-    expect(related).toHaveBeenCalledExactlyOnceWith({ resource_id: resource.resource_id, namespace: "shop", name: "checkout" }, expect.any(AbortSignal));
+    expect(related).not.toHaveBeenCalled();
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(lookup.mock.calls[0][0]).toMatchObject({ namespace: "shop", root_uid: "checkout-uid", limit: 100, cursor: undefined });
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
@@ -755,7 +762,7 @@ describe("Break timeline", () => {
   it("continues opaque root cursors beyond five pages without eager reads or graph-based filtering", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
     vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     const cursors = [undefined, "a+/=", "b+/=", "c+/=", "d+/=", "e+/=", "f+/="];
@@ -784,7 +791,7 @@ describe("Break timeline", () => {
   it("delegates root and URL kind filtering to the server and hides namespace and kind selectors in break detail", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&kind=Deployment&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
     vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     const lookup = vi.spyOn(api, "kubernetesChanges").mockImplementation(async (options) => ({ items: [{ ...change, id: options?.cursor ? "older" : "newer", name: options?.cursor ? "older-checkout" : "checkout" }], next: options?.cursor ? undefined : "older", sync }));
@@ -964,11 +971,12 @@ describe("Break timeline", () => {
   it.each(["syncing", "ready"])("distinguishes a %s empty Timeline from incomplete or unhealthy history", async (state) => {
     vi.spyOn(api, "kubernetesTimeline").mockResolvedValue(timelinePage([], { sync: { state, age_s: 0, partial: false } }));
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
-    await screen.findByText("0 events and 0 crashes");
     if (state === "syncing") {
       await screen.findByRole("region", { name: "Preparing your cluster" });
+      expect(screen.queryByText("0 events and 0 crashes")).toBeNull();
       expect(screen.queryByText("No changes or crashes in this range.")).toBeNull();
     } else {
+      await screen.findByText("0 events and 0 crashes");
       await screen.findByText("No changes or crashes in this range.");
       expect(screen.queryByRole("region", { name: "Preparing your cluster" })).toBeNull();
     }
@@ -981,7 +989,7 @@ describe("Break timeline", () => {
   it("preserves namespace, kind and cluster from the URL when clearing only the root filter", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&kind=Deployment&cluster=east&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
     vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], sync });
@@ -991,10 +999,10 @@ describe("Break timeline", () => {
     expect(Object.fromEntries(query)).toEqual({ view: "timeline", cluster: "east", namespace: "shop", kind: "Deployment" });
   });
 
-  it("discloses graph failures and partial/gap evidence instead of claiming a complete view", async () => {
+  it("discloses partial/gap history without making name-only graph reads for retained roots", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: true };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [{ ...issue, changes: [{ change, relation: "same_object", lead_seconds: 240 }] }], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [{ ...issue, changes: [{ change, relation: "same_object", lead_seconds: 240 }] }], totals: {}, truncated: false, sync }));
     vi.spyOn(api, "kubernetesRelated").mockRejectedValue(new ApiError(403, "Forbidden"));
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], truncated: true, sync, gaps: [{ from: change.at, to: issue.broke_at! }], partial_failures: [{ resource_id: "ConfigMap", class: "forbidden" }] });
@@ -1004,7 +1012,8 @@ describe("Break timeline", () => {
     const marker = screen.getByRole("button", { name: "Resource coverage" });
     expect(marker.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(marker);
-    expect(screen.getByText(/Related-resource graph unavailable/)).toBeTruthy();
+    expect(screen.queryByText(/Related-resource graph unavailable/)).toBeNull();
+    expect(api.kubernetesRelated).not.toHaveBeenCalled();
     expect(screen.getByText("ConfigMap: permission denied")).toBeTruthy();
     expect(screen.getByText("Change capture does not cover the whole range")).toBeTruthy();
   });
@@ -1012,7 +1021,7 @@ describe("Break timeline", () => {
   it("does not follow a repeated root change cursor automatically or enable another next page", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
     vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     const lookup = vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], next: "repeat", sync });
@@ -1025,10 +1034,10 @@ describe("Break timeline", () => {
     expect(screen.queryByText("Related change history is unavailable.")).toBeNull();
   });
 
-  it("uses one identity-scoped directed related-resource lookup for a cluster-scoped root", async () => {
+  it("keeps a retained cluster-scoped root independent of name-only related-resource lookups", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [{ ...issue, root: { ...issue.root, namespace: undefined } }], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [{ ...issue, root: { ...issue.root, namespace: undefined } }], totals: {}, truncated: false, sync }));
     const graph = vi.spyOn(api, "kubernetesGraph");
     const related = vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [{ id: "checkout-uid", kind: "Deployment", name: "checkout", group: "cluster" }], edges: [], omitted: {}, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
@@ -1036,49 +1045,54 @@ describe("Break timeline", () => {
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
     expect(await screen.findByRole("button", { name: /Deployment checkout:.* at / })).toBeTruthy();
     expect(graph).not.toHaveBeenCalled();
-    expect(related).toHaveBeenCalledExactlyOnceWith({ resource_id: resource.resource_id, namespace: undefined, name: "checkout" }, expect.any(AbortSignal));
+    expect(related).not.toHaveBeenCalled();
     expect(screen.queryByText("Related change history is unavailable.")).toBeNull();
   });
 
-  it("retries a failed directed related-resource lookup without a generic graph fallback", async () => {
+  it("retries a failed persisted context read without any live graph fallback", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [{ ...issue, root: { ...issue.root, namespace: undefined } }], totals: {}, truncated: false, sync });
+    let failed = false;
+    const issues = vi.spyOn(api, "kubernetesIssues").mockImplementation(async (options) => {
+      if (options?.context === "persisted") {
+        if (!failed) { failed = true; throw new ApiError(503, "storage unavailable"); }
+        return persistedRootPage(issue, sync);
+      }
+      return { items: [issue], totals: {}, truncated: false, sync };
+    });
     const graph = vi.spyOn(api, "kubernetesGraph");
-    const related = vi.spyOn(api, "kubernetesRelated").mockRejectedValueOnce(new ApiError(403, "private upstream response")).mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
+    const related = vi.spyOn(api, "kubernetesRelated");
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], sync });
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry root context" }));
     expect(await screen.findByRole("button", { name: /Deployment checkout:.* at / })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
-    expect(screen.getByText(/Related-resource graph unavailable/)).toBeTruthy();
-    expect(screen.queryByText(/private upstream response/)).toBeNull();
-    fireEvent.click(within(screen.getByRole("region", { name: "Resource coverage details" })).getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(related).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(screen.queryByText(/Related-resource graph unavailable/)).toBeNull());
+    expect(issues.mock.calls.filter(([options]) => options?.context === "persisted")).toHaveLength(2);
     expect(graph).not.toHaveBeenCalled();
+    expect(related).not.toHaveBeenCalled();
   });
 
-  it.each(["changes", "graph"] as const)("does not start continuation reads when an in-flight %s request finishes after unmount", async (stage) => {
+  it.each(["changes", "context"] as const)("does not start continuation reads when an in-flight %s request finishes after unmount", async (stage) => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [{ ...issue, root: { ...issue.root, namespace: undefined } }], totals: {}, truncated: false, sync });
     let finishChanges!: (page: KubernetesChangesPage) => void;
-    let finishGraph!: (page: KubernetesGraph) => void;
+    let finishContext!: (page: KubernetesIssuePage) => void;
     const pendingChanges = new Promise<KubernetesChangesPage>((resolve) => { finishChanges = resolve; });
-    const pendingGraph = new Promise<KubernetesGraph>((resolve) => { finishGraph = resolve; });
-    const graph = vi.spyOn(api, "kubernetesRelated").mockImplementation(() => stage === "graph" ? pendingGraph : Promise.resolve({ nodes: [], edges: [], omitted: {}, sync }));
+    const pendingContext = new Promise<KubernetesIssuePage>((resolve) => { finishContext = resolve; });
+    const issues = vi.spyOn(api, "kubernetesIssues").mockImplementation(async (options) => options?.context === "persisted"
+      ? stage === "context" ? pendingContext : persistedRootPage(issue, sync)
+      : { items: [issue], totals: {}, truncated: false, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     const changes = vi.spyOn(api, "kubernetesChanges").mockImplementation(() => pendingChanges);
     const { client, unmount } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
-    const lookup = stage === "graph" ? graph : changes;
+    const lookup = stage === "context" ? issues : changes;
     await waitFor(() => expect(lookup).toHaveBeenCalledOnce());
-    const query = client.getQueryCache().find({ queryKey: kubernetesKey("east", stage === "graph" ? "kubernetes-graph" : "kubernetes-changes", "timeline-root"), exact: false })!;
+    const query = client.getQueryCache().find({ queryKey: kubernetesKey("east", stage === "context" ? "kubernetes-issues" : "kubernetes-changes", stage === "context" ? "timeline-root-context" : "timeline-root"), exact: false })!;
     unmount();
     await act(async () => {
-      if (stage === "graph") finishGraph({ nodes: [], edges: [], omitted: {}, next: "next", sync });
+      if (stage === "context") finishContext(persistedRootPage(issue, sync));
       else finishChanges({ items: [change], next: "next", sync });
-      await (stage === "graph" ? pendingGraph : pendingChanges);
+      await (stage === "context" ? pendingContext : pendingChanges);
     });
     expect(lookup).toHaveBeenCalledOnce();
     expect(query.state.data).toBeUndefined();
@@ -1090,7 +1104,7 @@ describe("Break timeline", () => {
   it("does not invent graph-based missing-link warnings for server-filtered empty history", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [{ ...issue, more_changes: 4 }], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [{ ...issue, more_changes: 4 }], totals: {}, truncated: false, sync }));
     vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [{ id: "checkout-uid", kind: "Deployment", namespace: "shop", name: "checkout", group: "shop" }], edges: [], omitted: {}, sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync });
@@ -1184,7 +1198,7 @@ describe("Break timeline", () => {
   });
 
   it("expands one scoped root only and reuses its cached lookup", async () => {
-    const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, broken: { total: 1, by_severity: { critical: 1 } }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, broken: { total: 1, by_severity: { critical: 1 } }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } }));
     const { client } = mount(<BreakRow issue={issue} resource={resource} onSelectResource={vi.fn()} collapsed />);
     expect(lookup).not.toHaveBeenCalled();
     expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
@@ -1200,7 +1214,7 @@ describe("Break timeline", () => {
 
   it.each([undefined, "reconstructed", "complete"] as const)("keeps collapsed %s history free of per-row coverage markers and eager root reads", async (history) => {
     const detail = { ...issue, history: "reconstructed" as const, rebuilt: ["image"], partial: true };
-    const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [detail], totals: {}, truncated: false, sync: { state: "ready", age_s: 1, partial: false } });
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [detail], totals: {}, truncated: false, sync: { state: "ready", age_s: 1, partial: false } }));
     mount(<BreakRow issue={{ ...issue, history, evidence: undefined }} resource={resource} onSelectResource={vi.fn()} collapsed />);
     expect(lookup).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Resource coverage" })).toBeNull();
@@ -1216,7 +1230,7 @@ describe("Break timeline", () => {
   it("retains open aggregate warnings and focus when sync age and change timestamps refresh", async () => {
     const sync = { state: "stale", age_s: 4, partial: false };
     const page = { items: [issue], totals: {}, truncated: false, sync };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue(page);
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses(page));
     const { client } = mount(<TimelineCard changes={{ items: [change], sync }} windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
     const toggle = await screen.findByRole("button", { name: "Resource coverage" });
     fireEvent.click(toggle);
@@ -1230,7 +1244,7 @@ describe("Break timeline", () => {
   it("aggregates child issue coverage into one Timeline footer marker without hiding primary evidence", async () => {
     const sync = { state: "ready", age_s: 0, partial: false };
     const enriched = { ...issue, untracked: ["Secret"], gaps: [{ from: "2026-10-14T11:50:00Z", to: "2026-10-14T11:51:00Z" }], evidence: { ...issue.evidence!, partial: true } };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [enriched], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [enriched], totals: {}, truncated: false, sync }));
     mount(<TimelineCard changes={{ items: [], sync }} windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
     await screen.findByText("OOMKilled on 6 pods");
     const card = screen.getByRole("region", { name: "Break timeline" });
@@ -1263,10 +1277,10 @@ describe("Break timeline", () => {
     const sync = { state: "ready", age_s: 0, partial: false };
     const gaps = [{ from: "2026-10-14T11:50:00Z", to: "2026-10-14T11:51:00Z" }, { from: "2026-10-14T11:52:00Z", to: "2026-10-14T11:53:00Z" }];
     const page = { items: [{ ...issue, history: "reconstructed" as const, rebuilt: ["image"], untracked: ["Secret"], gaps }], totals: {}, truncated: false, sync };
-    const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue(page);
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses(page));
     vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [{ id: "checkout-uid", kind: "Deployment", namespace: "shop", name: "checkout", group: "shop" }], edges: [], omitted: {}, partial_failures: [{ resource_id: "ConfigMap", class: "forbidden" }], sync });
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
-    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], gaps: [...gaps, gaps[0]], sync });
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], gaps: [...gaps, gaps[0]], partial_failures: [{ resource_id: "ConfigMap", class: "forbidden" }], sync });
     const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
     expect(await screen.findByRole("button", { name: /Deployment checkout:.* at / })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
@@ -1290,7 +1304,7 @@ describe("Break timeline", () => {
   it.each([401, 403, 404])("keeps denied %s root history out of collapsed rows and isolates cached history across clusters", async (status) => {
     const cached = { ...issue, history: "reconstructed" as const, rebuilt: ["private"], untracked: ["CachedKind"], changes: [{ change: { ...change, name: "cached-east-config" }, relation: "same_object", lead_seconds: 240 }] };
     const page = { items: [cached], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } };
-    const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue(page);
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses(page));
     function Scenario() {
       const [cluster, setCluster] = useState("east");
       return <KubernetesClusterContext.Provider value={{ client: api, cluster, multiple: true, clusters: [], key: (...parts) => kubernetesKey(cluster, ...parts) }}><button onClick={() => setCluster("west")}>Switch cluster</button><BreakRow issue={{ ...issue, history: undefined, evidence: undefined, partial: true, untracked: ["Secret"] }} resource={resource} onSelectResource={vi.fn()} collapsed /></KubernetesClusterContext.Provider>;
@@ -1328,7 +1342,7 @@ describe("Break timeline", () => {
     { state: "unknown", age_s: 0, partial: false },
   ])("qualifies empty root history using enrichment sync $state partial=$partial", async (sync) => {
     const ready = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
     mount(<BreakRow issue={issue} resource={resource} onSelectResource={vi.fn()} sourceSync={ready} collapsed />);
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
     await waitFor(() => expect(screen.queryByText("Loading root history…")).toBeNull());
@@ -1340,7 +1354,7 @@ describe("Break timeline", () => {
 
   it("does not infer complete history when enrichment has no matching root", async () => {
     const ready = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, truncated: false, sync: ready });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [], totals: {}, truncated: false, sync: ready }));
     mount(<BreakRow issue={issue} resource={resource} onSelectResource={vi.fn()} sourceSync={ready} collapsed />);
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
     await waitFor(() => expect(screen.queryByText("Loading root history…")).toBeNull());
@@ -1353,7 +1367,7 @@ describe("Break timeline", () => {
     { state: "ready", age_s: 0, partial: true },
     { state: "unknown", age_s: 0, partial: false },
   ])("qualifies overview row history using parent sync $state partial=$partial", async (sync) => {
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
     mount(<TimelineCard windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
     const row = await screen.findByRole("article", { name: "Deployment checkout" });
     const complete = sync.state === "ready" && !sync.partial;
@@ -1383,8 +1397,31 @@ describe("Break timeline", () => {
     expect(select).toHaveBeenCalledWith(change);
   });
 
+  it("does not claim zero broken or recovery from a successful warming empty response", async () => {
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [], totals: {}, broken: { total: 0, by_severity: {} }, truncated: false, sync: { state: "syncing", age_s: 0, partial: false } }));
+    mount(<TimelineCard windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
+    await screen.findByText("Break timeline unavailable.");
+    expect(screen.queryByText("No broken workloads")).toBeNull();
+    expect(screen.queryByText("0")).toBeNull();
+  });
+
+  it("reads retained Issues with their pinned window without using historical totals as current counts", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=issues&since=2020-01-01T00:00:00Z&until=2026-10-28T00:00:00Z");
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(async (options) => ({
+      items: options?.since ? [{ ...issue, state: "resolved", occurrence_id: "old-occurrence", closed_at: "2026-10-15T00:00:00Z" }] : [],
+      totals: { critical: options?.since ? 90000 : 2 }, broken: { total: options?.since ? 90000 : 2, by_severity: {} },
+      truncated: false, next: options?.since && !options.cursor ? "opaque-position" : undefined, sync: { state: "ready", age_s: 0, partial: false },
+    }));
+    vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
+    mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    expect(await screen.findByLabelText("critical count")).toHaveProperty("textContent", "2");
+    expect(screen.queryByText("90000")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(lookup.mock.calls.some(([options]) => options?.cursor === "opaque-position" && options.since === "2020-01-01T00:00:00Z" && options.until === "2026-10-28T00:00:00Z")).toBe(true));
+  });
+
   it("keeps zero broken workloads distinct from missing totals", async () => {
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, broken: { total: 0, by_severity: {} }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [], totals: {}, broken: { total: 0, by_severity: {} }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } }));
     mount(<TimelineCard windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
     expect(await screen.findByText("No broken workloads")).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole("article")).toBeNull());
@@ -1408,7 +1445,7 @@ describe("Break timeline", () => {
     const snapshot = Date.parse("2026-10-14T12:06:00Z");
     vi.spyOn(Date, "now").mockReturnValue(snapshot);
     const sync = { state: "ready", age_s: 0, partial: false };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     const related = vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
     const logs = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(emptyLogs);
@@ -1433,7 +1470,7 @@ describe("Break timeline", () => {
     expect(chart.getAttribute("data-until")).toBe("2026-10-14T12:34:00.000Z");
     expect(screen.getByRole("region", { name: "Captured crash evidence" })).toBeTruthy();
     await waitFor(() => expect(logs).toHaveBeenCalled());
-    expect(related).toHaveBeenCalledExactlyOnceWith({ resource_id: resource.resource_id, namespace: "shop", name: "checkout" }, expect.any(AbortSignal));
+    expect(related).not.toHaveBeenCalled();
   });
 
   it("renders now only at its real coordinate when inside the shared axis", () => {
@@ -1594,15 +1631,15 @@ describe("Break timeline", () => {
     expect(container.querySelectorAll(".resource-timeline-break-line")).toHaveLength(1);
   });
 
-  it("qualifies stale zero broken totals as available evidence", async () => {
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, broken: { total: 0, by_severity: {} }, truncated: false, sync: { state: "stale", age_s: 90, partial: false } });
+  it("does not interpret a stale zero as confirmed recovery", async () => {
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [], totals: {}, broken: { total: 0, by_severity: {} }, truncated: false, sync: { state: "stale", age_s: 90, partial: false } }));
     mount(<TimelineCard windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
-    expect(await screen.findByText("No broken workloads in available evidence")).toBeTruthy();
-    expect(screen.queryByText("No broken workloads", { exact: true })).toBeNull();
+    expect(await screen.findByRole("button", { name: /^Broken Unknown/ })).toBeTruthy();
+    expect(screen.queryByText(/No broken workloads/)).toBeNull();
   });
 
   it("does not interpret missing totals as zero", async () => {
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } }));
     mount(<TimelineCard windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
     await waitFor(() => expect(screen.getByRole("button", { name: /Broken Unknown/ })).toBeTruthy());
     expect(screen.queryByText("No broken workloads")).toBeNull();
@@ -1611,7 +1648,7 @@ describe("Break timeline", () => {
   it("deduplicates aggregate failures and discloses stale changes while retaining the capped count and broken evidence", async () => {
     const failures = [{ resource_id: "ConfigMap", class: "forbidden" }, { resource_id: "ConfigMap", class: "forbidden" }];
     const sync = { state: "ready", age_s: 4, partial: true };
-    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: {}, broken: { total: 1, by_severity: { critical: 1 } }, truncated: false, sync, partial_failures: failures });
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, broken: { total: 1, by_severity: { critical: 1 } }, truncated: false, sync, partial_failures: failures }));
     mount(<TimelineCard changes={{ items: [], sync: { ...sync, state: "stale" }, truncated: true, partial_failures: failures }} windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
     const toggle = await screen.findByRole("button", { name: "Resource coverage" });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");

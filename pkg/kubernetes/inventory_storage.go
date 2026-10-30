@@ -9,12 +9,15 @@ import (
 	"sync"
 	"time"
 
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/google/uuid"
 )
 
 const inventoryLeaseTTL = 3 * time.Minute
+
+var errInventoryLeaseLost = errors.New("kubernetes: inventory lease lost")
 
 type inventoryLeaseRecord struct {
 	Owner     string
@@ -117,6 +120,11 @@ func preserveFirstPublication(provider storage.Provider, scope Scope, at time.Ti
 // record that cannot be read right now, yields the zero time — the marker is
 // never invented to fill the gap.
 func (service *Service) recordedFirstReadyAt() time.Time {
+	if service != nil {
+		if at := service.recovery.firstPublication(service.scope.OrgID); !at.IsZero() {
+			return at
+		}
+	}
 	if service == nil || service.changes == nil {
 		return time.Time{}
 	}
@@ -352,7 +360,7 @@ func (lease *inventoryLease) renew(ctx context.Context, service *Service) error 
 	lease.mu.Lock()
 	defer lease.mu.Unlock()
 	if !lease.record.Expires.After(time.Now()) {
-		return errors.New("kubernetes: inventory lease expired")
+		return errInventoryLeaseLost
 	}
 	record := lease.record
 	record.Expires = time.Now().Add(inventoryLeaseTTL)
@@ -363,7 +371,7 @@ func (lease *inventoryLease) renew(ctx context.Context, service *Service) error 
 	err = service.commitCredential(ctx, func() error {
 		won, err := lease.cas.CompareAndSwapBlob(inventoryKey(lease.scope), lease.expected, replacement)
 		if err == nil && !won {
-			return errors.New("kubernetes: inventory lease lost")
+			return errInventoryLeaseLost
 		}
 		return err
 	})
@@ -413,6 +421,9 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 			generation.FirstReadyAt = at
 		}
 	}
+	if generation.FirstReadyAt.IsZero() {
+		generation.FirstReadyAt = service.recovery.firstPublication(service.scope.OrgID)
+	}
 	generation.markFirstReady(time.Now())
 	if lease.cas == nil {
 		return ctx.Err()
@@ -421,7 +432,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	record := lease.record
 	if !record.Expires.After(time.Now()) {
 		lease.mu.Unlock()
-		return errors.New("kubernetes: inventory lease expired")
+		return errInventoryLeaseLost
 	}
 	lease.mu.Unlock()
 	// The publish is where a generation becomes durable, so it is also where the
@@ -445,32 +456,52 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 			}
 		}
 	}()
+
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	previous := inventoryGeneration{}
+	if cache != nil {
+		cache.mu.RLock()
+		previous = cache.generation
+		cache.mu.RUnlock()
+	}
+	generation.EvidenceBatch = nil
+	generation.EvidenceFailure = ""
+	if evidenceErr := service.prepareEvidence(ctx, generation, previous); evidenceErr != nil {
+		generation.EvidenceFailure = errorClass(evidenceErr)
+	}
 	payload, err := json.Marshal(generation)
 	if err != nil {
 		return err
 	}
 	// Each owner alternates its own two slots. A stale owner cannot modify a
 	// successor's data, and the small CAS is the only publication point.
-	if err := service.commitCredential(ctx, func() error { return lease.provider.WriteBlob(key, payload) }); err != nil {
+	payloadStarted := time.Now()
+	writeErr := service.commitCredential(ctx, func() error { return lease.provider.WriteBlob(key, payload) })
+	service.recovery.stage("payload", payloadStarted, writeErr)
+	if err := writeErr; err != nil {
 		return err
 	}
 	lease.mu.Lock()
 	defer lease.mu.Unlock()
 	if !lease.record.Expires.After(time.Now()) {
-		return errors.New("kubernetes: inventory lease expired")
+		return errInventoryLeaseLost
 	}
 	record.Expires = time.Now().Add(inventoryLeaseTTL)
 	replacement, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
+	casStarted := time.Now()
 	err = service.commitCredential(ctx, func() error {
 		won, err := lease.cas.CompareAndSwapBlob(inventoryKey(lease.scope), lease.expected, replacement)
 		if err == nil && !won {
-			return errors.New("kubernetes: inventory lease lost")
+			return errInventoryLeaseLost
 		}
 		return err
 	})
+	service.recovery.stage("cas", casStarted, err)
 	if err == nil {
 		lease.record, lease.expected = record, replacement
 		published = true
@@ -523,4 +554,24 @@ func (lease *inventoryLease) cleanupUnreferenced(owner string, slot int) error {
 
 func hydrateInventory(view kubeindex.Snapshot) (*kubeindex.Index, error) {
 	return kubeindex.Restore(view)
+}
+
+func (lease *inventoryLease) commitJournal(parent context.Context, service *Service, generation inventoryGeneration) error {
+	if generation.EvidenceBatch == nil {
+		return nil
+	}
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	if !lease.record.Expires.After(time.Now()) {
+		return kubechanges.ErrLeaseLost
+	}
+	ctx, cancel := context.WithDeadline(parent, lease.record.Expires)
+	defer cancel()
+	batch := *generation.EvidenceBatch
+	batch.GuardKey, batch.GuardExpected = inventoryKey(lease.scope), append([]byte(nil), lease.expected...)
+	generation.EvidenceBatch = &batch
+	started := time.Now()
+	err := service.commitEvidence(ctx, generation)
+	service.recovery.stage("journal", started, err)
+	return err
 }

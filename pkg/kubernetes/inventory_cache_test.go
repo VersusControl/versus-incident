@@ -658,27 +658,28 @@ func TestInventoryKeepsTheCoreGenerationWhenExtrasFail(t *testing.T) {
 	}
 	core := cachedGeneration(service)
 	for {
-		cache := service.inventoryCacheEntry()
-		cache.mu.RLock()
-		failed := cache.failed
-		cache.mu.RUnlock()
+		generation := cachedGeneration(service)
+		failed := false
+		for _, failure := range generation.DiscoveryPartial {
+			failed = failed || failure.ResourceID == "kubernetes.discovery" && failure.Class == "unavailable"
+		}
 		if failed {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("failing extras cycle was not recorded")
+			t.Fatal("optional discovery failure was not recorded")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	stored, _, err := readInventoryGeneration(provider, service.scope, "")
-	if err != nil || stored.Revision != core.Revision {
-		t.Fatalf("a failed extras cycle replaced the last good publication: %q/%q %v", stored.Revision, core.Revision, err)
+	if err != nil || !stored.View.Kinds["Pod"].ObservedAt.Equal(core.View.Kinds["Pod"].ObservedAt) {
+		t.Fatal("optional discovery changed the committed Pod observation")
 	}
 	pods, status, err := service.CachedIndexSnapshot(t.Context(), "Pod")
-	// The marker carries the cycle's own failure class, never a generic one.
-	if err != nil || len(pods.Records) != 1 || status.Kinds["Pod"].Error != "unavailable" {
-		t.Fatalf("last good core records were not retained and marked: records=%d status=%+v err=%v", len(pods.Records), status, err)
+	if err != nil || len(pods.Records) != 1 || status.Kinds["Pod"].State != "ready" || status.Kinds["Pod"].Error != "" {
+		t.Fatalf("optional discovery blocked usable core records: records=%d status=%+v err=%v", len(pods.Records), status, err)
 	}
+
 	if len(status.Pending) != 0 {
 		t.Fatalf("listed kind reported pending: %v", status.Pending)
 	}

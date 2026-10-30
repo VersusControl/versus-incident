@@ -1009,8 +1009,8 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 		}
 	}
 	page, err := replacement.Changes(t.Context(), ChangeQuery{})
-	if err != nil || len(page.Items) != 0 {
-		t.Fatal("replacement exposed old history")
+	if !errors.Is(err, ErrForbidden) || len(page.Items) != 0 {
+		t.Fatal("replacement did not fail closed for independently unauthorized history")
 	}
 	encoded, _ := json.Marshal(page)
 	if strings.Contains(string(encoded), "canary") || strings.Contains(string(encoded), "old-principal-data") {

@@ -7715,3 +7715,211 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await testInfo.attach("k14-live-upstream-counters", { body: JSON.stringify(await streamCounters(), null, 2), contentType: "application/json" });
   });
 });
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+  test(`published snapshots stay authorized through warming, recollection and later credential failure at ${width} ${theme}`, async ({ page }, testInfo) => {
+    test.skip(process.env.E2E_UI_FIXTURES !== "1", "credential-free intercepted UI fixture only");
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await page.addInitScript((value) => localStorage.setItem("versus.theme", value), theme);
+    const observed = "2026-10-28T00:00:00Z";
+    const recollected = "2026-10-28T00:14:00Z";
+    await page.clock.install({ time: new Date(observed) });
+    let phase: "published" | "warming" | "recollected" | "fault" | "empty" | "denied" = "published";
+    const replies: Array<{ phase: string; path: string; query: string; payload: unknown }> = [];
+    let logAttempts = 0;
+    const resource = { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout", summary: { ready: 2, desired: 3 } };
+    const sync = () => ({ state: phase === "warming" ? "syncing" : "ready", age_s: phase === "warming" ? 780 : 0, partial: false });
+    const issue = { root: { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout" }, rule: "pod.crash_loop", count: 3, severity: "critical", broken: true, broke_at: observed };
+    await page.route("**/api/**", async (route) => {
+      const url = new URL(route.request().url());
+      const path = url.pathname;
+      const answer = (payload: unknown, status = 200) => {
+        replies.push({ phase, path, query: url.search, payload });
+        return route.fulfill({ json: payload, status });
+      };
+      if (phase === "denied" && path.startsWith("/api/admin/kubernetes/")) return answer({ code: "forbidden", error: "infrastructure:view permission is required" }, 403);
+      if (path === "/api/admin/config/agent") return answer({ enable: false, mode: "detect", ai: { enable: false }, sources: [] });
+      if (path.includes("/deployment") || path.includes("/sso/")) return answer({ error: "Community" }, 403);
+      if (path === "/api/admin/kubernetes/clusters") return answer({ multiple: false, clusters: [] });
+      if (path === "/api/admin/kubernetes/sync") return phase === "fault"
+        ? answer({ code: "credential_unavailable", error: "Cluster credentials unavailable", first_ready_at: observed }, 502)
+        : answer({ ...sync(), first_ready_at: observed, kinds: {}, total_kinds: 1, ready_kinds: phase === "warming" ? 0 : 1, failing_kinds: 0, pending_kinds: phase === "warming" ? 1 : 0, truncated: false });
+      if (path === "/api/admin/kubernetes/overview") return answer({ connector: "kubernetes", cluster_id: "fixture", observed_at: phase === "warming" || phase === "fault" ? new Date().toISOString() : phase === "recollected" ? recollected : observed, nodes: phase === "warming" || phase === "empty" ? 0 : 2, ready_nodes: 2, pods: 3, running_pods: 0, namespaces: 1, active_namespaces: 1, workloads: 1, warnings: 1, ...(phase === "warming" ? {} : { allocatable_cpu: "8", allocatable_memory: "16Gi", requested_cpu: "2", requested_memory: "4Gi" }), truncated: false, sync: sync() });
+      if (path === "/api/admin/kubernetes/issues") return answer({ items: phase === "warming" || phase === "empty" ? [] : [issue], broken: { total: phase === "warming" || phase === "empty" ? 0 : 3, by_severity: { critical: phase === "empty" ? 0 : 3 } }, totals: { critical: phase === "empty" ? 0 : 3 }, truncated: false, sync: sync() });
+      if (path === "/api/admin/kubernetes/stream") return route.fulfill({ contentType: "text/event-stream", body: `event: heartbeat\ndata: {}\n\n` });
+      if (path === "/api/admin/kubernetes/namespaces") return answer({ items: ["shop"], sync: sync() });
+      if (path === "/api/admin/kubernetes/graph/overview") return answer({ nodes: [], edges: [], omitted: {}, sync: sync() });
+      if (path === "/api/admin/kubernetes/usage") {
+        const available = phase !== "warming";
+        const metrics = { availability: available ? "available" : "unavailable", fresh: available, complete: available, total: available ? 2 : 0, ...(available ? { cpu: "1", memory: "2Gi", observed_at: observed } : {}) };
+        return answer({ observed_at: available ? observed : new Date().toISOString(), availability: metrics.availability, fresh: available, pod_metrics: metrics, node_metrics: metrics, pods: [], nodes: [], truncated: false });
+      }
+      if (path === "/api/admin/kubernetes/issue-alerts") return answer({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only" });
+      if (path.endsWith("/checkout/describe")) return answer({ resource, events: [], related_resources: [], sync: sync() });
+      if (path === "/api/admin/kubernetes/workloads/Deployment/checkout") return answer({ ...resource, ready: 2, desired: 3, pods: [], containers: [{ name: "app", image: "checkout:demo" }], conditions: [], truncated: false, sync: sync() });
+      if (path === "/api/admin/kubernetes/graph/related") return answer({ nodes: [{ id: "checkout", ...resource, group: "workload", health: "degraded" }], edges: [], omitted: {}, sync: sync() });
+      if (path === "/api/admin/kubernetes/timeline") {
+        if (!url.searchParams.has("resource_uid")) {
+          const cursor = url.searchParams.get("cursor");
+          const last = cursor === "long+/last";
+          const change = { id: last ? "later-change" : "first-change", cluster: "fixture", kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout", type: last ? "replicas_changed" : "image_changed", fields: [], at: observed };
+          return answer({ items: cursor === "long+/empty" ? [] : [{ type: "change", id: change.id, at: observed, change }], ...(last ? {} : { next: cursor ? "long+/last" : "long+/empty" }), total: 90000, crash_count: 0, counts: { change: 90000, crash: 0, break: 0 }, gaps: [], sync: sync() });
+        }
+        if (!url.searchParams.has("cursor")) return answer({ items: [], next: "retained+/position", total: 90000, crash_count: 0, counts: { change: 90000, crash: 0, break: 0 }, gaps: [{ from: "2026-10-27T23:00:00Z", to: observed }], sync: sync() });
+        return answer({ items: [{ type: "change", id: "captured-change", at: observed, change: { id: "captured-change", cluster: "fixture", kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout", type: "image_changed", fields: [{ path: "image", from: "old", to: "demo" }], at: observed } }], total: 90000, crash_count: 0, counts: { change: 90000, crash: 0, break: 0 }, gaps: [], sync: sync() });
+      }
+      if (path.endsWith("/logs/stream")) {
+        logAttempts++;
+        if (phase === "fault") return answer({ code: "credential_unavailable", error: "Cluster credentials unavailable", retryable: false }, 502);
+        if (logAttempts === 1) return answer({ code: "credential_unavailable", error: "Renewal pending", retryable: true }, 502);
+        const line = { text: "authorized fixture output", container: "app", pod: "checkout-0", pod_uid: "pod-checkout", source_id: "checkout-app", timestamp: observed, ordinal: 1 };
+        return route.fulfill({ contentType: "text/event-stream", body: `event: line\ndata: ${JSON.stringify(line)}\n\nevent: end\ndata: {}\n\n` });
+      }
+      if (path.startsWith("/api/admin/kubernetes/")) return answer({ items: [], nodes: [], edges: [], omitted: {}, truncated: false, available: false, gaps: [], sync: sync() });
+      return answer({ items: [], incidents: [], total: 0, by_origin: {}, enable: false });
+    });
+    const capture = async (surface: string, state: string) => {
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      expect(await page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
+      await page.screenshot({ path: capturePath(surface, width, theme, state), fullPage: true, animations: "disabled" });
+    };
+    await page.goto("/agent/kubernetes");
+    const health = page.getByRole("region", { name: "Cluster health", exact: true });
+    await expect(health.getByRole("button", { name: "3 broken", exact: true })).toBeVisible();
+    const snapshot = await health.getByText(/^Snapshot \d\d:/).innerText();
+    const tabLabels = await page.getByRole("tablist", { name: "Kubernetes views" }).getByRole("tab").allTextContents();
+    const cpu = page.getByRole("heading", { name: "CPU capacity", exact: true }).locator("..").locator("..");
+    const memory = page.getByRole("heading", { name: "Memory capacity", exact: true }).locator("..").locator("..");
+    await expect(cpu).toContainText("8");
+    await expect(cpu).toContainText("1 core");
+    await expect(memory).toContainText("2 GiB");
+    await capture("published-continuity", "published");
+    await page.getByRole("button", { name: "Open resource checkout", exact: true }).click();
+    const drawer = page.getByRole("dialog", { name: "Details panel" });
+    const drawerTab = async (label: string) => {
+      const tab = drawer.getByRole("tab", { name: label, exact: true });
+      if (width >= 640 || ["Overview", "Logs", "Events"].includes(label)) await tab.click();
+      else {
+        await drawer.getByLabel("More resource tabs", { exact: true }).click();
+        await drawer.getByRole("menuitem", { name: label, exact: true }).click();
+      }
+      if (width >= 640 || ["Overview", "Logs", "Events"].includes(label)) await expect(tab).toHaveAttribute("aria-selected", "true");
+      await expect(drawer.locator(".resource-tabpanel")).toHaveAttribute("data-view", label.toLowerCase());
+    };
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByText("Ready 2/3", { exact: true })).toBeVisible();
+    await capture("resource-detail-retained", "identity");
+    await page.clock.runFor(1100);
+    await drawerTab("Logs");
+    await expect(drawer.getByLabel("Workload log output")).toContainText("authorized fixture output");
+    expect(logAttempts).toBe(2);
+    await capture("resource-detail-retained", "logs");
+    await drawerTab("YAML");
+    await expect(drawer.getByRole("region", { name: "Projected YAML" })).toContainText("Projected, read-only");
+    await capture("resource-detail-retained", "yaml");
+    await drawerTab("Events");
+    await expect(drawer.getByRole("region", { name: "Object-scoped events" })).toBeVisible();
+    await capture("resource-detail-retained", "events");
+    await drawerTab("Related");
+    await expect(drawer.locator('[data-relationship-node="checkout"]')).toBeVisible();
+    await capture("resource-detail-retained", "related");
+    await drawerTab("Timeline");
+    await drawer.getByRole("button", { name: "All retained", exact: true }).click();
+    await expect(drawer.getByText("Image changed", { exact: true })).toBeVisible();
+    const retained = replies.filter((reply) => reply.path.endsWith("/timeline") && new URLSearchParams(reply.query).get("since") === "1970-01-01T00:00:00.000Z");
+    expect(retained).toHaveLength(2);
+    const firstQuery = new URLSearchParams(retained[0].query), nextQuery = new URLSearchParams(retained[1].query);
+    expect(nextQuery.get("cursor")).toBe("retained+/position");
+    nextQuery.delete("cursor");
+    expect(nextQuery.toString()).toBe(firstQuery.toString());
+    expect(firstQuery.get("resource_uid")).toBe("checkout");
+    expect(firstQuery.get("limit")).toBe("100");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: capturePath("resource-detail-retained", width, theme, "timeline"), fullPage: true, animations: "disabled" });
+    await page.getByRole("button", { name: "Close panel", exact: true }).click();
+    await expect(health.getByRole("button", { name: "3 broken", exact: true })).toBeVisible();
+    phase = "warming";
+    await page.clock.setSystemTime(new Date("2026-10-28T00:13:00Z"));
+    await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+    await expect(page.locator('[data-sync-state="preparing"]')).toHaveText("Syncing");
+    await page.clock.runFor(60_000);
+    await expect(health.getByRole("button", { name: "3 broken", exact: true })).toBeVisible();
+    await expect(health.getByText(snapshot, { exact: true })).toBeVisible();
+    await expect(cpu).toContainText("8");
+    await expect(cpu).toContainText("1 core");
+    await expect(memory).toContainText("2 GiB");
+    await expect(page.getByText("No broken workloads", { exact: true })).toHaveCount(0);
+    await expect(page.locator("[data-preparing-panel], [data-sync-strip]")).toHaveCount(0);
+    expect(await page.getByRole("tablist", { name: "Kubernetes views" }).getByRole("tab").allTextContents()).toEqual(tabLabels);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: capturePath("published-continuity", width, theme, "warming"), fullPage: true, animations: "disabled" });
+    expect(replies.some((reply) => reply.phase === "warming" && reply.path.endsWith("/issues") && (reply.payload as { broken?: { total: number } }).broken?.total === 0)).toBe(true);
+    phase = "recollected";
+    await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+    await expect(health.getByText(`Snapshot ${new Date(recollected).toLocaleTimeString("en-US", { hour12: false })}`, { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Open resource checkout", exact: true }).click();
+    await drawerTab("Logs");
+    await expect(drawer.getByLabel("Workload log output")).toContainText("authorized fixture output");
+    phase = "fault";
+    await drawer.getByLabel("More log actions", { exact: true }).click();
+    await drawer.getByRole("button", { name: "Reload logs", exact: true }).click();
+    await expect(drawer.getByLabel("Workload log output")).toContainText("credential_unavailable");
+    await expect(drawer.getByLabel("Workload log output")).not.toContainText("authorized fixture output");
+    const permanentAttempts = logAttempts;
+    await page.clock.runFor(7000);
+    expect(logAttempts).toBe(permanentAttempts);
+    await page.getByRole("button", { name: "Close panel", exact: true }).click();
+    await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+    await expect(page.locator('[data-sync-state="failed"]')).toHaveText("Failed");
+    await expect(health).toHaveCount(0);
+    await expect(page.locator("[data-preparing-panel]")).toHaveCount(0);
+    await expect(page.getByText("No broken workloads", { exact: true })).toHaveCount(0);
+    await expect(page.locator("[data-sync-strip]")).toContainText("credentials are unavailable or rejected");
+    await page.screenshot({ path: capturePath("published-continuity", width, theme, "credential-failure"), fullPage: true, animations: "disabled" });
+    await page.reload();
+    await expect(page.locator('[data-sync-state="failed"]')).toHaveText("Failed");
+    await expect(page.locator("[data-preparing-panel]")).toHaveCount(0);
+    // Prove an authoritative empty publication replaces authorized current data,
+    // not merely the already-cleared credential-failure surface.
+    phase = "recollected";
+    await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+    await expect(health.getByRole("button", { name: "3 broken", exact: true })).toBeVisible();
+    phase = "empty";
+    await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+    await expect(health.getByRole("button", { name: "0 broken", exact: true })).toBeVisible();
+    await expect(health.getByText("3 critical", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("No broken workloads", { exact: true })).toBeVisible();
+    await capture("published-continuity", "complete-empty");
+    await page.getByRole("tablist", { name: "Kubernetes views" }).getByRole("tab", { name: "Timeline", exact: true }).click();
+    await expect(page.getByText("image changed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("tablist", { name: "Kubernetes views" }).getByRole("tab", { name: /Issues/ })).not.toContainText("90000");
+    await page.getByRole("group", { name: "Timeline window" }).getByRole("button", { name: "All retained", exact: true }).click();
+    await page.getByRole("combobox", { name: "Timeline kind", exact: true }).selectOption("Deployment");
+    await page.getByRole("combobox", { name: "Timeline namespace", exact: true }).click();
+    await page.getByRole("option", { name: "shop", exact: true }).click();
+    const timeline = page.getByRole("region", { name: "Kubernetes change timeline" });
+    await expect(timeline).toContainText("90000 events");
+    await timeline.getByRole("navigation", { name: "Timeline pages" }).getByRole("button", { name: /Next/ }).click();
+    await expect(timeline.getByText("replicas changed", { exact: true })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Timeline kind" })).toHaveValue("Deployment");
+    const continued = replies.filter((reply) => reply.path.endsWith("/timeline") && new URLSearchParams(reply.query).get("cursor")?.startsWith("long+/"));
+    expect(continued.length).toBeGreaterThanOrEqual(2);
+    for (const reply of continued) {
+      const query = new URLSearchParams(reply.query);
+      expect(query.get("kind")).toBe("Deployment");
+      expect(query.get("namespace")).toBe("shop");
+      expect(query.get("since")).toBe("1970-01-01T00:00:00.000Z");
+    }
+    await capture("published-continuity", "empty-current-retained-history");
+    phase = "denied";
+    await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+    await expect(page.getByRole("region", { name: "Kubernetes change timeline" })).toHaveCount(0);
+    await expect(page.locator("#kubernetes-view-panel")).not.toContainText("checkout");
+    await expect(page.locator("body")).not.toContainText("authorized fixture output");
+    await expect(page.locator('[data-sync-state="failed"]')).toHaveText("Failed");
+    await expect(page.getByText("Cluster permission denied", { exact: true })).toBeVisible();
+    await capture("published-continuity", "permission-denied");
+    await testInfo.attach("sanitized-response-bodies", { body: JSON.stringify(replies), contentType: "application/json" });
+  });
+}

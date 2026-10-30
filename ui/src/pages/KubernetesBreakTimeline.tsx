@@ -1,3 +1,4 @@
+import { incompleteKubernetesSnapshot } from "@/lib/kubernetesContinuity";
 import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
@@ -215,7 +216,7 @@ function crashObservationDetail(event: KubernetesCrashEvent) {
 const journalTime = (value: string) => Number.isFinite(Date.parse(value)) && !value.startsWith("0001-") ? new Date(value).toLocaleString() : "unavailable";
 
 export function CrashJournal({ journal, reasons = [] }: { journal: ReturnType<typeof useKubernetesCrashes>; reasons?: ReactNode[] }) {
-  const page = journal.isError ? undefined : journal.data;
+  const page = journal.data;
   const podCoverage = page?.coverage?.Pod;
   const windowLimited = page?.limitations?.some((limitation) =>
     ["journal_not_started_for_full_window", "outside_retention", "journal_commit_failed"].includes(limitation),
@@ -345,6 +346,7 @@ export function TimelineCard({ changes, windowEnd, clusterId, onSelectView, onSe
   const issues = useBrokenIssues();
   const blocked = issues.error instanceof ApiError && [401, 403].includes(issues.error.status);
   const data = blocked || !issues.data ? undefined : { ...issues.data, sync: settledSync(issues.data.sync, issues.data.partial_failures) ?? issues.data.sync };
+  const brokenTotal = data && (!(incompleteKubernetesSnapshot(data) || issues.isError) || data.items.length > 0) ? data.broken?.total : undefined;
   const warnings = timelineWarnings(data, changes);
   if (data && (issues.isError || data.sync.state === "stale")) warnings.push({ id: "break-stale", content: "Break evidence is stale." });
   const buckets = Array.from({ length: 12 }, () => 0);
@@ -357,9 +359,10 @@ export function TimelineCard({ changes, windowEnd, clusterId, onSelectView, onSe
   return <section aria-label="Break timeline" className="card min-w-0 overflow-hidden">
     <header className="card-header !py-2 sm:!py-3"><h2 className="card-title flex items-center gap-2"><History size={15} aria-hidden="true" />Timeline</h2><button type="button" className="flex items-center gap-2 text-xs text-link" onClick={() => onSelectView("timeline")}>Full timeline<ArrowRight size={13} aria-hidden="true" /></button></header>
     {issues.isPending && <div role="status" aria-label="Loading break timeline" className="space-y-2 p-4"><div className="sk h-14" /><div className="sk h-20" /></div>}
+    {!data && !issues.isPending && !issues.isError && <p role="status" className="p-4 text-xs text-ink-400">Break timeline unavailable.</p>}
     {issues.isError && <p role="status" className="p-4 text-xs text-ink-400">Break timeline unavailable.{data && " Showing earlier evidence."}<button type="button" className="ml-2 text-link underline" onClick={() => void issues.refetch()}>Retry</button></p>}
     {data && <><div className="grid grid-cols-2 gap-2 border-b border-ink-700 px-2 py-1 sm:p-3 [&>button]:py-1.5 sm:[&>button]:py-2 [&_strong]:leading-none sm:[&_strong]:leading-7 [&_button>span:nth-child(2)]:mt-0 sm:[&_button>span:nth-child(2)]:mt-1">
-      <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("issues")}><span className="flex items-center justify-between text-2xs text-ink-400 sm:block">Broken<strong className="text-xl tabular-nums text-ink-50 sm:hidden">{data.broken?.total ?? "Unknown"}</strong></span><span className="mt-1 flex flex-wrap items-center gap-1 sm:gap-2"><strong className="hidden text-xl tabular-nums text-ink-50 sm:inline">{data.broken?.total ?? "Unknown"}</strong>{Object.entries(data.broken?.by_severity ?? {}).filter(([, count]) => count > 0).map(([severity, count]) => <span key={severity} className={`pill ${severity === "critical" ? "pill-bad" : "pill-warn"}`}>{count} {severity}</span>)}</span>{data.broken?.total === 0 && <span className="text-xs text-ink-400">{data.sync.state === "stale" || data.sync.partial || data.truncated || data.partial_failures?.length || issues.isError ? "No broken workloads in available evidence" : "No broken workloads"}</span>}</button>
+      <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("issues")}><span className="flex items-center justify-between text-2xs text-ink-400 sm:block">Broken<strong className="text-xl tabular-nums text-ink-50 sm:hidden">{brokenTotal ?? "Unknown"}</strong></span><span className="mt-1 flex flex-wrap items-center gap-1 sm:gap-2"><strong className="hidden text-xl tabular-nums text-ink-50 sm:inline">{brokenTotal ?? "Unknown"}</strong>{Object.entries(data.broken?.by_severity ?? {}).filter(([, count]) => count > 0).map(([severity, count]) => <span key={severity} className={`pill ${severity === "critical" ? "pill-bad" : "pill-warn"}`}>{count} {severity}</span>)}</span>{brokenTotal === 0 && <span className="text-xs text-ink-400">{data.sync.state === "stale" || data.sync.partial || data.truncated || data.partial_failures?.length || issues.isError ? "No broken workloads in available evidence" : "No broken workloads"}</span>}</button>
       <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("timeline")}><span className="block text-2xs text-ink-400">Changes in 60 min</span><span className="mt-1 flex items-end justify-between gap-2"><strong className="text-xl tabular-nums text-ink-50">{changes ? `${changes.items.length}${changes.next || changes.truncated ? "+" : ""}` : "Unknown"}</strong><span role="img" aria-label="Change activity in twelve five-minute intervals" className="flex h-7 w-1/2 items-end gap-1">{buckets.map((count, index) => <span key={index} className={`min-w-0 flex-1 rounded-t-sm ${count ? "bg-accent" : "bg-ink-600"}`} style={{ height: `${count ? Math.max(12, count / peak * 100) : 8}%` }} />)}</span></span></button>
     </div><div className="divide-y divide-ink-700">{data.items.slice(0, 5).map((issue) => <BreakRow key={issue.root.uid ?? issue.root.name} issue={issue} resource={resourceFor(issue)} onSelectResource={onSelectResource} clusterId={clusterId} sourceSync={issues.isError ? undefined : data.sync} sourceFailures={data.partial_failures} warningsOwned />)}</div>{(data.broken?.total ?? 0) > data.items.length && <button type="button" className="flex w-full items-center gap-2 border-t border-ink-700 px-4 py-2 text-xs text-link" onClick={() => onSelectView("issues")}>{data.broken!.total - data.items.length} more<ArrowRight size={12} aria-hidden="true" />Issues</button>}
     </>}

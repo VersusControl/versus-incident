@@ -15,11 +15,13 @@ import (
 )
 
 type CaptureStatus struct {
-	Mode         string                       `json:"mode"`
-	Reason       string                       `json:"reason,omitempty"`
-	LastCycleAt  *time.Time                   `json:"last_cycle_at,omitempty"`
-	Behind       bool                         `json:"behind"`
-	Verification *projectedVerificationStatus `json:"verification,omitempty"`
+	EvidenceMode  string                       `json:"evidence_mode,omitempty"`
+	EvidenceError string                       `json:"evidence_error,omitempty"`
+	Mode          string                       `json:"mode"`
+	Reason        string                       `json:"reason,omitempty"`
+	LastCycleAt   *time.Time                   `json:"last_cycle_at,omitempty"`
+	Behind        bool                         `json:"behind"`
+	Verification  *projectedVerificationStatus `json:"verification,omitempty"`
 }
 
 type captureLoop struct {
@@ -70,7 +72,7 @@ func (service *Service) CaptureStatus() CaptureStatus {
 	loop := service.changes.captures[service.indexScope()]
 	service.changes.mu.Unlock()
 	if loop == nil {
-		return service.effectiveCaptureStatus()
+		return service.withEvidenceStatus(service.effectiveCaptureStatus())
 	}
 	loop.mu.Lock()
 	defer loop.mu.Unlock()
@@ -79,7 +81,7 @@ func (service *Service) CaptureStatus() CaptureStatus {
 		at := *status.LastCycleAt
 		status.LastCycleAt = &at
 	}
-	return status
+	return service.withEvidenceStatus(status)
 }
 
 func (service *Service) StartCapture(parent context.Context) {
@@ -87,10 +89,7 @@ func (service *Service) StartCapture(parent context.Context) {
 		return
 	}
 	service.startInventory(parent)
-	validation, stopValidation := context.WithTimeout(parent, 10*time.Second)
-	err := service.validateCredential(validation)
-	stopValidation()
-	if err != nil {
+	if service.identity.ctx.Err() != nil {
 		return
 	}
 	effective := service.effectiveCaptureStatus()
@@ -224,9 +223,27 @@ func (registry *ServiceRegistry) StartCapture(ctx context.Context) {
 	}
 	registry.captureContext = ctx
 	context.AfterFunc(ctx, registry.Close)
-	services := make([]*Service, 0, len(registry.services))
-	for _, service := range registry.services {
-		services = append(services, service)
+	services := []*Service{}
+	for _, entry := range registry.entries {
+		if entry.Service == nil {
+			continue
+		}
+		entry.Service.changes.mu.Lock()
+		if !entry.Service.changes.evidenceEnabled {
+			entry.Service.changes.stores = make(map[kubeindex.Scope]*kubechanges.Store)
+		}
+		entry.Service.changes.evidenceEnabled = true
+		entry.Service.changes.mu.Unlock()
+		services = append(services, entry.Service)
+		r := entry.Service.recovery
+		if r == nil {
+			r = &clusterRecovery{}
+			entry.Service.recovery = r
+			registry.recoveries[entry.Info.ID] = r
+		}
+		child, cancel := context.WithCancel(ctx)
+		r.cancel, r.done = cancel, make(chan struct{})
+		go registry.superviseCluster(child, entry.Info.ID, r)
 	}
 	registry.mu.Unlock()
 	for _, service := range services {
@@ -246,11 +263,21 @@ func (registry *ServiceRegistry) CloseContext(ctx context.Context) error {
 	if registry.closeDone == nil {
 		registry.closed = true
 		registry.closeDone = make(chan struct{})
+		recoveryDone := []chan struct{}{}
+		for _, r := range registry.recoveries {
+			if r.cancel != nil {
+				r.cancel()
+				recoveryDone = append(recoveryDone, r.done)
+			}
+		}
 		services := make([]*Service, 0, len(registry.services))
 		for _, service := range registry.services {
 			services = append(services, service)
 		}
 		go func() {
+			for _, done := range recoveryDone {
+				<-done
+			}
 			var workers sync.WaitGroup
 			for _, service := range services {
 				workers.Add(1)
@@ -278,6 +305,12 @@ func (registry *ServiceRegistry) DeregisterCluster(clusterID string) {
 		return
 	}
 	registry.mu.Lock()
+	var recoveryDone chan struct{}
+	if r := registry.recoveries[clusterID]; r != nil && r.cancel != nil {
+		r.cancel()
+		recoveryDone = r.done
+	}
+	delete(registry.recoveries, clusterID)
 	services := []*Service{}
 	for key, service := range registry.services {
 		if service.scope.ClusterID == clusterID {
@@ -293,6 +326,9 @@ func (registry *ServiceRegistry) DeregisterCluster(clusterID string) {
 	}
 	registry.entries = entries
 	registry.mu.Unlock()
+	if recoveryDone != nil {
+		<-recoveryDone
+	}
 	for _, service := range services {
 		service.StopCapture()
 	}
@@ -351,12 +387,14 @@ func (service *Service) captureOwned(loop *captureLoop, store *kubechanges.Store
 	loop.ownedContext = ownedContext
 	loop.mu.Unlock()
 	now := time.Now().UTC()
-	if previous, err := store.ReadWindow(now.Add(-24*time.Hour), now, now); err == nil {
-		loop.mu.Lock()
-		for kind, interval := range previous.Coverage {
-			loop.gapFrom[kind] = interval.To
+	if service.evidenceStore() == nil {
+		if previous, err := store.ReadWindow(now.Add(-24*time.Hour), now, now); err == nil {
+			loop.mu.Lock()
+			for kind, interval := range previous.Coverage {
+				loop.gapFrom[kind] = interval.To
+			}
+			loop.mu.Unlock()
 		}
-		loop.mu.Unlock()
 	}
 	renewDone := make(chan struct{})
 	go func() {
@@ -473,7 +511,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 	events, crashGaps, podRead := crashes.resolve(snapshot, now)
 	broken, deferredRoots := classifyReadyBreaks(snapshot, now)
 	if loop == nil || loop.status.Mode == "demand" {
-		if err := store.CommitCapture(collected, gaps, nil, "", now, events, crashGaps, podRead); err != nil {
+		if err := service.commitLegacyCapture(store, collected, gaps, nil, "", now, events, crashGaps, podRead); err != nil {
 			return err
 		}
 		service.rememberBreaks(broken, "", now, partial, deferredRoots...)
@@ -548,7 +586,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 		}
 		success[kind] = observed
 	}
-	if err := store.CommitCapture(collected, gaps, coverage, loop.owner, now, events, crashGaps, podRead); err != nil {
+	if err := service.commitLegacyCapture(store, collected, gaps, coverage, loop.owner, now, events, crashGaps, podRead); err != nil {
 		loop.status.Behind = true
 		return err
 	}
@@ -598,4 +636,32 @@ func drainIndexChanges(cluster string, deltas <-chan kubeindex.Delta, started, n
 		}
 	}
 	return result, gaps
+}
+
+func (service *Service) commitLegacyCapture(store *kubechanges.Store, collected []Change, gaps []kubechanges.Gap, coverage map[string]kubechanges.Gap, owner string, now time.Time, events []kubechanges.CrashEvent, crashGaps []kubechanges.Gap, podRead bool) error {
+	if service.evidenceStore() != nil {
+		return nil
+	}
+	return store.CommitCapture(collected, gaps, coverage, owner, now, events, crashGaps, podRead)
+}
+
+func (service *Service) withEvidenceStatus(status CaptureStatus) CaptureStatus {
+	service.changes.mu.Lock()
+	enabled := service.changes.evidenceEnabled
+	cache := service.changes.inventories[service.indexScope()]
+	provider := service.changes.provider
+	service.changes.mu.Unlock()
+	if !enabled {
+		return status
+	}
+	status.EvidenceMode = "unsupported"
+	if store, ok := provider.(storage.EvidenceStore); ok {
+		status.EvidenceMode = store.EvidencePolicy().Mode
+	}
+	if cache != nil {
+		cache.mu.RLock()
+		status.EvidenceError = cache.generation.EvidenceFailure
+		cache.mu.RUnlock()
+	}
+	return status
 }

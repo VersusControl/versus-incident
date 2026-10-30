@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type KubernetesTimelinePage, type KubernetesCrashPage, type KubernetesResource } from "@/lib/api";
+import { api, type KubernetesTimelinePage, type KubernetesCrashPage, type KubernetesResource, type KubernetesIssue } from "@/lib/api";
 import { CoverageMarker } from "@/components/CoverageMarker";
 import { NamespaceSelect } from "@/components/NamespaceSelect";
 import { KubernetesExplorerTabContent } from "./KubernetesExplorerViews";
@@ -109,8 +109,8 @@ describe("Kubernetes presentation", () => {
   it("shows a capture-gap marker without another resource Timeline caveat", async () => {
     vi.mocked(api.kubernetesTimeline).mockResolvedValue({ ...emptyTimeline, gaps: [{ from: "2026-10-23T07:00:00Z", to: now }] });
     mount(<ResourceTimeline resource={deployment} onCrash={vi.fn()} />);
-    await screen.findByText("No changes or crashes in this range.");
-    const marker = screen.getByRole("button", { name: "Resource coverage" });
+    const marker = await screen.findByRole("button", { name: "Resource coverage" });
+    expect(screen.queryByText("No changes or crashes in this range.")).toBeNull();
     expect(marker.parentElement?.querySelector('[aria-label="History range"]')).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Resource coverage" })).toHaveLength(1);
   });
@@ -150,7 +150,8 @@ describe("Kubernetes presentation", () => {
     expect(screen.getByText("rollouts: source did not respond")).toBeTruthy();
   });
   it("preserves root deep links and requests server-filtered related changes", async () => {
-    vi.mocked(api.kubernetesIssues).mockResolvedValue({ items: [{ root: deployment, broke_at: "2026-10-23T07:55:00Z", rule: "pod.crash_loop", severity: "critical", count: 1 }], totals: {}, truncated: false, sync });
+    const retained: KubernetesIssue = { root: deployment, broke_at: "2026-10-23T07:55:00Z", rule: "pod.crash_loop", severity: "critical", count: 1 };
+    vi.mocked(api.kubernetesIssues).mockImplementation(async options => ({ items: options?.context === "persisted" ? [] : [retained], totals: {}, truncated: false, sync, ...(options?.context === "persisted" ? { root_context: { root: retained.root, occurrence: retained, retained: true as const } } : {}) }));
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />, "/agent/kubernetes?view=timeline&root_uid=deployment&namespace=shop");
     await waitFor(() => expect(api.kubernetesChanges).toHaveBeenCalledWith(expect.objectContaining({ root_uid: "deployment", namespace: "shop" }), expect.any(AbortSignal)));
     expect(screen.getByRole("link", { name: "Clear root filter" })).toBeTruthy();

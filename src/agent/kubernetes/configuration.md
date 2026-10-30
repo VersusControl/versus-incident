@@ -225,14 +225,22 @@ for continuous capture in east and demand capture in west. Helm values use
 inside each `connectors.kubernetes.clusters` entry for multiple clusters.
 Restart Versus after configuration changes.
 
-History is retained for up to 24 hours; gaps may remain. Related changes are
-investigation clues, not proof of the cause. Configuration-change records do
-not expose Secret contents.
+### History storage
+
+| Backend | Kubernetes evidence policy |
+| --- | --- |
+| File | Per evidence scope, up to **24 hours**, **5,000 history records**, and a **4 MiB serialized evidence-state budget**. Older history is pruned to fit; active issue state is protected. If protected state still cannot fit, the commit fails rather than deleting active state. Persist the data directory to survive restarts. |
+| [PostgreSQL](/configuration/postgres-storage) | No application-imposed history age, total-record or total-byte retention limit, and no automatic Kubernetes-history pruning. Operators manage capacity and any explicit deletion/lifecycle policy. |
+| Memory | Ephemeral: evidence is lost when the process stops. |
+
+Bounded pages, query windows and per-operation payload limits constrain work,
+not PostgreSQL history retention. Choosing a longer time range cannot recover
+uncaptured or file-pruned evidence.
 
 | Symptom | What to check |
 | --- | --- |
 | Configured continuous capture reports effective Demand | Check the reported reason. Projected ServiceAccount tokens must be verifiable against the cluster API server. Unverified rotating or cloud identities, and unsupported storage, fall back to demand; selecting continuous alone does not guarantee coverage. |
-| History has gaps or is unavailable | Check capture mode, runtime uptime, reader permissions, and the 24-hour retention window. Revoked credentials stop capture; missing permissions leave incomplete history. Expand the history warnings rather than assuming nothing changed. |
+| History has gaps or is unavailable | Check capture mode, runtime uptime, current reader permissions, and the backend's history policy above. Revoked credentials stop capture; missing permissions leave incomplete history. Expand the history warnings rather than assuming nothing changed. |
 | Multiple replicas need continuous history | Use shared PostgreSQL storage and the same connector configuration on current versions. Duplicate-free capture is verified for static readers and verified projected ServiceAccount readers, not every cloud identity. Confirm effective continuous capture on each replica. Stop all old capture instances before upgrading; do not run old and new capture together. |
 | A large cluster responds slowly | Large inventories, including around 50,000 resources, can still be slow. Retry the read. Temporarily switching to demand may help reduce background work, but is not a guaranteed fix and can leave idle history gaps. |
 

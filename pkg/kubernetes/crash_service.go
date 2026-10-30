@@ -167,6 +167,9 @@ type CrashPage struct {
 }
 
 func (service *Service) Crashes(ctx context.Context, query kubechanges.CrashQuery) (CrashPage, error) {
+	if service.evidenceStore() != nil {
+		return service.evidenceCrashes(ctx, query)
+	}
 	if service == nil {
 		return CrashPage{}, ErrInvalidArguments
 	}

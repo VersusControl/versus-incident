@@ -280,8 +280,11 @@ func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
 	}))
 	defer server.Close()
 	base := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "one"})
-	warmTestInventory(t, base)
+	// Registry construction installs recovery and shared history ownership before
+	// any inventory worker can retain those dependencies.
 	registry := NewServiceRegistry(base)
+	t.Cleanup(registry.Close)
+	warmTestInventory(t, base)
 	result := registry.Summaries(context.Background(), "default", nil)
 	if len(result) != 1 || result[0].Version != "v1.33.2-eks.123" || result[0].Issues == nil || *result[0].Issues != 12 {
 		t.Fatalf("actual summary=%+v", result)
@@ -293,8 +296,10 @@ func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
 	denyIssues.Store(true)
 	version.Store("v1.33.2\nprivate-token")
 	denied := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "one"})
+	deniedRegistry := NewServiceRegistry(denied)
+	t.Cleanup(deniedRegistry.Close)
 	warmTestInventory(t, denied)
-	result = NewServiceRegistry(denied).Summaries(context.Background(), "default", nil)
+	result = deniedRegistry.Summaries(context.Background(), "default", nil)
 	if result[0].Version != "" || result[0].Issues != nil {
 		t.Fatalf("unsafe version or incomplete issues exposed: %+v", result)
 	}

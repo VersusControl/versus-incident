@@ -2293,6 +2293,9 @@ export interface KubernetesObjectRef {
 }
 
 export interface KubernetesIssue {
+  occurrence_id?: string;
+  state?: "open" | "resolved" | "observed";
+  closed_at?: string;
   root: KubernetesObjectRef;
   rule: string;
   severity: "critical" | "warning" | "info";
@@ -2330,6 +2333,8 @@ export interface KubernetesIssue {
 }
 
 export interface KubernetesIssuePage {
+  /** Persisted UID identity, independent of the selected history window and its totals. */
+  root_context?: { root: KubernetesObjectRef; occurrence: KubernetesIssue; retained: true };
   items: KubernetesIssue[];
   totals: Record<string, number>;
   broken?: { total: number; by_severity: Record<string, number> };
@@ -2403,7 +2408,7 @@ export interface KubernetesCrashPage {
   capture_gaps: Array<{ from: string; to: string }>;
   coverage: Record<string, { from: string; to: string }>;
   limitations: string[];
-  capture: { mode: string; reason?: string; last_cycle_at?: string; behind: boolean; verification?: { stage: string; http_status?: number } };
+  capture: { mode: string; evidence_mode?: string; evidence_error?: string; reason?: string; last_cycle_at?: string; behind: boolean; verification?: { stage: string; http_status?: number } };
   sync: KubernetesSync;
 }
 
@@ -2513,6 +2518,8 @@ export interface KubernetesKindStatus {
   records: number;
   partial: boolean;
   error?: string;
+  /** The entire current inventory attempt failed, not an isolated unreadable kind. */
+  cycle_failure?: boolean;
   skipped?: number;
   /**
    * When this kind's failure began, kept until its state or class changes, so
@@ -2557,6 +2564,7 @@ export interface KubernetesFailingKind {
 export type KubernetesUnreadableKind = KubernetesFailingKind;
 
 export interface KubernetesSyncHealthReport {
+  class?: string;
   progress?: KubernetesSyncProgress;
   /** ready | syncing | partial | stale | error, worst state first. */
   state: string;
@@ -2951,6 +2959,33 @@ export interface KubernetesBreakLogPage {
 
 export function createKubernetesApi(cluster?: string) {
   const request: typeof unscopedRequest = (path, options) => unscopedRequest(kubernetesClusterPath(path, cluster), options);
+  async function historyPage<T extends { items: unknown[]; next?: string; gaps?: unknown[] }>(path: string, original: URLSearchParams, signal?: AbortSignal): Promise<T> {
+    const query = new URLSearchParams(original);
+    if (query.has("limit")) query.set("limit", String(Math.min(500, Math.max(1, Number(query.get("limit")) || 100))));
+    const seen = new Set<string>();
+    const gaps: unknown[] = [];
+    let restarted = false;
+    for (let page = 0; ; page++) {
+      signal?.throwIfAborted();
+      let result: T;
+      try {
+        result = await request<T>(`${path}?${query}`, { signal });
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 400 || !query.has("cursor") || restarted) throw error;
+        // File pruning expires a query position, never the retained store.
+        query.delete("cursor");
+        seen.clear();
+        gaps.length = 0;
+        restarted = true;
+        continue;
+      }
+      gaps.push(...(result.gaps ?? []));
+      if (result.items?.length || !result.next || page >= 15) return gaps.length ? { ...result, gaps } : result;
+      if (seen.has(result.next) || result.next === query.get("cursor")) throw new ApiError(502, "History continuation did not advance.");
+      seen.add(result.next);
+      query.set("cursor", result.next);
+    }
+  }
   return {
   kubernetesOverview: () => request<KubernetesOverview>("/api/admin/kubernetes/overview"),
   /**
@@ -2973,33 +3008,33 @@ export function createKubernetesApi(cluster?: string) {
   kubernetesSaveAgentSettings: (settings: KubernetesAgentSettingsInput) => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings", { method: "PUT", body: JSON.stringify({ learning: settings.learning, break_logs: settings.break_logs }) }),
   kubernetesTestLink: (source: string, fields: KubernetesLogFields) => request<KubernetesTestLinkResult>("/api/admin/kubernetes/agent-settings/test-link", { method: "POST", body: JSON.stringify({ source, fields }) }),
   kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),
-  kubernetesIssues: (options: { namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string; broken?: boolean; include?: "changes"; root_uid?: string } = {}) => {
+  kubernetesIssues: (options: { since?: string; until?: string; namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string; broken?: boolean; include?: "changes"; root_uid?: string; context?: "persisted" } = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<KubernetesIssuePage>(`/api/admin/kubernetes/issues?${query}`);
+    return historyPage<KubernetesIssuePage>("/api/admin/kubernetes/issues", query, signal);
   },
   kubernetesChanges: (options: { since?: string; until?: string; namespace?: string; kind?: string; name?: string; root_uid?: string; type?: KubernetesChangeType; limit?: number; cursor?: string } = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<KubernetesChangesPage>(`/api/admin/kubernetes/changes?${query}`, { signal });
+    return historyPage<KubernetesChangesPage>("/api/admin/kubernetes/changes", query, signal);
   },
   kubernetesCrashes: (options: KubernetesCrashQuery = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<KubernetesCrashPage>(`/api/admin/kubernetes/crashes?${query}`, { signal });
+    return historyPage<KubernetesCrashPage>("/api/admin/kubernetes/crashes", query, signal);
   },
   kubernetesTimeline: (options: KubernetesTimelineQuery, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<KubernetesTimelinePage>(`/api/admin/kubernetes/timeline?${query}`, { signal });
+    return historyPage<KubernetesTimelinePage>("/api/admin/kubernetes/timeline", query, signal);
   },
   kubernetesGraph: (options: { namespace?: string; group_by?: "namespace" | "app"; max_nodes?: number; connected_only?: boolean; complete?: boolean; limit?: number; cursor?: string } = {}) => {
     const query = new URLSearchParams();

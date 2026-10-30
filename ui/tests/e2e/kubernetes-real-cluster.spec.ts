@@ -1895,81 +1895,70 @@ upgradeTest.describe("OSS to Enterprise persistent history", () => {
 });
 
 
-test.describe("Read-only external cluster acceptance", () => {
-  test.skip(
-    process.env.E2E_KUBERNETES_READONLY_ACCEPTANCE !== "1",
-    "requires an authorized read-only external cluster viewer",
-  );
-  test.setTimeout(300_000);
+async function waitForExternalOverview(page: Page) {
+  const timeline = page.getByRole("region", { name: "Break timeline", exact: true });
+  await expect(timeline).toBeVisible();
+  await expect.poll(() => timeline.evaluate((element) => {
+    const text = element.textContent ?? "";
+    return !element.querySelector('[aria-label="Loading break timeline"], .sk')
+      && !text.includes("Break timeline unavailable.")
+      && (element.querySelectorAll("[data-issue-row]").length > 0 || text.includes("No broken workloads"));
+  }), { timeout: 45_000 }).toBe(true);
+  await expect(timeline.getByRole("status", { name: "Loading break timeline", exact: true })).toHaveCount(0);
+}
 
-  test("verifies read-only resource detail drawer live logs break logs and agent settings without cluster mutations", async ({ browser }, testInfo) => {
-    const context = await browser.newContext({
-      baseURL: env.baseURL,
-      viewport: { width: 1440, height: 900 },
-      colorScheme: "dark",
-    });
-    const page = await context.newPage();
-    try {
-      const pageErrors: string[] = [];
-      const mutatingRequests: Array<{ method: string; pathname: string }> = [];
-      const streamLifecycle = {
-        started: 0,
-        completed: 0,
-        failedOrAborted: 0,
-        active: 0,
-        workloadStreams: 0,
-        podStreams: 0,
-      };
-      const activeStreamSet = new Set<object>();
+// Only numeric geometry leaves the browser: no text, attributes, names or IDs.
+// Measure before the identity-redaction helper can alter text widths/reflow.
+async function measureExternalGeometry(page: Page, surface: "preparing" | "issues") {
+  return page.evaluate((kind) => {
+    type Box = { x: number; y: number; width: number; height: number };
+    const box = (rect: DOMRect): Box => ({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    const inside = (inner: Box, outer: Box) => inner.x >= outer.x - 1 && inner.y >= outer.y - 1 && inner.x + inner.width <= outer.x + outer.width + 1 && inner.y + inner.height <= outer.y + outer.height + 1;
+    const area = (a: Box, b: Box) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+    const glyphs = (element: Element): Box[] => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      const result: Box[] = [];
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (!node.textContent?.trim() || node.parentElement?.closest(".sr-only")) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        result.push(...[...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0).map(box));
+      }
+      return result;
+    };
+    const rows = kind === "preparing"
+      ? [...document.querySelectorAll('[data-preparing-panel] [data-step="listing"]')]
+      : [...document.querySelectorAll('[aria-label="Kubernetes issues"] [data-issue-row]')].slice(0, 10);
+    return {
+      surface: kind, width: innerWidth, preRedaction: true,
+      rows: rows.map((row, index) => {
+        const groups = row.querySelectorAll(":scope > div");
+        const label = kind === "preparing" ? row.querySelector("[data-first-sync-step-label]") : groups[0];
+        const counts = kind === "preparing" ? row.querySelector("[data-first-sync-counts]") : groups[1];
+        if (!label || !counts) return { index, measured: false, label: null, counts: null, overlaps: 0, overflowedPhrases: 0, phraseCount: 0, centerDelta: 0 };
+        const labelBoxes = kind === "preparing" ? glyphs(label) : [...label.querySelectorAll(".pill")].flatMap(glyphs);
+        const countBoxes = glyphs(counts);
+        const countPhrases = kind === "preparing" ? [...counts.querySelectorAll("[data-first-sync-count]")] : [...counts.querySelectorAll(":scope > span")];
+        const bounds = box(row.getBoundingClientRect());
+        const labelBounds = box(label.getBoundingClientRect());
+        const countBounds = box(counts.getBoundingClientRect());
+        return {
+          index, measured: true, label: labelBounds, counts: countBounds,
+          overlaps: labelBoxes.reduce((total, left) => total + countBoxes.filter((right) => area(left, right) > 1).length, 0),
+          overflowedPhrases: countPhrases.filter((phrase) => {
+            const own = box(phrase.getBoundingClientRect());
+            return glyphs(phrase).some((rect) => !inside(rect, own) || !inside(rect, countBounds) || !inside(rect, bounds));
+          }).length + (kind === "preparing" && labelBoxes.some((rect) => !inside(rect, labelBounds) || !inside(rect, bounds)) ? 1 : 0),
+          phraseCount: countPhrases.length,
+          centerDelta: Math.abs(labelBounds.y + labelBounds.height / 2 - countBounds.y - countBounds.height / 2),
+        };
+      }),
+    };
+  }, surface);
+}
 
-      page.on("pageerror", (error) => {
-        pageErrors.push(error.name || "PageError");
-      });
-
-      page.on("request", (request) => {
-        const url = new URL(request.url());
-        const method = request.method().toUpperCase();
-        if (
-          (url.pathname.startsWith("/api/") || url.pathname.startsWith("/enterprise/api/")) &&
-          !["GET", "HEAD", "OPTIONS"].includes(method)
-        ) {
-          const isInitialSignIn =
-            method === "POST" &&
-            (url.pathname === "/api/auth/gateway-session" ||
-              url.pathname === "/api/admin/auth/session" ||
-              url.pathname === "/api/v1/auth/session" ||
-              url.pathname.endsWith("/auth/login") ||
-              url.pathname.endsWith("/session"));
-          if (!isInitialSignIn) {
-            mutatingRequests.push({ method, pathname: url.pathname });
-          }
-        }
-        if (url.pathname.includes("/logs/stream")) {
-          streamLifecycle.started += 1;
-          if (url.pathname.includes("/workloads/")) streamLifecycle.workloadStreams += 1;
-          if (url.pathname.includes("/pods/")) streamLifecycle.podStreams += 1;
-          activeStreamSet.add(request);
-          streamLifecycle.active = activeStreamSet.size;
-        }
-      });
-
-      page.on("requestfinished", (request) => {
-        if (activeStreamSet.delete(request)) {
-          streamLifecycle.completed += 1;
-          streamLifecycle.active = activeStreamSet.size;
-        }
-      });
-
-      page.on("requestfailed", (request) => {
-        if (activeStreamSet.delete(request)) {
-          streamLifecycle.failedOrAborted += 1;
-          streamLifecycle.active = activeStreamSet.size;
-        }
-      });
-
-      const capturedImages: Array<{ name: string; viewport: string; sha256: string }> = [];
-
-      const captureRedacted = async (surface: string, viewportWidth: number, state: string) => {
+async function captureExternalRedacted(page: Page, capturedImages: Array<{ name: string; viewport: string; sha256: string }>, surface: string, viewportWidth: number, state: string) {
         const targetPath = capturePath(surface, String(viewportWidth), "dark", state);
         await page.evaluate(() => {
           const win = window as unknown as {
@@ -2187,7 +2176,84 @@ test.describe("Read-only external cluster acceptance", () => {
             win.__restoreCallbacks = [];
           });
         }
+}
+
+test.describe("Read-only external cluster acceptance", () => {
+  test.skip(
+    process.env.E2E_KUBERNETES_READONLY_ACCEPTANCE !== "1",
+    "requires an authorized read-only external cluster viewer",
+  );
+  test.setTimeout(300_000);
+
+  test("verifies read-only resource detail drawer live logs break logs and agent settings without cluster mutations", async ({ browser }, testInfo) => {
+    const context = await browser.newContext({
+      baseURL: env.baseURL,
+      viewport: { width: 1440, height: 900 },
+      colorScheme: "dark",
+    });
+    const page = await context.newPage();
+    try {
+      const pageErrors: string[] = [];
+      const mutatingRequests: Array<{ method: string; pathname: string }> = [];
+      const streamLifecycle = {
+        started: 0,
+        completed: 0,
+        failedOrAborted: 0,
+        active: 0,
+        workloadStreams: 0,
+        podStreams: 0,
       };
+      const activeStreamSet = new Set<object>();
+
+      page.on("pageerror", (error) => {
+        pageErrors.push(error.name || "PageError");
+      });
+
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        const method = request.method().toUpperCase();
+        if (
+          (url.pathname.startsWith("/api/") || url.pathname.startsWith("/enterprise/api/")) &&
+          !["GET", "HEAD", "OPTIONS"].includes(method)
+        ) {
+          const isInitialSignIn =
+            method === "POST" &&
+            (url.pathname === "/api/auth/gateway-session" ||
+              url.pathname === "/api/admin/auth/session" ||
+              url.pathname === "/api/v1/auth/session" ||
+              url.pathname.endsWith("/auth/login") ||
+              url.pathname.endsWith("/session"));
+          if (!isInitialSignIn) {
+            mutatingRequests.push({ method, pathname: url.pathname });
+          }
+        }
+        if (url.pathname.includes("/logs/stream")) {
+          streamLifecycle.started += 1;
+          if (url.pathname.includes("/workloads/")) streamLifecycle.workloadStreams += 1;
+          if (url.pathname.includes("/pods/")) streamLifecycle.podStreams += 1;
+          activeStreamSet.add(request);
+          streamLifecycle.active = activeStreamSet.size;
+        }
+      });
+
+      page.on("requestfinished", (request) => {
+        if (activeStreamSet.delete(request)) {
+          streamLifecycle.completed += 1;
+          streamLifecycle.active = activeStreamSet.size;
+        }
+      });
+
+      page.on("requestfailed", (request) => {
+        if (activeStreamSet.delete(request)) {
+          streamLifecycle.failedOrAborted += 1;
+          streamLifecycle.active = activeStreamSet.size;
+        }
+      });
+
+      const capturedImages: Array<{ name: string; viewport: string; sha256: string }> = [];
+
+      const captureRedacted = (surface: string, viewportWidth: number, state: string) =>
+        captureExternalRedacted(page, capturedImages, surface, viewportWidth, state);
 
       await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
 
@@ -2200,10 +2266,10 @@ test.describe("Read-only external cluster acceptance", () => {
       const viewTabLabels = await viewTabs.getByRole("tab").allTextContents();
       expect(viewTabLabels.map((t) => t.trim())).toEqual([
         "Overview",
+        "Workloads",
         "Issues",
         "Timeline",
         "Topology",
-        "Workloads",
         "Nodes",
         "Helm",
         "GitOps",
@@ -2492,8 +2558,7 @@ test.describe("Read-only external cluster acceptance", () => {
 
       expect(clusterProbe.overview.status).toBe(200);
       await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
-      // Wait for Break timeline on Overview to finish loading before taking overview screenshot
-      await page.waitForTimeout(1_500);
+      await waitForExternalOverview(page);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await captureRedacted("eks-overview", 1440, "populated");
 
@@ -2679,12 +2744,23 @@ test.describe("Read-only external cluster acceptance", () => {
 
         await waitForLogsSettled();
 
-        // If 1h window has 0 lines, widen Since to 24h (86400) so older container lines are shown if available
-        if ((await logOutput.locator("[data-log-key]").count()) === 0) {
-          await page.waitForTimeout(2_200);
-          await logsRegion.getByLabel("Log since seconds", { exact: true }).selectOption("86400");
-          await waitForLogsSettled();
-        }
+        // Since chooses a finite window; only the explicit Load starts its
+        // read. Keep that behavior assertion even when the live tail is quiet.
+        const sinceWindow = logsRegion.getByRole("combobox", { name: "Since window", exact: true });
+        const loadEarlier = logsRegion.getByRole("button", { name: "Load logs since that window", exact: true });
+        await expect(sinceWindow).toBeVisible();
+        await expect(loadEarlier).toBeVisible();
+        await sinceWindow.selectOption("86400");
+        await expect(sinceWindow).toHaveValue("86400");
+        await page.waitForTimeout(2_200);
+        const earlierRead = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname.includes("/kubernetes/") && url.pathname.endsWith("/logs") && url.searchParams.get("since_seconds") === "86400";
+        });
+        await loadEarlier.click();
+        expect((await earlierRead).status()).toBe(200);
+        await expect(loadEarlier).toBeEnabled();
+        await waitForLogsSettled();
 
         // Verify no yellow warning banner inside log viewer (excluding per-Pod prefix buttons inside pre)
         const warningBannersInLogs = await logsRegion
@@ -2829,8 +2905,11 @@ test.describe("Read-only external cluster acceptance", () => {
           await waitForLogsSettled();
         }
 
-        // Test Timestamps toggle
+        // Current defaults: workload prefixes omit timestamps; Pod lines show
+        // them. Exercise both states and restore the mode-specific default.
         const timestampsCheckbox = logsRegion.getByLabel("Timestamps", { exact: true });
+        expect(await timestampsCheckbox.isChecked()).toBe(!isWorkload);
+        await timestampsCheckbox.uncheck();
         expect(await timestampsCheckbox.isChecked()).toBe(false);
         await timestampsCheckbox.check();
         expect(await timestampsCheckbox.isChecked()).toBe(true);
@@ -2840,8 +2919,9 @@ test.describe("Read-only external cluster acceptance", () => {
           if (!firstSpan) return null;
           return /\d{4}-\d{2}-\d{2}T|\d{2}:\d{2}:\d{2}/.test(firstSpan.textContent ?? "");
         });
-        await timestampsCheckbox.uncheck();
-        expect(await timestampsCheckbox.isChecked()).toBe(false);
+        if (hasTimestampTextWhenChecked !== null) expect(hasTimestampTextWhenChecked).toBe(true);
+        await timestampsCheckbox.setChecked(!isWorkload);
+        expect(await timestampsCheckbox.isChecked()).toBe(!isWorkload);
 
         // Test Wrap lines toggle
         const wrapCheckbox = logsRegion.getByLabel("Wrap lines", { exact: true });
@@ -2858,6 +2938,8 @@ test.describe("Read-only external cluster acceptance", () => {
         // the reader is away from the newest line.
         const liveStatusPill = logsRegion.getByLabel("Log connection status", { exact: true });
         await expect(liveStatusPill).toHaveText("Live");
+        await expect(logsRegion.getByRole("checkbox", { name: "Follow", exact: true })).toHaveCount(0);
+        await logOutput.evaluate((element) => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event("scroll")); });
         await expect(logsRegion.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0);
 
         const pauseBtn = logsRegion.getByRole("button", { name: "Pause logs", exact: true });
@@ -2900,12 +2982,14 @@ test.describe("Read-only external cluster acceptance", () => {
 
         // Test Previous logs / Previous container logs finite read
         await page.waitForTimeout(2_200);
-        const previousCheckbox = logsRegion.getByLabel(
-          isWorkload ? "Previous logs" : "Previous container logs",
-          { exact: true },
-        );
-        await previousCheckbox.check();
-        expect(await previousCheckbox.isChecked()).toBe(true);
+        const instance = logsRegion.getByRole("group", { name: "Container instance", exact: true });
+        const previousButton = instance.getByRole("button", { name: isWorkload ? "Previous logs" : "Previous container logs", exact: true });
+        const currentButton = instance.getByRole("button", { name: "Current", exact: true });
+        await expect(currentButton).toHaveAttribute("aria-pressed", "true");
+        await expect(previousButton).toHaveAttribute("aria-pressed", "false");
+        await previousButton.click();
+        await expect(previousButton).toHaveAttribute("aria-pressed", "true");
+        await expect(currentButton).toHaveAttribute("aria-pressed", "false");
         // A bounded previous read never follows, and the pill says so.
         await expect(liveStatusPill).toHaveText("Previous");
         await waitForLogsSettled();
@@ -2918,8 +3002,9 @@ test.describe("Read-only external cluster acceptance", () => {
           };
         });
         await page.waitForTimeout(2_200);
-        await previousCheckbox.uncheck();
-        expect(await previousCheckbox.isChecked()).toBe(false);
+        await currentButton.click();
+        await expect(previousButton).toHaveAttribute("aria-pressed", "false");
+        await expect(currentButton).toHaveAttribute("aria-pressed", "true");
         await expect(liveStatusPill).toHaveText("Live", { timeout: 30_000 });
         await waitForLogsSettled();
 
@@ -3132,7 +3217,13 @@ test.describe("Read-only external cluster acceptance", () => {
         const sourceKinds: Record<string, number> = {};
         const win = window as unknown as {
           __populatedBreakRoot?: { uid: string; namespace: string; broke_at: string } | null;
+          __brokenRoot?: { uid: string; namespace: string; broke_at: string };
         };
+        const firstRoot = validBroken[0];
+        if (firstRoot) {
+          const root = firstRoot.root as Record<string, unknown>;
+          win.__brokenRoot = { uid: String(root.uid), namespace: String(root.namespace), broke_at: String(firstRoot.broke_at) };
+        }
         win.__populatedBreakRoot = null;
         for (const item of validBroken.slice(0, 14)) {
           const r = (item.root as Record<string, unknown>) ?? {};
@@ -3214,8 +3305,17 @@ test.describe("Read-only external cluster acceptance", () => {
         };
       });
 
-      // Switch to Timeline view, select 24h window so all 24h breaks/crashes/brackets are in-window, and wait for queries to settle
+      // The unfocused timeline is the retained event list; break logs and the
+      // bracket belong to the focused root, not to that list.
       await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+      if (breakAndAgentProbe.issues.validBrokenRootsCount > 0) {
+        await page.evaluate(() => {
+          const root = (window as unknown as { __brokenRoot: { uid: string; namespace: string; broke_at: string } }).__brokenRoot;
+          const query = new URLSearchParams({ view: "timeline", root_uid: root.uid, namespace: root.namespace, center: root.broke_at });
+          history.pushState(null, "", `?${query}`);
+          dispatchEvent(new PopStateEvent("popstate"));
+        });
+      }
       const timelineRegion = page.getByRole("region", { name: "Kubernetes change timeline", exact: true });
       await expect(timelineRegion).toBeVisible();
       const windowGroup = timelineRegion.getByRole("group", { name: "Timeline window", exact: true });
@@ -3497,9 +3597,10 @@ test.describe("Read-only external cluster acceptance", () => {
       await page.getByRole("tab", { name: "Overview", exact: true }).click();
       await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await waitForExternalOverview(page);
       await captureRedacted("eks-overview", 390, "populated");
 
-      // Mobile drawer & Logs "More" controls check
+      // Mobile toolbar and native log action-menu controls check
       let mobileDrawerCheck: Record<string, unknown> = { exercised: false };
       if (await openTargetInDrawer("Deployment")) {
         const detail = page.getByRole("dialog", { name: "Details panel" });
@@ -3516,11 +3617,20 @@ test.describe("Read-only external cluster acceptance", () => {
         await expect
           .poll(async () => !((await logOutput.textContent()) ?? "").includes("Connecting to logs..."), { timeout: 25_000 })
           .toBe(true);
-        const moreBtn = logsRegion.getByRole("button", { name: "More", exact: true });
-        await expect(moreBtn).toBeVisible();
-        await moreBtn.click();
-        await expect(logsRegion.getByRole("group", { name: "Additional log controls" })).toBeVisible();
-        await moreBtn.click();
+        // Current toolbar keeps its primary controls visible on mobile and
+        // puts reload/copy in a native details action menu, not a More expander.
+        await expect(logsRegion.getByRole("combobox", { name: "Since window", exact: true })).toBeVisible();
+        await expect(logsRegion.getByRole("group", { name: "Container instance", exact: true })).toBeVisible();
+        const actionMenu = logsRegion.locator("details.log-action-menu");
+        const moreActions = actionMenu.getByLabel("More log actions", { exact: true });
+        await expect(moreActions).toBeVisible();
+        await moreActions.click();
+        await expect(actionMenu).toHaveAttribute("open", "");
+        await expect(actionMenu.getByRole("button", { name: "Reload logs", exact: true })).toBeVisible();
+        await expect(actionMenu.getByRole("button", { name: "Copy scrubbed logs", exact: true })).toBeVisible();
+        await moreActions.click();
+        await expect(actionMenu).not.toHaveAttribute("open", "");
+        await expect(actionMenu.getByRole("button", { name: "Reload logs", exact: true })).toBeHidden();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
         await captureRedacted("eks-drawer-logs", 390, "populated");
 
@@ -3529,7 +3639,7 @@ test.describe("Read-only external cluster acceptance", () => {
         await expect.poll(() => streamLifecycle.active, { timeout: 10_000 }).toBe(0);
         mobileDrawerCheck = {
           exercised: true,
-          moreControlsToggled: true,
+          actionMenuToggled: true,
           escapeClosedDrawer: true,
           activeStreamsAfterEscape: streamLifecycle.active,
         };
@@ -3576,6 +3686,317 @@ test.describe("Read-only external cluster acceptance", () => {
         );
       }
     } finally {
+      await context.close();
+    }
+  });
+
+  test("verifies read-only namespace recent-center root windows and published restart", async ({ browser }) => {
+    test.setTimeout(300_000);
+    expect(env.baseURL).toBe("http://127.0.0.1:28080");
+    const context = await browser.newContext({ baseURL: env.baseURL, viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
+    const page = await context.newPage();
+    const images: Array<{ name: string; viewport: string; sha256: string }> = [];
+    const reads: Array<{ route: string; status: number; scoped: boolean; root: boolean; enriched: boolean; future: boolean }> = [];
+    const mutations: string[] = [];
+    const checkpoints: Array<{ state: string; width: number }> = [];
+    const geometry: Array<Awaited<ReturnType<typeof measureExternalGeometry>>> = [];
+    const rootSelections: Array<{ width: number; selected: boolean; availability: string; candidates: number; listStatuses: number[]; attempts: Array<{ statuses: number[]; issues: number; changes: number; crashes: number }> }> = [];
+    const rootWindows: Array<{ width: number; shape: "valid" | "empty"; statuses: number[]; issues: number; changes: number; crashes: number; renderedChanges: number; renderedCrashes: number }> = [];
+    const quietSamples: Array<{ preparing: boolean; redInventory: boolean }> = [];
+    let quietSamplingErrors = 0;
+    let quietTimer: ReturnType<typeof setInterval> | undefined;
+    let quietRead: Promise<void> | undefined;
+    const pageErrors: string[] = [];
+    let restartObserved503 = false;
+    let restartStarted = false;
+    let restartEnrichedReturned = false;
+    let restartCompleted = false;
+    let initialPublished = false;
+    let firstMarkerAbsent = false;
+    let firstPreparationVerified = false;
+    let retainedMarker = false;
+    const apiPath = "/api/admin/kubernetes/";
+    page.on("pageerror", (error) => pageErrors.push(error.name));
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.pathname.startsWith("/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method()) && url.pathname !== "/api/auth/gateway-session") mutations.push(request.method());
+    });
+    page.on("response", async (response) => {
+      const url = new URL(response.url());
+      if (!url.pathname.startsWith(apiPath)) return;
+      const route = url.pathname.slice(apiPath.length).split("/")[0];
+      if (["overview", "issues", "timeline", "changes", "crashes"].includes(route)) {
+        reads.push({ route, status: response.status(), scoped: Boolean(url.searchParams.get("namespace")), root: Boolean(url.searchParams.get("root_uid")), enriched: url.searchParams.get("include") === "changes", future: Date.parse(url.searchParams.get("until") ?? "") > Date.now() + 1000 });
+        if (restartStarted && response.status() === 503) restartObserved503 = true;
+      }
+      if (!response.ok()) return;
+      try {
+        const payload: unknown = await response.json();
+        const tokens: string[] = [];
+        const walk = (value: unknown): void => {
+          if (!value || typeof value !== "object") return;
+          for (const [key, item] of Object.entries(value)) {
+            if (typeof item === "string" && /^(name|namespace|uid|id|pod|pod_uid|root_uid|root_name|container|cluster_id|resource_id)$/.test(key)) tokens.push(item);
+            else if (typeof item === "object") walk(item);
+          }
+        };
+        walk(payload);
+        await page.evaluate((values) => {
+          const win = window as unknown as { __redactTokens?: Set<string> };
+          win.__redactTokens ??= new Set();
+          values.forEach((value) => win.__redactTokens!.add(value));
+        }, tokens);
+      } catch { /* Closing a page can cancel a completed read's redaction collection. */ }
+    });
+    const settled = async () => {
+      await expect(page.getByRole("region", { name: "Kubernetes change timeline", exact: true })).toBeVisible();
+      await expect(page.getByRole("status", { name: /Loading projected change history|Loading related root change history|Loading captured crash evidence/ })).toHaveCount(0, { timeout: 45_000 });
+      await expect(page.getByText("Root history unavailable.", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("Crash journal unavailable.", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("Timeline unavailable.", { exact: true })).toHaveCount(0);
+    };
+    const capture = async (state: string, width: number) => {
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      const measured = state === "first-preparing" || state === "issues"
+        ? await measureExternalGeometry(page, state === "first-preparing" ? "preparing" : "issues") : null;
+      if (measured) geometry.push(measured);
+      await captureExternalRedacted(page, images, "eks-history", width, state);
+      checkpoints.push({ state, width });
+      if (measured?.surface === "preparing") {
+        expect(measured.rows.length, "Listing row geometry must be measured before redaction").toBe(1);
+        const row = measured.rows[0];
+        expect(row.measured).toBe(true);
+        expect(row.phraseCount).toBeGreaterThan(0);
+        expect(row.overlaps, "Essential listing label/count glyphs must not overlap").toBe(0);
+        expect(row.overflowedPhrases, "Every essential phrase must fit its own group and row").toBe(0);
+        if (width >= 640) expect(row.centerDelta, "Desktop listing remains vertically aligned").toBeLessThanOrEqual(2);
+      }
+    };
+    try {
+      await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+      await openApp(page, "/agent/kubernetes");
+      // The authorized fresh-start handle creates one new run-owned volume;
+      // the already attached browser and old volumes are retained.
+      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/scripts/eks-readonly.sh"), "--start"], {
+        timeout: 180_000,
+        env: { ...process.env, HARNESS_EKS_FRESH_DATA: "1", HARNESS_EKS_BROWSER_HANDOFF: "1", HARNESS_EKS_SOURCE_RECEIPT: process.env.HARNESS_EKS_SOURCE_RECEIPT },
+      });
+      process.env.HARNESS_EKS_VOLUME_OVERRIDE = path.join(process.env.HARNESS_DATA_DIR!, "owned-data-volume.json");
+      await openApp(page, "/agent/kubernetes");
+      const preparation = page.locator("[data-preparing-panel]");
+      await expect(preparation).toBeVisible({ timeout: 15_000 });
+      await expect(preparation.locator("[data-step]")).toHaveCount(4);
+      await expect(preparation.getByRole("progressbar")).toHaveCount(1);
+      await expect(preparation.locator("[data-first-sync-counts]")).toBeVisible();
+      const startup = await page.evaluate(async () => {
+        const sync = await fetch("/api/admin/kubernetes/sync").then((response) => response.json());
+        const alerts = await fetch("/api/admin/kubernetes/issue-alerts").then((response) => response.json());
+        return { markerAbsent: !sync.first_ready_at, alertsOff: alerts.enabled === false };
+      });
+      firstMarkerAbsent = startup.markerAbsent;
+      expect(startup.markerAbsent, "Actual first-publication marker must be absent").toBe(true);
+      expect(startup.alertsOff, "Read-only acceptance must not enable alerts").toBe(true);
+      await expect(page.locator("[role=alert]").filter({ hasText: /inventory_not_ready|503/ })).toHaveCount(0);
+      await capture("first-preparing", 1440);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(preparation).toBeVisible();
+      await capture("first-preparing", 390);
+      await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible({ timeout: 90_000 });
+      await expect(preparation).toHaveCount(0);
+      initialPublished = await page.evaluate(async () => Boolean((await fetch("/api/admin/kubernetes/sync").then((response) => response.json())).first_ready_at));
+      expect(initialPublished, "First publication returns data automatically").toBe(true);
+      firstPreparationVerified = true;
+      // No action or alert controls are clicked; the request guard below remains authoritative.
+      for (const width of [1440, 390]) {
+        await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+        const beforeOverview = reads.length;
+        await page.goto("/agent/kubernetes");
+        await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible({ timeout: 45_000 });
+        await waitForExternalOverview(page);
+        await expect.poll(() => reads.slice(beforeOverview).some((read) => read.route === "issues" && read.enriched && read.status === 200)).toBe(true);
+        await capture("overview", width);
+        const beforeIssues = reads.length;
+        await page.getByRole("tab", { name: "Issues", exact: true }).click();
+        await expect(page.getByRole("region", { name: "Kubernetes issues", exact: true })).toBeVisible();
+        await expect(page.getByRole("status", { name: "Loading grouped issues" })).toHaveCount(0, { timeout: 45_000 });
+        await expect.poll(() => reads.slice(beforeIssues).some((read) => read.route === "issues" && !read.enriched && !read.root && read.status === 200)).toBe(true);
+        await capture("issues", width);
+        const globalRead = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname.endsWith("/kubernetes/timeline") && !url.searchParams.get("namespace");
+        });
+        await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+        expect((await globalRead).status()).toBe(200);
+        await settled();
+        await capture("global", width);
+        const namespace = page.getByRole("combobox", { name: "Timeline namespace", exact: true });
+        await namespace.fill("core-integration");
+        const scopedRead = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname.endsWith("/kubernetes/timeline") && Boolean(url.searchParams.get("namespace"));
+        });
+        await page.getByRole("option", { name: "core-integration", exact: true }).click();
+        expect((await scopedRead).status()).toBe(200);
+        await settled();
+        await capture("scoped", width);
+        const recent = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith("/kubernetes/timeline"));
+        await page.goto(`/agent/kubernetes?view=timeline&namespace=core-integration&center=${encodeURIComponent(new Date(Date.now() - 120_000).toISOString())}`);
+        const recentResponse = await recent;
+        expect(recentResponse.status()).toBe(200);
+        expect(Date.parse(new URL(recentResponse.url()).searchParams.get("until")!)).toBeLessThanOrEqual(Date.now());
+        await settled();
+        await capture("recent-center", width);
+        const selection = await page.evaluate(async () => {
+          type Item = { root?: { uid?: string; namespace?: string }; root_uid?: string };
+          const read = async (route: string, query: URLSearchParams) => {
+            const response = await fetch(`/api/admin/kubernetes/${route}?${query}`);
+            const body = await response.json();
+            return { status: response.status, items: (Array.isArray(body.items) ? body.items : []) as Item[] };
+          };
+          // A normal current 24h range, ending now: never move the window to a
+          // root's historical firstSeen/break or rewrite a server response.
+          const until = new Date().toISOString();
+          const since = new Date(Date.parse(until) - 24 * 3600_000).toISOString();
+          const scope = new URLSearchParams({ namespace: "core-integration", since, until, limit: "100" });
+          const [current, retained] = await Promise.all([
+            read("issues", new URLSearchParams({ namespace: "core-integration", limit: "50" })),
+            read("crashes", scope),
+          ]);
+          const attempts: Array<{ statuses: number[]; issues: number; changes: number; crashes: number }> = [];
+          const result = { selected: false, availability: "unavailable-actual-data", candidates: 0, listStatuses: [current.status, retained.status], attempts };
+          if (result.listStatuses.some((status) => status !== 200)) { result.availability = "read-failed"; return result; }
+          const currentRoots = new Map(current.items.filter((item) => item.root?.uid).map((item) => [item.root!.uid!, item.root!]));
+          const candidates = [...new Set(retained.items.map((item) => item.root_uid).filter((uid): uid is string => Boolean(uid && currentRoots.has(uid))))];
+          result.candidates = candidates.length;
+          for (const uid of candidates.slice(0, 5)) {
+            const root = currentRoots.get(uid)!;
+            const query = new URLSearchParams({ namespace: root.namespace ?? "core-integration", root_uid: uid, since, until, limit: "100" });
+            const enriched = new URLSearchParams(query);
+            enriched.set("include", "changes");
+            const [issues, changes, crashes] = await Promise.all([read("issues", enriched), read("changes", query), read("crashes", query)]);
+            const proof = { statuses: [issues.status, changes.status, crashes.status], issues: issues.items.filter((item) => item.root?.uid === uid).length, changes: changes.items.length, crashes: crashes.items.filter((item) => item.root_uid === uid).length };
+            attempts.push(proof);
+            if (proof.statuses.every((status) => status === 200) && proof.issues > 0 && proof.changes > 0 && proof.crashes > 0) {
+              const win = window as unknown as { __acceptRoot?: { uid: string; namespace: string }; __redactTokens?: Set<string> };
+              win.__acceptRoot = { uid, namespace: root.namespace ?? "core-integration" };
+              win.__redactTokens ??= new Set();
+              win.__redactTokens.add(uid);
+              win.__redactTokens.add(root.namespace ?? "core-integration");
+              result.selected = true;
+              result.availability = "populated-current-retained";
+              break;
+            }
+          }
+          return result;
+        });
+        rootSelections.push({ width, ...selection });
+        expect(selection.listStatuses).toEqual([200, 200]);
+        expect(selection.selected, "Unavailable actual data unless a current authorized root has retained Issues, Changes and crash observations; never a populated PASS").toBe(true);
+        const rootResponse = (route: string, hours: number) => page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          const duration = Date.parse(url.searchParams.get("until") ?? "") - Date.parse(url.searchParams.get("since") ?? "");
+          return url.pathname.endsWith(`/kubernetes/${route}`) && Boolean(url.searchParams.get("root_uid")) && Math.abs(duration - hours * 3600_000) < 1000;
+        });
+        for (const windowShape of ["valid", "empty"] as const) {
+          // Install empty-window observers before navigation so a fast real
+          // response cannot be missed or require a second historical request.
+          const emptyIssues = windowShape === "empty" ? rootResponse("issues", 1) : null;
+          const emptyCrashes = windowShape === "empty" ? rootResponse("crashes", 1) : null;
+          // The valid view uses the actual current 24h UI control without a
+          // center override. The deliberately empty view has its own old range.
+          await page.evaluate((shape) => {
+            const root = (window as unknown as { __acceptRoot: { uid: string; namespace: string } }).__acceptRoot;
+            const query = new URLSearchParams({ view: "timeline", namespace: root.namespace, root_uid: root.uid });
+            if (shape === "empty") query.set("center", "2000-01-01T00:00:00.000Z");
+            history.pushState(null, "", `?${query}`);
+            dispatchEvent(new PopStateEvent("popstate"));
+          }, windowShape);
+          const timeline = page.getByRole("region", { name: "Kubernetes change timeline", exact: true });
+          await expect(timeline).toBeVisible();
+          const pendingIssues = emptyIssues ?? rootResponse("issues", 24);
+          const pendingCrashes = emptyCrashes ?? rootResponse("crashes", 24);
+          const pendingChanges = windowShape === "valid" ? rootResponse("changes", 24) : null;
+          if (windowShape === "valid") {
+            await timeline.getByRole("group", { name: "Timeline window", exact: true }).getByRole("button", { name: "24h", exact: true }).click();
+          }
+          const [issueResponse, crashResponse, changeResponse] = await Promise.all([pendingIssues, pendingCrashes, pendingChanges]);
+          const statuses = [issueResponse.status(), crashResponse.status(), ...(changeResponse ? [changeResponse.status()] : [])];
+          expect(statuses).toEqual(windowShape === "valid" ? [200, 200, 200] : [200, 200]);
+          const issues = (await issueResponse.json()).items?.length ?? 0;
+          const crashes = (await crashResponse.json()).items?.length ?? 0;
+          const changes = changeResponse ? (await changeResponse.json()).items?.length ?? 0 : 0;
+          await settled();
+          const journal = timeline.getByRole("region", { name: "Captured crash evidence", exact: true });
+          await expect(journal).toBeVisible();
+          await expect(journal.getByText("Loading captured crash evidence...", { exact: true })).toHaveCount(0, { timeout: 45_000 });
+          const changeMarkers = timeline.locator('[data-marker="change"]');
+          const crashRows = journal.getByRole("list", { name: "Crash observations", exact: true }).locator(":scope > li");
+          if (windowShape === "valid") {
+            expect(issues).toBeGreaterThan(0);
+            expect(changes).toBeGreaterThan(0);
+            expect(crashes).toBeGreaterThan(0);
+            await expect(timeline.getByText("Root not found in this namespace.", { exact: true })).toHaveCount(0);
+            await expect.poll(() => changeMarkers.count()).toBeGreaterThan(0);
+            await expect.poll(() => crashRows.count()).toBeGreaterThan(0);
+          } else {
+            expect(issues).toBe(0);
+            expect(crashes).toBe(0);
+            await expect(timeline.getByText("Root not found in this namespace.", { exact: true })).toBeVisible();
+            await expect(journal.getByText("No captured observations on this page.", { exact: true })).toBeVisible();
+          }
+          rootWindows.push({ width, shape: windowShape, statuses, issues, changes, crashes, renderedChanges: await changeMarkers.count(), renderedCrashes: await crashRows.count() });
+          await capture(`root-${windowShape}`, width);
+        }
+      }
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto("/agent/kubernetes");
+      await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
+      await waitForExternalOverview(page);
+      const marker = await page.evaluate(async () => (await fetch("/api/admin/kubernetes/sync").then((response) => response.json())).first_ready_at);
+      expect(Boolean(marker)).toBe(true);
+      const beforeRestart = reads.length;
+      let sampling = false;
+      quietTimer = setInterval(() => {
+        if (sampling) return;
+        sampling = true;
+        quietRead = page.evaluate(() => ({ preparing: Boolean(document.querySelector("[data-preparing-panel]")), redInventory: [...document.querySelectorAll("[role=alert], .text-sev-critical, .text-sev-warning")].some((element) => /inventory_not_ready/.test(element.textContent ?? "")) }))
+          .then((sample) => { quietSamples.push(sample); })
+          .catch(() => { quietSamplingErrors += 1; })
+          .finally(() => { sampling = false; });
+      }, 250);
+      restartStarted = true;
+      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/scripts/eks-readonly.sh"), "--restart"], { timeout: 60_000 });
+      restartCompleted = true;
+      await expect.poll(async () => {
+        try { return (await context.request.get("/healthz", { timeout: 3000 })).status(); } catch { return 0; }
+      }, { timeout: 60_000, intervals: [500] }).toBe(200);
+      // Keep the original page alive: no reload, Retry, refetch, synthetic
+      // response or manual cache invalidation may produce this recovery.
+      await expect.poll(() => {
+        const after = reads.slice(beforeRestart);
+        return after.some((read) => read.route === "overview" && read.status === 200)
+          && after.some((read) => read.route === "issues" && read.enriched && read.status === 200);
+      }, { timeout: 90_000, intervals: [500] }).toBe(true);
+      await waitForExternalOverview(page);
+      restartEnrichedReturned = true;
+      expect(restartObserved503, "The live restart 503 state must actually be observed, not inferred").toBe(true);
+      expect(quietSamples.length).toBeGreaterThan(0);
+      expect(quietSamples.some((sample) => sample.preparing || sample.redInventory)).toBe(false);
+      expect(quietSamplingErrors).toBe(0);
+      retainedMarker = await page.evaluate(async (before) => (await fetch("/api/admin/kubernetes/sync").then((response) => response.json())).first_ready_at === before, marker);
+      expect(retainedMarker).toBe(true);
+      await capture("published-restart", 1440);
+      await page.setViewportSize({ width: 390, height: 844 });
+      await waitForExternalOverview(page);
+      await capture("published-restart", 390);
+      expect(reads.filter((read) => [400, 401, 403, 500, 502].includes(read.status))).toEqual([]);
+      expect(reads.some((read) => read.future)).toBe(false);
+      expect(mutations).toEqual([]);
+      expect(pageErrors).toEqual([]);
+    } finally {
+      if (quietTimer) clearInterval(quietTimer);
+      await quietRead;
+      if (process.env.HARNESS_RESULTS_DIR) fs.writeFileSync(path.join(process.env.HARNESS_RESULTS_DIR, "eks-focused-history-restart.json"), JSON.stringify({ classification: "live", checkpoints, geometry, rootSelections, rootWindows, quietSamples, quietSamplingErrors, reads, images, mutatingRequests: mutations.length, pageErrors, initialPublished, retainedMarker, restartCompleted, restartObserved503, restartEnrichedReturned, firstMarkerAbsent, firstPreparationVerified, reportPendingPlaceholder: "unverified unless independently captured; no intercepted timing state" }, null, 2), { mode: 0o600 });
       await context.close();
     }
   });

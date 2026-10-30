@@ -26,6 +26,8 @@ type SyncStatus struct {
 
 type IssueOptions struct {
 	unpaged        bool
+	captureOnly    bool
+	Since, Until   time.Time
 	Namespace      string
 	Severity       string
 	Kind           string
@@ -34,10 +36,14 @@ type IssueOptions struct {
 	Broken         bool
 	IncludeChanges bool
 	RootUID        string
+	Context        string
 	targetObject   *ObjectRef
 }
 
 type Issue struct {
+	OccurrenceID  string                    `json:"occurrence_id,omitempty"`
+	State         string                    `json:"state,omitempty"`
+	ClosedAt      *time.Time                `json:"closed_at,omitempty"`
 	Root          ObjectRef                 `json:"root"`
 	Rule          string                    `json:"rule"`
 	Severity      string                    `json:"severity"`
@@ -68,13 +74,21 @@ type BrokenTotals struct {
 }
 
 type IssuePage struct {
-	Items     []Issue          `json:"items"`
-	Totals    map[string]int   `json:"totals"`
-	Truncated bool             `json:"truncated"`
-	Next      string           `json:"next,omitempty"`
-	Partial   []PartialFailure `json:"partial_failures,omitempty"`
-	Sync      SyncStatus       `json:"sync"`
-	Broken    BrokenTotals     `json:"broken"`
+	RootContext *PersistedRootContext `json:"root_context,omitempty"`
+	Items       []Issue               `json:"items"`
+	Totals      map[string]int        `json:"totals"`
+	Truncated   bool                  `json:"truncated"`
+	Next        string                `json:"next,omitempty"`
+	Partial     []PartialFailure      `json:"partial_failures,omitempty"`
+	Sync        SyncStatus            `json:"sync"`
+	Broken      BrokenTotals          `json:"broken"`
+}
+
+// PersistedRootContext describes captured identity, not a live graph lookup.
+type PersistedRootContext struct {
+	Root       ObjectRef `json:"root"`
+	Occurrence Issue     `json:"occurrence"`
+	Retained   bool      `json:"retained"`
 }
 
 type TopOptions struct {
@@ -103,6 +117,27 @@ type TopPage struct {
 
 // Issues returns bounded findings from projected cluster resources.
 func (service *Service) Issues(ctx context.Context, options IssueOptions) (IssuePage, error) {
+	if options.Context != "" {
+		if options.Context != "persisted" || options.RootUID == "" || !safeSegment(options.RootUID) || options.Namespace != "" && !safeSegment(options.Namespace) || !options.Since.IsZero() || !options.Until.IsZero() || options.Cursor != "" || options.Kind != "" || options.Severity != "" || options.Broken {
+			return IssuePage{}, ErrInvalidArguments
+		}
+		return service.persistedRootContext(ctx, options)
+	}
+	if !options.Since.IsZero() || !options.Until.IsZero() {
+		if options.Severity != "" && options.Severity != "critical" && options.Severity != "warning" && options.Severity != "info" {
+			return IssuePage{}, ErrInvalidArguments
+		}
+		if options.Namespace != "" && !safeSegment(options.Namespace) || options.Kind != "" && !safeSegment(options.Kind) || options.RootUID != "" && !safeSegment(options.RootUID) {
+			return IssuePage{}, ErrInvalidArguments
+		}
+		if options.Until.IsZero() && options.Cursor == "" {
+			options.Until = time.Now().UTC()
+		}
+		if options.Since.IsZero() || !options.Until.IsZero() && options.Since.After(options.Until) {
+			return IssuePage{}, ErrInvalidArguments
+		}
+		return service.historicalIssues(ctx, options)
+	}
 	return service.issuesSnapshot(ctx, options)
 }
 
