@@ -1263,7 +1263,8 @@ export type AIProvider =
   | "qwen"
   | "ollama"
   | "claude"
-  | "gemini";
+  | "gemini"
+  | "litellm";
 
 export const AI_PROVIDERS: AIProvider[] = [
   "openai",
@@ -1272,6 +1273,7 @@ export const AI_PROVIDERS: AIProvider[] = [
   "ollama",
   "claude",
   "gemini",
+  "litellm",
 ];
 
 // AISettingsInput is the PUT body. `api_key` and `provider` are both OPTIONAL:

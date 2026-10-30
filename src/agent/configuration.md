@@ -259,12 +259,12 @@ on-demand **analyze** investigation. Shared keys apply to both; the
 agent:
   ai:
     enable: true
-    provider: openai            # openai | deepseek | qwen | ollama | claude | gemini
+    provider: openai            # openai | deepseek | qwen | ollama | claude | gemini | litellm
     api_key: ${AGENT_AI_API_KEY}
     model: gpt-4o-mini          # shared default for detect + analyze
     temperature: 0.2
     max_tokens: 1024
-    base_url: ""                # optional OpenAI-compatible endpoint
+    base_url: ""                # optional OpenAI-compatible endpoint override
 
     analyze:
       model: gpt-4o             # stronger model for deep dives
@@ -277,7 +277,7 @@ temperature at `1` and reject any explicit value.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enable` | bool | `false` | Turns on the AI SRE (detect triage + analyze). Env: `AGENT_AI_ENABLE`. |
-| `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, or `gemini`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
+| `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, `gemini`, or `litellm`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
 | `base_url` | string | `""` | Custom OpenAI-compatible chat-completions base URL. When nonempty, takes precedence over `provider` for Detect, Chat, and Analyze. Env: `AGENT_AI_BASE_URL`; an empty env value restores provider selection. |
 | `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
 | `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
@@ -294,6 +294,28 @@ agent:
     api_key: ${AGENT_AI_API_KEY}
     model: custom-model
 ```
+
+### LiteLLM gateway
+
+Set `provider: litellm` to route the AI SRE through a
+[LiteLLM proxy](https://docs.litellm.ai/docs/simple_proxy): one
+OpenAI-compatible endpoint in front of 100+ upstream providers, with API
+keys, spend limits and fallbacks kept in the proxy.
+
+```yaml
+agent:
+  ai:
+    enable: true
+    provider: litellm
+    api_key: ${LITELLM_VIRTUAL_KEY}   # the proxy virtual key (Bearer)
+    model: gpt-5                       # a model alias from your proxy config
+```
+
+`provider: litellm` targets the local proxy at `http://localhost:4000/v1`
+(the common sidecar deployment) for chat and RAG embeddings. For a shared or
+remote gateway, set `base_url` (for example
+`https://litellm.internal.corp/v1`); as described above it takes precedence
+over `provider`, and a LiteLLM proxy serves the same OpenAI-compatible API.
 
 **Worked example**
 
