@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -188,6 +189,57 @@ func TestInventoryFailedSuccessorPublishRetainsLastGood(t *testing.T) {
 	got, _, err := readInventoryGeneration(provider, service.ActiveScope(), "")
 	if err != nil || len(got.View.Records) != 1 || got.View.Records[0].UID != "last-good" {
 		t.Fatalf("failed publication GC discarded last-good: %+v %v", got, err)
+	}
+}
+
+func TestNamespaceCandidateProofMergePreservesSemantics(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name, verified string
+		changed        bool
+	}{
+		{name: "prune only"},
+		{name: "overwrite", verified: "shop"},
+		{name: "new proof", verified: "new", changed: true},
+		{name: "expired proof reverified", verified: "expired", changed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+			service.SetChangeStorage(storage.NewMemory())
+			cache := service.namespaceCache()
+			verifiedAt := now.Add(-time.Minute)
+			if test.verified != "" {
+				if _, err := service.editNamespaceCandidates(t.Context(), cache, func(manifest *namespaceCandidateManifest) string {
+					manifest.Entries[test.verified] = namespaceCandidate{
+						State: "verified", Verified: verifiedAt, Expires: now.Add(time.Minute),
+					}
+					return ""
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			input := map[string]time.Time{
+				"shop":     now.Add(-2 * time.Minute),
+				"boundary": now.Add(-namespaceObservationTTL),
+				"expired":  now.Add(-namespaceObservationTTL - time.Second),
+			}
+			generation := inventoryGeneration{NamespaceProof: input}
+			want := map[string]time.Time{"shop": input["shop"], "boundary": input["boundary"]}
+			if test.verified != "" {
+				want[test.verified] = verifiedAt
+			}
+			changed, err := service.discoverNamespaceCandidates(t.Context(), cache, &generation, now)
+			if err != nil || changed != test.changed || !reflect.DeepEqual(generation.NamespaceProof, want) {
+				t.Fatalf("proofs=%v changed=%v err=%v, want %v changed=%v", generation.NamespaceProof, changed, err, want, test.changed)
+			}
+			if len(input) != 3 || !input["shop"].Equal(now.Add(-2*time.Minute)) || !input["expired"].Equal(now.Add(-namespaceObservationTTL-time.Second)) {
+				t.Fatal("proof merge mutated input map")
+			}
+			changed, err = service.discoverNamespaceCandidates(t.Context(), cache, &generation, now)
+			if err != nil || changed || !reflect.DeepEqual(generation.NamespaceProof, want) {
+				t.Fatalf("repeat merge: proofs=%v changed=%v err=%v", generation.NamespaceProof, changed, err)
+			}
+		})
 	}
 }
 
