@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { Activity, FileText, Lightbulb, Loader2, Maximize2, MessageSquare, Search } from "lucide-react";
@@ -6,12 +6,16 @@ import { Modal } from "@/components/Modal";
 import { ApiError, kubernetesAllContainers, type KubernetesBreakLogPage, type KubernetesIssue, type KubernetesResource } from "@/lib/api";
 import { useKubernetesCluster } from "@/lib/useKubernetesCluster";
 import { BreakLogsContext, maximumLogWindow as maximumWindow, useBreakLogs, useBreakLogsState } from "@/lib/useKubernetesBreakLogs";
+import { kubernetesAccessLost } from "@/lib/kubernetesContinuity";
 
 const minimumWindow = 30_000;
 const time = (value: string) => new Date(value).toLocaleTimeString([], { hour12: false });
 
-export function KubernetesBreakLogsProvider({ issue, onSelectResource, children }: { issue?: KubernetesIssue; onSelectResource: (resource: KubernetesResource, tab?: "timeline" | "logs") => void; children: ReactNode }) {
+export function KubernetesBreakLogsProvider({ issue, onSelectResource, children, onAccessLost }: { issue?: KubernetesIssue; onSelectResource: (resource: KubernetesResource, tab?: "timeline" | "logs") => void; children: ReactNode; onAccessLost?: (error: Error) => void }) {
   const state = useBreakLogsState(issue, onSelectResource);
+  useLayoutEffect(() => {
+    if (state.query.error && kubernetesAccessLost(state.query.error)) onAccessLost?.(state.query.error);
+  }, [state.query.error, onAccessLost]);
   return <BreakLogsContext.Provider value={state}>{children}</BreakLogsContext.Provider>;
 }
 
@@ -159,28 +163,30 @@ function ContainerSelect() {
   </label>;
 }
 
-export function KubernetesBreakLogs({ pending = false }: { pending?: boolean }) {
+export function KubernetesBreakLogs({ pending = false, mounted = false }: { pending?: boolean; mounted?: boolean }) {
   const state = useBreakLogs();
   const [expanded, setExpanded] = useState(false);
   const [tipOpen, setTipOpen] = useState(false);
   const tipID = useId();
   const { cluster } = useKubernetesCluster();
   const ready = Boolean(state?.validIssue && state.window);
-  if (!state || !ready && !pending) return null;
+  if (!state || !ready && !pending && !mounted) return null;
   const { page } = state;
   const params = new URLSearchParams({ view: "agent" });
   if (cluster) params.set("cluster", cluster);
   const showTip = page?.coverage?.state !== "complete" && page?.coverage?.tip;
-  const loading = !ready || state.query.isFetching && !state.query.isFetchingNextPage;
+  const loading = pending || ready && state.query.isFetching && !state.query.isFetchingNextPage;
   const spinner = (announce: boolean) => <span data-break-log-spinner className="inline-flex size-4 shrink-0 items-center justify-center text-ink-300">{loading && <Loader2 size={14} {...announce ? { role: "status", "aria-label": "Loading logs at break" } : { "aria-hidden": true }} className="animate-spin motion-reduce:animate-none" />}</span>;
   const actions = <><button type="button" className="btn" disabled={!ready} onClick={state.ask}><MessageSquare size={14} />Ask chat</button><button type="button" className="btn" disabled={!ready || !state.liveAvailable} title={state.liveAvailable ? `Open ${state.issue?.root.name}` : "Live logs are unavailable for this resource kind"} onClick={state.live}><Activity size={14} />Open live logs</button></>;
   return <section id="kubernetes-break-logs" aria-label="Logs at break" aria-busy={loading} className="min-w-0 border-t border-ink-600 px-3 pb-16 pt-3 sm:px-4 sm:pb-3">
-    <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs"><FileText size={16} aria-hidden="true" /><h3 className="text-sm font-semibold text-ink-50">Logs at break</h3>{state.window ? <span className="break-log-window-chip font-mono">{time(state.window.from)} - {time(state.window.to)}</span> : <span aria-hidden="true" className="sk h-5 w-36" />}
+    <header className="flex min-w-0 flex-wrap items-center gap-2 text-xs"><FileText size={16} aria-hidden="true" /><h3 className="text-sm font-semibold text-ink-50">Logs at break</h3>{state.window ? <span className="break-log-window-chip font-mono">{time(state.window.from)} - {time(state.window.to)}</span> : pending ? <span aria-hidden="true" className="sk h-5 w-36" /> : <span className="text-ink-400">Time unavailable</span>}
+      {state.issue?.broke_at_source === "observed_at" && ready && <span className="text-ink-400">Observation time; finish time unknown</span>}
       <ContainerSelect />
       {showTip && <div className="relative" onKeyDown={(event) => { if (event.key === "Escape") setTipOpen(false); }}><button type="button" aria-label="Log coverage tip" title="Log coverage tip" aria-expanded={tipOpen} aria-controls={tipID} className="btn-icon" onClick={() => setTipOpen(!tipOpen)}><Lightbulb size={14} /></button>{tipOpen && <section id={tipID} aria-label="Log coverage tip" className="fixed inset-x-4 bottom-20 z-20 max-w-[calc(100vw-2rem)] space-y-3 rounded-control border border-ink-500 bg-surface-raised p-4 shadow-overlay sm:absolute sm:inset-x-auto sm:bottom-auto sm:left-0 sm:top-full sm:w-72"><h4 className="font-medium text-ink-100">Some logs are not available from Kubernetes</h4><p className="text-ink-200">{page.coverage.reason === "capture_late" && page.coverage.gaps?.[0] ? `Logs before ${time(page.coverage.gaps[0].to)} were not available when Versus captured.` : tips[page.coverage.reason] ?? "Kubernetes could not cover the full log window."}</p><Link to={`/agent/kubernetes?${params}`} className="block text-link">Link a source in Agent tab</Link></section>}</div>}
       <div className="ml-auto hidden flex-wrap items-center gap-2 sm:flex">{spinner(true)}{actions}</div><button type="button" className="btn-icon" title="Expand logs" aria-label="Expand logs" disabled={!ready} onClick={() => setExpanded(true)}><Maximize2 size={14} /></button>
     </header>
-    {!expanded && <BreakLogViewer expanded={false} />}
+    {!ready && !pending && <p role="status" className="py-4 text-xs text-ink-300">Log time range is unavailable for this observation.</p>}
+    {!expanded && (ready || pending) && <BreakLogViewer expanded={false} />}
     {!expanded && ready && createPortal(<div role="toolbar" aria-label="Break log actions" className="fixed inset-x-0 bottom-0 z-overlay flex flex-wrap items-center justify-center gap-2 border-t border-ink-600 bg-surface-raised px-2 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:hidden">{spinner(false)}{actions}</div>, document.body)}
     {expanded && <Modal title="Logs at break" size="2xl" onClose={() => setExpanded(false)} footer={<>{spinner(false)}{actions}</>}><BreakLogViewer expanded /></Modal>}
   </section>;

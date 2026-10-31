@@ -199,13 +199,6 @@ func connectorResolutionError(err error) error {
 	return fmt.Errorf("%w: %w", kubernetes.ErrConnectorCredentialUnresolved, err)
 }
 
-func (controller *KubernetesAdminController) authorizeInfrastructureView(ctx *fiber.Ctx) error {
-	if !callerCanViewInfrastructure(ctx) {
-		return refuseCallerInfrastructureView(ctx)
-	}
-	return ctx.Next()
-}
-
 // callerCanViewInfrastructure answers the permission itself and records the
 // caller's authorization, but does not write a response or advance the chain. A
 // gate that still has to look at the deployment asks this first, so the answer it
@@ -484,7 +477,7 @@ func deltaMatchesNamespace(delta kubernetesindex.Delta, namespace string) bool {
 }
 func (controller *KubernetesAdminController) issues(ctx *fiber.Ctx) error {
 	args := ctx.Context().QueryArgs()
-	for _, key := range []string{"broken", "include", "root_uid", "context"} {
+	for _, key := range []string{"broken", "include", "root_uid", "context", "occurrence_id", "center"} {
 		if len(args.PeekMulti(key)) > 1 {
 			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 		}
@@ -506,6 +499,11 @@ func (controller *KubernetesAdminController) issues(ctx *fiber.Ctx) error {
 	if args.Has("context") && contextMode != "persisted" {
 		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 	}
+	occurrenceID := strings.Clone(ctx.Query("occurrence_id"))
+	center, centerErr := parseKubernetesTime(ctx.Query("center"))
+	if centerErr != nil || (args.Has("occurrence_id") || args.Has("center")) && contextMode != "persisted" || args.Has("occurrence_id") && occurrenceID == "" || args.Has("center") && center.IsZero() {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
 	if args.Has("root_uid") && (root == "" || include != "changes" && contextMode != "persisted") {
 		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 	}
@@ -519,7 +517,7 @@ func (controller *KubernetesAdminController) issues(ctx *fiber.Ctx) error {
 	}
 	value, err := requestKubernetesService(ctx).Issues(ctx.UserContext(), kubernetes.IssueOptions{
 		Since: since, Until: until, Namespace: ctx.Query("namespace"), Severity: ctx.Query("severity"), Kind: ctx.Query("kind"), Limit: queryInt(ctx, "limit"), Cursor: ctx.Query("cursor"),
-		Broken: broken, IncludeChanges: include == "changes", RootUID: root, Context: contextMode,
+		Broken: broken, IncludeChanges: include == "changes", RootUID: root, Context: contextMode, OccurrenceID: occurrenceID, Center: center,
 	})
 	return writeKubernetes(ctx, value, err)
 }

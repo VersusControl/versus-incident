@@ -9,7 +9,7 @@ import {
   type Ref,
   type ReactNode,
 } from "react";
-import { useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
+import { notifyManager, useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
@@ -38,6 +38,7 @@ import {
 } from "lucide-react";
 import { api, ApiError, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesIndexStatus, type KubernetesOverview, type KubernetesSyncHealthReport, type KubernetesResource, type KubernetesUsage } from "@/lib/api";
 import { kubernetesCatalogRefreshInterval } from "@/lib/kubernetesFirstSync";
+import { pendingKindNames } from "@/lib/kubernetesPending";
 import { PodLogViewer } from "@/components/PodLogViewer";
 import { ResourceLogsButton } from "@/components/ResourceLogsButton";
 import { canStreamLogs } from "@/lib/kubernetesLogTargets";
@@ -521,41 +522,78 @@ function KubernetesDashboard() {
    * degraded data need a strip; routine syncing uses the existing top bar.
    */
   const clusterQueriesEnabled = !authorityLost && clusterReachable && (health.state === "ready" || health.firstReadyAt !== undefined);
+  const [exhaustedReads, setExhaustedReads] = useState<ReadonlySet<string>>(new Set());
   useEffect(() => {
-    if (!clusterQueriesEnabled || health.state !== "ready" || !health.firstReadyAt) return;
+    setExhaustedReads(new Set());
+    if (!clusterQueriesEnabled || !health.firstReadyAt) return;
     // A pre-publication response may finish after readiness, even as a malformed
     // empty success or typed not-ready error. Recheck only those scoped reads at
     // most once a second; settled data, faults and denials do not keep polling.
+    const attempts = new WeakMap<Query, number>();
     const filters = {
       queryKey: key(),
       predicate: (query: Query) => query.isActive() && query.state.fetchStatus === "idle"
         && !["kubernetes-overview", "kubernetes-sync-health"].includes(String(query.queryKey[2]))
-        && kubernetesReadNeedsRecovery(query.state.data, query.state.error),
+        && kubernetesReadNeedsRecovery(query.state.data, query.state.error)
+        && (attempts.get(query) ?? 0) < 5,
+    };
+    const retryEligible = () => {
+      const admitted = new Set(queryClient.getQueryCache().findAll(filters));
+      for (const query of admitted) attempts.set(query, (attempts.get(query) ?? 0) + 1);
+      void queryClient.invalidateQueries({ ...filters, predicate: query => admitted.has(query) }, { cancelRefetch: false });
     };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const schedule = () => {
+      const exhausted = new Set(queryClient.getQueryCache().findAll({ queryKey: key(),
+        predicate: query => query.isActive() && query.state.fetchStatus === "idle"
+          && (attempts.get(query) ?? 0) >= 5 && kubernetesReadNeedsRecovery(query.state.data, query.state.error),
+      }).map(query => JSON.stringify(query.queryKey)));
+      setExhaustedReads(previous => previous.size === exhausted.size && [...previous].every(value => exhausted.has(value)) ? previous : exhausted);
       if (!queryClient.getQueryCache().findAll(filters).length) {
         clearTimeout(timer);
         timer = undefined;
       } else if (timer === undefined) {
         timer = setTimeout(() => {
           timer = undefined;
-          void queryClient.invalidateQueries(filters, { cancelRefetch: false });
+          retryEligible();
           schedule();
         }, 1_000);
       }
     };
-    void queryClient.invalidateQueries(filters, { cancelRefetch: false });
-    const unsubscribe = queryClient.getQueryCache().subscribe(schedule);
+    retryEligible();
+    // Query observers can update the cache during a child render. Defer the
+    // exhaustion state update until that render finishes, and fence unmounts.
+    let disposed = false;
+    let scheduled = false;
+    const unsubscribe = queryClient.getQueryCache().subscribe(() => {
+      if (scheduled) return;
+      scheduled = true;
+      queueMicrotask(() => {
+        scheduled = false;
+        if (!disposed) schedule();
+      });
+    });
     schedule();
     return () => {
+      disposed = true;
       unsubscribe();
       clearTimeout(timer);
     };
-  }, [clusterQueriesEnabled, health.state, health.firstReadyAt, key, queryClient]);
+  }, [clusterQueriesEnabled, health.firstReadyAt, key, queryClient]);
   const brokenIssues = useBrokenIssues(view === "overview" && clusterQueriesEnabled && !overviewAccessDenied);
   const overviewChangesKey = useMemo(() => key("kubernetes-changes", "overview", overview.data?.cluster_id), [key, overview.data?.cluster_id]);
-  const subscribeOverviewChanges = useCallback((notify: () => void) => queryClient.getQueryCache().subscribe(notify), [queryClient]);
+  const subscribeOverviewChanges = useCallback((notify: () => void) => {
+    let active = true;
+    // Query construction in a child render also emits cache events. Match
+    // query observers' deferred notifications instead of updating the parent
+    // synchronously, and retire queued notifications when unsubscribing.
+    const notifyAfterRender = notifyManager.batchCalls(() => { if (active) notify(); });
+    const unsubscribe = queryClient.getQueryCache().subscribe(notifyAfterRender);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [queryClient]);
   const getOverviewChanges = useCallback(() => queryClient.getQueryData<KubernetesChangesPage>(overviewChangesKey), [queryClient, overviewChangesKey]);
   const overviewChanges = useSyncExternalStore(subscribeOverviewChanges, getOverviewChanges, getOverviewChanges);
 
@@ -578,16 +616,18 @@ function KubernetesDashboard() {
   const workloadPaging = useCursorPagination(`workloads:${workloadNamespace}:${name.trim()}:${workloadKind}`);
   const workloads = useQuery({
     queryKey: ["kubernetes-workloads", workloadNamespace, name.trim(), workloadKind, workloadPaging.cursor],
-    queryFn: () => api.kubernetesWorkloads({
+    queryFn: ({ signal }) => api.kubernetesWorkloads({
       namespace: workloadNamespace === "All" ? undefined : workloadNamespace,
       kind: workloadKind === "All" ? undefined : workloadKind,
       q: name.trim() || undefined,
       limit: 20,
       cursor: workloadPaging.cursor,
-    }),
+    }, signal),
     enabled: clusterQueriesEnabled,
     retry: false,
-  });
+  }, syncReport.isSuccess && !authorityLost && !scopeChanged
+    && !syncReport.data?.unreadable?.some(row => workloadKindOptions.includes(row.kind))
+    ? firstReadyAt(syncReport.data) : undefined);
   const nodePaging = useCursorPagination("nodes");
   const nodes = useQuery({
     queryKey: ["kubernetes-nodes", nodePaging.cursor],
@@ -813,7 +853,19 @@ function KubernetesDashboard() {
   const visibleResources = asArray(workloads.data?.items);
   const nodeItems = asArray(nodes.data?.items);
   const selectedNodePods = asArray(nodePods.data?.items);
-  const workloadCounts = workloads.data?.counts ?? {};
+  const pendingWorkloadKinds = pendingKindNames(workloads.data?.sync?.pending);
+  const unknownWorkloadCounts = workloadKindOptions.filter(kind =>
+    typeof workloads.data?.counts?.[kind] !== "number"
+    || pendingWorkloadKinds.has(kind)
+    ||
+    syncReport.data?.unreadable?.some(row => row.kind === kind)
+    || workloads.data?.partial_failures?.some(failure =>
+      ["forbidden", "unauthorized", "namespace_scope", "credential_unavailable"].includes(failure.class)
+      && (!failure.resource_id || kubernetesQueryUsesKinds([failure.resource_id], undefined, new Set([kind])))));
+  const workloadCounts = Object.fromEntries(Object.entries(workloads.data?.counts ?? {}).filter(([kind]) => !unknownWorkloadCounts.includes(kind)));
+  const workloadRecoveryExhausted = exhaustedReads.has(JSON.stringify(key("kubernetes-workloads", workloadNamespace, name.trim(), workloadKind, workloadPaging.cursor)));
+  const workloadWarming = !workloadRecoveryExhausted && (workloads.unpublished || kubernetesReadNeedsRecovery(workloads.data, workloads.error));
+  const workloadCursorExpired = Boolean(workloadPaging.cursor && workloads.error instanceof ApiError && workloads.error.status === 400);
   const workloadTotal = workloadKindOptions.reduce((sum, kind) => sum + (workloadCounts[kind] ?? 0), 0);
 
   useEffect(() => {
@@ -945,7 +997,7 @@ function KubernetesDashboard() {
             {multiple && <><Link to="/agent/kubernetes" className="btn">Clusters</Link><select aria-label="Cluster" className="input h-8 w-32 min-w-0 py-0 text-xs sm:w-48" value={cluster} onChange={(event) => {
               const next = new URLSearchParams(window.location.search);
               next.set("cluster", event.target.value);
-              for (const parameter of ["r", "tab", "namespace", "root_uid", "center"]) next.delete(parameter);
+              for (const parameter of ["r", "tab", "namespace", "root_uid", "occurrence_id", "crash_id", "center"]) next.delete(parameter);
               navigate(`/agent/kubernetes?${next}`);
             }}>{clusters.map((entry) => <option key={entry.id} value={entry.id}>{entry.display_name || entry.id}</option>)}</select></>}
             <KubernetesSyncStateIndicator
@@ -1139,7 +1191,7 @@ function KubernetesDashboard() {
             icon={<Boxes size={16} />}
             trailing={
               <span className="text-xs text-ink-400">
-                {workloadsAccessDenied || !workloads.data ? "Inventory unavailable" : `${workloadTotal} total`}
+                {workloadsAccessDenied ? "Inventory unavailable" : !workloads.data ? workloads.isPending || workloadWarming ? "Loading inventory" : "Inventory unavailable" : workloads.data.counts && !unknownWorkloadCounts.length ? `${workloadTotal} total` : "Count unavailable"}
               </span>
             }
           >
@@ -1164,8 +1216,10 @@ function KubernetesDashboard() {
                 <NamespaceSelect label="Workload namespace" value={workloadNamespace === "All" ? "" : workloadNamespace} onChange={(namespace) => setWorkloadNamespace(namespace || "All")} />
               </label>
             </div>
-            <KindTabs label="Workload kind" kinds={workloadKindOptions} counts={workloadsAccessDenied ? {} : workloadCounts} selected={workloadKind} onSelect={setWorkloadKind} />
-            {workloads.isPending && (
+            <KindTabs label="Workload kind" kinds={workloadKindOptions} counts={workloadsAccessDenied ? {} : workloadCounts} allKnown={!unknownWorkloadCounts.length} selected={workloadKind} onSelect={setWorkloadKind} />
+            {workloadCursorExpired && <p role="status" className="px-4 py-2 text-xs text-sev-warning">This inventory page expired or its filters changed. Restart paging.<button type="button" className="ml-2 text-link" onClick={workloadPaging.resetPage}>Restart inventory paging</button></p>}
+            {workloads.data && workloads.isError && !workloadsAccessDenied && !workloadCursorExpired && <p role="status" className="px-4 py-2 text-xs text-sev-warning">Resource inventory refresh is unavailable. Showing the last authorized observation.</p>}
+            {(workloads.isPending || workloadWarming && !workloads.data) && (
               <div className="p-4">
                 <SkCard lines={4} />
               </div>
@@ -1175,9 +1229,10 @@ function KubernetesDashboard() {
                 <KubernetesPreparingPanel progress={workloads.data.sync.progress} />
               </div>
             )}
-            {(workloadsAccessDenied || !workloads.data && !workloads.isPending) && (
+            {(workloadsAccessDenied || !workloads.data && !workloads.isPending && !workloadWarming && !workloadCursorExpired) && (
               <p role="status" className="p-4 text-sm text-sev-warning">
                 Resource inventory is unavailable.
+                {workloadRecoveryExhausted && <button type="button" className="ml-2 text-link" onClick={() => void workloads.refetch()}>Retry inventory</button>}
               </p>
             )}
             {/* The rows already in hand survive a background resync: once this
@@ -1185,19 +1240,22 @@ function KubernetesDashboard() {
                 show is replaced by the preparing surface. */}
             {workloads.data && (Boolean(health.firstReadyAt) || workloads.data.sync?.state !== "syncing") && !workloadsAccessDenied && (
                 <div className="overflow-hidden">
+                  <div
+                    role="list"
+                    className="max-h-[min(45vh,32rem)] divide-y divide-ink-700 overflow-y-auto"
+                  >
                   {visibleResources.length > 0 && (
-                    <div className="kubernetes-list-head border-b border-ink-700 bg-ink-900/40 px-4 py-2 text-2xs font-medium uppercase text-ink-400">
+                    <div className="kubernetes-workload-head kubernetes-workload-shell sticky top-0 z-10 border-b border-ink-700 bg-surface-raised text-2xs font-medium uppercase text-ink-400">
+                    <div className="kubernetes-list-head px-4 py-2">
                       <span>Name</span>
                       <span>Namespace</span>
                       <span>Kind</span>
                       <span>Readiness / status</span>
                       <span className="sr-only">Select</span>
                     </div>
+                    <span aria-hidden="true" />
+                    </div>
                   )}
-                  <div
-                    role="list"
-                    className="max-h-[min(45vh,32rem)] divide-y divide-ink-700 overflow-y-auto"
-                  >
                     {visibleResources.map((item) => (
                       <ResourceRow
                         key={`${item.resource_id}:${item.namespace}:${item.name}`}
@@ -1458,12 +1516,14 @@ function KindTabs({
   counts = {},
   selected,
   onSelect,
+  allKnown = true,
 }: {
   label: string;
   kinds: string[];
   counts?: Record<string, number>;
   selected: string;
   onSelect: (kind: string) => void;
+  allKnown?: boolean;
 }) {
   const options = ["All", ...kinds];
   return (
@@ -1500,7 +1560,7 @@ function KindTabs({
               key={kind}
             >
               {kind}
-              <span aria-hidden="true" className="ml-1 tabular-nums text-ink-400">{kind === "All" ? kinds.reduce((sum, item) => sum + (counts[item] ?? 0), 0) : counts[kind] ?? 0}</span>
+              {(kind === "All" ? allKnown && Object.keys(counts).length > 0 : counts[kind] !== undefined) && <span aria-hidden="true" className="ml-1 tabular-nums text-ink-400">{kind === "All" ? kinds.reduce((sum, item) => sum + (counts[item] ?? 0), 0) : counts[kind]}</span>}
             </button>
           );
         })}
@@ -1769,7 +1829,7 @@ function ResourceRow({
   const unhealthy = condition?.status === "False";
   const status = workloadStatus(item);
   return (
-    <div role="listitem" className="flex min-w-0 items-center">
+    <div role="listitem" className="kubernetes-workload-shell min-w-0 items-center">
       <button
         type="button"
         onClick={onSelect}
@@ -1802,7 +1862,7 @@ function ResourceRow({
           aria-hidden="true"
         />
       </button>
-      {onLogs && <div className="px-2"><ResourceLogsButton resource={item} onSelect={onLogs} /></div>}
+      <div className="flex min-w-0 justify-center">{onLogs && <ResourceLogsButton resource={item} onSelect={onLogs} />}</div>
     </div>
   );
 }

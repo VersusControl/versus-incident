@@ -37,6 +37,8 @@ type IssueOptions struct {
 	IncludeChanges bool
 	RootUID        string
 	Context        string
+	OccurrenceID   string
+	Center         time.Time
 	targetObject   *ObjectRef
 }
 
@@ -74,14 +76,16 @@ type BrokenTotals struct {
 }
 
 type IssuePage struct {
-	RootContext *PersistedRootContext `json:"root_context,omitempty"`
-	Items       []Issue               `json:"items"`
-	Totals      map[string]int        `json:"totals"`
-	Truncated   bool                  `json:"truncated"`
-	Next        string                `json:"next,omitempty"`
-	Partial     []PartialFailure      `json:"partial_failures,omitempty"`
-	Sync        SyncStatus            `json:"sync"`
-	Broken      BrokenTotals          `json:"broken"`
+	SelectedOccurrence *Issue                `json:"selected_occurrence,omitempty"`
+	SelectionStatus    string                `json:"selection_status,omitempty"`
+	RootContext        *PersistedRootContext `json:"root_context,omitempty"`
+	Items              []Issue               `json:"items"`
+	Totals             map[string]int        `json:"totals"`
+	Truncated          bool                  `json:"truncated"`
+	Next               string                `json:"next,omitempty"`
+	Partial            []PartialFailure      `json:"partial_failures,omitempty"`
+	Sync               SyncStatus            `json:"sync"`
+	Broken             BrokenTotals          `json:"broken"`
 }
 
 // PersistedRootContext describes captured identity, not a live graph lookup.
@@ -121,7 +125,13 @@ func (service *Service) Issues(ctx context.Context, options IssueOptions) (Issue
 		if options.Context != "persisted" || options.RootUID == "" || !safeSegment(options.RootUID) || options.Namespace != "" && !safeSegment(options.Namespace) || !options.Since.IsZero() || !options.Until.IsZero() || options.Cursor != "" || options.Kind != "" || options.Severity != "" || options.Broken {
 			return IssuePage{}, ErrInvalidArguments
 		}
+		if options.OccurrenceID != "" && (!safeSegment(options.OccurrenceID) || len(options.OccurrenceID) > 253) || !options.Center.IsZero() && (options.Center.Before(time.Unix(1, 0)) || options.Center.After(time.Now())) {
+			return IssuePage{}, ErrInvalidArguments
+		}
 		return service.persistedRootContext(ctx, options)
+	}
+	if options.OccurrenceID != "" || !options.Center.IsZero() {
+		return IssuePage{}, ErrInvalidArguments
 	}
 	if !options.Since.IsZero() || !options.Until.IsZero() {
 		if options.Severity != "" && options.Severity != "critical" && options.Severity != "warning" && options.Severity != "info" {

@@ -12,6 +12,53 @@ const warming = { items: [], broken: { total: 0 }, allocatable_cpu: undefined, o
 afterEach(cleanup);
 
 describe("Kubernetes publication continuity", () => {
+  it("requires published-cluster and committed projection proof for an initial partial timeout", () => {
+    const partial = { items: [{ kind: "Deployment", namespace: "shop", name: "checkout" }], counts: { Deployment: 1, Job: 0 }, sync: { state: "error", partial: true },
+      partial_failures: [{ resource_id: "batch~v1~cronjobs", class: "timeout" }] };
+    expect(hasKubernetesPublication(partial, committed.observed_at)).toBe(true);
+    expect(hasKubernetesPublication({ ...partial, items: [], counts: { Deployment: 0 } }, committed.observed_at)).toBe(true);
+    for (const value of [
+      partial,
+      { ...partial, counts: {} },
+      { ...partial, counts: { Unknown: 1 } },
+      { ...partial, counts: { Deployment: -1 } },
+      { ...partial, items: ["untrusted"] },
+      { ...partial, items: [{ kind: "CronJob", name: "unobserved", namespace: "shop" }] },
+      { ...partial, sync: { state: "syncing", partial: true }, items: [] },
+      { ...partial, sync: { state: "error", partial: false } },
+      { ...partial, partial_failures: [] },
+      ...["forbidden", "unauthorized", "namespace_scope", "credential_unavailable", "unknown"].map(className =>
+        ({ ...partial, partial_failures: [{ resource_id: "batch~v1~cronjobs", class: className }] })),
+    ]) expect(hasKubernetesPublication(value, value === partial ? undefined : committed.observed_at)).toBe(false);
+    expect(hasKubernetesPublication(partial, "invalid")).toBe(false);
+  });
+
+  it("admits only the currently scoped first partial response and hides permission denial", async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const partial = { items: [{ kind: "Deployment", namespace: "shop", name: "checkout" }], counts: { Deployment: 1, Job: 0 }, sync: { state: "error", partial: true },
+      partial_failures: [{ resource_id: "batch~v1~cronjobs", class: "timeout" }] };
+    let reply: typeof partial | Error = partial;
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: cache }, children);
+    const { result, rerender } = renderHook(({ scope, proof }: { scope: string; proof?: string }) =>
+      useKubernetesQuery({ queryKey: ["kubernetes-workloads", scope], queryFn: async () => {
+        if (reply instanceof Error) throw reply;
+        return reply;
+      } }, proof), { wrapper, initialProps: { scope: "shop", proof: undefined as string | undefined } });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBeUndefined();
+    rerender({ scope: "shop", proof: committed.observed_at });
+    expect(result.current.data?.counts).toEqual({ Deployment: 1, Job: 0 });
+    rerender({ scope: "other", proof: undefined });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBeUndefined();
+    rerender({ scope: "shop", proof: committed.observed_at });
+    reply = new ApiError(403, "Permission denied");
+    await act(async () => { await result.current.refetch(); });
+    await waitFor(() => expect(result.current.data).toBeUndefined());
+    expect(cache.getQueryData(["kubernetes", "_", "kubernetes-workloads", "shop"])).toBeUndefined();
+    cache.clear();
+  });
+
   it("preserves committed rows, capacity and observation time across repeated successful warming and failed publications", () => {
     const refreshing = retainKubernetesPublication(committed, warming);
     const failed = retainKubernetesPublication(refreshing, { ...warming, sync: { state: "error", age_s: 900, partial: true } });
@@ -72,6 +119,14 @@ describe("Kubernetes publication continuity", () => {
     expect(kubernetesQueryUsesKinds(["kubernetes-workloads", "Secret"], { items: [{ kind: "Deployment" }] }, denied)).toBe(false);
     expect(kubernetesQueryUsesKinds(["kubernetes-workloads"], undefined, denied)).toBe(false);
     expect(kubernetesQueryUsesKinds(["kubernetes-graph"], undefined, new Set())).toBe(false);
+  });
+
+  it("fences workload counts and unfinished mixed workload projections even when the displayed page has no denied-kind rows", () => {
+    const denied = new Set(["Pod"]);
+    expect(kubernetesQueryUsesKinds(["kubernetes-workloads", "shop", "", "Deployment"], undefined, denied)).toBe(true);
+    expect(kubernetesQueryUsesKinds(["kubernetes-workloads"], { items: [{ kind: "Deployment" }], counts: { Pod: 9, Deployment: 1 } }, denied)).toBe(true);
+    expect(kubernetesQueryUsesKinds(["kubernetes-summary"], { counts: { Pod: 0 } }, denied)).toBe(true);
+    expect(kubernetesQueryUsesKinds(["kubernetes-workloads"], undefined, new Set(["Secret"]))).toBe(false);
   });
 
   it("rejects a malformed empty sync envelope without inventing a publication", () => {

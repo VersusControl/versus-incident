@@ -384,18 +384,28 @@ func TestWorkloadsFiltersCountsAndPaginatesSharedIndex(t *testing.T) {
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
 	warmTestInventory(t, service, "shop")
+	assertCursorOffset := func(cursor, want string) {
+		t.Helper()
+		raw, err := base64.RawURLEncoding.DecodeString(cursor)
+		binding, offset, ok := strings.Cut(string(raw), ":")
+		if err != nil || !ok || len(binding) != 64 || offset != want {
+			t.Fatalf("opaque cursor %q does not bind offset %s", cursor, want)
+		}
+	}
 	page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Query: "CHECK", Limit: 1})
-	if err != nil || len(page.Items) != 1 || page.Items[0].Kind != "Deployment" || page.Items[0].Name != "checkout-a" || page.Next != "1" || page.Truncated {
+	if err != nil || len(page.Items) != 1 || page.Items[0].Kind != "Deployment" || page.Items[0].Name != "checkout-a" || page.Truncated {
 		t.Fatalf("first workload page = %#v err=%v", page, err)
 	}
+	assertCursorOffset(page.Next, "1")
 	wantCounts := map[string]int{"Deployment": 2, "StatefulSet": 0, "DaemonSet": 0, "Job": 0, "CronJob": 0, "Pod": 1}
 	if !reflect.DeepEqual(page.Counts, wantCounts) {
 		t.Fatalf("workload counts = %#v, want %#v", page.Counts, wantCounts)
 	}
 	page, err = service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Query: "check", Limit: 1, Cursor: page.Next})
-	if err != nil || len(page.Items) != 1 || page.Items[0].Name != "checkout-b" || page.Next != "2" {
+	if err != nil || len(page.Items) != 1 || page.Items[0].Name != "checkout-b" {
 		t.Fatalf("second workload page = %#v err=%v", page, err)
 	}
+	assertCursorOffset(page.Next, "2")
 	page, err = service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Query: "check", Limit: 1, Cursor: page.Next})
 	if err != nil || len(page.Items) != 1 || page.Items[0].Kind != "Pod" || page.Next != "" || page.Truncated {
 		t.Fatalf("last workload page = %#v err=%v", page, err)

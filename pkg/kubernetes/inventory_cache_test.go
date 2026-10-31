@@ -31,6 +31,244 @@ func seedInventory(t *testing.T, service *Service, records []kubeindex.Record) {
 	}
 }
 
+func TestWorkloadsPinsPartialPublicationAcrossReplacement(t *testing.T) {
+	client, err := NewClient(Config{Endpoint: "http://127.0.0.1:1", AllowLoopbackHTTP: true, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(client, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	old := []kubeindex.Record{
+		{UID: "old-pod", Kind: "Pod", Namespace: "shop", Name: "old-pod"},
+		{UID: "old-deployment", Kind: "Deployment", Namespace: "shop", Name: "old-deployment"},
+	}
+	seedInventory(t, service, old)
+	cache := service.changes.inventories[service.indexScope()]
+	state := cache.generation.View.Kinds["Pod"]
+	state.State, state.Partial, state.Error = "error", true, "timeout"
+	cache.generation.View.Kinds["Pod"] = state
+	var reads atomic.Int32
+	client.credentials = &credentialSource{authorization: func(context.Context) (string, error) {
+		if reads.Add(1) == 2 {
+			cache.mu.Lock()
+			replacement, cloneErr := cloneInventoryGeneration(cache.generation)
+			if cloneErr != nil {
+				t.Fatal(cloneErr)
+			}
+			replacement.View.Records = []kubeindex.Record{{UID: "new-pod", Kind: "Pod", Namespace: "shop", Name: "new-pod"}}
+			cache.generation = replacement
+			cache.mu.Unlock()
+		}
+		return "", nil
+	}}
+	page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop"})
+	if err != nil || len(page.Items) != 2 || page.Counts["Deployment"] != 1 || page.Counts["Pod"] != 1 {
+		t.Fatalf("partial committed publication lost rows across replacement: rows=%d err=%v", len(page.Items), err)
+	}
+	for _, item := range page.Items {
+		if item.UID != "old-pod" && item.UID != "old-deployment" {
+			t.Fatal("one response mixed inventory generations")
+		}
+	}
+	if len(page.Partial) != 1 || page.Partial[0].Class != "timeout" {
+		t.Fatal("retained rows concealed the transient collection failure")
+	}
+}
+
+func TestNamespaceProjectionDoesNotResurrectDeletedGlobalRecords(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	seedInventory(t, service, nil)
+	cache := service.changes.inventories[service.indexScope()]
+	cache.generation.Namespaces = map[string]kubeindex.Snapshot{"shop": {
+		Records: []kubeindex.Record{{UID: "deleted-pod", Kind: "Pod", Namespace: "shop", Name: "reused-name"}},
+		Kinds: map[string]kubeindex.KindStatus{"Pod": {
+			State: "ready", ObservedAt: time.Now().Add(-time.Minute),
+		}},
+	}}
+	for _, namespace := range []string{"", "shop", "other"} {
+		page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: namespace})
+		if err != nil || len(page.Items) != 0 || page.Counts["Pod"] != 0 {
+			t.Fatalf("complete empty replacement resurrected scoped rows: namespace=%q rows=%d err=%v", namespace, len(page.Items), err)
+		}
+	}
+}
+
+func TestNamespaceProjectionPrefersNewerCompleteScopedReplacement(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	seedInventory(t, service, []kubeindex.Record{{UID: "deleted-pod", Kind: "Pod", Namespace: "shop", Name: "reused-name"}})
+	cache := service.changes.inventories[service.indexScope()]
+	state := cache.generation.View.Kinds["Pod"]
+	state.ObservedAt = time.Now().Add(-time.Minute)
+	cache.generation.View.Kinds["Pod"] = state
+	cache.generation.Namespaces = map[string]kubeindex.Snapshot{"shop": {
+		Kinds: map[string]kubeindex.KindStatus{"Pod": {
+			State: "ready", ObservedAt: time.Now(),
+		}},
+	}}
+	page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop"})
+	if err != nil || len(page.Items) != 0 || page.Counts["Pod"] != 0 {
+		t.Fatal("newer scoped empty replacement resurrected an older global row")
+	}
+}
+
+func TestNamespaceProjectionPreservesObservationAuthorityAndFailure(t *testing.T) {
+	for _, test := range []struct {
+		name, globalError, scopedError, wantUID, wantError string
+		newer, cycle                                       bool
+	}{
+		{name: "stale-scoped-timeout", globalError: "timeout", wantUID: "current-pod", wantError: "timeout"},
+		{name: "stale-scoped-unauthorized", globalError: "unauthorized", wantError: "unauthorized"},
+		{name: "global-forbidden", globalError: "forbidden", wantUID: "scoped-pod"},
+		{name: "global-namespace-scope", globalError: "namespace_scope", wantUID: "scoped-pod"},
+		{name: "newer-scoped-ready", globalError: "timeout", newer: true, wantUID: "scoped-pod"},
+		{name: "newer-scoped-timeout", scopedError: "timeout", newer: true, wantUID: "scoped-pod", wantError: "timeout"},
+		{name: "newer-scoped-denial", scopedError: "forbidden", newer: true, wantError: "forbidden"},
+		{name: "whole-cycle-denial", globalError: "forbidden", cycle: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+			seedInventory(t, service, []kubeindex.Record{{UID: "current-pod", Kind: "Pod", Namespace: "shop", Name: "reused-name"}})
+			cache := service.changes.inventories[service.indexScope()]
+			now := time.Now().UTC()
+			// A real failed refresh advances the attempt, not the successful LIST.
+			global := kubeindex.KindStatus{State: "ready", ObservedAt: now.Add(-12 * time.Hour), LastAttemptAt: now}
+			if test.globalError != "" {
+				global.State, global.Partial, global.Error, global.CycleFailure = "error", true, test.globalError, test.cycle
+			}
+			cache.generation.View.Kinds["Pod"] = global
+			scoped := kubeindex.KindStatus{State: "ready", ObservedAt: now.Add(-6 * time.Hour)}
+			scoped.LastAttemptAt = scoped.ObservedAt
+			if test.newer {
+				scoped.ObservedAt = now.Add(time.Second)
+				scoped.LastAttemptAt = scoped.ObservedAt
+			}
+			if test.scopedError != "" {
+				scoped.State, scoped.Partial, scoped.Error = "error", true, test.scopedError
+			}
+			cache.generation.Namespaces = map[string]kubeindex.Snapshot{"shop": {
+				Records: []kubeindex.Record{{UID: "scoped-pod", Kind: "Pod", Namespace: "shop", Name: "reused-name"}},
+				Kinds:   map[string]kubeindex.KindStatus{"Pod": scoped},
+			}}
+			page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Kind: "Pod"})
+			if test.cycle {
+				if !errors.Is(err, ErrForbidden) {
+					t.Fatalf("whole-cycle denial concealed by scoped cache: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantUID == "" {
+				if len(page.Items) != 0 {
+					t.Fatal("denied observation exposed records")
+				}
+			} else if len(page.Items) != 1 || page.Items[0].UID != test.wantUID {
+				t.Fatalf("wrong committed source: %+v", page.Items)
+			}
+			if test.wantError == "" {
+				if len(page.Partial) != 0 {
+					t.Fatalf("scoped authority did not clear global limitation: %+v", page.Partial)
+				}
+			} else if len(page.Partial) != 1 || page.Partial[0].Class != test.wantError {
+				t.Fatalf("observation failure concealed: %+v", page.Partial)
+			}
+		})
+	}
+}
+
+func TestWorkloadCountsBeforePublicationAndCommittedEmpty(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	for _, namespace := range []string{"", "shop"} {
+		page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: namespace})
+		if err != nil || len(page.Items) != 0 || len(page.Counts) != 0 || page.Sync.State != "syncing" || page.Sync.Partial || len(page.Sync.Pending) != len(workloadResources) || page.Sync.PendingKinds != len(indexedResourceIDs) {
+			t.Fatalf("no publication manufactured known empty counts: namespace=%q page=%+v err=%v", namespace, page, err)
+		}
+	}
+	seedInventory(t, service, nil)
+	for _, namespace := range []string{"", "shop"} {
+		page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: namespace})
+		if err != nil || len(page.Items) != 0 || len(page.Counts) != len(workloadResources) || len(page.Sync.Pending) != 0 {
+			t.Fatalf("committed empty listing lost known counts: namespace=%q page=%+v err=%v", namespace, page, err)
+		}
+		for kind, count := range page.Counts {
+			if count != 0 {
+				t.Fatalf("committed empty %s count=%d", kind, count)
+			}
+		}
+	}
+}
+
+func TestWorkloadCursorBindsCommittedSnapshotAndFilters(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	records := []kubeindex.Record{
+		{UID: "c", Kind: "Deployment", Namespace: "shop", Name: "web"},
+		{UID: "a", Kind: "Deployment", Namespace: "payments", Name: "ledger"},
+		{UID: "b", Kind: "Deployment", Namespace: "shop", Name: "only-a"},
+	}
+	seedInventory(t, service, records)
+	first, err := service.Workloads(t.Context(), WorkloadListOptions{Kind: "Deployment", Limit: 1})
+	if err != nil || len(first.Items) != 1 || first.Items[0].UID != "a" || first.Next == "" {
+		t.Fatalf("first sorted page: %+v %v", first, err)
+	}
+	second, err := service.Workloads(t.Context(), WorkloadListOptions{Kind: "Deployment", Limit: 1, Cursor: first.Next})
+	if err != nil || len(second.Items) != 1 || second.Items[0].UID != "b" {
+		t.Fatalf("valid continuation: %+v %v", second, err)
+	}
+	for _, options := range []WorkloadListOptions{
+		{Kind: "Pod", Cursor: first.Next},
+		{Kind: "Deployment", Namespace: "shop", Cursor: first.Next},
+		{Kind: "Deployment", Query: "web", Cursor: first.Next},
+		{Kind: "Deployment", Cursor: "1"},
+		{Kind: "Deployment", Cursor: first.Next + "corrupt"},
+	} {
+		if _, err := service.Workloads(t.Context(), options); !errors.Is(err, ErrInvalidArguments) {
+			t.Fatalf("unbound cursor accepted: %+v %v", options, err)
+		}
+	}
+	scoped, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Kind: "Deployment", Limit: 1})
+	if err != nil || len(scoped.Items) != 1 || scoped.Items[0].UID != "b" || scoped.Next == "" {
+		t.Fatalf("scoped sorting: %+v %v", scoped, err)
+	}
+	scopedNext, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Kind: "Deployment", Limit: 1, Cursor: scoped.Next})
+	if err != nil || len(scopedNext.Items) != 1 || scopedNext.Items[0].UID != "c" || scopedNext.Next != "" {
+		t.Fatalf("scoped continuation: %+v %v", scopedNext, err)
+	}
+	cache := service.changes.inventories[service.indexScope()]
+	for kind, state := range cache.generation.View.Kinds {
+		state.ObservedAt, state.CompletedAt, state.LastAttemptAt = time.Now(), time.Now(), time.Now()
+		cache.generation.View.Kinds[kind] = state
+	}
+	cache.generation.View.Kinds["Event"] = kubeindex.KindStatus{State: "error", Error: "timeout", ObservedAt: time.Now()}
+	unchanged, err := service.Workloads(t.Context(), WorkloadListOptions{Kind: "Deployment", Limit: 1, Cursor: first.Next})
+	if err != nil || len(unchanged.Items) != 1 || unchanged.Items[0].UID != "b" {
+		t.Fatalf("timestamps or unrelated kinds expired unchanged page: %+v %v", unchanged, err)
+	}
+	cache.generation.View.Records = append(records, kubeindex.Record{UID: "inserted", Kind: "Deployment", Namespace: "payments", Name: "aaa"})
+	if _, err := service.Workloads(t.Context(), WorkloadListOptions{Kind: "Deployment", Cursor: first.Next}); !errors.Is(err, ErrInvalidArguments) {
+		t.Fatalf("replacement cursor did not return typed invalidation: %v", err)
+	}
+}
+
+func TestWorkloadPendingKindCountIsUnknown(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	seedInventory(t, service, []kubeindex.Record{{UID: "pod", Kind: "Pod", Namespace: "shop", Name: "pod"}})
+	cache := service.changes.inventories[service.indexScope()]
+	delete(cache.generation.View.Kinds, "CronJob")
+	cache.generation.Pending = []string{indexedResourceIDs["CronJob"]}
+	for _, namespace := range []string{"", "shop"} {
+		page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: namespace})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, known := page.Counts["CronJob"]; known {
+			t.Fatalf("pending CronJob is a known zero: %+v", page.Counts)
+		}
+		if page.Counts["Pod"] != 1 || page.Counts["Deployment"] != 0 || !containsString(page.Sync.Pending, indexedResourceIDs["CronJob"]) || len(page.Partial) != 0 || page.Truncated {
+			t.Fatalf("pending changed successful counts or became failure: %+v", page)
+		}
+	}
+}
+
 func TestCachedNamespaceSnapshotIgnoresRecordCounts(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
 	for _, test := range []struct {
@@ -885,6 +1123,16 @@ func TestPendingKindsNeverAppearAsFailuresInAnyView(t *testing.T) {
 			}
 		}
 		sync, _ := body["sync"].(map[string]any)
+		if name == "workloads" {
+			counts, _ := body["counts"].(map[string]any)
+			for _, candidate := range workloadResources {
+				if pendingIDs[candidate.ResourceID] {
+					if _, known := counts[candidate.Kind]; known {
+						t.Errorf("pending %s has a known count: %v", candidate.Kind, counts)
+					}
+				}
+			}
+		}
 		if sync["state"] != "unavailable" && sync["pending_kinds"] == nil {
 			t.Errorf("%s does not say other kinds are loading: %v", name, sync)
 		}

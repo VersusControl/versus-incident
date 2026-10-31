@@ -359,6 +359,26 @@ func TestKubernetesIssuesQueryValidationAndInvestigate(t *testing.T) {
 		return ctx.Next()
 	})
 	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	for _, query := range []string{
+		"?occurrence_id=selected",
+		"?center=2026-10-01T00:00:00Z",
+		"?context=persisted&root_uid=deployment-checkout&occurrence_id=",
+		"?context=persisted&root_uid=deployment-checkout&occurrence_id=bad%2Fid",
+		"?context=persisted&root_uid=deployment-checkout&occurrence_id=a&occurrence_id=b",
+		"?context=persisted&root_uid=deployment-checkout&center=",
+		"?context=persisted&root_uid=deployment-checkout&center=not-a-time",
+		"?context=persisted&root_uid=deployment-checkout&center=2999-01-01T00:00:00Z",
+		"?context=persisted&root_uid=deployment-checkout&center=2026-10-01T00:00:00Z&center=2026-10-01T00:00:00Z",
+	} {
+		response, err := app.Test(httptest.NewRequest("GET", "/api/admin/kubernetes/issues"+query, nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid selector accepted: status=%d", response.StatusCode)
+		}
+	}
 	for _, test := range []struct {
 		query string
 		want  int

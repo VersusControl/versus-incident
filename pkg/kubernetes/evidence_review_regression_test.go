@@ -366,6 +366,117 @@ func TestPersistedRootContextIgnoresEvidenceWindowAndLiveExistence(t *testing.T)
 	}
 }
 
+func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
+	for _, backend := range []string{"memory", "file"} {
+		t.Run(backend, func(t *testing.T) {
+			service, store, scope := reviewHistoryService(t)
+			if backend == "file" {
+				provider, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { provider.Close() })
+				service.SetChangeStorage(provider)
+				store = provider.(storage.EvidenceStore)
+			}
+			at := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second).Add(123456789 * time.Nanosecond)
+			root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "retained", UID: "retained-root"}
+			batch := storage.EvidenceBatch{ID: "capture:selected", At: at, Epoch: "synthetic"}
+			for i := 0; i < 3; i++ {
+				broke := at
+				if i == 2 {
+					broke = at.Add(time.Minute)
+				}
+				rule := fmt.Sprintf("synthetic.rule-%d", i)
+				raw, _ := json.Marshal(Issue{Root: root, Rule: rule, Broken: true, BrokeAt: &broke, Severity: "warning"})
+				batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: rule, Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: rule, LastSeen: at, ObservationOnly: true, Payload: raw})
+			}
+			if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+				t.Fatal(err)
+			}
+			history, err := service.historicalIssues(t.Context(), IssueOptions{RootUID: root.UID, Namespace: root.Namespace, Since: at.Add(-time.Minute), Until: time.Now()})
+			if err != nil || len(history.Items) != 3 {
+				t.Fatal("synthetic retained occurrences unavailable")
+			}
+			selected := history.Items[2]
+			for _, test := range []struct {
+				name, id, namespace, uid, status string
+				center                           time.Time
+			}{
+				{name: "exact", id: selected.OccurrenceID, status: "resolved"},
+				{name: "mismatch", id: "missing-id", center: *selected.BrokeAt, status: "not_found"},
+				{name: "unique-center", center: at.Add(time.Minute), status: "resolved"},
+				{name: "millisecond-center-does-not-substitute", center: at.Add(time.Minute).Truncate(time.Millisecond), status: "not_found"},
+				{name: "nearby-center-does-not-substitute", center: at.Add(time.Minute + time.Nanosecond), status: "not_found"},
+				{name: "ambiguous-center", center: at, status: "ambiguous"},
+				{name: "no-selector", status: "not_requested"},
+				{name: "wrong-namespace", id: selected.OccurrenceID, namespace: "other", status: "not_found"},
+				{name: "same-name-new-uid", id: selected.OccurrenceID, uid: "replacement-root", status: "not_found"},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					options := IssueOptions{Context: "persisted", RootUID: root.UID, Namespace: root.Namespace}
+					if test.namespace != "" {
+						options.Namespace = test.namespace
+					}
+					if test.uid != "" {
+						options.RootUID = test.uid
+					}
+					options.OccurrenceID, options.Center = test.id, test.center
+					page, err := service.Issues(t.Context(), options)
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw, _ := json.Marshal(page)
+					var response struct {
+						Status   string `json:"selection_status"`
+						Selected *Issue `json:"selected_occurrence"`
+					}
+					if err := json.Unmarshal(raw, &response); err != nil {
+						t.Fatal(err)
+					}
+					if response.Status != test.status {
+						t.Fatalf("selection status=%q want=%q", response.Status, test.status)
+					}
+					if test.status != "resolved" && response.Selected != nil {
+						t.Fatal("unresolved selector substituted another recurrence")
+					}
+					if test.name == "exact" && (response.Selected == nil || response.Selected.OccurrenceID != selected.OccurrenceID) {
+						t.Fatal("explicit occurrence did not survive date-free root lookup")
+					}
+					if test.name == "unique-center" && (response.Selected == nil || response.Selected.BrokeAt == nil || !response.Selected.BrokeAt.Equal(test.center)) {
+						t.Fatal("nanosecond center did not preserve the exact retained occurrence")
+					}
+					if test.name == "no-selector" && (page.RootContext == nil || response.Selected != nil) {
+						t.Fatal("legacy root link lost retained context or selected an arbitrary occurrence")
+					}
+					if len(page.Items) != 0 || len(page.Totals) != 0 || page.Next != "" {
+						t.Fatal("selected context polluted historical paging")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestPersistedRootSelectionReportsBoundedScanWithoutFalseUniqueness(t *testing.T) {
+	service, store, scope := reviewHistoryService(t)
+	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "retained", UID: "retained-root"}
+	batch := storage.EvidenceBatch{ID: "capture:many", At: at, Epoch: "synthetic"}
+	for i := 0; i < 1001; i++ {
+		rule := fmt.Sprintf("synthetic.rule-%04d", i)
+		raw, _ := json.Marshal(Issue{Root: root, Rule: rule, BrokeAt: &at, Broken: true, Severity: "warning"})
+		batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: rule, Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: rule, LastSeen: at, ObservationOnly: true, Payload: raw})
+	}
+	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.Issues(t.Context(), IssueOptions{Context: "persisted", RootUID: root.UID, Namespace: root.Namespace, OccurrenceID: "not-in-scanned-prefix"})
+	if err != nil || page.SelectionStatus != "partial" || page.SelectedOccurrence != nil || page.RootContext == nil || !page.Sync.Partial {
+		t.Fatal("bounded scan claimed absence or erased retained root")
+	}
+}
+
 func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *testing.T) {
 	for _, backend := range []string{"memory", "file", "postgres"} {
 		t.Run(backend, func(t *testing.T) {
@@ -502,6 +613,11 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 			if err != nil || contextPage.RootContext == nil || contextPage.RootContext.Root.UID != "retained-root" || len(contextPage.Items) != 0 || !contextPage.Sync.Partial {
 				t.Fatal("persisted context required a live object, hid a malformed observation, or leaked into history")
 			}
+			contextOptions.OccurrenceID = contextPage.RootContext.Occurrence.OccurrenceID
+			selectedPage, err := service.Issues(t.Context(), contextOptions)
+			if err != nil || selectedPage.SelectedOccurrence == nil || selectedPage.SelectionStatus != "resolved" || selectedPage.SelectedOccurrence.BrokeAt != nil {
+				t.Fatal("exact missing-time occurrence was substituted or fabricated a timestamp")
+			}
 			occurrences, err := service.queryEvidence(t.Context(), storage.EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Minute), Namespace: "sample", RootUID: "retained-root", Type: "occurrence", Limit: 1})
 			if err != nil || occurrences.Total != 2 || occurrences.Counts["issue_opened"] != 1 || occurrences.Counts["coverage_gap"] != 1 || len(occurrences.Items) != 1 || occurrences.Next == "" {
 				t.Fatal("occurrence projection did not preserve accurate counts and bounded opaque pagination")
@@ -580,6 +696,9 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 			}
 			denyPod.Store(false)
 			wrongCluster.Store(true)
+			if selected, err := service.Issues(t.Context(), contextOptions); err != nil || selected.SelectedOccurrence != nil || selected.RootContext != nil || selected.SelectionStatus != "not_found" {
+				t.Fatal("selected occurrence bypassed physical cluster identity")
+			}
 			page, err := service.queryEvidence(t.Context(), global)
 			if err != nil || len(page.Items) != 0 {
 				t.Fatal("physical cluster replacement exposed retained evidence")

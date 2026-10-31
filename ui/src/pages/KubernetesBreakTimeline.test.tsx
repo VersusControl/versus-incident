@@ -29,12 +29,18 @@ function timelinePage(items: KubernetesTimelineEntry[] = [], overrides: Partial<
 }
 const changeEntry = (value = change): KubernetesTimelineEntry => ({ type: "change", id: value.id, at: value.at, change: value });
 function persistedRootPage(value = issue, sync: KubernetesIssuePage["sync"] = { state: "ready", age_s: 0, partial: false }): KubernetesIssuePage {
-  return { items: [], totals: {}, truncated: false, sync, root_context: { root: value.root, occurrence: value, retained: true } };
+  return { items: [], totals: {}, truncated: false, sync, selected_occurrence: value, selection_status: "resolved", root_context: { root: value.root, occurrence: value, retained: true } };
 }
 function rootIssueResponses(page: KubernetesIssuePage) {
   return async (options: Parameters<typeof api.kubernetesIssues>[0]) => options?.context === "persisted" ? persistedRootPage(page.items[0] ?? issue, page.sync) : page;
 }
 function Location() { const location = useLocation(); return <output aria-label="Location">{location.pathname}{location.search}</output>; }
+function ClickedBreak({ value }: { value: KubernetesIssue }) {
+  const location = useLocation();
+  return new URLSearchParams(location.search).get("view") === "timeline"
+    ? <KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />
+    : <BreakRow issue={value} resource={resource} onSelectResource={vi.fn()} />;
+}
 function mount(element: React.ReactNode, cluster = "east") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return { client, ...render(<QueryClientProvider client={client}><KubernetesClusterContext.Provider value={{ client: api, cluster, multiple: true, clusters: [], key: (...parts) => kubernetesKey(cluster, ...parts) }}><MemoryRouter initialEntries={[`${window.location.pathname}${window.location.search}`]}>{element}<Location /></MemoryRouter></KubernetesClusterContext.Provider></QueryClientProvider>) };
@@ -590,6 +596,31 @@ describe("Break timeline", () => {
     expect(screen.getByRole("region", { name: "Resource timeline chart" }).getAttribute("data-until")).toBe("2026-10-16T12:25:00.000Z");
   });
 
+  it.each(["resolved", "not_found"] as const)("preserves a clicked nanosecond break center and only enables logs after server resolution: %s", async (status) => {
+    const precise = { ...issue, broke_at: "2026-10-14T12:04:00.123456789Z" };
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(async options => {
+      if (options?.context !== "persisted") return { items: [precise], totals: {}, truncated: false, sync: journalPage.sync };
+      const resolved = options.center === precise.broke_at && status === "resolved";
+      return { ...persistedRootPage(issue), selection_status: resolved ? "resolved" : "not_found", selected_occurrence: resolved ? precise : undefined };
+    });
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync: journalPage.sync });
+    const logs = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue({ window: { from: "2026-10-14T11:59:00Z", to: "2026-10-14T12:09:00Z" }, pods: [], lines: [], markers: [], counts: { all: 0, errors: 0, warnings: 0 }, rate: [], patterns: [], sources: [], coverage: { state: "complete", gaps: [] } });
+    mount(<ClickedBreak value={precise} />);
+    fireEvent.click(screen.getByRole("button", { name: "Timeline for checkout" }));
+    await waitFor(() => expect(lookup.mock.calls.find(([options]) => options?.context === "persisted")?.[0]).toMatchObject({ center: precise.broke_at, occurrence_id: undefined }));
+    const location = screen.getByLabelText("Location").textContent!;
+    expect(new URLSearchParams(location.slice(location.indexOf("?"))).get("center")).toBe(precise.broke_at);
+    if (status === "resolved") {
+      await waitFor(() => expect(logs).toHaveBeenCalled());
+      expect(logs.mock.calls[0][0]).toMatchObject({ since: "2026-10-14T11:59:00.123Z", until: "2026-10-14T12:06:00.123Z" });
+      expect(screen.queryByText("Log time range is unavailable.")).toBeNull();
+    } else {
+      await screen.findByText(/Log time range is unavailable/);
+      expect(logs).not.toHaveBeenCalled();
+    }
+  });
+
   it.each([["pod.config_error", "Container config error"], ["pod.evicted", "Evicted"], ["pod.unschedulable", "Unschedulable"]])("names rule %s and singular affected Pods", (rule, label) => {
     mount(<BreakRow issue={{ ...issue, rule, count: 1, of: 1, evidence: undefined }} resource={resource} onSelectResource={vi.fn()} />);
     expect(screen.getByLabelText(label)).toBeTruthy();
@@ -743,15 +774,13 @@ describe("Break timeline", () => {
     expect(screen.queryByRole("button", { name: /unrelated-0:/ })).toBeNull();
     expect(graph).not.toHaveBeenCalled();
     expect(related).not.toHaveBeenCalled();
-    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledTimes(2);
     expect(lookup.mock.calls[0][0]).toMatchObject({ namespace: "shop", root_uid: "checkout-uid", limit: 100, cursor: undefined });
-    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     expect(await screen.findByRole("button", { name: /ConfigMap settings-23:.* at / })).toBeTruthy();
     expect(lookup.mock.calls[1][0]).toMatchObject({ root_uid: "checkout-uid", cursor: "opaque+/=next" });
     expect(lookup).toHaveBeenCalledTimes(2);
-    expect(screen.queryByRole("button", { name: /ConfigMap settings-0:.* at / })).toBeNull();
-    expect(screen.getByRole("button", { name: "Next page" }).hasAttribute("disabled")).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Previous page" }));
+    expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Previous page" })).toBeNull();
     expect(await screen.findByRole("button", { name: /ConfigMap settings-0:.* at / })).toBeTruthy();
     const query = new URLSearchParams(screen.getByLabelText("Location").textContent!.split("?")[1]);
     expect(query.get("root_uid")).toBe(issue.root.uid);
@@ -759,7 +788,7 @@ describe("Break timeline", () => {
     expect(query.get("center")).toBe(issue.broke_at);
   });
 
-  it("continues opaque root cursors beyond five pages without eager reads or graph-based filtering", async () => {
+  it("bounds internal root continuation to five pages with loaded markers and explicit incomplete coverage", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
     vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
@@ -772,20 +801,12 @@ describe("Break timeline", () => {
     });
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
     await screen.findByRole("button", { name: /Deployment linked-0:.* at / });
-    expect(lookup).toHaveBeenCalledTimes(1);
-    for (let index = 1; index < cursors.length; index++) {
-      fireEvent.click(screen.getByRole("button", { name: "Next page" }));
-      await screen.findByRole("button", { name: new RegExp(`Deployment linked-${index}:.* at `) });
-      expect(screen.queryByRole("button", { name: new RegExp(`Deployment linked-${index - 1}:.* at `) })).toBeNull();
-      expect(lookup).toHaveBeenCalledTimes(index + 1);
-    }
-    expect(lookup).toHaveBeenCalledTimes(7);
-    expect(lookup.mock.calls.map(([options]) => options?.cursor)).toEqual(cursors);
+    expect(lookup).toHaveBeenCalledTimes(5);
+    for (let index = 1; index < 5; index++) expect(screen.getByRole("button", { name: new RegExp(`Deployment linked-${index}:.* at `) })).toBeTruthy();
+    expect(lookup.mock.calls.map(([options]) => options?.cursor)).toEqual(cursors.slice(0, 5));
     expect(lookup.mock.calls.every(([options]) => options?.root_uid === "checkout-uid" && options.namespace === "shop" && options.limit === 100)).toBe(true);
-    expect(screen.getByRole("button", { name: "Next page" }).hasAttribute("disabled")).toBe(true);
-    expect(screen.queryByText(/Related change scan is incomplete after 5 pages/)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Previous page" }));
-    await screen.findByRole("button", { name: /Deployment linked-5:.* at / });
+    expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
+    expect(screen.getByText(/Change evidence is incomplete for this range/)).toBeTruthy();
   });
 
   it("delegates root and URL kind filtering to the server and hides namespace and kind selectors in break detail", async () => {
@@ -798,7 +819,6 @@ describe("Break timeline", () => {
     const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
     expect(await screen.findByRole("button", { name: /Deployment checkout:.* at / })).toBeTruthy();
     expect(lookup.mock.calls.at(-1)?.[0]).toMatchObject({ root_uid: "checkout-uid", namespace: "shop", kind: "Deployment", limit: 100 });
-    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
     await screen.findByRole("button", { name: /Deployment older-checkout:.* at / });
     expect(client.getQueryCache().findAll().filter((query) => query.queryKey.includes("kubernetes-changes")).every((query) => query.queryKey[0] === "kubernetes" && query.queryKey[1] === "east")).toBe(true);
     expect(screen.queryByRole("combobox", { name: "Timeline kind" })).toBeNull();
@@ -1018,7 +1038,7 @@ describe("Break timeline", () => {
     expect(screen.getByText("Change capture does not cover the whole range")).toBeTruthy();
   });
 
-  it("does not follow a repeated root change cursor automatically or enable another next page", async () => {
+  it("stops repeated internal root cursors and reports incomplete evidence without a pager", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
     const sync = { state: "ready", age_s: 0, partial: false };
     vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
@@ -1026,10 +1046,8 @@ describe("Break timeline", () => {
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     const lookup = vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], next: "repeat", sync });
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
-    await waitFor(() => expect(screen.getByRole("button", { name: "Next page" }).hasAttribute("disabled")).toBe(false));
-    expect(lookup).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Next page" }).hasAttribute("disabled")).toBe(true));
+    await screen.findByText(/Change evidence is incomplete for this range/);
+    expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
     expect(lookup).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("Related change history is unavailable.")).toBeNull();
   });

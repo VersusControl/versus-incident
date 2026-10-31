@@ -2,6 +2,8 @@ package kubernetes
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
 const (
@@ -702,36 +706,39 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		return WorkloadPage{}, indexErr
 	}
 	result.Sync = SyncStatus{State: status.State, Partial: status.Partial, AgeSeconds: status.AgeSeconds, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}
-	indexReady := true
 	for _, candidate := range workloadResources {
-		if status.Kinds[candidate.Kind].State != "ready" {
-			indexReady = false
-			break
+		state, known := status.Kinds[candidate.Kind]
+		if !known || state.State == "pending" || containsString(status.Pending, candidate.ResourceID) {
+			// Missing means unknown, not a successful count of zero. Keep the
+			// pending resource IDs in sync without manufacturing a failure.
+			delete(result.Counts, candidate.Kind)
+			if !containsString(result.Sync.Pending, candidate.ResourceID) {
+				result.Sync.Pending = append(result.Sync.Pending, candidate.ResourceID)
+			}
+		}
+		// Only a successful, still-authorized observation establishes a count.
+		// Transient failures retain that observation and its committed rows;
+		// a first LIST failure is an explicit error, not pending or known empty.
+		if state.ObservedAt.IsZero() || state.Error == "forbidden" || state.Error == "unauthorized" ||
+			state.Error == "namespace_scope" || state.Error == "credential_unavailable" {
+			delete(result.Counts, candidate.Kind)
+		}
+		if state.Error != "" {
+			result.Partial = append(result.Partial, PartialFailure{ResourceID: candidate.ResourceID, Class: state.Error})
 		}
 	}
-	if indexReady {
-		for _, record := range view.Records {
-			if !isWorkloadKind(record.Kind) {
-				continue
-			}
-			resources = append(resources, projectedWorkloadIndexRecord(record))
-		}
+	if len(status.Kinds) == 0 && status.State == "syncing" {
+		result.Sync.PendingKinds = len(indexedResourceIDs)
 	} else {
-		for _, candidate := range workloadResources {
-			page, listErr := service.cachedList(ctx, ListOptions{ResourceID: candidate.ResourceID, Namespace: options.Namespace})
-			if listErr != nil {
-				class := errorClass(listErr)
-				if errors.Is(listErr, ErrNotFound) {
-					class = "unsupported"
-				}
-				result.Partial = append(result.Partial, PartialFailure{ResourceID: candidate.ResourceID, Class: class})
-				result.Truncated = true
-				continue
-			}
-			resources = append(resources, page.Items...)
-			result.Partial = append(result.Partial, page.Partial...)
-			result.Truncated = result.Truncated || page.Truncated
-			result.Omitted = append(result.Omitted, page.Omitted...)
+		result.Sync.PendingKinds = max(result.Sync.PendingKinds, len(result.Sync.Pending))
+	}
+	// Snapshot projection already excludes denied kinds and retains committed
+	// records through transient refresh failures. Reading each kind again here
+	// could cross a publication boundary and mix rows, counts and observation
+	// times from different generations.
+	for _, record := range view.Records {
+		if isWorkloadKind(record.Kind) {
+			resources = append(resources, projectedWorkloadIndexRecord(record))
 		}
 	}
 	query := strings.ToLower(strings.TrimSpace(options.Query))
@@ -740,7 +747,9 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		if options.Namespace != "" && resource.Namespace != options.Namespace || query != "" && !strings.Contains(strings.ToLower(resource.Name), query) && !strings.Contains(strings.ToLower(resource.Namespace), query) {
 			continue
 		}
-		result.Counts[resource.Kind]++
+		if _, known := result.Counts[resource.Kind]; known {
+			result.Counts[resource.Kind]++
+		}
 		if options.Kind == "" || resource.Kind == options.Kind {
 			filtered = append(filtered, resource)
 		}
@@ -754,20 +763,72 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		}
 		return filtered[i].Name < filtered[j].Name
 	})
-	start, end, next, err := pageWindow(options.Cursor, limit, len(filtered))
+	// Bind the offset to the committed projection and normalized filters read
+	// above. A replacement cannot turn an old offset into duplicate-row success.
+	// Observation timestamps and unrelated kinds do not change the page, so
+	// routine polling alone must not expire a valid continuation.
+	type cursorKindState struct {
+		State, Error          string
+		Partial, CycleFailure bool
+	}
+	cursorKinds := make(map[string]cursorKindState, len(workloadResources))
+	for _, candidate := range workloadResources {
+		state := status.Kinds[candidate.Kind]
+		cursorKinds[candidate.Kind] = cursorKindState{state.State, state.Error, state.Partial, state.CycleFailure}
+	}
+	binding, err := json.Marshal(struct {
+		Scope                  kubeindex.Scope
+		Namespace, Kind, Query string
+		Rows                   []ProjectedResource
+		Counts                 map[string]int
+		Kinds                  map[string]cursorKindState
+	}{service.indexScope(), options.Namespace, options.Kind, query, filtered, result.Counts, cursorKinds})
+	if err != nil {
+		return WorkloadPage{}, err
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(binding))
+	offset, err := workloadCursorOffset(options.Cursor, digest)
+	if err != nil {
+		return WorkloadPage{}, err
+	}
+	start, end, next, err := pageWindow(offset, limit, len(filtered))
 	if err != nil {
 		return WorkloadPage{}, err
 	}
 	result.Items = append(result.Items, filtered[start:end]...)
-	result.Next = next
+	result.Next = encodeWorkloadCursor(next, digest)
 	var sizeTruncated bool
 	result.Items, result.Omitted, sizeTruncated = trimAggregateItems(result.Items, result.Omitted)
 	result.Truncated = result.Truncated || sizeTruncated
 	if sizeTruncated {
-		start, _ := strconv.Atoi(options.Cursor)
-		result.Next = strconv.Itoa(start + len(result.Items))
+		result.Next = encodeWorkloadCursor(strconv.Itoa(start+len(result.Items)), digest)
 	}
 	return result, nil
+}
+
+func workloadCursorOffset(cursor, digest string) (string, error) {
+	if cursor == "" {
+		return "", nil
+	}
+	if len(cursor) > 128 {
+		return "", ErrInvalidArguments
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", ErrInvalidArguments
+	}
+	binding, offset, ok := strings.Cut(string(raw), ":")
+	if !ok || binding != digest || offset == "" {
+		return "", ErrInvalidArguments
+	}
+	return offset, nil
+}
+
+func encodeWorkloadCursor(offset, digest string) string {
+	if offset == "" {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(digest + ":" + offset))
 }
 
 func normalizePageLimit(limit int) int {

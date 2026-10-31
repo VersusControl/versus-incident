@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, clearSecret, createKubernetesApi, kubernetesClusterPath, setSecret } from "./api";
+import { focusedChanges } from "./kubernetesFocusedHistory";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -8,6 +9,39 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("carries selected occurrence and center separately from date-free retained root identity", async () => {
+    const selected = { occurrence_id: "selected", root: { uid: "root" }, broke_at: "2026-10-14T12:00:00Z" };
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [], selected_occurrence: selected, selection_status: "resolved" })));
+    const result = await createKubernetesApi("east").kubernetesIssues({ context: "persisted", root_uid: "root", namespace: "shop", occurrence_id: "selected", center: selected.broke_at });
+    expect(Object.fromEntries(new URL(String(fetch.mock.calls[0][0]), "http://localhost").searchParams)).toEqual({
+      context: "persisted", root_uid: "root", namespace: "shop", occurrence_id: "selected", center: selected.broke_at, cluster: "east",
+    });
+    expect(result.selected_occurrence).toEqual(selected);
+    expect(result.selection_status).toBe("resolved");
+  });
+
+  it.each(["changes", "crashes"] as const)("returns one raw focused %s page including empty continuations, without hidden paging or cursor restart", async route => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [], next: "opaque-next", sync: { state: "ready", age_s: 0, partial: false } })));
+    const client = createKubernetesApi("east"), signal = new AbortController().signal;
+    const result = await client[route === "changes" ? "kubernetesChanges" : "kubernetesCrashes"]({ root_uid: "root", cursor: "position", limit: 100 }, signal, "single");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.next).toBe("opaque-next");
+    expect(fetch.mock.calls[0][1]?.signal).toBe(signal);
+    fetch.mockReset().mockResolvedValue(new Response(JSON.stringify({ error: "Invalid query" }), { status: 400 }));
+    await expect(client[route === "changes" ? "kubernetesChanges" : "kubernetesCrashes"]({ root_uid: "root", cursor: "expired" }, signal, "single")).rejects.toMatchObject({ status: 400 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("enforces the focused scan's actual HTTP request budget even on an empty history", async () => {
+    let page = 0;
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ items: [], next: `cursor-${++page}`, sync: { state: "ready", age_s: 0, partial: false } })));
+    const signal = new AbortController().signal;
+    const client = createKubernetesApi("east");
+    const result = await focusedChanges(cursor => client.kubernetesChanges({ root_uid: "root", cursor, limit: 100 }, signal, "single"), signal);
+    expect(fetch).toHaveBeenCalledTimes(5);
+    expect(result.incomplete_range).toBe(true);
+    expect(result.next).toBe("cursor-5");
+  });
   it("fetches persisted UID context independently of history dates and keeps its envelope separate", async () => {
     const root = { kind: "Deployment", namespace: "shop", name: "retained-root", uid: "root-uid" };
     const page = { items: [], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false }, root_context: { root, occurrence: { root, rule: "resource.context", severity: "info", count: 0 }, retained: true } };

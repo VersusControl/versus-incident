@@ -37,7 +37,7 @@ function timelinePage(items: KubernetesTimelineEntry[], overrides: Partial<Kuber
   return { items, counts, total: items.length, crash_count: counts.crash, gaps: [], sync, since: "2026-10-14T11:06:00Z", until: "2026-10-14T12:06:00Z", ...overrides };
 }
 function persistedRootPage(value = issue, syncState = sync): KubernetesIssuePage {
-  return { items: [], totals: {}, truncated: false, sync: syncState, root_context: { root: value.root, occurrence: value, retained: true } };
+  return { items: [], totals: {}, truncated: false, sync: syncState, selected_occurrence: value, selection_status: "resolved", root_context: { root: value.root, occurrence: value, retained: true } };
 }
 function rootIssueResponses(page: KubernetesIssuePage) {
   return async (options: Parameters<typeof api.kubernetesIssues>[0]) => options?.context === "persisted" ? persistedRootPage(page.items[0] ?? issue, page.sync) : page;
@@ -393,6 +393,113 @@ describe("Timeline range and filters", () => {
 });
 
 describe("Persisted root identity independent of historical windows", () => {
+  it("uses the selected crash's verified observation time and keeps that anchor across range changes", async () => {
+    const event: KubernetesCrashEvent = { id: "selected-crash", sequence: 1, cluster: "east", namespace: "shop", pod: "checkout-a", pod_uid: "pod-a",
+      container: "api", init: false, root_uid: "checkout-uid", root_kind: "Deployment", root_name: "checkout",
+      type: "termination", at: "2026-10-14T12:02:00Z", observed_at: "2026-10-14T12:02:00Z", time_source: "observed_at", restart_count: 2 };
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&crash_id=selected-crash&center=${event.at}`);
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue(persistedRootPage());
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync });
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValueOnce({ ...crashPage, items: [event] }).mockResolvedValue({ ...crashPage, items: [] });
+    const logs = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(logPage());
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await screen.findByRole("slider", { name: "Log window start" });
+    expect(logs.mock.calls[0][0].since).toBe("2026-10-14T11:57:00.000Z");
+    expect(screen.getByText("Observation time; finish time unknown")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "6h" }));
+    await waitFor(() => expect(api.kubernetesCrashes).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("slider", { name: "Log window start" })).toBeTruthy();
+    expect(logs.mock.calls.every(([options]) => options.since === "2026-10-14T11:57:00.000Z")).toBe(true);
+  });
+
+  it("scrubs protected logs and bracket metadata on a typed credential failure, then re-proves context before retrying", async () => {
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
+    const issues = vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync });
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(crashPage);
+    const logs = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(logPage());
+    const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await screen.findByText("upstream timeout");
+    const logQuery = client.getQueryCache().findAll().find(query => query.queryKey.includes("kubernetes-break-logs") && query.isActive())!;
+    logs.mockRejectedValue(new ApiError(502, "credential unavailable", { code: "credential_unavailable" }));
+    await act(async () => { await client.invalidateQueries({ queryKey: logQuery.queryKey, exact: true }); });
+    await screen.findByRole("button", { name: "Retry root context" });
+    expect(screen.queryByText("upstream timeout")).toBeNull();
+    expect(screen.queryByRole("slider", { name: "Log window start" })).toBeNull();
+    expect(client.getQueryData(logQuery.queryKey)).toBeUndefined();
+    const proofs = issues.mock.calls.filter(([options]) => options?.context === "persisted").length;
+    logs.mockResolvedValue(logPage());
+    fireEvent.click(screen.getByRole("button", { name: "Retry root context" }));
+    await screen.findByText("upstream timeout");
+    expect(issues.mock.calls.filter(([options]) => options?.context === "persisted")).toHaveLength(proofs + 1);
+  });
+
+  it("pins the clicked resolved occurrence rather than a later recurrence as bounded history arrives", async () => {
+    const selected = { ...issue, occurrence_id: "selected-break", state: "resolved" as const, broken: false };
+    const recurrence = { ...issue, occurrence_id: "later-break", broke_at: "2026-10-14T12:05:00Z" };
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&occurrence_id=selected-break&center=${issue.broke_at}`);
+    const context = { ...persistedRootPage(recurrence), selected_occurrence: selected };
+    const issues = vi.spyOn(api, "kubernetesIssues").mockImplementation(async options => options?.context === "persisted" ? context : { items: [recurrence], totals: {}, truncated: false, sync });
+    const last = deferred<{ items: typeof change[]; sync: typeof sync }>();
+    const changes = vi.spyOn(api, "kubernetesChanges").mockImplementation(async options => {
+      if (!options?.cursor) return { items: [change], next: "empty", sync };
+      if (options.cursor === "empty") return { items: [], next: "last", sync };
+      return last.promise;
+    });
+    const crashes = vi.spyOn(api, "kubernetesCrashes").mockImplementation(async options => ({
+      ...crashPage, items: options?.cursor === "empty" ? [] : crashPage.items,
+      next: !options?.cursor ? "empty" : options.cursor === "empty" ? "last" : undefined,
+    }));
+    const logs = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(logPage());
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    const panel = await screen.findByRole("region", { name: "Logs at break" });
+    const bracket = await screen.findByRole("slider", { name: "Log window start" });
+    const lane = screen.getByRole("region", { name: "Timeline lane checkout" });
+    await waitFor(() => expect(changes).toHaveBeenCalledTimes(3));
+    expect(issues.mock.calls.find(([options]) => options?.context === "persisted")?.[0]).toMatchObject({ occurrence_id: "selected-break", center: issue.broke_at });
+    expect(logs.mock.calls[0][0].since).toBe("2026-10-14T11:59:00.000Z");
+    fireEvent.click(within(panel).getByRole("button", { name: /^Errors/ }));
+    await act(async () => { last.resolve({ items: [change, { ...change, id: "second", name: "second" }], sync }); });
+    await screen.findByRole("button", { name: /Deployment second:.* at / });
+    expect(screen.getByRole("region", { name: "Logs at break" })).toBe(panel);
+    expect(screen.getByRole("slider", { name: "Log window start" })).toBe(bracket);
+    expect(screen.getByRole("region", { name: "Timeline lane checkout" })).toBe(lane);
+    expect(within(panel).getByRole("button", { name: /^Errors/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(changes.mock.calls.map(([options]) => options?.cursor)).toEqual([undefined, "empty", "last"]);
+    expect(crashes.mock.calls.map(([options]) => options?.cursor)).toEqual([undefined, "empty", "last"]);
+    expect(screen.queryByRole("navigation", { name: "Crash journal pages" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Next page" })).toBeNull();
+    expect(logs.mock.calls.every(([options]) => options.since === "2026-10-14T11:59:00.000Z")).toBe(true);
+  });
+
+  it.each(["not_found", "ambiguous", "partial", "missing-time"] as const)("keeps a truthful mounted log panel for %s without using URL center or another occurrence as a break", async status => {
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&occurrence_id=selected-break&center=${issue.broke_at}`);
+    const context: KubernetesIssuePage = { ...persistedRootPage(), selection_status: status === "missing-time" ? "resolved" : status,
+      selected_occurrence: status === "missing-time" ? { ...issue, occurrence_id: "selected-break", broke_at: undefined } : undefined };
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue(context);
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync });
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(crashPage);
+    const logs = vi.spyOn(api, "kubernetesBreakLogs");
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    const panel = await screen.findByRole("region", { name: "Logs at break" });
+    expect(await within(panel).findByText("Log time range is unavailable for this observation.")).toBeTruthy();
+    expect(within(panel).getByRole("button", { name: "Ask chat" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByRole("slider", { name: "Log window start" })).toBeNull();
+    expect(logs).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mismatched selected occurrence instead of substituting root identity", async () => {
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&occurrence_id=selected-break&center=${issue.broke_at}`);
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ ...persistedRootPage(), selected_occurrence: { ...issue, occurrence_id: "different-break" } });
+    const logs = vi.spyOn(api, "kubernetesBreakLogs");
+    const changes = vi.spyOn(api, "kubernetesChanges");
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await screen.findByRole("button", { name: "Retry root context" });
+    expect(screen.queryByRole("region", { name: "Logs at break" })).toBeNull();
+    expect(logs).not.toHaveBeenCalled();
+    expect(changes).not.toHaveBeenCalled();
+  });
+
   it("keeps persisted identity when the selected window predates capture, without inventing markers or totals", async () => {
     window.history.replaceState(null, "", "/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=2020-01-01T00:00:00Z");
     const contextPage = persistedRootPage({ ...issue, first_seen: "2020-01-01T00:00:00Z", changes: [{ change, relation: "same_object", lead_seconds: 1 }] });
@@ -411,8 +518,8 @@ describe("Persisted root identity independent of historical windows", () => {
     expect(related).not.toHaveBeenCalled();
     const metadata = lookup.mock.calls.filter(([options]) => options?.context === "persisted");
     expect(metadata).toHaveLength(1);
-    expect(metadata[0][0]).toEqual({ context: "persisted", root_uid: "checkout-uid", namespace: "shop" });
-    const contextKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", "shop");
+    expect(metadata[0][0]).toMatchObject({ context: "persisted", root_uid: "checkout-uid", namespace: "shop", center: "2020-01-01T00:00:00Z" });
+    const contextKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", "shop", undefined, "2020-01-01T00:00:00Z");
     expect(client.getQueryData(contextKey)).toMatchObject({ items: [], totals: {}, root_context: { retained: true, root: issue.root } });
     expect(changes.mock.calls[0][0]).toMatchObject({ root_uid: "checkout-uid", namespace: "shop", since: "2019-12-31T23:30:00.000Z", until: "2020-01-01T00:30:00.000Z" });
     expect(crashes.mock.calls[0][0]).toMatchObject({ root_uid: "checkout-uid", namespace: "shop" });
@@ -493,12 +600,11 @@ describe("Persisted root identity independent of historical windows", () => {
     });
     const related = vi.spyOn(api, "kubernetesRelated");
     const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
-    await screen.findByRole("button", { name: /Deployment checkout:.* at / });
-    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await screen.findAllByRole("button", { name: /Deployment checkout:.* at / });
     await waitFor(() => expect(changes.mock.calls.at(-1)?.[0]?.cursor).toBe("older"));
-    await screen.findByRole("button", { name: /Deployment checkout:.* at / });
+    await screen.findAllByRole("button", { name: /Deployment checkout:.* at / });
     const selected = changes.mock.calls.at(-1)![0];
-    const contextKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", explicitNamespace ? "shop" : "");
+    const contextKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", explicitNamespace ? "shop" : "", undefined, issue.broke_at);
     const otherKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "other-root", "shop");
     client.setQueryData(otherKey, { identity: "unaffected" });
     const target = client.getQueryCache().findAll({ queryKey: kubernetesKey("east", `kubernetes-${route}`), predicate: query => query.isActive() })
@@ -521,10 +627,10 @@ describe("Persisted root identity independent of historical windows", () => {
     expect(screen.queryByText("Deployment shop/checkout")).toBeNull();
     holdContext = false;
     await act(async () => { nextContext.resolve(persistedRootPage()); });
-    expect(await screen.findByRole("button", { name: /Deployment checkout:.* at / })).toBeTruthy();
+    expect(await screen.findAllByRole("button", { name: /Deployment checkout:.* at / })).toHaveLength(2);
     expect(screen.getByText("Deployment shop/checkout")).toBeTruthy();
     expect(historyCounts().every((count, index) => count > beforeRetry[index])).toBe(true);
-    expect(contextCalls().at(-1)?.[0]).toEqual({ context: "persisted", root_uid: "checkout-uid", namespace: explicitNamespace ? "shop" : undefined });
+    expect(contextCalls().at(-1)?.[0]).toMatchObject({ context: "persisted", root_uid: "checkout-uid", namespace: explicitNamespace ? "shop" : undefined, center: issue.broke_at });
     expect(changes.mock.calls.at(-1)?.[0]).toEqual(selected);
     expect(crashes.mock.calls.every(([options]) => options?.namespace === "shop")).toBe(true);
     expect(client.getQueryData(contextKey)).toMatchObject({ items: [], totals: {}, root_context: { retained: true } });
@@ -552,7 +658,7 @@ describe("Persisted root identity independent of historical windows", () => {
       await waitFor(() => expect((screen.getByRole("button", { name: "Retry root context" }) as HTMLButtonElement).disabled).toBe(false));
       expect(screen.queryByText("Deployment shop/checkout")).toBeNull();
       expect(screen.queryByRole("region", { name: "Timeline lane checkout" })).toBeNull();
-      expect(client.getQueryData(kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", "shop"))).toBeUndefined();
+      expect(client.getQueryData(kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", "shop", undefined, issue.broke_at))).toBeUndefined();
     }
     expect(issues.mock.calls.filter(([options]) => options?.context === "persisted")).toHaveLength(3);
   });
@@ -572,7 +678,7 @@ describe("Persisted root identity independent of historical windows", () => {
     vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(logPage());
     const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
     await screen.findByRole("button", { name: /Deployment checkout:.* at / });
-    const contextKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", "shop");
+    const contextKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "checkout-uid", "shop", undefined, issue.broke_at);
     const otherKey = kubernetesKey("east", "kubernetes-issues", "timeline-root-context", "different-uid", "shop");
     client.setQueryData(otherKey, { retained: "other-root" });
     const lateKey = kubernetesKey("east", "kubernetes-changes", "timeline-root", "checkout-uid", "shop", "late");

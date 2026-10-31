@@ -19,6 +19,7 @@ import {
   ApiError,
   type KubernetesChange,
   type KubernetesChangesPage,
+  type KubernetesCrashEvent,
   type KubernetesHelmRelease,
   type KubernetesGraph,
   type KubernetesGraphNode,
@@ -38,6 +39,7 @@ import { KubernetesWarnings } from "./KubernetesWarnings";
 import { failureWarnings, issueWarnings } from "./kubernetesWarningItems";
 import { KubernetesAgentTab } from "./KubernetesAgentTab";
 import { KubernetesBreakLogs, KubernetesBreakLogsProvider } from "./KubernetesBreakLogs";
+import { focusedChanges, type FocusedCoverage } from "@/lib/kubernetesFocusedHistory";
 
 const virtualViewportHeight = 440;
 const resourceRowHeight = 58;
@@ -861,12 +863,14 @@ function TimelineView({ onSelectResource }: { onSelectResource: ResourceSelectio
   const { search } = useLocation();
   const focus = new URLSearchParams(search);
   const rootUID = focus.get("root_uid");
-  return rootUID ? <RootTimelineView key={JSON.stringify([cluster, rootUID, focus.get("center"), focus.get("namespace"), focus.get("kind")])} rootUID={rootUID} focus={focus} onSelectResource={onSelectResource} /> : <UnfocusedTimelineView onSelectResource={onSelectResource} />;
+  return rootUID ? <RootTimelineView key={JSON.stringify([cluster, rootUID, focus.get("occurrence_id"), focus.get("crash_id"), focus.get("center"), focus.get("namespace"), focus.get("kind")])} rootUID={rootUID} focus={focus} onSelectResource={onSelectResource} /> : <UnfocusedTimelineView onSelectResource={onSelectResource} />;
 }
 
 function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: string; focus: URLSearchParams; onSelectResource: ResourceSelection }) {
   const { client: api, cluster, key } = useKubernetesCluster();
   const center = focus.get("center");
+  const occurrenceID = focus.get("occurrence_id") || undefined;
+  const crashID = focus.get("crash_id") || undefined;
   const centerTime = center ? Date.parse(center) : NaN;
   const centered = Number.isFinite(centerTime);
   const [minutes, setMinutes] = useState<TimelineMinutes>(60);
@@ -879,16 +883,23 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
   const [authorityHeld, setAuthorityHeld] = useState(false);
   const [checkingContext, setCheckingContext] = useState(false);
   const [awaitingWindowProof, setAwaitingWindowProof] = useState(false);
+  const [logAuthorityError, setLogAuthorityError] = useState<Error | null>(null);
   const rootContext = useQuery({
-    queryKey: ["kubernetes-issues", "timeline-root-context", rootUID, namespace],
+    queryKey: ["kubernetes-issues", "timeline-root-context", rootUID, namespace, occurrenceID, center],
     queryFn: async ({ signal }) => {
-      const page = await api.kubernetesIssues({ root_uid: rootUID, namespace: namespace || undefined, context: "persisted" }, signal);
+      const page = await api.kubernetesIssues({ root_uid: rootUID, namespace: namespace || undefined, context: "persisted", occurrence_id: occurrenceID, center: centered ? center! : undefined }, signal);
       const context = page.root_context;
       if (context && (context.retained !== true || !context.root.kind || !context.root.name || context.root.uid !== rootUID || context.occurrence.root.uid !== rootUID
         || namespace && (context.root.namespace !== namespace || context.occurrence.root.namespace !== namespace)
         || context.root.kind !== context.occurrence.root.kind || context.root.name !== context.occurrence.root.name
         || context.root.namespace !== context.occurrence.root.namespace)) {
         throw new ApiError(502, "Retained root context does not match this selection", { code: "root_context_mismatch" });
+      }
+      const selected = page.selected_occurrence;
+      if (selected && (!context || page.selection_status !== "resolved" || selected.root.uid !== rootUID
+        || selected.root.namespace !== context.root.namespace || selected.root.kind !== context.root.kind || selected.root.name !== context.root.name
+        || occurrenceID && selected.occurrence_id !== occurrenceID)) {
+        throw new ApiError(502, "Selected occurrence does not match this selection", { code: "root_context_mismatch" });
       }
       return page;
     },
@@ -916,11 +927,10 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
     retry: false,
     refetchInterval: (query) => query.state.data?.sync.pending?.length ? 5000 : false,
   });
-  const crashes = useKubernetesCrashes({ root_uid: rootUID, namespace: rootNamespace, since, until: new Date(Math.min(journalCeiling, Date.parse(until))).toISOString() }, windowReadsEnabled && !kubernetesAccessLost(breaks.error), true);
+  const crashes = useKubernetesCrashes({ root_uid: rootUID, namespace: rootNamespace, since, until: new Date(Math.min(journalCeiling, Date.parse(until))).toISOString() }, windowReadsEnabled && !kubernetesAccessLost(breaks.error), true, true);
   const historicalIssue = breaks.data?.items.find(item => item.root.uid === rootUID && item.root.namespace === context?.root.namespace);
-  const paging = useCursorPagination(`root-timeline:${rootUID}:${since}:${until}:${namespace}:${kind}`);
-  const changes = useQuery<KubernetesChangesPage>({
-    queryKey: ["kubernetes-changes", "timeline-root", rootUID, rootNamespace, since, until, kind, paging.cursor],
+  const changes = useQuery<KubernetesChangesPage & FocusedCoverage>({
+    queryKey: ["kubernetes-changes", "timeline-root", rootUID, rootNamespace, since, until, kind],
     enabled: windowReadsEnabled && !kubernetesAccessLost(breaks.error) && !kubernetesAccessLost(crashes.error),
     retry: false,
     // Keep the previous range on screen while a new range or page loads, so
@@ -930,13 +940,13 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
       const scope = key("kubernetes-changes", "timeline-root", rootUID, rootNamespace);
       return prior && JSON.stringify(prior.slice(0, scope.length)) === JSON.stringify(scope) && prior[scope.length + 2] === kind ? previous : undefined;
     },
-    queryFn: ({ signal }) => api.kubernetesChanges({ root_uid: rootUID, since, until, namespace: rootNamespace, kind: kind || undefined, limit: 100, cursor: paging.cursor }, signal),
+    queryFn: ({ signal }) => focusedChanges(cursor => api.kubernetesChanges({ root_uid: rootUID, since, until, namespace: rootNamespace, kind: kind || undefined, limit: 100, cursor }, signal, "single"), signal),
   });
-  const rootAuthorityLost = contextBlocked || kubernetesAccessLost(breaks.error) || kubernetesAccessLost(changes.error) || kubernetesAccessLost(crashes.error);
+  const rootAuthorityLost = contextBlocked || kubernetesAccessLost(breaks.error) || kubernetesAccessLost(changes.error) || kubernetesAccessLost(crashes.error) || kubernetesAccessLost(logAuthorityError);
   const fenced = useRef<Array<Error | null>>([]);
   useLayoutEffect(() => {
     if (!rootAuthorityLost) { fenced.current = []; return; }
-    const errors = [rootContext.error, breaks.error, changes.error, crashes.error];
+    const errors = [rootContext.error, breaks.error, changes.error, crashes.error, logAuthorityError];
     if (errors.every((error, index) => error === fenced.current[index])) return;
     fenced.current = errors;
     setAuthorityHeld(true);
@@ -954,8 +964,8 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
     void cache.cancelQueries(filters);
     cache.removeQueries({ ...filters, predicate: query => filters.predicate(query)
       && query.queryKey[3] !== "timeline-root-context" && !kubernetesAccessLost(query.state.error) });
-    cache.getQueryCache().find({ queryKey: key("kubernetes-issues", "timeline-root-context", rootUID, namespace), exact: true })?.setState({ data: undefined });
-  }, [rootAuthorityLost, rootContext.error, breaks.error, changes.error, crashes.error, cache, key, rootUID, namespace]);
+    cache.getQueryCache().find({ queryKey: key("kubernetes-issues", "timeline-root-context", rootUID, namespace, occurrenceID, center), exact: true })?.setState({ data: undefined });
+  }, [rootAuthorityLost, rootContext.error, breaks.error, changes.error, crashes.error, logAuthorityError, cache, key, rootUID, namespace, occurrenceID, center]);
   useEffect(() => {
     if (!awaitingWindowProof) return;
     if (breaks.isError || changes.isError || crashes.isError) { setAwaitingWindowProof(false); return; }
@@ -975,25 +985,38 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
       const fresh = result.data?.root_context;
       if (!recovering || result.isError || !fresh) return;
       const freshNamespace = fresh.root.namespace;
+      setLogAuthorityError(null);
       // A current date-free context proof precedes fresh selected-window reads.
       // Reset errors/data only; never change the user's range, kind or cursors.
       await Promise.all([
         key("kubernetes-issues", "timeline-root", rootUID, freshNamespace ?? "", since, until),
-        key("kubernetes-changes", "timeline-root", rootUID, freshNamespace, since, until, kind, paging.cursor),
-        key("kubernetes-crashes", { root_uid: rootUID, namespace: freshNamespace, since, until: new Date(Math.min(journalCeiling, Date.parse(until))).toISOString() }, crashes.paging.cursor),
+        key("kubernetes-changes", "timeline-root", rootUID, freshNamespace, since, until, kind),
+        key("kubernetes-crashes", { root_uid: rootUID, namespace: freshNamespace, since, until: new Date(Math.min(journalCeiling, Date.parse(until))).toISOString() }, crashes.paging.cursor, "focused"),
       ].map(queryKey => cache.resetQueries({ queryKey, exact: true })));
       setAwaitingWindowProof(true);
     } finally { setCheckingContext(false); }
   };
-  const issue = !rootAuthorityLost && !authorityHeld && context ? { ...(historicalIssue ?? context.occurrence), root: context.root, changes: [] } : undefined;
+  const selectedOccurrence = rootContext.data?.selection_status === "resolved" ? rootContext.data.selected_occurrence : undefined;
+  const pinnedCrash = useRef<KubernetesCrashEvent | undefined>(undefined);
+  if (rootAuthorityLost || authorityHeld || !context) pinnedCrash.current = undefined;
+  else if (crashID && !pinnedCrash.current) pinnedCrash.current = crashes.data?.items.find(event => event.id === crashID
+    && event.root_uid === rootUID && event.namespace === context.root.namespace && (!cluster || event.cluster === cluster)
+    && Number.isFinite(Date.parse(event.at)) && !isZeroTime(event.at));
+  const selection: KubernetesIssue | undefined = crashID ? pinnedCrash.current && {
+    root: context!.root, rule: "container.termination", severity: "warning", count: 1, state: "observed",
+    broke_at: pinnedCrash.current.at, broke_at_source: pinnedCrash.current.time_source,
+  } : selectedOccurrence;
+  const verifiedTime = selection?.broke_at && !isZeroTime(selection.broke_at)
+    && Number.isFinite(Date.parse(selection.broke_at)) ? selection.broke_at : undefined;
+  const issue = !rootAuthorityLost && !authorityHeld && context ? { ...(selection ?? context.occurrence), broke_at: verifiedTime, root: context.root, changes: [] } : undefined;
   const data = issue && changes.data ? { ...changes.data, items: changes.data.items.filter((change) => (!cluster || change.cluster === cluster) && (!rootNamespace || change.namespace === rootNamespace || change.kind === "Node")) } : undefined;
   const gaps = [...(data?.gaps ?? []), ...(historicalIssue?.gaps ?? [])];
   const failures = rootAuthorityLost ? [] : [...(rootContext.data?.partial_failures ?? []), ...(breaks.data?.partial_failures ?? []), ...(data?.partial_failures ?? [])];
-  const warnings: Array<{ id: string; content: ReactNode }> = [...issueWarnings(historicalIssue ? { ...historicalIssue, gaps: [] } : undefined), ...failureWarnings(failures)];
+  const warnings: Array<{ id: string; content: ReactNode }> = [...issueWarnings(selection ? { ...selection, gaps: [] } : undefined), ...failureWarnings(failures)];
   if ([rootContext.data?.sync.state, breaks.data?.sync.state, data?.sync.state].includes("stale")) warnings.push({ id: "snapshot-stale", content: "Timeline evidence includes stale snapshots." });
   if (gaps.length) warnings.push({ id: "history-gaps", content: "Change capture does not cover the whole range" });
   const unfocusedQuery = new URLSearchParams(focus);
-  for (const name of ["root_uid", "center", "namespace", "kind"]) unfocusedQuery.delete(name);
+  for (const name of ["root_uid", "occurrence_id", "crash_id", "center", "namespace", "kind"]) unfocusedQuery.delete(name);
   if (namespace) unfocusedQuery.set("namespace", namespace);
   if (kind) unfocusedQuery.set("kind", kind);
   for (const name of ["logs_from", "logs_to", "logs_mode", "logs_pod", "logs_container"]) unfocusedQuery.delete(name);
@@ -1002,7 +1025,8 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
   const noMarkers = issue && data && !data.items.length && !data.next && crashes.data && !crashes.data.items.length && !crashes.data.next
     && !breaks.isError && !changes.isError && !crashes.isError && !changes.isFetching && !crashes.isFetching && !rangeLoading
     && !incompleteKubernetesSnapshot(data) && !incompleteKubernetesSnapshot(crashes.data);
-  return <KubernetesBreakLogsProvider issue={issue} onSelectResource={onSelectResource}><section className="card overflow-clip" aria-label="Kubernetes change timeline">
+  const selectedOffRange = verifiedTime && (Date.parse(verifiedTime) < Date.parse(since) || Date.parse(verifiedTime) > Date.parse(until));
+  return <KubernetesBreakLogsProvider issue={issue} onSelectResource={onSelectResource} onAccessLost={setLogAuthorityError}><section className="card overflow-clip" aria-label="Kubernetes change timeline">
     <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-b border-ink-700 px-4 py-2">
       <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs"><span className="text-ink-300">Filtered</span><span className="pill max-w-full"><span className="truncate" title={rootUID}>{issue ? `${issue.root.kind} ${issue.root.namespace ? `${issue.root.namespace}/` : ""}${issue.root.name}` : rootUID}</span><Link to={`?${unfocusedQuery}`} className="ml-2" aria-label="Clear root filter" title="Clear root filter"><X size={12} aria-hidden="true" /></Link></span>{centered && <time className="pill pill-accent font-mono" dateTime={new Date(centerTime).toISOString()}>centred {new Date(centerTime).toLocaleTimeString([], { hour12: false })}</time>}</div>
       <TimelineRangeControl minutes={minutes} onChange={setMinutes} loading={rangeLoading} compact />
@@ -1015,12 +1039,13 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
     {(breaks.isError || breaks.unpublished) && <p role="status" className="p-4 text-sm text-sev-warning">Root history unavailable.</p>}
     {changes.isError && <p role="status" className="p-4 text-sm text-sev-warning">Related change history is unavailable.<button type="button" className="ml-2 text-link" disabled={checkingContext || awaitingWindowProof} onClick={() => void (rootAuthorityLost || authorityHeld ? retryRootContext() : changes.refetch())}>Retry</button></p>}
     {issue && <>
-      <BreakTimelineLane scope={JSON.stringify([cluster, rootUID, minutes, namespace, kind, paging.cursor, crashes.paging.cursor])} warningsOwned issue={{ ...issue, changes: [] }} crashes={crashes.isError ? [] : crashes.data?.items ?? []} changes={data?.items ?? []} since={since} until={until} onSelectChange={(change) => { const resource_id = resourceIdForKind(change.kind); if (resource_id) onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline"); }} />
-      <CursorPagination state={paging} busy={changes.isFetching} next={data?.next} />
+      <BreakTimelineLane scope={JSON.stringify([cluster, rootUID, minutes, namespace, kind, occurrenceID, center])} warningsOwned issue={{ ...issue, changes: [] }} crashes={crashes.isError ? [] : crashes.data?.items ?? []} changes={data?.items ?? []} since={since} until={until} onSelectChange={(change) => { const resource_id = resourceIdForKind(change.kind); if (resource_id) onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline"); }} />
+      {data?.incomplete_range && <p role="status" className="p-4 text-sm text-sev-warning">Change evidence is incomplete for this range. Narrow the timeline window to inspect more evidence.</p>}
+      {selectedOffRange && <p role="status" className="px-4 py-2 text-xs text-ink-300">The selected break time is outside this timeline range. Its log window remains selected.</p>}
       {noMarkers && <p role="status" className="p-4 text-sm text-ink-400">No captured markers in this range.</p>}
     </>}
     </div>
-    <KubernetesBreakLogs pending={rootContext.isPending || Boolean(issue) && breaks.isPending} />
+    <KubernetesBreakLogs mounted={Boolean(context) && !rootAuthorityLost && !authorityHeld} pending={rootContext.isPending || Boolean(crashID && !pinnedCrash.current && crashes.isPending)} />
     {issue && <CrashJournal journal={crashes} reasons={warnings.map((warning) => warning.content)} />}
   </section></KubernetesBreakLogsProvider>;
 }
@@ -1071,11 +1096,14 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     if (!resource_id) return;
     onSelectResource({ resource_id, kind: change.kind, namespace: change.namespace, name: change.name, uid: change.uid }, "timeline");
   };
-  const focusedLink = (uid: string, at: string, ns?: string) => {
+  const focusedLink = (uid: string, at: string, ns?: string, occurrenceID?: string, crashID?: string) => {
     const query = new URLSearchParams(focus);
     query.set("view", "timeline");
     query.set("root_uid", uid);
     query.set("center", at);
+    if (occurrenceID) query.set("occurrence_id", occurrenceID); else query.delete("occurrence_id");
+    if (crashID) query.set("crash_id", crashID); else query.delete("crash_id");
+    for (const field of ["logs_from", "logs_to", "logs_mode", "logs_pod", "logs_container"]) query.delete(field);
     if (ns) query.set("namespace", ns); else query.delete("namespace");
     return `?${query}`;
   };
@@ -1089,11 +1117,11 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     if (entry.type === "break") {
       const issue = entry.issue;
       return { ...entry, kind: issue.root.kind, name: issue.root.name, namespace: issue.root.namespace, summary: issue.rule.replaceAll(/[._]/g, " "),
-        content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(issue.root.uid ?? "", entry.at, issue.root.namespace)}>Open break details</Link> };
+        content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(issue.root.uid ?? "", entry.at, issue.root.namespace, issue.occurrence_id)}>Open break details</Link> };
     }
     const crash = entry.crash;
     return { ...entry, kind: crash.root_kind || "Pod", name: crash.root_name || crash.pod, namespace: crash.namespace, summary: `${crash.container}: ${crash.reason || "Terminated"}, exit ${crash.exit_code}`,
-      content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(crash.root_uid || crash.pod_uid, entry.at, crash.namespace)}>Open crash details</Link> };
+      content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(crash.root_uid || crash.pod_uid, entry.at, crash.namespace, undefined, crash.id)}>Open crash details</Link> };
   });
   return <section className="card overflow-clip transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
     <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && (data.items.length > 0 || !timeline.isError && !incompleteKubernetesSnapshot(data)) && <span className="text-2xs text-ink-400">{breaksOnly ? `${data.counts?.break ?? data.total} ${(data.counts?.break ?? data.total) === 1 ? "break" : "breaks"} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event")} and ${counted(data.crash_count, "crash")}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />

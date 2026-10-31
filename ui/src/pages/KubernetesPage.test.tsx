@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
+import { notifyManager, QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { BrowserRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, type KubernetesIssue } from "@/lib/api";
@@ -109,10 +109,182 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); window.history.replaceState(null, "", "/"); });
 
 describe("KubernetesPage", () => {
+	it.each(["Overview", "Issues", "Timeline"])("opens the pinned occurrence from %s without a cross-component render update", async (entrypoint) => {
+		const errors = vi.spyOn(console, "error");
+		const sync = { state: "ready", age_s: 0, partial: false };
+		const center = new Date(Date.now() - 300_000).toISOString().replace(/\.\d{3}Z$/, ".123456789Z");
+		const selected: KubernetesIssue = {
+			root: { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" },
+			occurrence_id: "pinned-old", rule: "pod.crash_loop", severity: "critical", count: 1, broken: false, broke_at: center,
+		};
+		const newer = { ...selected, occurrence_id: "newer", broke_at: new Date().toISOString() };
+		vi.mocked(api.kubernetesIssues).mockImplementation(async (options) => ({
+			items: [options?.context === "persisted" ? newer : selected], totals: { critical: 1 }, broken: { total: 1 }, sync,
+			...(options?.context === "persisted" ? { selected_occurrence: selected, selection_status: "resolved" as const, root_context: { root: selected.root, occurrence: newer, retained: true } } : {}),
+		}));
+		vi.mocked(api.kubernetesTimeline).mockResolvedValue({
+			items: [{ type: "break", id: selected.occurrence_id!, at: center, issue: selected }],
+			total: 1, crash_count: 0, counts: { change: 0, crash: 0, break: 1 }, since: center, until: new Date().toISOString(), gaps: [], sync,
+		});
+		const logs = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(async (options) => ({
+			window: { from: options.since, to: options.until }, pods: [], lines: [], markers: [], counts: { all: 0, errors: 0, warnings: 0 },
+			rate: [], patterns: [], sources: [], coverage: { state: "complete", gaps: [], reason: "", tip: false },
+		}));
+		try {
+			renderPage();
+			await screen.findByRole("button", { name: "Timeline for checkout" });
+			if (entrypoint !== "Overview") {
+				await browserClick(screen.getByRole("tab", { name: entrypoint, exact: true }));
+			}
+			await browserClick(entrypoint === "Timeline"
+				? await screen.findByRole("link", { name: "Open break details", exact: true })
+				: await screen.findByRole("button", { name: "Timeline for checkout" }));
+			await screen.findByRole("region", { name: "Timeline lane checkout" });
+			await screen.findByRole("region", { name: "Logs at break", exact: true });
+			const query = new URLSearchParams(window.location.search);
+			expect(query.get("center")).toBe(center);
+			expect(query.get("occurrence_id")).toBe("pinned-old");
+			expect(api.kubernetesIssues).toHaveBeenCalledWith(expect.objectContaining({ context: "persisted", center, occurrence_id: "pinned-old" }), expect.anything());
+			expect(screen.getByRole("slider", { name: "Log window start" })).toBeTruthy();
+			await settle();
+			expect(errors.mock.calls.filter(args => args.some(value => String(value).includes("Cannot update a component")))).toEqual([]);
+		} finally {
+			logs.mockRestore();
+			errors.mockRestore();
+		}
+	});
+
+	it("defers cache snapshot notifications and retires queued callbacks on unsubscribe", async () => {
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const batches = vi.spyOn(notifyManager, "batchCalls");
+		const reads = vi.spyOn(client, "getQueryData");
+		const { unmount } = renderPage(client);
+		await screen.findByRole("region", { name: "Cluster health" });
+		await settle();
+		vi.useFakeTimers();
+		try {
+			const snapshotReads = () => reads.mock.calls.filter(([key]) => key.includes("kubernetes-changes") && key.includes("overview")).length;
+			const before = snapshotReads();
+			// Even unrelated cache events reach this subscriber; never notify
+			// React synchronously while another component constructs its query.
+			client.setQueryData(["unrelated-notification"], 1);
+			expect(snapshotReads()).toBe(before);
+			expect(batches).toHaveBeenCalled();
+			await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+			expect(snapshotReads()).toBeGreaterThan(before);
+			const queued = batches.mock.calls.at(-1)![0];
+			client.setQueryData(["unrelated-notification"], 2);
+			unmount();
+			reads.mockClear();
+			// Exercise both an already queued notification and a stale retained
+			// callback: unsubscription must make the callback itself inert.
+			queued();
+			await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+			expect(snapshotReads()).toBe(0);
+		} finally {
+			unmount();
+			reads.mockRestore();
+			batches.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps mixed workload actions and the header in the same scrollbar width context", async () => {
+		const kinds = ["Deployment", "CronJob", "Pod", "ConfigMap"];
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: kinds.map(kind => ({
+			resource_id: kind === "ConfigMap" ? "core~v1~configmaps" : kind === "Pod" ? "core~v1~pods" : kind === "CronJob" ? "batch~v1~cronjobs" : "apps~v1~deployments",
+			kind, namespace: "shop", name: `${kind}-${"long-name-".repeat(20)}`,
+		})), counts: { Deployment: 1, CronJob: 1, Pod: 1, ConfigMap: 1 }, truncated: false });
+		renderWorkloads();
+		const inventory = await screen.findByRole("region", { name: "Workloads" });
+		const rows = await within(inventory).findAllByRole("listitem");
+		expect(rows).toHaveLength(4);
+		const header = inventory.querySelector(".kubernetes-workload-head")!;
+		expect(header.parentElement).toBe(rows[0].parentElement);
+		expect(header.classList.contains("kubernetes-workload-shell")).toBe(true);
+		for (const row of rows) {
+			expect(row.classList.contains("kubernetes-workload-shell")).toBe(true);
+			expect(row.children).toHaveLength(2);
+			expect(row.children[0].tagName).toBe("BUTTON");
+			expect(row.children[0].querySelector("button")).toBeNull();
+			expect(row.children[1].className).toBe(rows[0].children[1].className);
+		}
+		expect(within(rows[3]).queryByRole("button", { name: /Logs/ })).toBeNull();
+		expect(within(rows[1]).queryByRole("button", { name: /Logs/ })).toBeNull();
+		for (const row of [rows[0], rows[2]]) expect(within(row).getByRole("button", { name: /Logs/ }).parentElement).toBe(row.children[1]);
+	});
+
+	it("does not manufacture numeric kind badges without a scoped publication or borrow rows for a new filter", async () => {
+		let finish!: (value: Awaited<ReturnType<typeof api.kubernetesWorkloads>>) => void;
+		vi.mocked(api.kubernetesWorkloads).mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+		renderWorkloads();
+		const inventory = await screen.findByRole("region", { name: "Workloads" });
+		expect(within(inventory).getByText("Loading inventory")).toBeTruthy();
+		const tabs = within(inventory).getByRole("tablist", { name: "Workload kind" });
+		expect(tabs.querySelectorAll(".tabular-nums")).toHaveLength(0);
+		await act(async () => { finish({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "committed-row" }], counts: { Deployment: 1 }, truncated: false }); });
+		await within(inventory).findByText("committed-row");
+		vi.mocked(api.kubernetesWorkloads).mockReturnValueOnce(new Promise(() => {}));
+		fireEvent.click(within(tabs).getByRole("tab", { name: "CronJob" }));
+		expect(within(inventory).queryByText("committed-row")).toBeNull();
+		expect(tabs.querySelectorAll(".tabular-nums")).toHaveLength(0);
+	});
+	it("does not present denied workload counts as zero or an aggregate total", async () => {
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "authorized-deployment" }],
+			counts: { Deployment: 1, Pod: 0 }, truncated: false, partial_failures: [{ resource_id: "core~v1~pods", class: "forbidden" }] });
+		renderWorkloads();
+		await screen.findByText("authorized-deployment");
+		const inventory = screen.getByRole("region", { name: "Workloads" });
+		const tabs = within(inventory).getByRole("tablist", { name: "Workload kind" });
+		expect(within(tabs).getByRole("tab", { name: "Pod" }).querySelector(".tabular-nums")).toBeNull();
+		expect(within(tabs).getByRole("tab", { name: "All" }).querySelector(".tabular-nums")).toBeNull();
+		expect(within(tabs).getByRole("tab", { name: "Deployment" }).textContent).toContain("1");
+		expect(within(inventory).getByText("Count unavailable")).toBeTruthy();
+	});
+	it("shows committed first-time timeout rows with omitted counts unknown and observed zero known", async () => {
+		const observed = "2026-08-30T12:00:00Z";
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ state: "error", partial: true, age_s: 18,
+			first_ready_at: observed, total_kinds: 6, ready_kinds: 5, failing_kinds: 1, pending_kinds: 0, truncated: false,
+			kinds: { CronJob: { state: "error", records: 0, partial: true, error: "timeout" } }, unreadable: [] });
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "committed-timeout-row" }],
+			counts: { Deployment: 1, StatefulSet: 0, DaemonSet: 0, Job: 0, Pod: 0 }, truncated: false,
+			sync: { state: "error", partial: true, age_s: 18, pending: null, pending_kinds: 0 },
+			partial_failures: [{ resource_id: "batch~v1~cronjobs", class: "timeout" }] });
+		renderWorkloads();
+		await screen.findByText("committed-timeout-row");
+		const inventory = screen.getByRole("region", { name: "Workloads" });
+		const tabs = within(inventory).getByRole("tablist", { name: "Workload kind" });
+		for (const kind of ["CronJob", "All"]) expect(within(tabs).getByRole("tab", { name: kind }).querySelector(".tabular-nums")).toBeNull();
+		expect(within(tabs).getByRole("tab", { name: "Deployment" }).querySelector(".tabular-nums")?.textContent).toBe("1");
+		expect(within(tabs).getByRole("tab", { name: "Job" }).querySelector(".tabular-nums")?.textContent).toBe("0");
+		expect(within(inventory).getByText("Count unavailable")).toBeTruthy();
+		expect(within(inventory).queryByText(/^\d+ total$/)).toBeNull();
+	});
+	it("recovers a typed expired inventory cursor explicitly without showing first-page rows under the later page", async () => {
+		let replacement = false;
+		vi.mocked(api.kubernetesWorkloads).mockImplementation(async options => {
+			if (options?.cursor) throw new ApiError(400, "Invalid query");
+			return { items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: replacement ? "replacement-page-one" : "old-page-one" }],
+				counts: { Deployment: 21 }, next: "expired-cursor", truncated: true };
+		});
+		renderWorkloads();
+		await screen.findByText("old-page-one");
+		const inventory = screen.getByRole("region", { name: "Workloads" });
+		fireEvent.click(within(inventory).getByRole("button", { name: "Next page" }));
+		const restart = await within(inventory).findByRole("button", { name: "Restart inventory paging" });
+		expect(within(inventory).queryByText("old-page-one")).toBeNull();
+		expect(within(inventory).queryByText("No workloads in this scope.")).toBeNull();
+		expect(within(inventory).queryByText("0 total")).toBeNull();
+		replacement = true;
+		fireEvent.click(restart);
+		await within(inventory).findByText("replacement-page-one");
+		expect(within(inventory).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(true);
+		expect(vi.mocked(api.kubernetesWorkloads).mock.calls.at(-1)?.[0].cursor).toBeUndefined();
+	});
 	it("follows the coverage tip router link into the Agent tab without reloading", async () => {
 		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline&root_uid=root&namespace=shop");
 		const retained: KubernetesIssue = { root: { kind: "Deployment", name: "checkout", namespace: "shop", uid: "root" }, rule: "pod.crash_loop", severity: "critical", count: 1, broken: true, broke_at: "2026-10-17T12:00:00Z" };
-		vi.mocked(api.kubernetesIssues).mockImplementation(async options => ({ items: options?.context === "persisted" ? [] : [retained], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false }, ...(options?.context === "persisted" ? { root_context: { root: retained.root, occurrence: retained, retained: true as const } } : {}) }));
+		vi.mocked(api.kubernetesIssues).mockImplementation(async options => ({ items: options?.context === "persisted" ? [] : [retained], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false }, ...(options?.context === "persisted" ? { selected_occurrence: retained, selection_status: "resolved" as const, root_context: { root: retained.root, occurrence: retained, retained: true as const } } : {}) }));
 		vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue({ window: { from: "2026-10-17T11:55:00Z", to: "2026-10-17T12:02:00Z" }, pods: [], lines: [], markers: [], counts: { all: 0, errors: 0, warnings: 0 }, rate: [], patterns: [], sources: [], coverage: { state: "none", tip: true, reason: "pod_deleted", gaps: [] } });
 		const fields = { namespace: "namespace", pod: "pod", container: "container" };
 		vi.spyOn(api, "kubernetesAgentSettings").mockResolvedValue({ learning: { logs: false, metrics: false, traces: false, scope: { include: [], exclude: [] } }, break_logs: { linked_source: "", fields: { loki: fields, elasticsearch: fields, cloudwatchlogs: fields, graylog: fields, splunk: fields, signoz: fields } }, can_write: false, linked_source_missing: false, sources: [], detected: { workloads: 1, namespaces: 1, metrics_server: false, traces: null } });
@@ -619,7 +791,7 @@ describe("KubernetesPage", () => {
 		expect(api.kubernetesGraph).not.toHaveBeenCalled();
 		expect(api.kubernetesNamespaces).not.toHaveBeenCalled();
 		expect(api.kubernetesWorkloads).toHaveBeenCalledOnce();
-		expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 }));
+		expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 }), expect.any(AbortSignal));
 	});
 
 	it("keeps workloads full width and the sampled timestamp naturally left aligned", async () => {
@@ -649,11 +821,12 @@ describe("KubernetesPage", () => {
 		renderWorkloads(client);
 		const inventory = await screen.findByRole("region", { name: "Workloads" });
 		await waitFor(() => expect(client.isFetching()).toBe(0));
-		expect(within(inventory).getByText("137 total")).toBeTruthy();
+		expect(within(inventory).getByText("Count unavailable")).toBeTruthy();
+		expect(within(inventory).getByRole("tab", { name: "Deployment" }).textContent).toContain("137");
 		vi.mocked(api.kubernetesWorkloads).mockRejectedValueOnce(new ApiError(status, "Access denied"));
 		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
 		expect(await within(inventory).findByText("Inventory unavailable")).toBeTruthy();
-		expect(within(inventory).queryByText("137 total")).toBeNull();
+		expect(within(inventory).queryByText("Count unavailable")).toBeNull();
 		expect(within(inventory).queryByText("137", { exact: true })).toBeNull();
 		expect(within(inventory).queryByText("private-api")).toBeNull();
 		expect(within(inventory).queryByText(/Some evidence could not be collected/)).toBeNull();
@@ -1338,7 +1511,7 @@ describe("KubernetesPage", () => {
 		renderWorkloads();
 		const inventory = await screen.findByRole("region", { name: "Workloads" });
 		expect(await within(inventory).findAllByRole("button", { name: /Select Deployment/ })).toHaveLength(20);
-		expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 }));
+		expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ limit: 20 }), expect.any(AbortSignal));
 	});
 
 	it("renders health, partial visibility, and cluster-scoped nodes", async () => {
@@ -1377,11 +1550,11 @@ describe("KubernetesPage", () => {
 		fireEvent.change(screen.getByLabelText("Resource name"), { target: { value: "nightly" } });
 		expect(await screen.findByText("nightly-cleanup")).toBeTruthy();
 		expect(screen.queryByText("checkout-api")).toBeNull();
-		await waitFor(() => expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ q: "nightly", limit: 20 })));
+		await waitFor(() => expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ q: "nightly", limit: 20 }), expect.any(AbortSignal)));
 		fireEvent.focus(screen.getByLabelText("Workload namespace"));
 		fireEvent.click(await screen.findByRole("option", { name: "payments" }));
 		expect(await screen.findByText("No matching workloads.")).toBeTruthy();
-		expect(api.kubernetesWorkloads).toHaveBeenLastCalledWith(expect.objectContaining({ namespace: "payments", q: "nightly", limit: 20 }));
+		expect(api.kubernetesWorkloads).toHaveBeenLastCalledWith(expect.objectContaining({ namespace: "payments", q: "nightly", limit: 20 }), expect.any(AbortSignal));
 		expect(api.kubernetesSearch).not.toHaveBeenCalled();
 	});
 
@@ -1487,8 +1660,8 @@ describe("KubernetesPage", () => {
 		// One page has nowhere to go, so the pager is gone rather than disabled.
 		expect(within(workloads).queryByRole("button", { name: "Next page" })).toBeNull();
 		expect(within(workloads).queryByRole("navigation", { name: "Page navigation" })).toBeNull();
-		expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ cursor: "workload-next", limit: 20 }));
-		expect(api.kubernetesWorkloads).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "Job", cursor: undefined, limit: 20 }));
+		expect(api.kubernetesWorkloads).toHaveBeenCalledWith(expect.objectContaining({ cursor: "workload-next", limit: 20 }), expect.any(AbortSignal));
+		expect(api.kubernetesWorkloads).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "Job", cursor: undefined, limit: 20 }), expect.any(AbortSignal));
 	});
 
 	it("fetches only the current server page for workloads and nodes without querying warning events", async () => {
@@ -2247,6 +2420,69 @@ describe("KubernetesPage sync gate", () => {
 	});
 
 	it.each([
+		["typed not-ready", "ready"], ["malformed success", "ready"],
+		["typed not-ready", "degraded"], ["typed not-ready", "failed"],
+	])("bounds late %s recovery under %s health to five scoped retries, then offers an explicit retry instead of polling forever", async (response, state) => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=resources");
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
+		const recoveryReport = { ...report(state === "failed" ? "error" : "ready", {
+			Pod: state === "ready" ? readyKind : { ...readyKind, state: state === "failed" ? "error" : "ready", partial: true, error: state === "failed" ? "unavailable" : "timeout" },
+		}, { failing: state === "ready" ? 0 : 1 }), first_ready_at: published };
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(recoveryReport);
+		let fail!: (error: ApiError) => void;
+		let finish!: (value: Awaited<ReturnType<typeof api.kubernetesWorkloads>>) => void;
+		vi.mocked(api.kubernetesWorkloads).mockReturnValueOnce(new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+		const { container } = renderPage();
+		await waitFor(() => expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(1));
+		if (state !== "ready") expect(container.querySelector(`[data-sync-strip="${state}"]`)).toBeTruthy();
+		vi.useFakeTimers();
+		try {
+			const error = new ApiError(503, "warming", { code: "inventory_not_ready", retryable: true });
+			const malformed = { items: [], counts: {}, truncated: false, sync: { state: "", age_s: 0, partial: false } };
+			if (response === "typed not-ready") vi.mocked(api.kubernetesWorkloads).mockRejectedValue(error);
+			else vi.mocked(api.kubernetesWorkloads).mockResolvedValue(malformed);
+			await act(async () => {
+				if (response === "typed not-ready") fail(error);
+				else finish(malformed);
+				await vi.advanceTimersByTimeAsync(20);
+			});
+			for (let retry = 0; retry < 6; retry++) await act(async () => { await vi.advanceTimersByTimeAsync(1_050); });
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(6);
+			expect(screen.getByRole("button", { name: "Retry inventory" })).toBeTruthy();
+			expect(screen.getByText("Inventory unavailable")).toBeTruthy();
+			expect(screen.queryByText("Loading inventory")).toBeNull();
+			expect(container.querySelector("[data-preparing-panel]")).toBeNull();
+			expect(screen.queryByText("0 total")).toBeNull();
+			await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(6);
+			vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [], counts: { Deployment: 0, StatefulSet: 0, DaemonSet: 0, Job: 0, CronJob: 0, Pod: 0 }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+			fireEvent.click(screen.getByRole("button", { name: "Retry inventory" }));
+			await act(async () => { await vi.advanceTimersByTimeAsync(20); });
+			expect(screen.getByText("No workloads in this scope.")).toBeTruthy();
+			expect(screen.getByText("0 total")).toBeTruthy();
+		} finally { vi.useRealTimers(); }
+	});
+
+	it.each(["cronjobs", "batch~v1~cronjobs"])("keeps pending %s counts unknown until the scope is actually listed", async pending => {
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("ready", { Pod: readyKind }), first_ready_at: published });
+		const listing = { items: [], counts: { Deployment: 2, CronJob: 0 }, truncated: false, sync: { state: "ready", age_s: 0, partial: false, pending: [pending] } };
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue(listing);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderWorkloads(client);
+		await screen.findByText("Count unavailable");
+		const kinds = screen.getByRole("tablist", { name: "Workload kind" });
+		expect(within(kinds).getByRole("tab", { name: "CronJob" }).textContent).toBe("CronJob");
+		expect(within(kinds).getByRole("tab", { name: /Deployment/ }).textContent).toBe("Deployment2");
+		expect(within(kinds).getByRole("tab", { name: "All" }).textContent).toBe("All");
+		expect(screen.queryByText("2 total")).toBeNull();
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ ...listing, counts: { Deployment: 2, StatefulSet: 0, DaemonSet: 0, Job: 0, CronJob: 0, Pod: 0 }, sync: { ...listing.sync, pending: [] } });
+		await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
+		await screen.findByText("2 total");
+		expect(within(kinds).getByRole("tab", { name: /CronJob/ }).textContent).toBe("CronJob0");
+	});
+
+	it.each([
 		["malformed success", false], ["malformed success", true],
 		["typed not-ready", false], ["typed not-ready", true],
 	] as const)("recovers a late %s with unchanged ready authority (cached publication: %s)", async (response, cached) => {
@@ -2283,14 +2519,14 @@ describe("KubernetesPage sync gate", () => {
 			expect(screen.queryByText("No workloads in this scope.")).toBeNull();
 			expect(screen.queryByText("0 total")).toBeNull();
 			if (cached) expect(screen.getByText("committed-api")).toBeTruthy();
-			else expect(screen.getByText("Inventory unavailable")).toBeTruthy();
+			else expect(screen.getByText(response === "typed not-ready" ? "Loading inventory" : "Inventory unavailable")).toBeTruthy();
 			await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
 			expect(screen.getByText("recovered-api")).toBeTruthy();
 			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(2);
 			await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
 			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(2);
 			// A real complete-empty publication from the existing stream replaces rows.
-			vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ ...malformed, sync: committed.sync });
+			vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ ...malformed, counts: { Deployment: 0, StatefulSet: 0, DaemonSet: 0, Job: 0, CronJob: 0, Pod: 0 }, sync: committed.sync });
 			await act(async () => { emit({ event: "records", data: "{}" }); await vi.advanceTimersByTimeAsync(800); });
 			expect(screen.queryByText("recovered-api")).toBeNull();
 			expect(screen.getByText("No workloads in this scope.")).toBeTruthy();
@@ -2369,6 +2605,22 @@ describe("KubernetesPage sync gate", () => {
 		expect(client.getQueryData(lateKey)).toEqual(currentGraph);
 		expect(screen.queryByText("protected-api")).toBeNull();
 		expect(screen.queryByRole("dialog", { name: "Details panel" })).toBeNull();
+		// An old callback can outlive both the denial and the successful refresh.
+		// It must not invalidate or overwrite the new authority's publication.
+		const reauthorizedReads = vi.mocked(api.kubernetesWorkloads).mock.calls.length;
+		vi.useFakeTimers();
+		try {
+			await act(async () => {
+				emitLog({ event: "line", container: "app", text: "retired after refresh" });
+				oldStream[0]({ event: "sync", data: JSON.stringify({ state: "error", partial: true }) });
+				oldStream[0]({ event: "records", data: "{}" });
+				await vi.advanceTimersByTimeAsync(800);
+			});
+			expect(screen.queryByText("retired after refresh")).toBeNull();
+			expect(screen.getByText("reauthorized-api")).toBeTruthy();
+			expect(client.getQueryData(lateKey)).toEqual(currentGraph);
+			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(reauthorizedReads);
+		} finally { vi.useRealTimers(); }
 	});
 
 	it("recovers through report polling after correlated overview denial and a held cycle-authority failure", async () => {
