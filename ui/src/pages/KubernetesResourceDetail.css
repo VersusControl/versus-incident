@@ -635,6 +635,11 @@
   align-items: center;
   gap: 12px;
 }
+.kubernetes-workload-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.5rem;
+}
+.kubernetes-workload-head { display: none; }
 .kubernetes-list-head {
   display: none;
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 7rem minmax(7rem, 1fr) 1.5rem;
@@ -655,6 +660,7 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 @container (min-width: 34rem) {
+  .kubernetes-workload-head { display: grid; }
   .kubernetes-list-head { display: grid; }
   .kubernetes-list-toolbar { grid-template-columns: minmax(0, 1fr) 14rem; }
   .kubernetes-list-row--workload { grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 7rem minmax(7rem, 1fr) 1.5rem; }

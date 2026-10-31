@@ -2333,6 +2333,8 @@ export interface KubernetesIssue {
 }
 
 export interface KubernetesIssuePage {
+  selected_occurrence?: KubernetesIssue;
+  selection_status?: "not_requested" | "not_found" | "resolved" | "ambiguous" | "partial";
   /** Persisted UID identity, independent of the selected history window and its totals. */
   root_context?: { root: KubernetesObjectRef; occurrence: KubernetesIssue; retained: true };
   items: KubernetesIssue[];
@@ -2959,9 +2961,11 @@ export interface KubernetesBreakLogPage {
 
 export function createKubernetesApi(cluster?: string) {
   const request: typeof unscopedRequest = (path, options) => unscopedRequest(kubernetesClusterPath(path, cluster), options);
-  async function historyPage<T extends { items: unknown[]; next?: string; gaps?: unknown[] }>(path: string, original: URLSearchParams, signal?: AbortSignal): Promise<T> {
+  async function historyPage<T extends { items: unknown[]; next?: string; gaps?: unknown[] }>(path: string, original: URLSearchParams, signal?: AbortSignal, pageMode?: "single"): Promise<T> {
     const query = new URLSearchParams(original);
     if (query.has("limit")) query.set("limit", String(Math.min(500, Math.max(1, Number(query.get("limit")) || 100))));
+    // Focused scans own one shared HTTP request budget, including empty pages.
+    if (pageMode === "single") return request<T>(`${path}?${query}`, { signal });
     const seen = new Set<string>();
     const gaps: unknown[] = [];
     let restarted = false;
@@ -3008,26 +3012,26 @@ export function createKubernetesApi(cluster?: string) {
   kubernetesSaveAgentSettings: (settings: KubernetesAgentSettingsInput) => request<KubernetesAgentSettings>("/api/admin/kubernetes/agent-settings", { method: "PUT", body: JSON.stringify({ learning: settings.learning, break_logs: settings.break_logs }) }),
   kubernetesTestLink: (source: string, fields: KubernetesLogFields) => request<KubernetesTestLinkResult>("/api/admin/kubernetes/agent-settings/test-link", { method: "POST", body: JSON.stringify({ source, fields }) }),
   kubernetesOverviewGraph: () => request<KubernetesGraph>("/api/admin/kubernetes/graph/overview"),
-  kubernetesIssues: (options: { since?: string; until?: string; namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string; broken?: boolean; include?: "changes"; root_uid?: string; context?: "persisted" } = {}, signal?: AbortSignal) => {
+  kubernetesIssues: (options: { since?: string; until?: string; namespace?: string; severity?: string; kind?: string; limit?: number; cursor?: string; broken?: boolean; include?: "changes"; root_uid?: string; context?: "persisted"; occurrence_id?: string; center?: string } = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     return historyPage<KubernetesIssuePage>("/api/admin/kubernetes/issues", query, signal);
   },
-  kubernetesChanges: (options: { since?: string; until?: string; namespace?: string; kind?: string; name?: string; root_uid?: string; type?: KubernetesChangeType; limit?: number; cursor?: string } = {}, signal?: AbortSignal) => {
+  kubernetesChanges: (options: { since?: string; until?: string; namespace?: string; kind?: string; name?: string; root_uid?: string; type?: KubernetesChangeType; limit?: number; cursor?: string } = {}, signal?: AbortSignal, pageMode?: "single") => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return historyPage<KubernetesChangesPage>("/api/admin/kubernetes/changes", query, signal);
+    return historyPage<KubernetesChangesPage>("/api/admin/kubernetes/changes", query, signal, pageMode);
   },
-  kubernetesCrashes: (options: KubernetesCrashQuery = {}, signal?: AbortSignal) => {
+  kubernetesCrashes: (options: KubernetesCrashQuery = {}, signal?: AbortSignal, pageMode?: "single") => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return historyPage<KubernetesCrashPage>("/api/admin/kubernetes/crashes", query, signal);
+    return historyPage<KubernetesCrashPage>("/api/admin/kubernetes/crashes", query, signal, pageMode);
   },
   kubernetesTimeline: (options: KubernetesTimelineQuery, signal?: AbortSignal) => {
     const query = new URLSearchParams();
@@ -3079,12 +3083,12 @@ export function createKubernetesApi(cluster?: string) {
   kubernetesUsage: (namespace = "") => request<KubernetesUsage>(`/api/admin/kubernetes/usage?namespace=${encodeURIComponent(namespace)}`),
   kubernetesUsageHistory: (namespace: string, pod: string, signal?: AbortSignal) =>
     request<KubernetesUsageHistory>(`/api/admin/kubernetes/usage-history?${new URLSearchParams({ namespace, pod })}`, { signal }),
-  kubernetesWorkloads: async (options: { namespace?: string; kind?: string; q?: string; limit?: number; cursor?: string } = {}) => {
+  kubernetesWorkloads: async (options: { namespace?: string; kind?: string; q?: string; limit?: number; cursor?: string } = {}, signal?: AbortSignal) => {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    const page = await request<Omit<KubernetesWorkloadPage, "items"> & { items: KubernetesResource[] | null }>(`/api/admin/kubernetes/workloads?${query}`);
+    const page = await request<Omit<KubernetesWorkloadPage, "items"> & { items: KubernetesResource[] | null }>(`/api/admin/kubernetes/workloads?${query}`, { signal });
     return { ...page, items: Array.isArray(page.items) ? page.items : [] };
   },
   kubernetesWorkload: (kind: string, namespace: string, name: string) =>

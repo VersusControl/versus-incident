@@ -1,8 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useState } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { ApiError, kubernetesAllContainers, type KubernetesBreakLogQuery, type KubernetesCrashEvent, type KubernetesIssue, type KubernetesResource } from "./api";
+import { kubernetesAllContainers, type KubernetesBreakLogQuery, type KubernetesCrashEvent, type KubernetesIssue, type KubernetesResource } from "./api";
 import { useKubernetesCluster } from "./useKubernetesCluster";
+import { kubernetesAccessLost } from "./kubernetesContinuity";
 
 export const maximumLogWindow = 2 * 60 * 60_000;
 export const CrashLogNavigationContext = createContext<{ current: ((event: KubernetesCrashEvent) => boolean) | null } | null>(null);
@@ -75,7 +76,14 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
       document.removeEventListener("visibilitychange", visibilityChanged);
     };
   }, [validIssue, query.isError, firstPageFetchedAt, settleAt, queryClient, pollingQuery]);
-  const denied = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status);
+  const denied = kubernetesAccessLost(query.error);
+  const protectedKey = JSON.stringify(queryKey);
+  useLayoutEffect(() => {
+    if (!denied) return;
+    const queryKey = JSON.parse(protectedKey) as readonly unknown[];
+    void queryClient.cancelQueries({ queryKey, exact: true });
+    queryClient.getQueryCache().find({ queryKey, exact: true })?.setState({ data: undefined });
+  }, [denied, protectedKey, queryClient]);
   const page = denied ? undefined : query.data?.pages[0];
   const lines = denied ? [] : query.data?.pages.flatMap((item) => item.lines ?? []) ?? [];
   const setWindow = (from: number, to: number) => {

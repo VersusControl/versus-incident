@@ -278,17 +278,24 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 	}
 	if scoped, exists := generation.Namespaces[namespace]; namespace != "" && exists {
 		states := make(map[string]kubeindex.KindStatus, len(generation.View.Kinds))
+		scopedKinds := make(map[string]bool, len(scoped.Kinds))
 		for kind, state := range generation.View.Kinds {
 			states[kind] = state
 		}
 		for kind, state := range scoped.Kinds {
-			if states[kind].State != "ready" {
+			global := states[kind]
+			// Namespace authority can replace a global permission limitation,
+			// not a newer transient observation or a whole-cycle auth failure.
+			// A newer scoped failure is authoritative too; never hide a denial.
+			authFailure := global.CycleFailure && (global.Error == "forbidden" || global.Error == "unauthorized")
+			if !authFailure && (global.Error == "forbidden" || global.Error == "namespace_scope" || inventoryObservationAt(state).After(inventoryObservationAt(global))) {
 				states[kind] = state
+				scopedKinds[kind] = true
 			}
 		}
 		records := make([]kubeindex.Record, 0)
 		for _, record := range generation.View.Records {
-			if record.Namespace == "" || record.Namespace == namespace {
+			if record.Namespace == "" || record.Namespace == namespace && !scopedKinds[record.Kind] {
 				records = append(records, record)
 			}
 		}
@@ -297,6 +304,12 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 			byUID[record.UID] = true
 		}
 		for _, record := range scoped.Records {
+			if !scopedKinds[record.Kind] || record.Namespace != namespace {
+				// Choose one committed source per kind, never their union. A
+				// complete replacement (global or scoped) includes real deletions;
+				// records from an older fallback must not resurrect removed rows.
+				continue
+			}
 			if !byUID[record.UID] {
 				records = append(records, record)
 			}
@@ -384,6 +397,19 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 	}
 	generation.View.Records = records
 	return generation.View, status, nil
+}
+
+// inventoryObservationAt orders authority observations, including failed LISTs
+// that retain the last successful ObservedAt and its committed records.
+func inventoryObservationAt(state kubeindex.KindStatus) time.Time {
+	at := state.ObservedAt
+	if state.LastAttemptAt.After(at) {
+		at = state.LastAttemptAt
+	}
+	if state.FailingSince.After(at) {
+		at = state.FailingSince
+	}
+	return at
 }
 
 // pendingKinds counts the resource types a published generation still lacks.

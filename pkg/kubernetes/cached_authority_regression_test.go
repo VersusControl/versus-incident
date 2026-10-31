@@ -2,10 +2,12 @@ package kubernetes
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,40 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/tests/fakekube"
 )
+
+// Observe the actual durable head and journal writes, without changing their
+// timing or guards. The LIST attempt provenance identifies which cycle wrote a
+// checkpoint even if its journal commit completes after permission revocation.
+type authorityObservedStore struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	t    *testing.T
+	mode *atomic.Int32
+}
+
+func (p *authorityObservedStore) CompareAndSwapBlob(key string, old, next []byte) (bool, error) {
+	won, err := p.BlobCAS.CompareAndSwapBlob(key, old, next)
+	if won && err == nil {
+		var a, b inventoryLeaseRecord
+		if json.Unmarshal(old, &a) == nil && json.Unmarshal(next, &b) == nil && b.Revision != "" && b.Revision != a.Revision {
+			raw, readErr := p.ReadBlob(key + "/data/" + b.DataOwner + "/" + strconv.Itoa(b.Slot))
+			var generation inventoryGeneration
+			if readErr == nil && json.Unmarshal(raw, &generation) == nil {
+				p.t.Logf("durable head mode=%d revision=%s pod=%+v deployment=%+v", p.mode.Load(), b.Revision, generation.View.Kinds["Pod"], generation.View.Kinds["Deployment"])
+			}
+		}
+	}
+	return won, err
+}
+
+func (p *authorityObservedStore) CommitEvidence(ctx context.Context, scope storage.EvidenceScope, batch storage.EvidenceBatch) error {
+	err := p.EvidenceStore.CommitEvidence(ctx, scope, batch)
+	if err == nil {
+		p.t.Logf("durable journal mode=%d id=%s expected=%s at=%s", p.mode.Load(), batch.ID, batch.Expected, batch.At.Format(time.RFC3339Nano))
+	}
+	return err
+}
 
 func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T) {
 	for _, backend := range []string{"memory", "file"} {
@@ -84,6 +120,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 						t.Fatal(err)
 					}
 				}
+				provider = &authorityObservedStore{Provider: provider, BlobCAS: provider.(storage.BlobCAS), EvidenceStore: provider.(storage.EvidenceStore), t: t, mode: &mode}
 				service.SetChangeStorage(provider)
 				registry := NewServiceRegistry(service)
 				defer registry.Close()
@@ -123,11 +160,16 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 					t.Fatal(err)
 				}
 				beforeRaw, _ := json.Marshal(before)
-				checkpoint, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
-				if err != nil {
-					t.Fatal(err)
-				}
+				// Ready data is visible before its journal commit finishes. Pin the
+				// checkpoint belonging to this exact head before revoking permission;
+				// an authorized baseline commit is not a denied-cycle publication.
+				var checkpoint storage.EvidenceCheckpoint
+				waitUntil(t, 8*time.Second, "baseline data-head journal committed", func() bool {
+					checkpoint, err = store.EvidenceCheckpoint(t.Context(), evidenceScope)
+					return err == nil && before.EvidenceBatch != nil && checkpoint.ID == before.EvidenceBatch.ID
+				})
 				catalogs := catalogReads.Load()
+				t.Logf("baseline checkpoint=%s at=%s revision=%s revoke_at=%s", checkpoint.ID, checkpoint.At.Format(time.RFC3339Nano), record.Revision, time.Now().UTC().Format(time.RFC3339Nano))
 				if scenario == "all" {
 					mode.Store(1)
 				} else {
@@ -135,6 +177,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 				}
 				select {
 				case <-materialSeen:
+					t.Logf("first material denial at=%s", time.Now().UTC().Format(time.RFC3339Nano))
 				case <-time.After(40 * time.Second):
 					t.Fatal("normal material cadence never observed the changed permissions")
 				}
@@ -177,7 +220,9 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 					report, _ := health()
 					workloads, workErr := service.Workloads(t.Context(), WorkloadListOptions{})
 					issues, issueErr := service.Issues(t.Context(), IssueOptions{})
-					t.Fatalf("cached catalog bypassed current proof: denied=%d sync=%s failing=%d unreadable=%d Workloads=%d/%v Issues=%d/%v", materialDenials.Load(), report.State, report.FailingKinds, report.UnreadableKinds, len(workloads.Items), workErr, len(issues.Items), issueErr)
+					current, _ := store.EvidenceCheckpoint(t.Context(), evidenceScope)
+					latest, head, _ := readInventoryGeneration(provider, scope, "")
+					t.Fatalf("cached catalog bypassed current proof: denied=%d sync=%s failing=%d unreadable=%d Workloads=%d/%v Issues=%d/%v checkpoint=%s/%s revision=%s pod=%+v", materialDenials.Load(), report.State, report.FailingKinds, report.UnreadableKinds, len(workloads.Items), workErr, len(issues.Items), issueErr, current.ID, current.At.Format(time.RFC3339Nano), head.Revision, latest.View.Kinds["Pod"])
 				}
 				pending, _ := health()
 				if pending.State == "ready" {

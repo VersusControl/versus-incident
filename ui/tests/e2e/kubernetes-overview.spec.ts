@@ -469,6 +469,11 @@ async function expectNoTopologyPagination(panel: Locator) {
 }
 
 const screenshotDir = process.env.E2E_KUBERNETES_CAPTURE_DIR || captureDir();
+// Assertion-only reruns retain inspected captures for unaffected visual inputs.
+const captureUnchanged = process.env.E2E_CAPTURE_UNCHANGED !== "0";
+if (process.env.E2E_NATIVE_SCROLLBARS === "1") {
+  test.use({ launchOptions: { args: ["--disable-features=OverlayScrollbar,FluentOverlayScrollbar"] } });
+}
 
 async function fitOverviewCapture(page: Page) {
   const measurements = [];
@@ -2429,6 +2434,7 @@ test.describe("Pod log streaming fixtures", () => {
   test.beforeEach(async ({ page }, testInfo) => {
     const overviewRefresh = testInfo.title.startsWith("Overview refresh");
     const breakTimeline = testInfo.title.startsWith("Break timeline");
+    const focusRegression = testInfo.title.includes("selected marker removal") || testInfo.title.includes("external controls retain focus");
     const lightTheme = testInfo.title.includes("light theme");
     const fullOverview = testInfo.title === "Break timeline full populated dark Overview documentation";
     const guideAlerts = { enabled: false, level: "critical", enabled_at: "", can_write: true, available: true, reason: "", links_ready: true, channels_enabled: true };
@@ -2586,6 +2592,8 @@ test.describe("Pod log streaming fixtures", () => {
       }
       if (pathname === "/api/admin/config/agent") return route.fulfill({ json: { enable: breakTimeline, mode: "shadow", sources: [], ai: { enable: breakTimeline }, catalog: {}, miner: {}, regex: { rules: [] }, redaction: {}, service_patterns: [] } });
       if (multiClusterBreak && pathname === "/api/admin/kubernetes/clusters") return route.fulfill({ json: { multiple: true, clusters: ["east", "west"].map((id) => ({ id, provider: "generic", health: "attention", nodes: 12, ready_nodes: 12, pods: 28, running_pods: 19, warnings: 26, broken: 3, ...(testInfo.title.includes("fleet documentation") ? { last_change_at: id === "east" ? at(9) : "invalid-timestamp" } : {}), sync: { state: "ready" }, observed_at: new Date().toISOString() })) } });
+      if (focusRegression && pathname === "/api/admin/kubernetes/clusters") return route.fulfill({ json: { multiple: false, clusters: [] } });
+      if (focusRegression && pathname === "/api/admin/kubernetes/namespaces") return route.fulfill({ json: { items: ["shop", "payments"], sync: { state: "ready", partial: false, age_s: 0 } } });
       if (breakTimeline && pathname === "/api/admin/kubernetes/overview") return route.fulfill({ json: { connector: "kubernetes", cluster_id: "fixture", observed_at: new Date().toISOString(), nodes: 12, ready_nodes: 12, pods: 28, running_pods: 19, namespaces: 3, active_namespaces: 3, workloads: 4, warnings: 26, truncated: diagnostics, omitted_categories: diagnostics ? ["ConfigMap"] : [], partial_failures: failures } });
       if (breakTimeline && pathname === "/api/admin/kubernetes/crashes") {
         const cursor = url.searchParams.get("cursor");
@@ -2613,6 +2621,7 @@ test.describe("Pod log streaming fixtures", () => {
         return route.fulfill({ json: result });
       }
       if (breakTimeline && pathname === "/api/admin/kubernetes/issues") {
+        if (focusRegression && url.searchParams.get("context") === "persisted") return route.fulfill({ json: { items: [], totals: {}, truncated: false, sync: { state: "ready", partial: false, age_s: 0 }, root_context: { root: roots[0].root, occurrence: roots[0], retained: true }, selected_occurrence: roots[0], selection_status: "resolved" } });
         const rootLookup = url.searchParams.has("root_uid");
         if (denialEdge && rootLookup && (++edgeRootReads > 1 || denialEdge[1] === "initial")) return route.fulfill({ status: Number(denialEdge[2]), json: { error: "Synthetic root lookup denied" } });
         const cart: KubernetesIssue = { root: { kind: "Deployment", namespace: "shop", name: "cart", uid: "cart-uid" }, rule: "event.warning", severity: "warning", count: 1, first_seen: at(1), history: "gap" };
@@ -3802,61 +3811,97 @@ test.describe("Pod log streaming fixtures", () => {
     });
 
     test(`Break timeline selected marker removal restores chart focus ${viewport.name} dark`, async ({ page }) => {
+      const warnings: string[] = [];
+      page.on("console", message => { if (message.type() === "error" && message.text().includes("Cannot update a component")) warnings.push(message.text()); });
       await page.setViewportSize(viewport);
-      await openApp(page, "/agent/kubernetes?view=timeline");
+      await openApp(page, "/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop");
       const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
       const marker = chart.locator('[data-marker="change"]').first();
       await marker.focus();
       await page.keyboard.press("Enter");
       const details = page.getByRole("region", { name: "Timeline event details", exact: true });
       await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
-      for (const endpoint of ["changes", "issues"]) {
-        await page.route(`**/api/admin/kubernetes/${endpoint}*`, (route) => route.fulfill({ json: { items: [], totals: {}, sync: { state: "ready", partial: false, age_s: 0 } } }));
-      }
+      await page.route("**/api/admin/kubernetes/changes*", (route) => route.fulfill({ json: { items: [], sync: { state: "ready", partial: false, age_s: 0 } } }));
       await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
       await expect(details).toHaveCount(0);
       await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
       await expect(chart).toBeFocused();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      expect(warnings).toEqual([]);
     });
     test(`Break timeline external controls retain focus across filters and polling ${viewport.name} dark`, async ({ page }) => {
+      const warnings: string[] = [];
+      page.on("console", message => { if (message.type() === "error" && message.text().includes("Cannot update a component")) warnings.push(message.text()); });
       await page.setViewportSize(viewport);
       await page.clock.install({ time: new Date() });
-      await page.route("**/api/admin/kubernetes/issues*", (route) => route.fulfill({ json: { items: [], totals: {}, sync: { state: "ready", partial: false, age_s: 0 } } }));
-      await openApp(page, "/agent/kubernetes?view=timeline");
+      await openApp(page, "/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop");
       const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
       const marker = chart.locator('[data-marker="change"]').first();
       const details = page.getByRole("region", { name: "Timeline event details", exact: true });
-      const namespace = page.getByRole("textbox", { name: "Timeline namespace", exact: true });
-      const kind = page.getByRole("combobox", { name: "Timeline kind", exact: true });
+      const range = page.getByRole("group", { name: "Timeline window", exact: true }).getByRole("button", { name: "15m", exact: true });
       await marker.focus();
       await page.keyboard.press("Enter");
       await expect(details.getByRole("heading", { name: "Timeline event details", exact: true })).toBeFocused();
-      await namespace.focus();
-      await namespace.pressSequentially("missing");
-      await expect(namespace).toHaveValue("missing");
-      await expect(namespace).toBeFocused();
-      await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
+      await range.focus();
+      await page.keyboard.press("Enter");
+      await expect(range).toHaveAttribute("aria-pressed", "true");
+      await expect(range).toBeFocused();
       await expect(details).toHaveCount(0);
-      await namespace.fill("");
       await marker.focus();
       await page.keyboard.press("Enter");
+      const refresh = page.getByRole("button", { name: "Refresh Kubernetes data", exact: true });
+      await refresh.focus();
+      const previousUntil = await chart.getAttribute("data-until");
+      await page.route("**/api/admin/kubernetes/changes*", (route) => route.fulfill({ json: { items: [], sync: { state: "ready", partial: false, age_s: 0 } } }));
+      await page.keyboard.press("Enter");
+      await expect(details).toHaveCount(0);
+      await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
+      await expect(refresh).toBeFocused();
+      await page.clock.fastForward(30_000);
+      // Root investigations pin their range; polling must not move that bracket.
+      await expect(chart).toHaveAttribute("data-until", previousUntil!);
+      await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
+      await expect(details).toHaveCount(0);
+      await expect(refresh).toBeFocused();
+
+      // Namespace/kind filters now belong to the unfocused paginated list.
+      let removed = false;
+      const reads: URL[] = [];
+      await page.route("**/api/admin/kubernetes/timeline*", route => {
+        const url = new URL(route.request().url());
+        reads.push(url);
+        const entry = { type: "change", id: "focus-change", at: new Date().toISOString(), change: { id: "focus-change", at: new Date().toISOString(), cluster: "fixture", kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid", type: "image_changed" } };
+        const items = removed || url.searchParams.get("namespace") === "payments" ? [] : [entry];
+        return route.fulfill({ json: { items, total: items.length, counts: { change: items.length, crash: 0, break: 0 }, crash_count: 0, since: url.searchParams.get("since"), until: url.searchParams.get("until"), gaps: [], sync: { state: "ready", partial: false, age_s: 0 } } });
+      });
+      await page.getByRole("link", { name: "Clear root filter", exact: true }).click();
+      const list = page.getByRole("list", { name: "Breaks and changes", exact: true });
+      await expect(list.getByRole("listitem")).toHaveCount(1);
+      const namespace = page.getByRole("combobox", { name: "Timeline namespace", exact: true });
+      await namespace.focus();
+      await namespace.fill("payments");
+      await expect(page.getByRole("option", { name: "payments", exact: true })).toBeVisible();
+      await page.keyboard.press("Enter");
+      await expect(list.getByRole("listitem")).toHaveCount(0);
+      await expect(namespace).toBeFocused();
+      await namespace.click();
+      await namespace.fill("shop");
+      await expect(page.getByRole("option", { name: "shop", exact: true })).toBeVisible();
+      await page.keyboard.press("Enter");
+      await expect(list.getByRole("listitem")).toHaveCount(1);
+      const kind = page.getByRole("combobox", { name: "Timeline kind", exact: true });
       await kind.focus();
       await kind.selectOption("Deployment");
-      await expect(details).toHaveCount(0);
       await expect(kind).toBeFocused();
-      await marker.focus();
-      await page.keyboard.press("Enter");
+      await expect.poll(() => reads.at(-1)?.searchParams.get("kind")).toBe("Deployment");
       await namespace.focus();
-      const previousUntil = await chart.getAttribute("data-until");
-      for (const endpoint of ["changes", "issues"]) {
-        await page.route(`**/api/admin/kubernetes/${endpoint}*`, (route) => route.fulfill({ json: { items: [], totals: {}, sync: { state: "ready", partial: false, age_s: 0 } } }));
-      }
+      removed = true;
+      const listUntil = reads.at(-1)?.searchParams.get("until");
       await page.clock.fastForward(30_000);
-      await expect(chart).not.toHaveAttribute("data-until", previousUntil!);
-      await expect(chart.locator('[data-marker="change"]')).toHaveCount(0);
-      await expect(details).toHaveCount(0);
+      await expect.poll(() => reads.at(-1)?.searchParams.get("until")).not.toBe(listUntil);
+      await expect(list.getByRole("listitem")).toHaveCount(0);
       await expect(namespace).toBeFocused();
+      expect(warnings).toEqual([]);
     });
     test(`Break timeline label and stack geometry ${viewport.name} dark`, async ({ page }) => {
       await page.setViewportSize(viewport);
@@ -4405,6 +4450,553 @@ test.describe("Pod log streaming fixtures", () => {
       expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
       fs.mkdirSync(screenshotDir, { recursive: true });
       await page.screenshot({ path: path.join(screenshotDir, `topology-control-row-${viewport.name}.png`), fullPage: true, animations: "disabled" });
+    });
+  }
+});
+
+test.describe("Workloads and focused investigation worst-case browser gate", () => {
+  test.skip(process.env.E2E_UI_FIXTURES !== "1", "deterministic intercepted UI evidence, not live collection");
+
+  for (const width of [1440, 390]) {
+    test(`published never-listed timeout, last-good count and successful empty zero ${width}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+      const observed = new Date().toISOString();
+      let phase: "never-listed" | "known" | "later-timeout" | "empty" = "never-listed";
+      const timedOut = () => phase === "never-listed" || phase === "later-timeout";
+      const sync = () => ({ state: timedOut() ? "error" : "ready", partial: timedOut(), age_s: 18,
+        // The published timeout trace has no pending CronJob.
+        pending: null, pending_kinds: 0 });
+      const partials = () => [
+        ...(timedOut() ? [{ resource_id: "batch~v1~cronjobs", class: "timeout" }] : []),
+      ];
+      const resources = [
+        { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "only-a", uid: "only-a" },
+        { resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "web", uid: "web-v1" },
+        { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "only-a-0", uid: "only-a-pod" },
+        { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "web-0", uid: "web-v1-pod" },
+        { resource_id: "apps~v1~statefulsets", kind: "StatefulSet", namespace: "shop", name: "db", uid: "db-v1" },
+      ];
+      const payloads: unknown[] = [];
+      await page.route("**/api/**", async route => {
+        const pathname = new URL(route.request().url()).pathname;
+        const reply = (json: unknown, status = 200) => route.fulfill({ json, status });
+        if (pathname.endsWith("/clusters")) return reply({ multiple: false, clusters: [] });
+        if (pathname.endsWith("/sync")) return reply({
+          ...sync(), first_ready_at: observed, total_kinds: 20, ready_kinds: timedOut() ? 19 : 20,
+          failing_kinds: timedOut() ? 1 : 0, unreadable_kinds: 0,
+          failing: timedOut() ? [{ kind: "CronJob", state: "error", class: "timeout", records: phase === "later-timeout" ? 1 : 0 }] : [],
+          unreadable: [],
+          kinds: { CronJob: { state: timedOut() ? "error" : "ready", error: timedOut() ? "timeout" : "",
+            records: phase === "never-listed" || phase === "empty" ? 0 : 1,
+            ...(phase === "never-listed" ? {} : { observed_at: observed }) } },
+        });
+        if (pathname.endsWith("/workloads")) {
+          const payload = {
+            items: phase === "empty" ? [] : [...resources, ...(phase === "never-listed" ? [] : [
+              { resource_id: "batch~v1~cronjobs", kind: "CronJob", namespace: "shop", name: "nightly", uid: "nightly-v1" },
+            ])],
+            counts: phase === "empty" ? { Deployment: 0, StatefulSet: 0, DaemonSet: 0, Job: 0, Pod: 0, CronJob: 0 }
+              : { Deployment: 2, StatefulSet: 1, DaemonSet: 0, Job: 0, Pod: 2, ...(phase === "never-listed" ? {} : { CronJob: 1 }) },
+            observed_at: observed, truncated: false, sync: sync(), partial_failures: partials(),
+          };
+          payloads.push({ phase, ...payload });
+          return reply(payload);
+        }
+        if (pathname.endsWith("/namespaces")) return reply({ items: ["shop"], sync: sync() });
+        if (pathname.endsWith("/overview")) return reply({ connector: "kubernetes", observed_at: observed, nodes: 1, pods: 2, namespaces: 1, workloads: 3, sync: sync() });
+        if (pathname.includes("/deployment") || pathname.includes("/sso/")) return reply({ error: "Community" }, 403);
+        return reply({ items: [], nodes: [], edges: [], omitted: {}, sources: [], totals: {}, broken: { total: 0 }, sync: sync(), enable: false });
+      });
+      const panel = page.getByRole("tabpanel", { name: "Workloads", exact: true });
+      const expectCount = async (kind: string, count?: number, soft = false) => {
+        const assertion = soft ? expect.soft : expect;
+        if (width === 390) await assertion(panel.getByRole("combobox", { name: "Workload kind" }).locator(`option[value="${kind}"]`)).toHaveText(count === undefined ? kind : `${kind} (${count})`, { timeout: 1000 });
+        else await assertion(panel.getByRole("tab", { name: kind, exact: true })).toHaveText(count === undefined ? kind : `${kind}${count}`, { timeout: 1000 });
+      };
+      const shot = async () => {
+        await expect(panel).not.toContainText("Preparing your cluster");
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await page.screenshot({ path: capturePath("workload-count-provenance", width, "dark", phase), fullPage: true, animations: "disabled" });
+      };
+      await page.goto("/agent/kubernetes?view=resources");
+      await expect(page.locator('[data-sync-problem="CronJob"]')).toContainText("the cluster is slow or rate-limiting reads");
+      // Keep the acceptance failure while collecting independent later phases.
+      await expect.soft(panel).toContainText("web", { timeout: 1000 });
+      await expect.soft(panel).toContainText("db", { timeout: 1000 });
+      await expect.soft(panel).toContainText("Count unavailable", { timeout: 1000 });
+      await expect(panel).not.toContainText("total");
+      await expectCount("CronJob");
+      await expectCount("All");
+      await expectCount("Deployment", 2, true);
+      await expectCount("StatefulSet", 1, true);
+      await expectCount("Pod", 2, true);
+      await expectCount("Job", 0, true);
+      await shot();
+      for (phase of ["known", "later-timeout"] as const) {
+        await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+        await expect(panel).toContainText("nightly");
+        await expectCount("CronJob", 1);
+        await expect(panel).toContainText("6 total");
+        if (phase === "later-timeout") await expect(page.locator('[data-sync-problem="CronJob"]')).toContainText("the cluster is slow or rate-limiting reads");
+        await shot();
+      }
+      phase = "empty";
+      await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+      await expect(panel).toContainText("No workloads in this scope.");
+      await expect(panel).not.toContainText("nightly");
+      await expect(panel).not.toContainText("web");
+      await expect(panel).toContainText("0 total");
+      await expectCount("CronJob", 0);
+      await expectCount("Deployment", 0);
+      await shot();
+      await testInfo.attach("count-provenance-responses", { body: JSON.stringify(payloads), contentType: "application/json" });
+    });
+  }
+
+  for (const width of [1440, 390]) for (const health of ["degraded", "failed"] as const) {
+    test(`pending counts and bounded post-publication ${health} recovery ${width}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
+      const observed = new Date().toISOString();
+      let phase: "cold" | "published" | "pending" | "warming" | "empty" = "cold";
+      const coldPending = ["apps~v1~deployments", "apps~v1~statefulsets", "apps~v1~daemonsets", "batch~v1~jobs", "batch~v1~cronjobs", "core~v1~pods"];
+      let pending = "cronjobs", scopedReads = 0;
+      let release!: () => void;
+      const barrier = new Promise<void>(resolve => { release = resolve; });
+      const sync = () => ({ state: phase === "cold" ? "syncing" : "ready", age_s: 0, partial: false,
+        ...(phase === "cold" ? { pending: coldPending, pending_kinds: 20 } : phase === "pending" ? { pending: [pending] } : {}) });
+      await page.route("**/api/**", async route => {
+        const url = new URL(route.request().url());
+        const reply = (json: unknown, status = 200) => route.fulfill({ json, status });
+        if (url.pathname.endsWith("/clusters")) return reply({ multiple: false, clusters: [] });
+        if (url.pathname.endsWith("/sync") && phase === "cold") return reply({
+          ...sync(), first_ready: false, total_kinds: 20, ready_kinds: 0,
+          kinds: Object.fromEntries(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"].map(kind => [kind, { state: "pending", first_ready: false }])),
+        });
+        if (url.pathname.endsWith("/sync")) return reply({
+          state: health === "failed" ? "error" : "ready", partial: true, age_s: 0, first_ready_at: observed,
+          kinds: { Pod: { state: health === "failed" ? "error" : "ready", partial: true, observed_at: observed, records: 1, error: health === "failed" ? "unavailable" : "timeout" } },
+          total_kinds: 1, ready_kinds: health === "failed" ? 0 : 1, failing_kinds: 1, pending_kinds: 0,
+        });
+        if (url.pathname.endsWith("/workloads")) {
+          // The real cold response omits counts entirely; pending is not zero.
+          if (phase === "cold") return reply({ items: [], truncated: false, sync: sync() });
+          if (phase === "warming") {
+            if (++scopedReads === 1) await barrier;
+            return reply({ code: "inventory_not_ready", error: "Scoped inventory warming", retryable: true }, 503);
+          }
+          return reply({ items: phase === "empty" ? [] : [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "committed-api", uid: "committed-uid" }],
+            counts: { Deployment: phase === "empty" ? 0 : 2, ...(phase === "pending" ? {} : { CronJob: 0 }) }, observed_at: observed, truncated: false, sync: sync() });
+        }
+        if (url.pathname.endsWith("/namespaces")) return reply({ items: ["shop", "payments"], sync: sync() });
+        if (url.pathname.endsWith("/overview")) return reply({ connector: "kubernetes", observed_at: observed, nodes: 1, pods: 1, namespaces: 2, workloads: 2, sync: sync() });
+        if (url.pathname.includes("/deployment") || url.pathname.includes("/sso/")) return reply({ error: "Community" }, 403);
+        return reply({ items: [], nodes: [], edges: [], omitted: {}, sources: [], totals: {}, broken: { total: 0 }, sync: sync(), enable: false });
+      });
+      const panel = page.getByRole("tabpanel", { name: "Workloads", exact: true });
+      const shot = async (state: string) => {
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        await page.screenshot({ path: capturePath("workload-health", width, "dark", `${health}-${state}`), fullPage: true, animations: "disabled" });
+      };
+      try {
+        await page.goto("/agent/kubernetes?view=resources");
+        await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+        await expect(panel).toContainText("Preparing your cluster");
+        await expect(panel).not.toContainText("0 total");
+        await expect(panel.getByRole("combobox", { name: "Workload kind" })).toHaveCount(0);
+        await expect(panel.getByRole("tab")).toHaveCount(0);
+        await shot("cold-pending");
+        phase = "published";
+        await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+        await expect(panel).toContainText("committed-api");
+        await expect(page.locator(`[data-sync-strip="${health}"]`)).toBeVisible();
+        phase = "pending";
+        for (pending of ["cronjobs", "batch~v1~cronjobs"]) {
+          await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+          await expect(panel).toContainText("Count unavailable");
+          if (width === 390) {
+            const kinds = panel.getByRole("combobox", { name: "Workload kind" });
+            await expect(kinds.locator('option[value="CronJob"]')).toHaveText("CronJob");
+            await expect(kinds.locator('option[value="Deployment"]')).toHaveText("Deployment (2)");
+            await expect(kinds.locator('option[value="All"]')).toHaveText("All");
+          } else {
+            await expect(panel.getByRole("tab", { name: "CronJob", exact: true })).toHaveText("CronJob");
+            await expect(panel.getByRole("tab", { name: "Deployment", exact: true })).toContainText("2");
+            await expect(panel.getByRole("tab", { name: "All", exact: true })).toHaveText("All");
+          }
+          await expect(panel).not.toContainText("2 total");
+        }
+        await shot("pending");
+        await page.clock.install({ time: new Date() });
+        phase = "warming";
+        await panel.getByRole("combobox", { name: "Workload namespace", exact: true }).fill("payments");
+        await page.getByRole("option", { name: "payments", exact: true }).click();
+        await expect.poll(() => scopedReads).toBe(1);
+        await expect(panel).not.toContainText("committed-api");
+        await shot("loading");
+        release();
+        for (let retry = 0; retry < 6; retry++) {
+          await page.clock.fastForward(1050);
+          await page.waitForTimeout(50);
+        }
+        await expect(panel.getByRole("button", { name: "Retry inventory", exact: true })).toBeVisible();
+        expect(scopedReads).toBe(6);
+        await expect(panel).toContainText("Inventory unavailable");
+        await expect(panel).not.toContainText("0 total");
+        await shot("exhausted");
+        await page.clock.fastForward(10_000);
+        expect(scopedReads).toBe(6);
+        phase = "empty";
+        await panel.getByRole("button", { name: "Retry inventory", exact: true }).click();
+        await expect(panel).toContainText("No workloads in this namespace.");
+        await expect(panel).toContainText("0 total");
+        if (width === 390) await expect(panel.getByRole("combobox", { name: "Workload kind" }).locator('option[value="CronJob"]')).toHaveText("CronJob (0)");
+        else await expect(panel.getByRole("tab", { name: "CronJob", exact: true })).toContainText("0");
+        await shot("explicit-retry-empty");
+        await testInfo.attach("bounded-health", { body: JSON.stringify({ classification: "fixture", health, scopedReads, automaticRetries: scopedReads - 1 }), contentType: "application/json" });
+      } finally { release(); }
+    });
+  }
+
+  for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`scope resync late warmup cursor recovery and denial callback fence ${width} ${theme}`, async ({ page }, testInfo) => {
+      test.setTimeout(120_000);
+      await page.setViewportSize({ width, height: 900 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const observed = new Date(Date.now() - 60_000).toISOString();
+      let phase = "published", warmingReads = 0;
+      let releaseWarm!: () => void, releaseLate!: () => void;
+      const warm = new Promise<void>(resolve => { releaseWarm = resolve; });
+      const late = new Promise<void>(resolve => { releaseLate = resolve; });
+      const requests: Array<{ phase: string; path: string; query: Record<string, string> }> = [];
+      const sync = () => ({ state: phase === "resync" || phase === "late-warmup" ? "syncing" : "ready", age_s: 0, partial: false });
+      await page.route("**/api/**", async route => {
+        const url = new URL(route.request().url()), query = Object.fromEntries(url.searchParams);
+        requests.push({ phase, path: url.pathname, query });
+        const reply = (json: unknown, status = 200) => route.fulfill({ json, status });
+        if (url.pathname.endsWith("/clusters")) return reply({ multiple: false, clusters: [] });
+        if (url.pathname.endsWith("/sync")) return phase === "denied"
+          ? reply({ code: "forbidden", error: "Infrastructure access denied" }, 403)
+          : reply({ ...sync(), first_ready_at: observed, total_kinds: 2, ready_kinds: phase === "resync" ? 1 : 2, pending_kinds: phase === "resync" ? 1 : 0, kinds: {} });
+        if (url.pathname.endsWith("/workloads")) {
+          const namespace = query.namespace || "shop";
+          const item = { resource_id: "apps~v1~deployments", kind: "Deployment", namespace, uid: `${namespace}-uid`, name: `${namespace}-committed`, ready: 1, desired: 1 };
+          if (phase === "late-warmup" && namespace === "payments" && warmingReads++ === 0) {
+            await warm;
+            return reply({ code: "inventory_not_ready", error: "Scoped inventory warming", retryable: true }, 503);
+          }
+          if (phase === "hold-positive") { await late; return reply({ items: [item], counts: { Deployment: 1 }, observed_at: observed, sync: sync() }).catch(() => {}); }
+          if (phase === "denied") return reply({ code: "forbidden", error: "Infrastructure access denied" }, 403);
+          if (query.cursor) return reply({ code: "cursor_expired", error: "Inventory generation changed" }, 400);
+          if (phase === "resync") return reply({ code: "inventory_not_ready", error: "Replacement warming", retryable: true }, 503);
+          return reply({ items: phase === "empty" ? [] : [item], counts: { Deployment: phase === "empty" ? 0 : 1 }, observed_at: observed, sync: sync(), ...(phase === "cursor" ? { next: "old-generation" } : {}) });
+        }
+        if (url.pathname.endsWith("/namespaces")) return reply({ items: ["shop", "payments"], sync: sync() });
+        if (url.pathname.endsWith("/overview")) return reply({ connector: "kubernetes", observed_at: observed, nodes: 1, pods: 1, namespaces: 2, workloads: 1, sync: sync() });
+        if (url.pathname.includes("/deployment") || url.pathname.includes("/sso/")) return reply({ error: "Community" }, 403);
+        return reply({ items: [], nodes: [], edges: [], omitted: {}, sources: [], totals: {}, broken: { total: 0 }, sync: sync(), enable: false });
+      });
+      const rows = page.locator(".kubernetes-workload-shell[role=listitem]");
+      const panel = page.getByRole("tabpanel", { name: "Workloads", exact: true });
+      const capture = async (state: string) => {
+        expect.soft(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+        if (captureUnchanged) await page.screenshot({ path: capturePath("workload-recovery", width, theme, state), fullPage: true, animations: "disabled" });
+      };
+      try {
+        await page.goto("/agent/kubernetes");
+        await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+        await expect(rows).toContainText("shop-committed");
+        phase = "resync";
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await expect(page.locator('[data-sync-state="preparing"]')).toHaveText("Syncing");
+        await expect(rows).toContainText("shop-committed");
+        await expect(panel).not.toContainText("Resource inventory is unavailable.");
+        if (width === 390) await expect(panel.getByRole("combobox", { name: "Workload kind" }).locator('option[value="Deployment"]')).toHaveText("Deployment (1)");
+        else await expect(panel.getByRole("tab", { name: "Deployment", exact: true })).toContainText("1");
+        await capture("same-scope-sync");
+        await page.reload();
+        await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+        await expect(rows).toHaveCount(0);
+        await expect(panel).not.toContainText(/All 0|Deployment 0/);
+        await capture("reload-unknown");
+        phase = "late-warmup";
+        await panel.getByRole("combobox", { name: "Workload namespace" }).fill("payments");
+        await page.getByRole("option", { name: "payments", exact: true }).click();
+        await expect.poll(() => warmingReads).toBe(1);
+        await expect(rows).toHaveCount(0);
+        await capture("scope-loading");
+        phase = "ready";
+        // The held warmup completes after the ready status has been observed.
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        releaseWarm();
+        await expect(rows).toContainText("payments-committed", { timeout: 45_000 });
+        await expect(rows).not.toContainText("shop-committed");
+        await capture("late-warmup-recovered");
+        phase = "cursor";
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await panel.getByRole("button", { name: "Next page", exact: true }).click();
+        await expect(panel).toContainText("This inventory page expired");
+        await expect(rows).toHaveCount(0);
+        await capture("cursor-expired");
+        await panel.getByRole("button", { name: "Restart inventory paging" }).click();
+        await expect(rows).toContainText("payments-committed");
+        phase = "empty";
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await expect(rows).toHaveCount(0);
+        await capture("complete-empty");
+        phase = "ready";
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await expect(rows).toHaveCount(1);
+        phase = "hold-positive";
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await expect.poll(() => requests.filter(request => request.phase === "hold-positive" && request.path.endsWith("/workloads")).length).toBeGreaterThan(0);
+        phase = "denied";
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await expect(rows).toHaveCount(0);
+        releaseLate();
+        await page.waitForTimeout(1000);
+        await expect(rows).toHaveCount(0);
+        await expect(panel).not.toContainText("payments-committed");
+        await capture("denied-late-positive");
+      } finally {
+        releaseWarm(); releaseLate();
+        await testInfo.attach("scope-recovery-requests", { body: JSON.stringify(requests), contentType: "application/json" });
+      }
+    });
+  }
+
+  for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`pinned recurrence detail consumes empty continuations and explains missing capture ${width} ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const at = new Date(Date.now() - 300_000).toISOString().replace(/\.\d{3}Z$/, ".123456789Z");
+      const later = new Date(Date.now() - 60_000).toISOString();
+      const sync = { state: "ready", age_s: 0, partial: false };
+      const root = { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" };
+      let state = "recurring";
+      let denyDetail = false, holdDetail = false, heldDetail = 0;
+      let releaseDetail!: () => void;
+      const detailBarrier = new Promise<void>(resolve => { releaseDetail = resolve; });
+      const reads: Array<{ state: string; path: string; query: Record<string, string> }> = [];
+      const selected = () => ({ root, occurrence_id: "pinned-old", state: state === "resolved" || state === "deleted" ? "resolved" : "open", rule: "pod.crash_loop", count: 1, severity: "critical", broken: false, ...(state === "missing-time" ? {} : { broke_at: at }) });
+      await page.route("**/api/**", async route => {
+        const url = new URL(route.request().url()), query = Object.fromEntries(url.searchParams);
+        reads.push({ state, path: url.pathname, query });
+        const reply = (json: unknown, status = 200) => route.fulfill({ json, status });
+        if (url.pathname.endsWith("/clusters")) return reply({ multiple: false, clusters: [] });
+        if (url.pathname.endsWith("/sync")) return reply({ ...sync, first_ready_at: at, total_kinds: 1, ready_kinds: 1, kinds: {} });
+        if (url.pathname.endsWith("/issues") && denyDetail) return reply({ code: "forbidden", error: "Root access denied" }, 403);
+        if (url.pathname.endsWith("/issues")) return reply({
+          items: [query.context === "persisted" ? { ...selected(), occurrence_id: "wrong-new", broke_at: later } : selected()],
+          ...(query.context === "persisted" ? { root_context: { root, occurrence: { ...selected(), occurrence_id: "wrong-new", broke_at: later }, retained: true }, selected_occurrence: selected(), selection_status: "resolved" } : {}),
+          totals: { critical: 1 }, broken: { total: 1 }, sync,
+        });
+        if (url.pathname.endsWith("/timeline")) return reply({
+          items: [{ type: "break", id: "pinned-old", at, issue: selected() }],
+          total: 1, crash_count: 0, counts: { change: 0, crash: 0, break: 1 }, gaps: [], sync,
+        });
+        if (url.pathname.endsWith("/changes")) {
+          const cursor = query.cursor;
+          const item = (id: string) => ({ id, cluster: "fixture", ...root, type: "image_changed", fields: [{ path: "image", from: "v1", to: id }], at });
+          return reply({ items: cursor === "empty-changes" ? [] : cursor ? [item("first-marker"), item("last-marker")] : [item("first-marker")],
+            ...(!cursor ? { next: "empty-changes" } : cursor === "empty-changes" ? { next: "last-changes" } : {}), gaps: [], sync });
+        }
+        if (url.pathname.endsWith("/crashes")) {
+          const item = (id: string) => ({ id, sequence: id === "crash-first" ? 1 : 2, cluster: "fixture", namespace: "shop", pod: id, pod_uid: id, root_uid: root.uid, root_kind: root.kind, root_name: root.name, container: "api", type: "termination", reason: "OOMKilled", exit_code: 137, at, observed_at: at, time_source: "finished_at" });
+          return reply({ items: query.cursor === "empty-crashes" ? [] : query.cursor ? [item("crash-first"), item("crash-last")] : [item("crash-first")],
+            ...(!query.cursor ? { next: "empty-crashes" } : query.cursor === "empty-crashes" ? { next: "last-crashes" } : {}),
+            since: query.since, until: query.until, gaps: [], capture_gaps: [], coverage: {}, limitations: [], capture: { mode: "continuous", behind: false }, sync });
+        }
+        if (url.pathname.endsWith("/break-logs")) {
+          if (holdDetail) { heldDetail++; await detailBarrier; }
+          return reply({
+          window: { from: query.since, to: query.until }, pods: [{ name: "retained-pod", uid: "retained-pod", state: "deleted", short: "retained" }],
+          main_container: "api", containers: [{ name: "api", main: true }], markers: [],
+          lines: state === "no-logs" || state === "deleted" ? [] : [{ at, pod: "retained-pod", pod_uid: "retained-pod", container: "api", init: false, slot: "previous", level: "error", text: "synthetic-filter pinned retained line", source: "captured" }], rate: [], patterns: [], sources: [], counts: { all: state === "no-logs" || state === "deleted" ? 0 : 1, errors: state === "no-logs" || state === "deleted" ? 0 : 1, warnings: 0 },
+          coverage: { state: "partial", reason: "capture_not_found", tip: true, gaps: [{ from: query.since, to: query.until }] },
+        }).catch(() => {});
+        }
+        if (url.pathname.endsWith("/overview")) return reply({ connector: "kubernetes", observed_at: at, nodes: 1, pods: 1, namespaces: 1, workloads: 1, sync });
+        if (url.pathname.includes("/deployment") || url.pathname.includes("/sso/")) return reply({ error: "Community" }, 403);
+        return reply({ items: [], nodes: [], edges: [], omitted: {}, sources: [], totals: {}, broken: { total: 0 }, sync, enable: false });
+      });
+      const renderWarnings: string[] = [];
+      page.on("console", message => {
+        if (message.type() === "error" && message.text().includes("Cannot update a component")) renderWarnings.push(message.text());
+      });
+      for (state of ["overview-entry", "issues-entry", "timeline-entry", "recurring", "resolved", "deleted", "no-logs", "missing-time"]) {
+        if (state.endsWith("-entry")) {
+          await page.goto("/agent/kubernetes");
+          if (state === "timeline-entry") {
+            await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+            await page.getByRole("link", { name: "Open break details", exact: true }).click();
+          } else {
+            if (state === "issues-entry") await page.getByRole("tab", { name: "Issues", exact: true }).click();
+            await page.getByRole("button", { name: "Timeline for checkout", exact: true }).click();
+          }
+          await expect(page.getByRole("tab", { name: "Timeline", exact: true })).toHaveAttribute("aria-selected", "true");
+          expect(new URL(page.url()).searchParams.get("center")).toBe(at);
+          expect(new URL(page.url()).searchParams.get("occurrence_id")).toBe("pinned-old");
+        } else {
+          await page.goto(`/agent/kubernetes?view=timeline&root_uid=${root.uid}&namespace=shop&occurrence_id=pinned-old&center=${at}`);
+          await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+        }
+        const lane = page.getByRole("region", { name: "Timeline lane checkout", exact: true });
+        await expect(lane).toBeVisible();
+        const logs = page.getByRole("region", { name: "Logs at break", exact: true });
+        await expect(logs).toBeVisible();
+        await expect.poll(() => reads.filter(read => read.state === state && read.path.endsWith("/changes") && read.query.cursor === "last-changes").length).toBeGreaterThanOrEqual(1);
+        await expect.poll(() => reads.filter(read => read.state === state && read.path.endsWith("/crashes") && read.query.cursor === "last-crashes").length).toBeGreaterThanOrEqual(1);
+        expect(reads.filter(read => read.state === state && read.path.endsWith("/issues") && read.query.context === "persisted")
+          .every(read => read.query.center === at && read.query.occurrence_id === "pinned-old")).toBe(true);
+        expect.soft(await page.getByRole("button", { name: /^(Prev|Previous|Next)( page| crash page)?$/ }).count()).toBe(0);
+        expect.soft(await page.getByText(/^Page \d/).count()).toBe(0);
+        if (state === "missing-time") {
+          await expect(logs).toContainText(/time range.*unavailable|break time.*unresolved/i);
+          expect.soft(await lane.getByRole("slider").count()).toBe(0);
+          expect.soft(reads.filter(read => read.state === state && read.path.endsWith("/break-logs"))).toHaveLength(0);
+        } else {
+          const handle = lane.getByRole("slider", { name: "Log window start", exact: true });
+          await expect(handle).toBeVisible();
+          await handle.focus();
+          await expect(handle).toBeFocused();
+          const bracket = await handle.getAttribute("aria-valuenow");
+          const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
+          const markers = chart.locator('[data-marker="change"]');
+          await expect(markers).toHaveCount(2);
+          await markers.first().focus();
+          await page.keyboard.press("Enter");
+          await expect(page.getByRole("region", { name: "Timeline event details", exact: true })).toBeVisible();
+          const filter = logs.getByRole("textbox", { name: "Search in log window" });
+          await expect(logs.getByRole("combobox", { name: "Log container", exact: true })).toBeEnabled();
+          await expect(logs.getByRole("combobox", { name: "Log container", exact: true })).not.toContainText("Loading");
+          await filter.fill("synthetic-filter");
+          const scrollBeforeRefresh = await chart.evaluate(element => {
+            element.scrollLeft = Math.min(64, element.scrollWidth - element.clientWidth);
+            return element.scrollLeft;
+          });
+          if (width === 390) expect(scrollBeforeRefresh).toBeGreaterThan(0);
+          await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+          await expect(filter).toHaveValue("synthetic-filter");
+          await expect(handle).toHaveAttribute("aria-valuenow", bracket!);
+          await expect(markers).toHaveCount(2);
+          await expect(page.getByRole("region", { name: "Timeline event details", exact: true })).toBeVisible();
+          await expect.poll(() => chart.evaluate(element => element.scrollLeft)).toBe(scrollBeforeRefresh);
+          await chart.evaluate(element => { element.scrollLeft = 0; });
+          expect.soft(reads.filter(read => read.state === state && read.path.endsWith("/break-logs")).every(read =>
+            Date.parse(read.query.since) <= Date.parse(at) && Date.parse(read.query.until) >= Date.parse(at) && Date.parse(read.query.until) < Date.parse(later))).toBe(true);
+        }
+        expect.soft(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+        if (captureUnchanged || state.endsWith("-entry")) await page.screenshot({ path: capturePath("focused-investigation", width, theme, state), fullPage: true, animations: "disabled" });
+      }
+      try {
+        state = "denial-fence";
+        await page.goto(`/agent/kubernetes?view=timeline&root_uid=${root.uid}&namespace=shop&occurrence_id=pinned-old&center=${at}`);
+        await page.getByRole("tab", { name: "Timeline", exact: true }).click();
+        await expect(page.getByRole("log", { name: "Break log lines" })).toContainText("pinned retained line");
+        holdDetail = true;
+        await page.getByRole("region", { name: "Logs at break", exact: true }).getByRole("button", { name: "Previous container", exact: true }).click();
+        await expect.poll(() => heldDetail).toBeGreaterThan(0);
+        denyDetail = true;
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await expect(page.getByRole("slider", { name: "Log window start" })).toHaveCount(0);
+        releaseDetail();
+        await page.waitForTimeout(1000);
+        await expect(page.getByRole("slider", { name: "Log window start" })).toHaveCount(0);
+        await expect(page.getByRole("log", { name: "Break log lines" })).toHaveCount(0);
+        if (captureUnchanged) await page.screenshot({ path: capturePath("focused-investigation", width, theme, "denied-late-logs"), fullPage: true, animations: "disabled" });
+      } finally { releaseDetail(); }
+      expect(renderWarnings).toEqual([]);
+      fs.writeFileSync(path.join(process.env.HARNESS_RESULTS_DIR!, `focused-investigation-${width}-${theme}.json`), JSON.stringify({ classification: "fixture; deleted is retained identity without live resource, not proof of server deletion", reads }, null, 2));
+      await testInfo.attach("pinned-requests", { body: JSON.stringify(reads), contentType: "application/json" });
+    });
+  }
+
+  for (const width of [1440, 1024, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`mixed workload column edges and keyboard controls ${width} ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      await page.emulateMedia({ colorScheme: theme });
+      const sync = { state: "ready", age_s: 0, partial: false };
+      let crowded = false;
+      const base = [
+        { kind: "CronJob", resource_id: "batch~v1~cronjobs" },
+        { kind: "Deployment", resource_id: "apps~v1~deployments" },
+        { kind: "Pod", resource_id: "core~v1~pods" },
+        { kind: "ConfigMap", resource_id: "core~v1~configmaps" },
+      ];
+      await page.route("**/api/**", route => {
+        const url = new URL(route.request().url());
+        if (url.pathname === "/api/admin/kubernetes/workloads") {
+          const items = Array.from({ length: crowded ? 32 : 4 }, (_, index) => ({
+            ...base[index % 4], namespace: "namespace-with-a-long-but-valid-name",
+            name: `${base[index % 4].kind.toLowerCase()}-${index}-${"long-name-".repeat(8)}`,
+            uid: `resource-${index}`, summary: { ready: 1, desired: 1 }, conditions: [],
+          }));
+          return route.fulfill({ json: { items, counts: { CronJob: crowded ? 8 : 1, Deployment: crowded ? 8 : 1, Pod: crowded ? 8 : 1, ConfigMap: crowded ? 8 : 1 }, observed_at: new Date().toISOString(), sync } });
+        }
+        if (url.pathname.endsWith("/sync")) return route.fulfill({ json: { ...sync, first_ready_at: "2026-10-30T00:00:00Z", kinds: {}, total_kinds: 4, ready_kinds: 4 } });
+        if (url.pathname.endsWith("/clusters")) return route.fulfill({ json: { multiple: false, clusters: [] } });
+        if (url.pathname.endsWith("/namespaces")) return route.fulfill({ json: { items: ["namespace-with-a-long-but-valid-name"], sync } });
+        if (url.pathname.endsWith("/overview")) return route.fulfill({ json: { connector: "kubernetes", nodes: 1, pods: 1, namespaces: 1, workloads: 4, observed_at: new Date().toISOString(), sync } });
+        if (url.pathname.includes("/deployment") || url.pathname.includes("/sso/")) return route.fulfill({ status: 403, json: { error: "Community" } });
+        return route.fulfill({ json: { items: [], sources: [], nodes: [], edges: [], omitted: {}, counts: {}, totals: {}, broken: { total: 0 }, sync, enable: false } });
+      });
+      await page.goto("/agent/kubernetes?view=workloads");
+      await page.getByRole("tab", { name: "Workloads", exact: true }).click();
+      const report = [];
+      for (const state of ["no-scrollbar", "scrollbar"] as const) {
+        if (state === "scrollbar") {
+          crowded = true;
+          await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        }
+        const rows = page.locator(".kubernetes-workload-shell[role=listitem]");
+        await expect(rows).toHaveCount(crowded ? 32 : 4);
+        const measurement = await rows.evaluateAll(elements => {
+          const head = document.querySelector(".kubernetes-workload-head")!;
+          const headers = Array.from(head.querySelector(".kubernetes-list-head")!.children);
+          const scroller = head.parentElement!;
+          return {
+            desktop: getComputedStyle(head).display !== "none",
+            scrollbar: scroller.scrollHeight > scroller.clientHeight,
+            gutter: scroller.offsetWidth - scroller.clientWidth,
+            overflow: document.documentElement.scrollWidth > innerWidth,
+            rows: elements.map(row => {
+              const button = row.querySelector(".kubernetes-list-row--workload")!;
+              const cells = Array.from(button.children);
+              return { kind: cells[2].textContent, deltas: [1, 2, 3].map(index => ({
+                column: headers[index].textContent,
+                headerX: headers[index].getBoundingClientRect().x,
+                cellX: cells[index].getBoundingClientRect().x,
+                delta: Math.abs(headers[index].getBoundingClientRect().x - cells[index].getBoundingClientRect().x),
+              })), nestedButtons: button.querySelectorAll("button").length,
+              actionOutside: Array.from(row.querySelectorAll("button")).some(control => control.getBoundingClientRect().right > row.getBoundingClientRect().right + 1) };
+            }),
+          };
+        });
+        report.push({ width, theme, state, ...measurement });
+        expect.soft(measurement.scrollbar).toBe(crowded);
+        expect.soft(measurement.overflow).toBe(false);
+        if (width === 1440) expect.soft(measurement.desktop).toBe(true);
+        for (const row of measurement.rows) {
+          expect.soft(row.nestedButtons).toBe(0);
+          expect.soft(row.actionOutside).toBe(false);
+          if (measurement.desktop) for (const edge of row.deltas) expect.soft(edge.delta, `${row.kind} ${edge.column}`).toBeLessThanOrEqual(1);
+        }
+        const first = rows.first().getByRole("button").first();
+        await first.focus();
+        await expect(first).toBeFocused();
+        const unsupported = rows.filter({ has: page.locator(".pill", { hasText: "CronJob" }) });
+        expect.soft(await unsupported.getByRole("button").count()).toBe(crowded ? 8 : 1);
+        if (captureUnchanged || process.env.E2E_NATIVE_SCROLLBARS === "1" && width === 1440 && theme === "dark") {
+          await page.screenshot({ path: capturePath("workload-alignment", width, theme, state), fullPage: true, animations: "disabled" });
+        }
+      }
+      fs.writeFileSync(path.join(process.env.HARNESS_RESULTS_DIR!, `workload-alignment-${width}-${theme}.json`), JSON.stringify({ classification: "fixture", thresholdCSSPixels: 1, report }, null, 2));
+      await testInfo.attach("exact-column-edges", { body: JSON.stringify(report), contentType: "application/json" });
     });
   }
 });
@@ -7782,7 +8374,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
     const capture = async (surface: string, state: string) => {
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       expect(await page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
-      await page.screenshot({ path: capturePath(surface, width, theme, state), fullPage: true, animations: "disabled" });
+      if (captureUnchanged) await page.screenshot({ path: capturePath(surface, width, theme, state), fullPage: true, animations: "disabled" });
     };
     await page.goto("/agent/kubernetes");
     const health = page.getByRole("region", { name: "Cluster health", exact: true });
@@ -7836,7 +8428,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
     expect(firstQuery.get("resource_uid")).toBe("checkout");
     expect(firstQuery.get("limit")).toBe("100");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: capturePath("resource-detail-retained", width, theme, "timeline"), fullPage: true, animations: "disabled" });
+    if (captureUnchanged) await page.screenshot({ path: capturePath("resource-detail-retained", width, theme, "timeline"), fullPage: true, animations: "disabled" });
     await page.getByRole("button", { name: "Close panel", exact: true }).click();
     await expect(health.getByRole("button", { name: "3 broken", exact: true })).toBeVisible();
     phase = "warming";
@@ -7853,7 +8445,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
     await expect(page.locator("[data-preparing-panel], [data-sync-strip]")).toHaveCount(0);
     expect(await page.getByRole("tablist", { name: "Kubernetes views" }).getByRole("tab").allTextContents()).toEqual(tabLabels);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    await page.screenshot({ path: capturePath("published-continuity", width, theme, "warming"), fullPage: true, animations: "disabled" });
+    if (captureUnchanged) await page.screenshot({ path: capturePath("published-continuity", width, theme, "warming"), fullPage: true, animations: "disabled" });
     expect(replies.some((reply) => reply.phase === "warming" && reply.path.endsWith("/issues") && (reply.payload as { broken?: { total: number } }).broken?.total === 0)).toBe(true);
     phase = "recollected";
     await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
@@ -7876,7 +8468,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
     await expect(page.locator("[data-preparing-panel]")).toHaveCount(0);
     await expect(page.getByText("No broken workloads", { exact: true })).toHaveCount(0);
     await expect(page.locator("[data-sync-strip]")).toContainText("credentials are unavailable or rejected");
-    await page.screenshot({ path: capturePath("published-continuity", width, theme, "credential-failure"), fullPage: true, animations: "disabled" });
+    if (captureUnchanged) await page.screenshot({ path: capturePath("published-continuity", width, theme, "credential-failure"), fullPage: true, animations: "disabled" });
     await page.reload();
     await expect(page.locator('[data-sync-state="failed"]')).toHaveText("Failed");
     await expect(page.locator("[data-preparing-panel]")).toHaveCount(0);

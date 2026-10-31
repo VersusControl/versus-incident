@@ -41,12 +41,17 @@ export function kubernetesQueryUsesKinds(parts: readonly unknown[], value: unkno
     const name = kind.toLowerCase(), candidate = value.toLowerCase();
     return candidate === name || candidate.endsWith(`~${name}s`) || candidate.endsWith(`~${name}es`);
   });
+  // Workloads publishes counts for every workload kind, even when this page's
+  // rows are filtered to another kind. Its in-flight dependency set is known.
+  if (parts[0] === "kubernetes-workloads"
+    && ["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"].some(matches)) return true;
   const seen = new WeakSet<object>();
   const visit = (value: unknown): boolean => {
     if (!value || typeof value !== "object" || seen.has(value)) return false;
     seen.add(value);
     if (Array.isArray(value)) return value.some(visit);
     const row = value as Record<string, unknown>;
+    if (Object.keys(object(row.counts) ?? {}).some(matches)) return true;
     return [row.kind, row.root_kind, row.resource_id].some(matches) || Object.values(row).some(visit);
   };
   return parts.some(part => typeof part === "string" && part.includes("~") && matches(part) || visit(part)) || visit(value);
@@ -88,10 +93,33 @@ function hasProjectedObservation(value: unknown): boolean {
       && [projection.nodes, projection.pods, projection.workloads].some((count) => typeof count === "number" && count > 0)));
 }
 
-export function hasKubernetesPublication(value: unknown): boolean {
+export function hasKubernetesPublication(value: unknown, firstReadyAt?: string): boolean {
   const snapshot = value as Snapshot | undefined;
   if (snapshot?.[published]) return true;
   if (snapshot?.sync && (!snapshot.sync.state || snapshot.sync.state === "syncing")) return hasProjectedObservation(value);
+  if (snapshot?.sync?.state === "error") {
+    const projection = object(value);
+    const firstReady = Date.parse(firstReadyAt ?? "");
+    const counts = object(projection?.counts);
+    const workloadKinds = new Set(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"]);
+    const knownCount = (kind: string) => typeof counts?.[kind] === "number"
+      && Number.isSafeInteger(counts[kind]) && counts[kind] >= 0;
+    // Workloads has no observation timestamp. Its count keys are emitted only
+    // for authorized successful observations, including empty ones. Together
+    // with current scoped cluster authority they prove a committed projection,
+    // not an arbitrary error or a cold warming response.
+    return Boolean(Number.isFinite(firstReady)
+      && snapshot.sync.partial === true && Array.isArray(projection?.items)
+      && counts && Object.keys(counts).length && Object.keys(counts).every(kind => workloadKinds.has(kind) && knownCount(kind))
+      && projection.items.every(item => {
+        const row = object(item);
+        return typeof row?.kind === "string" && knownCount(row.kind)
+          && typeof row.name === "string" && row.name.length > 0 && typeof row.namespace === "string";
+      })
+      && snapshot.partial_failures?.length && snapshot.partial_failures.every(failure =>
+        kubernetesQueryUsesKinds([object(failure)?.resource_id], undefined, workloadKinds)
+        && ["timeout", "unavailable"].includes(failure.class ?? "")));
+  }
   return snapshot?.sync?.state !== "error";
 }
 

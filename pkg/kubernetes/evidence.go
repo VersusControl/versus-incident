@@ -721,7 +721,11 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 }
 
 func (service *Service) persistedRootContext(ctx context.Context, options IssueOptions) (IssuePage, error) {
-	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: "ready"}}
+	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: "ready"}, SelectionStatus: "not_requested"}
+	selecting := options.OccurrenceID != "" || !options.Center.IsZero()
+	if selecting {
+		page.SelectionStatus = "not_found"
+	}
 	// Search retained occurrences, not the selected evidence interval. A missing
 	// live object, recovered issue, or empty selected interval cannot erase this
 	// identity. Each candidate still passes the normal current authority gate.
@@ -733,18 +737,44 @@ func (service *Service) persistedRootContext(ctx context.Context, options IssueO
 		}
 		page.Sync.Partial = page.Sync.Partial || history.Sync.Partial
 		page.Partial = append(page.Partial, history.Partial...)
-		if len(history.Items) > 0 {
-			issue := history.Items[0]
+		for _, issue := range history.Items {
 			if issue.Root.UID != options.RootUID || options.Namespace != "" && issue.Root.Namespace != options.Namespace {
 				return page, ErrIncompleteInventory
 			}
-			page.RootContext = &PersistedRootContext{Root: issue.Root, Occurrence: issue, Retained: true}
-			return page, nil
+			if page.RootContext == nil {
+				page.RootContext = &PersistedRootContext{Root: issue.Root, Occurrence: issue, Retained: true}
+			}
+			if !selecting {
+				return page, nil
+			}
+			if options.OccurrenceID != "" {
+				// ID is authoritative: center never permits a different occurrence.
+				if issue.OccurrenceID == options.OccurrenceID {
+					page.SelectedOccurrence, page.SelectionStatus = &issue, "resolved"
+					return page, nil
+				}
+			} else if issue.BrokeAt != nil && issue.BrokeAt.Equal(options.Center) {
+				if page.SelectionStatus == "resolved" {
+					page.SelectedOccurrence, page.SelectionStatus = nil, "ambiguous"
+				} else if page.SelectionStatus != "ambiguous" {
+					page.SelectedOccurrence, page.SelectionStatus = &issue, "resolved"
+				}
+			}
 		}
 		if history.Next == "" {
+			if selecting && page.Sync.Partial && page.SelectionStatus != "ambiguous" {
+				page.SelectedOccurrence, page.SelectionStatus = nil, "partial"
+			}
 			return page, nil
 		}
 		options.Cursor = history.Next
+	}
+	if selecting {
+		// A bounded scan cannot prove absence or uniqueness beyond its horizon.
+		page.SelectedOccurrence, page.SelectionStatus = nil, "partial"
+		page.Sync.Partial = true
+		page.Partial = append(page.Partial, PartialFailure{Class: "selection_scan_limit"})
+		return page, nil
 	}
 	return page, storage.ErrEvidenceLimit
 }

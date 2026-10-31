@@ -3,6 +3,7 @@ import { useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-
 import { api, createKubernetesApi, type KubernetesClusters, type KubernetesCrashQuery } from "./api";
 import { useCursorPagination } from "./pagination";
 import { hasKubernetesPublication, kubernetesAccessLost, retainKubernetesPublication } from "./kubernetesContinuity";
+import { focusedCrashes } from "./kubernetesFocusedHistory";
 
 export function kubernetesKey(cluster: string | undefined, ...parts: readonly unknown[]) {
   return ["kubernetes", cluster ?? "_", ...parts] as const;
@@ -36,7 +37,7 @@ export function useKubernetesCluster(): ClusterContext {
   return useContext(KubernetesClusterContext) ?? singleContext;
 }
 
-export function useKubernetesQuery<T>(options: UseQueryOptions<T, Error, T, readonly unknown[]>) {
+export function useKubernetesQuery<T>(options: UseQueryOptions<T, Error, T, readonly unknown[]>, firstReadyAt?: string) {
   const { key } = useKubernetesCluster();
   const cache = useQueryClient();
   const query = useQuery({
@@ -54,7 +55,7 @@ export function useKubernetesQuery<T>(options: UseQueryOptions<T, Error, T, read
     // Keep the authoritative error, but discard its now-unauthorized cache.
     cache.getQueryCache().find({ queryKey: JSON.parse(scopedKey) as readonly unknown[], exact: true })?.setState({ data: undefined });
   }, [accessLost, cache, scopedKey]);
-  const missingPublication = query.data !== undefined && !hasKubernetesPublication(query.data);
+  const missingPublication = query.data !== undefined && !hasKubernetesPublication(query.data, firstReadyAt);
   const unpublished = missingPublication && (query.data as { sync?: { state?: string } }).sync?.state === "syncing";
   const hidden = accessLost || missingPublication;
   return { ...query, unpublished, data: hidden ? undefined : query.data };
@@ -65,15 +66,18 @@ export function useBrokenIssues(enabled = true) {
   return useKubernetesQuery({ queryKey: ["kubernetes-issues", "broken", cluster], queryFn: () => client.kubernetesIssues({ broken: true, include: "changes", limit: 5 }), enabled, retry: false, refetchInterval: 30_000 });
 }
 
-export function useKubernetesCrashes(options: Omit<KubernetesCrashQuery, "limit" | "cursor">, enabled = true, keepAcrossRanges = false) {
+export function useKubernetesCrashes(options: Omit<KubernetesCrashQuery, "limit" | "cursor">, enabled = true, keepAcrossRanges = false, focused = false) {
   const { client, cluster } = useKubernetesCluster();
   const paging = useCursorPagination(JSON.stringify([cluster, options]));
   const query = useKubernetesQuery({
-    queryKey: ["kubernetes-crashes", options, paging.cursor],
-    queryFn: ({ signal }) => client.kubernetesCrashes({ ...options, limit: 50, cursor: paging.cursor }, signal),
+    queryKey: ["kubernetes-crashes", options, paging.cursor, ...(focused ? ["focused"] : [])],
+    queryFn: ({ signal }) => focused
+      ? focusedCrashes(cursor => client.kubernetesCrashes({ ...options, limit: 50, cursor }, signal, "single"), signal)
+      : client.kubernetesCrashes({ ...options, limit: 50, cursor: paging.cursor }, signal),
     enabled,
     placeholderData: (previous, query) => {
       if (query?.queryKey[1] !== (cluster ?? "_")) return undefined;
+      if ((query.queryKey[5] === "focused") !== focused) return undefined;
       const prior = query.queryKey[3] as typeof options | undefined;
       if (!prior || prior.namespace !== options.namespace || prior.root_uid !== options.root_uid || prior.pod_uid !== options.pod_uid) return undefined;
       if (keepAcrossRanges || prior.since === options.since && prior.until === options.until) return previous;
@@ -86,5 +90,5 @@ export function useKubernetesCrashes(options: Omit<KubernetesCrashQuery, "limit"
     gcTime: 60_000,
     refetchOnWindowFocus: false,
   });
-  return { ...query, paging };
+  return { ...query, paging, focused };
 }

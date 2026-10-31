@@ -228,6 +228,7 @@ export function CrashJournal({ journal, reasons = [] }: { journal: ReturnType<ty
   const incomplete = page && (!podCoverage || !Number.isFinite(Date.parse(podCoverage.from)) || !Number.isFinite(Date.parse(podCoverage.to)) || Date.parse(podCoverage.from) > Date.parse(page.since) || Date.parse(podCoverage.to) < Date.parse(page.until) || page.sync.state !== "ready" || page.sync.partial || page.capture.mode !== "continuous" || page.capture.behind || page.gaps?.length || page.capture_gaps?.length || windowLimited || ambiguousEvidence);
   return <section aria-label="Captured crash evidence" className="min-w-0 border-t border-ink-700 text-xs">
     <header className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3"><h3 className="font-semibold text-ink-100">Captured crash evidence</h3>{page && <span className="text-ink-300">{counted(page.crash_count ?? page.items.filter((event) => event.type === "termination").length, "crash")}</span>}<CoverageMarker reasons={[...reasons, ...(incomplete ? ["Crash capture does not cover the whole range"] : [])]} /></header>
+    {journal.focused && page && ("incomplete_range" in page && page.incomplete_range || page.next) && <p role="status" className="px-4 pb-3 text-sev-warning">Crash evidence is incomplete for this range. Narrow the timeline window to inspect more evidence.</p>}
     {journal.isPending && <p role="status" className="px-4 pb-3">Loading captured crash evidence...</p>}
     {journal.isError && <p role="alert" className="px-4 pb-3 text-sev-warning">Crash journal unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void journal.refetch()}>Retry crash journal</button></p>}
     {page && <>
@@ -236,14 +237,14 @@ export function CrashJournal({ journal, reasons = [] }: { journal: ReturnType<ty
         <p>Window: {journalTime(page.since)} – {journalTime(page.until)}</p>
         <p>Capture started: {journalTime(page.started_at)}</p>
       </div></details>
-      {!page.items.length && <p role="status" className="px-4 pb-3 text-ink-300">No captured observations on this page.</p>}
-      <ul className="divide-y divide-ink-700" aria-label="Crash observations">{page.items.map((event) => <li key={event.id} className="min-w-0 px-4 py-2 [overflow-wrap:anywhere]">
+      {!page.items.length && <p role="status" className="px-4 pb-3 text-ink-300">{journal.focused ? "No captured observations in the loaded range." : "No captured observations on this page."}</p>}
+      <ul className={`${journal.focused ? "max-h-96 overflow-y-auto " : ""}divide-y divide-ink-700`} aria-label="Crash observations">{page.items.map((event) => <li key={event.id} className="min-w-0 px-4 py-2 [overflow-wrap:anywhere]">
         <details><summary className="cursor-pointer py-1 text-ink-200"><span className="font-medium">{event.type === "termination" ? event.reason || "Terminated" : event.waiting_reason || "Status observation"}</span>{" - "}{event.namespace}/{event.pod}{" / "}{event.init ? "Init " : ""}{event.container}{" / "}Observed: <time dateTime={event.observed_at}>{journalTime(event.observed_at)}</time>{event.time_source === "finished_at" && (Date.parse(event.at) < Date.parse(page.since) || Date.parse(event.at) > Date.parse(page.until)) && <span className="ml-2 text-sev-warning">Reported finish outside observed window</span>}</summary>
           <div className="space-y-1 py-2 text-ink-300"><p>{crashObservationDetail(event)}</p><p>Root UID: {event.root_uid}; Pod UID: {event.pod_uid}</p><p>Event time: <time dateTime={event.at}>{journalTime(event.at)}</time> ({event.time_source === "finished_at" ? "reported finish time" : "observation time; finish time unknown"})</p><p>Observed: <time dateTime={event.observed_at}>{journalTime(event.observed_at)}</time></p>{event.ancestry_partial && <p className="text-sev-warning">Capture-time ancestry is incomplete.</p>}<p className="text-ink-400">Observation ID: {event.id}</p></div>
         </details>
       </li>)}</ul>
     </>}
-    <nav aria-label="Crash journal pages" className="flex items-center justify-between gap-2 border-t border-ink-700 px-4 py-2 text-ink-300"><span>Page {journal.paging.page}</span><div className="flex gap-2"><button type="button" className="btn" aria-label="Previous crash page" disabled={!journal.paging.canPrevious || journal.isFetching} onClick={journal.paging.previousPage}><ChevronLeft size={14} aria-hidden="true" />Previous</button><button type="button" className="btn" aria-label="Next crash page" disabled={journal.isFetching || !page?.next || page.next === journal.paging.cursor} onClick={() => journal.paging.nextPage(page?.next)}>Next<ChevronRight size={14} aria-hidden="true" /></button></div></nav>
+    {!journal.focused && <nav aria-label="Crash journal pages" className="flex items-center justify-between gap-2 border-t border-ink-700 px-4 py-2 text-ink-300"><span>Page {journal.paging.page}</span><div className="flex gap-2"><button type="button" className="btn" aria-label="Previous crash page" disabled={!journal.paging.canPrevious || journal.isFetching} onClick={journal.paging.previousPage}><ChevronLeft size={14} aria-hidden="true" />Previous</button><button type="button" className="btn" aria-label="Next crash page" disabled={journal.isFetching || !page?.next || page.next === journal.paging.cursor} onClick={() => journal.paging.nextPage(page?.next)}>Next<ChevronRight size={14} aria-hidden="true" /></button></div></nav>}
   </section>;
 }
 
@@ -276,6 +277,9 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
     else query.delete("namespace");
     if (issue.broke_at) query.set("center", issue.broke_at);
     else query.delete("center");
+    if (issue.occurrence_id) query.set("occurrence_id", issue.occurrence_id);
+    else query.delete("occurrence_id");
+    query.delete("crash_id");
     navigate(`/agent/kubernetes?${query}`);
   };
   const investigate = () => {
