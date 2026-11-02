@@ -101,6 +101,25 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 	if len(auditEvents) != 0 {
 		t.Fatalf("successful passive break-log reads audited: %+v", auditEvents)
 	}
+	center := from.Add(time.Minute + 123*time.Nanosecond)
+	manifest := breaklogs.Manifest{ID: breaklogs.ManifestIdentity("deleted-root", center), Namespace: "deleted", RootUID: "deleted-root", BreakAt: center, From: from, To: now, CapturedAt: now}
+	if err := store.CommitBreakLogs(nil, nil, "", "", time.Now().UTC(), manifest); err != nil {
+		t.Fatal(err)
+	}
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, base+"&center="+center.Format(time.RFC3339Nano), nil), 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected kubernetes.BreakLogPage
+	json.NewDecoder(response.Body).Decode(&selected)
+	response.Body.Close()
+	foundCenter := false
+	for _, marker := range selected.Markers {
+		foundCenter = foundCenter || marker.Type == "break" && marker.At.Equal(center)
+	}
+	if response.StatusCode != 200 || !foundCenter || selected.OccurrenceID != manifest.ID || selected.OccurrenceID == "deleted-root" || !selected.Window.From.Equal(from) || !selected.Window.To.Equal(now) {
+		t.Fatalf("raw center/identity lost: status=%d page=%+v", response.StatusCode, selected)
+	}
 	for _, test := range []struct {
 		method, path, body, view, write string
 		status                          int
@@ -112,6 +131,14 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 		{http.MethodGet, base + "&container=*", "", "", "", 200},
 		{http.MethodGet, base + "&container=not-a-container", "", "", "", 400},
 		{http.MethodGet, base + "&container=app&container=app", "", "", "", 400},
+		{http.MethodGet, base + "&center=", "", "", "", 400},
+		{http.MethodGet, base + "&center=invalid", "", "", "", 400},
+		{http.MethodGet, base + "&center=" + center.Add(time.Nanosecond).Format(time.RFC3339Nano), "", "", "", 400},
+		{http.MethodGet, base + "&center=" + center.Format(time.RFC3339Nano) + "&center=" + center.Format(time.RFC3339Nano), "", "", "", 400},
+		{http.MethodGet, base + "&occurrence_id=", "", "", "", 400},
+		{http.MethodGet, base + "&occurrence_id=unknown", "", "", "", 400},
+		{http.MethodGet, base + "&occurrence_id=" + manifest.ID, "", "", "", 200},
+		{http.MethodGet, base + "&occurrence_id=" + manifest.ID + "&center=" + center.Add(time.Nanosecond).Format(time.RFC3339Nano), "", "", "", 400},
 		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1", "", "", "", 200},
 		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=yes", "", "", "", 400},
 		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1&breaks=0", "", "", "", 400},
@@ -128,6 +155,10 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 		{http.MethodPost, "/api/admin/kubernetes/agent-settings/test-link?cluster=cluster", `{"source":"unknown","fields":{}}`, "", "allow", 404},
 		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{"logs":true},"break_logs":{"linked_source":""}}`, "", "allow", 200},
 		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"learning":{},"break_logs":{},"sources":[]}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"break_logs":{"ingest_delay":0}}`, "", "allow", 200},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"break_logs":{"ingest_delay":90}}`, "", "allow", 200},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"break_logs":{"ingest_delay":-1}}`, "", "allow", 400},
+		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"break_logs":{"ingest_delay":3601}}`, "", "allow", 400},
 		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=missing", `{}`, "", "allow", 404},
 		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{"break_logs":{"linked_source":"SECRET_SOURCE"}}`, "", "allow", 400},
 		{http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster=cluster", `{}`, "deny", "allow", 403},

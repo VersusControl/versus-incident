@@ -32,13 +32,13 @@ export function AgentOverviewPage() {
         </nav>
       </div>}
       {isMobile ? <div className="agent-overview-content">
-        {view === "services" && <ServiceHealthSection />}
-        {view === "activity" && <AgentActivity />}
-        {view === "learning" && <AgentLearning />}
+        {view === "services" && <ServiceHealthSection key="services" />}
+        {view === "activity" && <AgentActivity key="activity" />}
+        {view === "learning" && <AgentLearning key="learning" />}
       </div> : <div className="agent-overview-sections">
-        <ServiceHealthSection />
-        <AgentActivity />
-        <AgentLearning />
+        <AgentActivity key="activity" />
+        <AgentLearning key="learning" />
+        <ServiceHealthSection key="services" />
       </div>}
     </main>
   </>;

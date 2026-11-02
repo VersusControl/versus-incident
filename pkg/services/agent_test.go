@@ -57,6 +57,39 @@ type renewalSequenceStore struct {
 	calls       atomic.Int64
 }
 
+// Advance storage time only on observed heartbeats, so scheduler delays cannot
+// expire a tiny test lease before the heartbeat goroutine gets CPU time.
+type clockedDetectionStore struct {
+	storage.Provider
+	storage.DetectionEpisodeStore
+	storage.DetectionIncidentStore
+	mu      sync.Mutex
+	now     time.Time
+	renewed chan time.Time
+}
+
+func (s *clockedDetectionStore) RecordDetectionOccurrence(occurrence storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	occurrence.ReceivedAt = s.now
+	return s.DetectionEpisodeStore.RecordDetectionOccurrence(occurrence)
+}
+
+func (s *clockedDetectionStore) RenewDetectionNotificationClaim(renewal storage.DetectionNotificationRenewal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = s.now.Add(renewal.ClaimLease / 3)
+	renewal.RenewedAt = s.now
+	err := s.DetectionEpisodeStore.RenewDetectionNotificationClaim(renewal)
+	if err == nil {
+		select {
+		case s.renewed <- s.now:
+		default:
+		}
+	}
+	return err
+}
+
 func newBlockingDetectionSaveStore(provider storage.Provider) *blockingDetectionSaveStore {
 	return &blockingDetectionSaveStore{
 		Provider: provider, episodes: provider.(storage.DetectionEpisodeStore),
@@ -412,7 +445,13 @@ func TestCreateIncidentFromFinding_RenewsLiveClaimDuringFanout(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			loadAgentTestConfig(t)
-			provider := storage.NewMemory()
+			base := storage.NewMemory()
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			provider := &clockedDetectionStore{
+				Provider: base, DetectionEpisodeStore: base.(storage.DetectionEpisodeStore),
+				DetectionIncidentStore: base.(storage.DetectionIncidentStore),
+				now:                    start, renewed: make(chan time.Time, 8),
+			}
 			previousStore := Storage()
 			SetStorage(provider)
 			t.Cleanup(func() { SetStorage(previousStore) })
@@ -420,6 +459,7 @@ func TestCreateIncidentFromFinding_RenewsLiveClaimDuringFanout(t *testing.T) {
 			var orchestrations atomic.Int64
 			blocked := make(chan struct{})
 			release := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
 			blockNext := atomic.Bool{}
 			SetEmitInterceptor(func(map[string]interface{}, string) EmitDecision {
 				orchestrations.Add(1)
@@ -441,14 +481,41 @@ func TestCreateIncidentFromFinding_RenewsLiveClaimDuringFanout(t *testing.T) {
 					t.Fatalf("initial CreateIncidentFromFinding: %v", err)
 				}
 			}
+			provider.mu.Lock()
+			claimStarted := provider.now
+			provider.mu.Unlock()
 			blockNext.Store(true)
-			ownerDone := make(chan error, 1)
+			ownerDone := make(chan struct{})
+			var ownerErr error
 			go func() {
 				finding := &core.AIFinding{Title: "Live claim", Severity: testCase.blockedSeverity}
-				ownerDone <- createIncidentFromFindingWithLease(finding, result, "loki", "checkout", 30*time.Millisecond)
+				ownerErr = createIncidentFromFindingWithLease(finding, result, "loki", "checkout", 30*time.Millisecond)
+				close(ownerDone)
 			}()
-			<-blocked
-			time.Sleep(80 * time.Millisecond)
+			defer func() {
+				unblock()
+				select {
+				case <-ownerDone:
+				case <-time.After(5 * time.Second):
+					t.Error("notification owner did not stop")
+				}
+			}()
+			select {
+			case <-blocked:
+			case <-time.After(5 * time.Second):
+				t.Fatal("notification owner did not reach fanout")
+			}
+			// Cross the original lease boundary using successful renewals, not
+			// a wall-clock sleep. Without renewal the later call must reclaim.
+			deadline := time.NewTimer(5 * time.Second)
+			defer deadline.Stop()
+			for renewed := claimStarted; !renewed.After(claimStarted.Add(30 * time.Millisecond)); {
+				select {
+				case renewed = <-provider.renewed:
+				case <-deadline.C:
+					t.Fatal("heartbeat did not renew past the original claim expiry")
+				}
+			}
 			later := &core.AIFinding{Title: "Live claim", Severity: "low"}
 			if err := createIncidentFromFindingWithLease(later, result, "loki", "checkout", 30*time.Millisecond); err != nil {
 				t.Fatalf("later CreateIncidentFromFinding: %v", err)
@@ -456,9 +523,10 @@ func TestCreateIncidentFromFinding_RenewsLiveClaimDuringFanout(t *testing.T) {
 			if got := orchestrations.Load(); got != testCase.wantOrchestrations {
 				t.Fatalf("orchestrations while owner alive=%d, want %d", got, testCase.wantOrchestrations)
 			}
-			close(release)
-			if err := <-ownerDone; err != nil {
-				t.Fatalf("owner CreateIncidentFromFinding: %v", err)
+			unblock()
+			<-ownerDone
+			if ownerErr != nil {
+				t.Fatalf("owner CreateIncidentFromFinding: %v", ownerErr)
 			}
 			incidents, err := provider.ListIncidents(0)
 			if err != nil || len(incidents) != 1 {

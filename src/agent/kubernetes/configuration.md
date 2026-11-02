@@ -225,6 +225,52 @@ for continuous capture in east and demand capture in west. Helm values use
 inside each `connectors.kubernetes.clusters` entry for multiple clusters.
 Restart Versus after configuration changes.
 
+### Linked break-log source
+
+In the cluster's **Agent** tab, link an already configured Loki, Elasticsearch,
+SigNoz, Graylog, CloudWatch Logs or Splunk source. Verify its Kubernetes field
+mapping and workload scope with **Test link**, then save. This extends
+[Logs at break](auto-detect-issue.md#linked-source-and-ingestion-delays);
+it does not change current/live logs.
+
+| Saved cluster setting | Value |
+| --- | --- |
+| `break_logs.linked_source` | Name of the configured log source selected in the Agent tab. |
+| `break_logs.fields` | Existing per-source Kubernetes field mappings. |
+| `break_logs.ingest_delay` | Optional integer seconds, **0–3600** inclusive. Blank/absent uses the source default; `0` is an explicit zero-delay estimate. |
+
+These are saved Agent settings, not `connectors.kubernetes` YAML keys.
+Use **Ingestion delay override (seconds)** only when needed. Built-in estimates
+are **30s** for Loki, **60s** for Elasticsearch/SigNoz/Graylog, and **120s** for
+CloudWatch Logs/Splunk. Readiness is the selected window end plus this delay:
+there is no ingestion watermark or guaranteed completion time. Background
+settling is automatic when a source is linked; it has no separate enable setting.
+
+### Break-log evidence limits
+
+Raw break-log excerpts and identity metadata are bounded on both file and
+PostgreSQL storage, separately from general Timeline history:
+
+| Evidence | Limit |
+| --- | --- |
+| Raw snapshots and their metadata | **24 hours**, **2,000 snapshots**, **8 MiB serialized state including metadata**. |
+| Identity history | **1 MiB** total reservation per evidence scope; **40 Pods** and **64 KiB** per namespace/root UID. |
+| All identity metadata | **2 MiB** within the overall 8 MiB cap. |
+| Break identity manifest | Up to **20 Pods per root occurrence**, retained within the same 24-hour horizon and metadata budget. |
+
+Sampling or eviction of healthy and retired Pod identities leaves explicit
+coverage gaps scoped to the affected root/namespace; loss markers are retained
+for the 24-hour horizon. Under pressure, root markers may be coarsened to the
+affected namespace. These budgets do not guarantee all-fleet identity coverage
+or retention of every excerpt for a full day. Settled excerpts may outlast source
+retention only within the same limits; they are not a long-term archive.
+
+Each self-hosted deployment has one organization: OSS writes and reads `default`;
+a licensed deployment writes its licensed organization and reads
+`[licensed organization, default]`. The two concurrent background-settle slots
+are shared across the deployment, not multiplied by organization or cluster.
+Current Kubernetes namespace authority still applies to reads and settling.
+
 ### History storage
 
 | Backend | Kubernetes evidence policy |

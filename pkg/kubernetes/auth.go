@@ -60,6 +60,12 @@ type credentialEpoch struct {
 type credentialEpochContextKey struct{}
 
 func (service *Service) captureCredentialID() string {
+	return service.captureCredentialIDAtGeneration(service.client.authGeneration.Load())
+}
+
+// Recovery generations fence process-local reads, not persistent identity.
+// Generation zero retains the existing initial-boot storage key format.
+func (service *Service) captureCredentialIDAtGeneration(generation uint64) string {
 	epoch := service.identity
 	epoch.mu.Lock()
 	defer epoch.mu.Unlock()
@@ -75,7 +81,7 @@ func (service *Service) captureCredentialID() string {
 	if service.client.base != nil {
 		endpoint = service.client.base.String()
 	}
-	encoded, _ := json.Marshal([]string{"capture-scope-v1", endpoint, service.configuredCredentialID, mode, hex.EncodeToString(identity[:]), strconv.FormatUint(service.client.authGeneration.Load(), 10)})
+	encoded, _ := json.Marshal([]string{"capture-scope-v1", endpoint, service.configuredCredentialID, mode, hex.EncodeToString(identity[:]), strconv.FormatUint(generation, 10)})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }

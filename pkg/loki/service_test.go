@@ -87,6 +87,7 @@ func TestReadServiceLabelMappingIntersectsScope(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		_, err = service.Read(context.Background(), ReadRequest{Service: `api"} |= ".*`, Limit: 1})
 		if err != nil {
 			t.Fatal(err)
@@ -95,6 +96,24 @@ func TestReadServiceLabelMappingIntersectsScope(t *testing.T) {
 		if parseErr != nil || len(matchers) != 4 || matchers[3].name != item.label || matchers[3].literal != `"api\"} |= \".*"` || !strings.Contains(query, item.scope[1:len(item.scope)-1]) {
 			t.Fatalf("mapped query = %q; matchers=%+v, %v", query, matchers, parseErr)
 		}
+	}
+}
+
+func TestReadForwardSelectsOldestAcrossStreams(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("direction") != "forward" || request.URL.Query().Get("limit") != "2" {
+			t.Errorf("forward bounded query missing: %v", request.URL.Query())
+		}
+		fmt.Fprint(writer, `{"status":"success","data":{"resultType":"streams","result":[{"stream":{"app":"api"},"values":[["2000000000","second"]]},{"stream":{"app":"api"},"values":[["1000000000","head"]]}]}}`)
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentLokiSourceConfig{Address: server.URL, Query: `{app="api"}`}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ReadWindow(t.Context(), ReadRequest{Forward: true, Limit: 1}, time.Unix(0, 0), time.Unix(5, 0))
+	if err != nil || result.Count != 1 || result.Records[0].Message != "head" || !result.Truncated || result.NextOffset != 1 {
+		t.Fatalf("oldest-first excerpt or truncation lost: %+v err=%v", result, err)
 	}
 }
 

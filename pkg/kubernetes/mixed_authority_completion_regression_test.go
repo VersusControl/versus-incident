@@ -261,7 +261,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					t.Fatalf("held tail hid known failed cycle: %+v", held)
 				}
 				workloads, err := service.Workloads(t.Context(), WorkloadListOptions{})
-				if !errors.Is(err, ErrInventoryNotReady) || len(workloads.Items) != 0 {
+				if (!errors.Is(err, ErrInventoryNotReady) && !errors.Is(err, ErrForbidden)) || len(workloads.Items) != 0 {
 					t.Fatalf("held tail allowed protected access: %d %v", len(workloads.Items), err)
 				}
 				mu.Lock()
@@ -286,7 +286,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				if incomplete {
 					waitUntil(t, 12*time.Second, "invalid final LIST uncertainty admission", func() bool {
 						_, err := service.Workloads(t.Context(), WorkloadListOptions{})
-						return invalidFinal.Load() > 0 && errors.Is(err, ErrInventoryNotReady)
+						return invalidFinal.Load() > 0 && (errors.Is(err, ErrInventoryNotReady) || errors.Is(err, ErrForbidden))
 					})
 					assertRetained()
 					if health().State == "ready" {

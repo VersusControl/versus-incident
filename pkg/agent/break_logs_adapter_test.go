@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +16,110 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
+	"github.com/VersusControl/versus-incident/pkg/signoz"
 	awslogs "github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
+	"github.com/aws/smithy-go"
 )
 
+func TestLinkedUpstreamErrorsRetainOnlySafeClass(t *testing.T) {
+	for _, test := range []struct {
+		err   error
+		class string
+	}{
+		{context.DeadlineExceeded, "timeout"},
+		{&smithy.GenericAPIError{Code: "AccessDeniedException", Message: "secret upstream body"}, "unauthorized"},
+		{&smithy.GenericAPIError{Code: "ServiceUnavailableException", Message: "secret upstream body"}, "unavailable"},
+		{&smithy.GenericAPIError{Code: "ResourceNotFoundException", Message: "secret upstream body"}, "not_found"},
+		{&signoz.StatusError{StatusCode: 503}, "unavailable"},
+		{errors.New("transport failure secret"), "unavailable"},
+		{errors.New("invalid_mapping"), "invalid_mapping"},
+	} {
+		err := safeLinkedError(context.Background(), test.err)
+		var typed *breaklogs.ReadError
+		if !errors.As(err, &typed) || typed.Class != test.class || err.Error() != test.class {
+			t.Fatalf("unsafe or incorrect upstream error: %T %v", err, err)
+		}
+	}
+}
+
 type linkedCanaryScrubber struct{}
+
+func TestLinkedMultiPodSelectorsReadEveryIdentityInOneWindow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	for _, kind := range []string{"loki", "elasticsearch", "signoz"} {
+		t.Run(kind, func(t *testing.T) {
+			calls := 0
+			var actual string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				calls++
+				if kind == "loki" {
+					actual = request.URL.Query().Get("query")
+					streams := []any{}
+					for i := 0; i < 4; i++ {
+						streams = append(streams, map[string]any{"stream": map[string]string{"namespace": "shop", "pod": fmt.Sprintf("api-%d", i), "container": "app"}, "values": [][]string{{strconv.FormatInt(now.Add(-time.Minute).UnixNano(), 10), "LINKED_CANARY"}}})
+					}
+					json.NewEncoder(writer).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "streams", "result": streams}})
+					return
+				}
+				var body map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				raw, _ := json.Marshal(body)
+				actual = string(raw)
+				rows := []any{}
+				for i := 0; i < 4; i++ {
+					name := fmt.Sprintf("api-%d", i)
+					if kind == "elasticsearch" {
+						rows = append(rows, map[string]any{"_source": map[string]any{"@timestamp": now.Add(-time.Minute).Format(time.RFC3339Nano), "message": "LINKED_CANARY", "kubernetes": map[string]string{"namespace_name": "shop", "pod_name": name, "container_name": "app"}}})
+					} else {
+						rows = append(rows, map[string]any{"timestamp": now.Add(-time.Minute).Format(time.RFC3339Nano), "data": map[string]any{"body": "LINKED_CANARY", "resources_string": map[string]string{"k8s.namespace.name": "shop", "k8s.pod.name": name, "k8s.container.name": "app"}}})
+					}
+				}
+				if kind == "elasticsearch" {
+					json.NewEncoder(writer).Encode(map[string]any{"hits": map[string]any{"total": map[string]any{"value": 4, "relation": "eq"}, "hits": rows}})
+				} else {
+					json.NewEncoder(writer).Encode(map[string]any{"status": "success", "data": map[string]any{"data": map[string]any{"results": []any{map[string]any{"queryName": "A", "rows": rows}}}}})
+				}
+			}))
+			defer server.Close()
+			roots := x509.NewCertPool()
+			roots.AddCert(server.Certificate())
+			source := config.AgentSourceConfig{Type: kind}
+			source.Loki = config.AgentLokiSourceConfig{Address: server.URL, Query: `{app="api"}`, InsecureSkipVerify: true}
+			source.Elasticsearch = config.AgentElasticsearchSourceConfig{Addresses: []string{server.URL}, Index: "logs-*", AllowLoopback: true, InsecureSkipVerify: true}
+			source.Signoz = config.AgentSignozSourceConfig{Address: server.URL, APIKey: "test-key", AllowLoopback: true, RootCAs: roots, Query: "environment = 'prod'"}
+			adapter := &breakLogAdapter{source: source, fields: breaklogs.DefaultFields(kind), scrubber: linkedCanaryScrubber{}}
+			query := breaklogs.LinkedQuery{Namespace: "shop", Pods: []string{"api-0", "api-1", "api-2", "api-3"}, From: now.Add(-5 * time.Minute), To: now, Limit: 2000}
+			result, err := breaklogs.ReadWindow(t.Context(), adapter, query)
+			if err != nil || calls != 1 || result.Truncated || len(result.Lines) != 4 || len(result.Complete) != 1 {
+				t.Fatal("multi-Pod batch starved identities", calls, result, err)
+			}
+			for _, name := range query.Pods {
+				if !strings.Contains(actual, name) {
+					t.Fatal("selector omitted verified Pod", name, actual)
+				}
+			}
+			for _, line := range result.Lines {
+				if line.Text != "[redacted]" {
+					t.Fatal("batch bypassed redaction")
+				}
+			}
+		})
+	}
+}
+
+func TestLinkedBatchedAdapterSharesWholeQueryBudget(t *testing.T) {
+	now := time.Now().UTC()
+	api := &linkedCloudAPI{t: t, at: now.Add(-time.Minute), saturated: true}
+	adapter := &breakLogAdapter{source: config.AgentSourceConfig{Type: "cloudwatchlogs", CloudWatchLogs: config.AgentCloudWatchLogsSourceConfig{Region: "us-east-1", LogGroupName: "/configured/group", FilterPattern: "configured"}}, fields: breaklogs.DefaultFields("cloudwatchlogs"), scrubber: linkedCanaryScrubber{}, cloudAPI: api}
+	query := breaklogs.LinkedQuery{Namespace: "shop", Pods: []string{"api-1", "api-2", "api-3", "api-4"}, From: now.Add(-5 * time.Minute), To: now, Limit: 2000}
+	result, err := breaklogs.ReadWindow(t.Context(), adapter, query)
+	if err != nil || api.calls != 3 || !result.Truncated || len(result.Complete) != 0 || len(result.Lines) > 6000 {
+		t.Fatal("fallback exceeded whole-query budget or hid starvation", api.calls, result, err)
+	}
+}
 
 func (linkedCanaryScrubber) Scrub(value string) string {
 	return strings.ReplaceAll(value, "LINKED_CANARY", "[redacted]")
@@ -30,6 +130,7 @@ type linkedCloudAPI struct {
 	at               time.Time
 	calls            int
 	missingContainer bool
+	saturated        bool
 }
 
 func (api *linkedCloudAPI) FilterLogEvents(ctx context.Context, input *awslogs.FilterLogEventsInput, _ ...func(*awslogs.Options)) (*awslogs.FilterLogEventsOutput, error) {
@@ -43,7 +144,14 @@ func (api *linkedCloudAPI) FilterLogEvents(ctx context.Context, input *awslogs.F
 	}
 	stream := "configured-stream"
 	at := api.at.UnixMilli()
-	return &awslogs.FilterLogEventsOutput{Events: []types.FilteredLogEvent{{Timestamp: &at, Message: &message, LogStreamName: &stream}}}, nil
+	events := []types.FilteredLogEvent{{Timestamp: &at, Message: &message, LogStreamName: &stream}}
+	if api.saturated {
+		events = nil
+		for i := 0; i < 50; i++ {
+			events = append(events, types.FilteredLogEvent{Timestamp: &at, Message: &message, LogStreamName: &stream})
+		}
+	}
+	return &awslogs.FilterLogEventsOutput{Events: events}, nil
 }
 
 func TestBreakLogAdaptersAllSixHistoricalScopedContracts(t *testing.T) {

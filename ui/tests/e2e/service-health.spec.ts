@@ -1,6 +1,6 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import * as path from "node:path";
-import { captureDir } from "./support/capture";
+import { captureDir, capturePath } from "./support/capture";
 
 const screenshotDir = captureDir();
 const fixedTime = "2026-09-10T12:00:00Z";
@@ -333,6 +333,80 @@ test("Now pulse activity is compact, navigable, and responsive", async ({ page }
   await pulse.screenshot({ path: path.join(screenshotDir, "now-pulse-off-mobile.png"), animations: "disabled" });
 });
 
+test("overview heatmap wraps many services without widening the page", async ({ page }, testInfo) => {
+  const snapshot = liveSnapshot();
+  const sample = (snapshot.services as Array<Record<string, unknown>>)[0];
+  const names = Array.from({ length: 36 }, (_, index) =>
+    `service-${String(index).padStart(2, "0")}-${"longproductionname".repeat(6)}`);
+  const services = names.map((service) => ({ ...sample, service, domain: "Ungrouped" }));
+  snapshot.services = services;
+  snapshot.coverage = { total_services: 36, observed_services: 36, partial: false };
+  snapshot.facets = { pressure: 36 };
+  const state = await installApi(page, snapshot);
+  const measurements = [];
+
+  for (const scenario of ["ungrouped", "grouped", "no-source"]) {
+    const grouped = scenario === "grouped";
+    state.health = { ...snapshot,
+      ...(scenario === "no-source" ? {
+        capabilities: emptySnapshot().capabilities,
+        coverage: { total_services: 36, observed_services: 0, partial: true },
+        facets: { unknown: 36 },
+      } : {}),
+      services: services.map((service, index) => ({
+      ...service, domain: grouped ? `domain-${index % 4}-${"longdomainname".repeat(6)}` : "Ungrouped",
+      ...(scenario === "no-source" ? {
+        active_incidents: null, severity: "unknown",
+        logs: { matched_logs: 0, unique_patterns: 0, new_patterns: 0, unknown_patterns: 0, spiking_patterns: 0, severity_counts: {} },
+        availability: { logs: { state: "not_configured" } },
+      } : {}),
+    })) };
+    for (const width of [1440, 1024, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 });
+      await openAuthenticated(page, "/agent");
+      const main = page.locator("main.agent-overview");
+      const canvas = page.getByTestId("service-health-domains");
+      const tiles = canvas.getByRole("button", { name: /^Inspect / });
+      await expect(tiles).toHaveCount(36);
+      await expectNoHorizontalOverflow(page);
+      const widths = await page.locator("html, body, #main, main.agent-overview, .agent-overview-sections, .agent-overview-content, .heatmap-canvas, .heatmap-canvas > section, .heatmap-grid").evaluateAll((elements) =>
+        elements.map((element) => ({
+          element: element.className || element.tagName,
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+        })));
+      measurements.push({ scenario, width, widths });
+      console.log(JSON.stringify({ scenario, width, widths }));
+      for (const measurement of widths) {
+        expect(measurement.scrollWidth, `${width}px ${measurement.element}`).toBeLessThanOrEqual(measurement.clientWidth);
+      }
+      const last = canvas.getByRole("button", { name: `Inspect ${names[35]}`, exact: true });
+      await last.scrollIntoViewIfNeeded();
+      await expect(last).toBeInViewport();
+      await last.focus();
+      await last.press("Enter");
+      await expect(page.getByRole("dialog", { name: names[35], exact: true })).toBeVisible();
+      await page.keyboard.press("Escape");
+      expect(await main.evaluate((element) => element.scrollLeft)).toBe(0);
+      for (const tile of await tiles.all()) {
+        expect(await tile.locator("h4").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      }
+      await page.getByRole("button", { name: "List view", exact: true }).click();
+      expect(await main.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await canvas.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await page.getByRole("button", { name: "Grid view", exact: true }).click();
+      if (width === 1440 || width === 390) {
+        await tiles.first().scrollIntoViewIfNeeded();
+        await page.getByRole("heading", { name: "Service Heatmap", exact: true }).scrollIntoViewIfNeeded();
+        await page.screenshot({ path: capturePath("agent-overview", width, "dark", scenario) });
+      }
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator(".agent-overview-sections > section").last().getByRole("heading", { name: "Service Heatmap", exact: true })).toHaveCount(1);
+  await testInfo.attach("layout-measurements", { body: JSON.stringify(measurements, null, 2), contentType: "application/json" });
+});
+
 test("no-source preview is labeled, isolated, and responsive", async ({ page }) => {
   await installApi(page, emptySnapshot());
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -369,8 +443,8 @@ test("live OSS evidence supports mode, facet, domain drill-down, and service nav
   await expect(page.getByRole("button", { name: "payments-database-with-a-long-production-name, no health snapshot available" })).toBeVisible();
   await expect(page.getByText("Impact based on combined evidence")).toHaveCount(0);
   await expect(page.getByText("Patterns + incidents")).toHaveCount(0);
-  const firstTile = await page.getByRole("button", { name: "Inspect catalog", exact: true }).boundingBox();
-  expect(firstTile?.y).toBeLessThan(620);
+  await page.getByRole("heading", { name: "Service Heatmap", exact: true }).scrollIntoViewIfNeeded();
+  await expect(page.getByRole("button", { name: "Inspect catalog", exact: true })).toBeInViewport();
   await expect(page.getByRole("heading", { name: "Lifetime totals" })).not.toBeVisible();
   await page.screenshot({ path: path.join(screenshotDir, "live-grid-desktop.png"), fullPage: true });
   const checkoutTile = page.getByRole("button", { name: "Inspect checkout-service-with-a-long-production-name", exact: true });

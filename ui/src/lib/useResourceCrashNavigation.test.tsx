@@ -108,7 +108,7 @@ describe("Resource crash log navigation", () => {
     expect(state.pods).toEqual(["pod-a"]);
     const params = new URLSearchParams(state.search);
     expect(params.get("logs_from")).toBe("2026-10-21T07:56:00.000Z");
-    expect(params.get("logs_to")).toBe("2026-10-21T08:01:00.000Z");
+    expect(params.get("logs_to")).toBe("2026-10-21T08:01:00Z");
     expect(params.get("root_uid")).toBe("root");
     expect(params.get("namespace")).toBe("shop");
     expect(params.get("logs_pod")).toBe("pod-a");

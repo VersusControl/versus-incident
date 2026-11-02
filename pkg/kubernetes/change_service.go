@@ -122,7 +122,14 @@ func (service *Service) changeStore() *kubechanges.Store {
 	created := kubechanges.NewStore(service.changes.provider, scope)
 	if service.changes.evidenceEnabled {
 		if provider, ok := service.changes.provider.(storage.EvidenceStore); ok && provider.EvidencePolicy().Mode != "unsupported" {
-			created = kubechanges.NewCaptureState(service.changes.provider, scope)
+			// A restarted process must find the same retained excerpts after
+			// same-principal recovery. Live indexes and cancellation still
+			// use the runtime epoch; storage retains full credential binding.
+			persistentScope := scope
+			if service.client != nil {
+				persistentScope.CredentialID = service.persistentCredentialID
+			}
+			created = kubechanges.NewCaptureState(service.changes.provider, persistentScope)
 		}
 	}
 	if created != nil {

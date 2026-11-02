@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -985,5 +986,111 @@ func TestEvidencePreparationPinsDeletionGeneration(t *testing.T) {
 	page, err = store.QueryEvidence(t.Context(), scope, storage.EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Hour), Type: "issue", UID: "fresh"})
 	if err != nil || page.Total == 0 {
 		t.Fatalf("fresh capture failed to resume: total=%d err=%v", page.Total, err)
+	}
+}
+
+func TestLiveIssueCarriesPinnedOccurrenceThroughConditionTimeDrift(t *testing.T) {
+	service, store, scope := reviewHistoryService(t)
+	opened := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second).Add(123456789 * time.Nanosecond)
+	root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "api", UID: "api-root"}
+	commit := func(id, expected string, generation uint64, brokeAt, at time.Time) {
+		t.Helper()
+		raw, _ := json.Marshal(Issue{Root: root, Rule: "pod.crash_loop", Severity: "warning", Broken: true, BrokeAt: &brokeAt})
+		batch := storage.EvidenceBatch{ID: id, Expected: expected, Generation: generation, At: at, Epoch: "synthetic", Issues: []storage.EvidenceIssue{{Key: "api", Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: "pod.crash_loop", LastSeen: at, Broken: true, Payload: raw}}}
+		if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit("capture:open", "", 0, opened, opened)
+	checkpoint, _ := store.EvidenceCheckpoint(t.Context(), scope)
+	drifted := opened.Add(7*time.Minute + 987*time.Nanosecond)
+	commit("capture:later", checkpoint.ID, checkpoint.Generation, drifted, opened.Add(8*time.Minute))
+
+	kinds := map[string]kubeindex.KindStatus{}
+	for kind := range indexedResourceIDs {
+		kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: time.Now().UTC(), CompletedAt: time.Now().UTC()}
+	}
+	generation := inventoryGeneration{View: kubeindex.Snapshot{Kinds: kinds, Records: []kubeindex.Record{
+		{Kind: "Namespace", Name: "kube-system", UID: "physical"},
+		{Kind: root.Kind, Namespace: root.Namespace, Name: root.Name, UID: root.UID},
+		{Kind: "Pod", Namespace: root.Namespace, Name: "api-0", UID: "pod", Phase: "Running", ReadyStatus: "False", ReadyTransitionAt: drifted, Owners: []kubeindex.OwnerRef{{Kind: root.Kind, UID: root.UID, Controller: true}}, Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 2}}},
+	}}}
+	live, err := service.Issues(pinInventory(t.Context(), generation), IssueOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var item Issue
+	for _, issue := range live.Items {
+		if issue.Root.UID == root.UID && issue.Rule == "pod.crash_loop" {
+			item = issue
+		}
+	}
+	if item.OccurrenceID == "" || item.BrokeAt == nil || !item.BrokeAt.Equal(opened) {
+		t.Fatalf("live list did not adopt the pinned occurrence: id=%q at=%v", item.OccurrenceID, item.BrokeAt)
+	}
+	for _, options := range []IssueOptions{
+		{Context: "persisted", RootUID: root.UID, Namespace: root.Namespace, OccurrenceID: item.OccurrenceID, Center: *item.BrokeAt},
+		{Context: "persisted", RootUID: root.UID, Namespace: root.Namespace, Center: *item.BrokeAt},
+	} {
+		resolved, err := service.persistedRootContext(t.Context(), options)
+		if err != nil || resolved.SelectedOccurrence == nil || resolved.SelectedOccurrence.OccurrenceID != item.OccurrenceID {
+			t.Fatalf("persisted root did not resolve the live selection %+v: %v", options, err)
+		}
+	}
+	query := breaklogs.Query{Namespace: root.Namespace, RootUID: root.UID, OccurrenceID: item.OccurrenceID, Center: *item.BrokeAt, From: opened.Add(-time.Minute), To: opened.Add(time.Minute)}
+	resolvedQuery, err := service.resolveBreakLogSelection(t.Context(), query, breaklogs.State{})
+	if err != nil || !resolvedQuery.Center.Equal(opened) {
+		t.Fatalf("break-logs selection rejected the live list identity: %v", err)
+	}
+}
+
+type occurrenceLookupFailureStore struct {
+	storage.Provider
+	storage.EvidenceStore
+	cause error
+	page  storage.EvidencePage
+}
+
+func (store occurrenceLookupFailureStore) QueryEvidence(context.Context, storage.EvidenceScope, storage.EvidenceQuery) (storage.EvidencePage, error) {
+	return store.page, store.cause
+}
+
+func TestLiveIssueIncompleteOccurrenceHistoryWithholdsCenter(t *testing.T) {
+	service, store, _ := reviewHistoryService(t)
+	service.SetChangeStorage(occurrenceLookupFailureStore{Provider: service.usageProvider(), EvidenceStore: store, page: storage.EvidencePage{Items: []storage.EvidenceRecord{{Type: "coverage_gap", Payload: json.RawMessage(`{}`)}}}})
+	drifted := time.Now().UTC().Add(-time.Minute)
+	page := IssuePage{Items: []Issue{{Root: ObjectRef{Kind: "Pod", Namespace: "shop", UID: "pod"}, Rule: "pod.crash_loop", Broken: true, BrokeAt: &drifted, BrokeAtSource: "condition"}}}
+	if err := service.pinOpenOccurrences(t.Context(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if !page.Sync.Partial || len(page.Partial) == 0 || !page.Items[0].Partial || page.Items[0].BrokeAt != nil || page.Items[0].OccurrenceID != "" || page.Items[0].BrokeAtSource != "" {
+		t.Fatalf("unavailable occurrence history served an authoritative drifting center: %+v", page)
+	}
+}
+
+func TestLiveIssuesFailClosedWhenOccurrenceLookupFails(t *testing.T) {
+	for _, cause := range []error{storage.ErrUnsupported, context.DeadlineExceeded, ErrForbidden, ErrUnauthorized} {
+		t.Run(errorClass(cause), func(t *testing.T) {
+			service, store, _ := reviewHistoryService(t)
+			service.SetChangeStorage(occurrenceLookupFailureStore{Provider: service.usageProvider(), EvidenceStore: store, cause: cause})
+			at := time.Now().UTC()
+			kinds := map[string]kubeindex.KindStatus{}
+			for kind := range indexedResourceIDs {
+				kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: at, CompletedAt: at}
+			}
+			generation := inventoryGeneration{View: kubeindex.Snapshot{Kinds: kinds, Records: []kubeindex.Record{
+				{Kind: "Namespace", Name: "kube-system", UID: "physical"},
+				{Kind: "Pod", Namespace: "shop", Name: "api-0", UID: "pod", Phase: "Running", ReadyStatus: "False", ReadyTransitionAt: at.Add(-time.Minute), Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 2}}},
+			}}}
+			ctx := pinInventory(t.Context(), generation)
+			before, err := service.issuesSnapshot(ctx, IssueOptions{})
+			if err != nil || len(before.Items) == 0 || !before.Items[0].Broken {
+				t.Fatalf("fixture has no live broken issue: %+v %v", before, err)
+			}
+			page, err := service.Issues(ctx, IssueOptions{})
+			if !errors.Is(err, cause) || len(page.Items) != 0 || DiagnoseError(err).Code != DiagnoseError(cause).Code {
+				t.Fatalf("lookup failure served drifting live items or lost its cause: %+v %v", page, err)
+			}
+		})
 	}
 }

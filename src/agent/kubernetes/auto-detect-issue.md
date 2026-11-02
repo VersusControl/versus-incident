@@ -106,11 +106,45 @@ Open **Log coverage tip** when the lightbulb appears. It explains why part of th
 
 *Check the coverage tip before treating missing messages as evidence that nothing failed.*
 
-The tip's **Link a source in Agent tab** opens this cluster's source settings. Check the workload scope and use **Test link** to inspect the preview; a successful preview does not guarantee complete incident history. For setup, see [Configuration](configuration.md) and the [Kubernetes connector guide](../connectors/kubernetes.md).
+The tip's **Link a source in Agent tab** opens this cluster's existing source settings. Select a configured log source, check its Kubernetes field mapping and workload scope, then use **Test link** and save. A successful preview does not guarantee complete incident history. See [linked-source settings](configuration.md#linked-break-log-source) and the [Kubernetes connector guide](../connectors/kubernetes.md).
 
 ![Agent tab with linked log source settings and Test link preview](../../docs/images/kubernetes-auto-detect-agent-link.png)
 
 *The Agent tab is a secondary step when the incident window needs an additional log source.*
+
+### Linked Source And Ingestion Delays
+
+For gaps in stored evidence, Versus queries the linked source for the selected
+break's fixed window. A deleted Pod can contribute lines when previously captured
+identity proves its UID and lifetime. Never-observed Pods, unknown lifetimes, and
+unresolved same-name UID reuse remain gaps; a matching name alone is not proof.
+
+**Waiting for ingestion** uses the window end plus the source's estimated delay:
+Loki **30s**; Elasticsearch, SigNoz and Graylog **60s**; CloudWatch Logs and Splunk
+**120s**. This is not a watermark or a guarantee that ingestion has finished.
+The optional [delay override](configuration.md#linked-break-log-source) changes
+the estimate.
+
+While the panel is open and visible, pending ingestion retries automatically
+after **15s**, then **30s**, then **60s** intervals, for at most **5 minutes**.
+Closing stops retries; reopening starts a fresh budget. Arriving lines merge
+without resetting filters, Pod/container selection or scroll. Expanding and
+closing the larger viewer also preserve scroll. An empty response after the
+estimated ready time stops pending retries, but does not prove the source has
+finished ingesting; stored excerpts remain.
+
+Each linked query is bounded to **3 logical calls** and **6,000 returned lines**,
+with up to **2,000 lines per call**. Provider page and lifecycle-request limits
+apply separately and may return less. Time-splitting truncated results does not
+remove those limits: remaining coverage is partial, with budget gaps, not a
+complete archive.
+
+Background settling saves only a bounded break-window excerpt, with at most
+**2 attempts per occurrence** and **2 concurrent settles per deployment**.
+It uses capture ownership and file/PostgreSQL atomic safeguards; it does not
+continuously write every container's log stream. Excerpts and identity metadata
+share the [24-hour break-evidence limits](configuration.md#break-log-evidence-limits),
+independent of longer Timeline history or the linked source's retention.
 
 ## Check The Workload Now
 

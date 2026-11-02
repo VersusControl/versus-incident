@@ -22,6 +22,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"golang.org/x/time/rate"
 )
 
 func TestServiceActiveScopePreservesCredentialEpoch(t *testing.T) {
@@ -371,7 +372,7 @@ func TestWorkloadsFiltersCountsAndPaginatesSharedIndex(t *testing.T) {
 				map[string]any{"name": "jobs", "kind": "Job", "namespaced": true, "verbs": []string{"get", "list"}},
 				map[string]any{"name": "cronjobs", "kind": "CronJob", "namespaced": true, "verbs": []string{"get", "list"}},
 			}})
-		case "/api/v1/pods":
+		case "/api/v1/pods", "/api/v1/namespaces/shop/pods":
 			writeJSON(writer, map[string]any{"items": []any{workloadListFixture("Pod", "checkout-pod"), workloadListFixture("Pod", "other-pod")}})
 		case "/apis/apps/v1/deployments":
 			writeJSON(writer, map[string]any{"items": []any{workloadListFixture("Deployment", "checkout-b"), workloadListFixture("Deployment", "checkout-a")}})
@@ -1616,6 +1617,9 @@ func newTestService(t *testing.T, endpoint string, scope Scope) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Fixture reads need no production pacing. Keep a finite limiter so tests
+	// that deliberately exhaust its burst still exercise the budget guard.
+	client.indexLimiter = rate.NewLimiter(1e6, 4)
 	return NewService(client, scope, time.Minute)
 }
 func writeJSON(writer http.ResponseWriter, value any) {

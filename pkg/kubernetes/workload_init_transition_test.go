@@ -25,7 +25,6 @@ func TestRunningInitCompletionContinuesCheckpointWithoutReplayingLines(t *testin
 	finished := append([]kubeindex.Record(nil), running...)
 	finished[1].LogContainers = append([]kubeindex.ContainerState(nil), running[1].LogContainers...)
 	finished[1].LogContainers[1].Running = false
-	finished[1].LogContainers[1].StartedAt = time.Time{}
 	finished[1].LogContainers[1].CurrentTermination = true
 	finished[1].LogContainers[1].TerminatedAt = ended
 	finished[1].LogContainers[1].TerminatedReason = "Completed"

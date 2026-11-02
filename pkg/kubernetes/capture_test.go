@@ -622,7 +622,9 @@ func TestCaptureScopeIsolationAndProviderRenewal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return NewService(client, scope, 0)
+		service := NewService(client, scope, 0)
+		service.changes.evidenceEnabled = true
+		return service
 	}
 	scope := Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "configured"}
 	base := construct("http://127.0.0.1:12345", "credential-a-canary", scope)
@@ -673,11 +675,30 @@ func TestCaptureScopeIsolationAndProviderRenewal(t *testing.T) {
 	if first.indexScope() != renewed.indexScope() || first.indexScope() == other.indexScope() {
 		t.Fatal("provider principal renewal or isolation failed across processes")
 	}
+	if first.persistentCredentialID != renewed.persistentCredentialID || first.persistentCredentialID == other.persistentCredentialID {
+		t.Fatal("durable provider principal renewal or isolation failed across processes")
+	}
 	for _, service := range []*Service{base, alias, first, renewed, other} {
 		encoded, _ := json.Marshal(service.ActiveScope())
 		if strings.Contains(string(encoded), "canary") || strings.Contains(service.indexScope().CredentialID, "canary") {
 			t.Fatal("credential escaped opaque scope")
 		}
+	}
+}
+
+func TestDurableCaptureStateWithoutClientKeepsConfiguredAliasesIsolated(t *testing.T) {
+	provider := storage.NewMemory()
+	base := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster", CredentialID: "first"}, 0)
+	base.SetChangeStorage(provider)
+	base.changes.evidenceEnabled = true
+	now := time.Now().UTC()
+	if err := base.changeStore().Append([]Change{{ID: "old", Kind: "Pod", Cluster: "cluster", Name: "old", Type: kubechanges.Created, At: now}}, now); err != nil {
+		t.Fatal(err)
+	}
+	alias := base.Scoped(Scope{OrgID: "default", ClusterID: "cluster", CredentialID: "second"})
+	page, err := alias.changeStore().Query(ChangeQuery{}, now)
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("configured alias reused client-less capture state: items=%d err=%v", len(page.Items), err)
 	}
 }
 
@@ -1404,6 +1425,7 @@ func TestCaptureRateSharedAcrossScopes(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { writeJSON(writer, map[string]any{}) }))
 	defer server.Close()
 	first := newTestService(t, server.URL, Scope{ClusterID: "cluster", OrgID: "first"})
+	first.client.indexLimiter = rate.NewLimiter(2, 4)
 	second := first.Scoped(Scope{ClusterID: "cluster", OrgID: "second"})
 	if first.client != second.client || captureCadences["Pod"] != 30*time.Second || captureCadences["Job"] != time.Minute || captureCadences["ConfigMap"] != 5*time.Minute {
 		t.Fatal("capture cadence or shared limiter contract")
@@ -1432,6 +1454,7 @@ func TestCaptureLimiterPreservesForegroundDeadline(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
+	service.client.indexLimiter = rate.NewLimiter(2, 4)
 	if !service.client.indexLimiter.AllowN(time.Now(), 4) {
 		t.Fatal("could not exhaust capture burst")
 	}

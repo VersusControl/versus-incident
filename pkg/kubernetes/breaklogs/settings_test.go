@@ -7,6 +7,28 @@ import (
 	"time"
 )
 
+func TestLinkedIngestionDefaultsAndOptionalZeroOverride(t *testing.T) {
+	for kind, seconds := range map[string]int{"loki": 30, "elasticsearch": 60, "signoz": 60, "graylog": 60, "splunk": 120, "cloudwatchlogs": 120} {
+		if got := (CaptureSettings{}).IngestionDelay(kind); got != time.Duration(seconds)*time.Second {
+			t.Fatalf("%s delay=%s", kind, got)
+		}
+	}
+	zero := 0
+	if got := (CaptureSettings{IngestDelay: &zero}).IngestionDelay("splunk"); got != 0 {
+		t.Fatal("explicit zero became default", got)
+	}
+	delay := 90
+	provider := storage.NewMemory()
+	key := SettingsKey("default", "cluster")
+	if err := UpdateSettings(provider, key, func(state *SettingsState) error { state.Settings.BreakLogs.IngestDelay = &delay; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	state, err := LoadSettings(provider, key)
+	if err != nil || state.Settings.BreakLogs.IngestionDelay("loki") != 90*time.Second {
+		t.Fatal("override lost on reload", state, err)
+	}
+}
+
 func TestSettingsCASDefaultsIsolationAndContention(t *testing.T) {
 	provider := storage.NewMemory()
 	key := SettingsKey("org", "cluster")

@@ -160,7 +160,7 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 					}
 				}
 				root := objectRef(kubebreaks.Root(rootRecord, byUID))
-				if record.Kind == "Event" && record.Target != nil && rootRecord.Kind == "Event" {
+				if record.Kind == "Event" && record.Target != nil && record.Target.UID != "" && rootRecord.Kind == "Event" {
 					root = ObjectRef{Kind: record.Target.Kind, Name: record.Target.Name, Namespace: record.Target.Namespace, UID: record.Target.UID}
 				}
 				key := root.UID + "\x00" + root.Kind + "\x00" + root.Namespace + "\x00" + root.Name + "\x00" + finding.rule

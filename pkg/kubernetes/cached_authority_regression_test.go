@@ -52,6 +52,9 @@ func (p *authorityObservedStore) CommitEvidence(ctx context.Context, scope stora
 }
 
 func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: observe permission revocation and recovery on the natural inventory cadence")
+	}
 	for _, backend := range []string{"memory", "file"} {
 		for _, scenario := range []string{"all", "multiple-kinds", "secret-only"} {
 			t.Run(backend+"/"+scenario, func(t *testing.T) {

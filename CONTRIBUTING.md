@@ -71,6 +71,47 @@ listener, signal source) follow the patterns in `pkg/common/` and
 - Prefer table-driven tests for multiple input cases.
 - Run `go test ./...` and confirm it passes before opening a PR.
 
+For the local race/coverage loop, run from the module root:
+
+```sh
+go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
+```
+
+`./...` recursively selects packages; `./..` selects the parent directory, not
+the module's packages. Short mode keeps race detection and atomic coverage,
+but omits these explicitly marked integration/endurance scenarios:
+
+- `TestSessionStoreBoundsAggregateTraceAndBlobGrowth`: 100 worst-case turns.
+- `TestSnapshotHistoryTrimsToMarshaledByteLimit`: maximum-size history growth.
+- `TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority`: natural
+  background permission-revocation/recovery cadence.
+- `TestLinkedSettleTakeoverFencesStaleOwnerAwaitingResponse`: real lease expiry.
+- `TestLinkedBreakIdleTicksBoundedWrites`: multiple real scheduler ticks.
+- `TestLinkedBreakDeletedPodBeforeDetectionAcrossRestartAndLag`: delayed source
+  ingestion and settling across a durable restart.
+- `TestRegistryRenewsTwentyEpochsWithoutBrowserOrResolveRequests`: 20 autonomous
+  credential-epoch replacements.
+- `TestKindFirstListedLaterProducesNoChangesOrBreaks`: autonomous discovery and
+  journal cycles when a kind becomes served.
+- `TestRelayedGenerationKeepsAnUnservedKindUnlistedForTheJournal`: real refresh
+  window before relaying a newly served kind.
+- `TestWorkloadsHTTPRestartDistinguishesWarmingDeniedAndCompleteEmpty`: durable
+  restart and autonomous recovery through HTTP.
+- `TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial`: autonomous inventory
+  and permission changes through HTTP enrichment.
+
+Ordinary unit tests, including large graph boundaries, still run in short mode.
+Without `-short`, all eleven scenarios remain enabled:
+
+```sh
+go test -race -coverprofile=coverage.out -covermode=atomic ./...
+```
+
+The local short command does not replace full-suite PR/CI gates. Tests requiring
+external services or explicit process harnesses retain their existing prerequisites.
+Kubernetes fixture helpers avoid production API pacing; tests of throttling set
+their own limiter explicitly.
+
 ## Commit messages
 
 Follow Conventional Commits. The git history uses prefixes like:

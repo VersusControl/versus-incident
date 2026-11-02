@@ -19,6 +19,9 @@ import (
 )
 
 func TestWorkloadsHTTPRestartDistinguishesWarmingDeniedAndCompleteEmpty(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: restart durable inventory and await autonomous authority recovery")
+	}
 	gateway := middleware.GatewayAuthEnabled()
 	middleware.SetGatewayAuthEnabled(false)
 	t.Cleanup(func() { middleware.SetGatewayAuthEnabled(gateway) })

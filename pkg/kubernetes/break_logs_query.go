@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,16 +65,17 @@ type BreakLogSource struct {
 	At   time.Time `json:"at"`
 }
 type BreakLogPage struct {
-	Window   BreakLogWindow     `json:"window"`
-	Pods     []BreakLogPod      `json:"pods"`
-	Lines    []BreakLogLine     `json:"lines"`
-	Markers  []BreakLogMarker   `json:"markers"`
-	Counts   BreakLogCounts     `json:"counts"`
-	Rate     []BreakLogRate     `json:"rate"`
-	Patterns []BreakLogPattern  `json:"patterns"`
-	Sources  []BreakLogSource   `json:"sources"`
-	Coverage breaklogs.Coverage `json:"coverage"`
-	Next     string             `json:"next,omitempty"`
+	OccurrenceID string             `json:"occurrence_id,omitempty"`
+	Window       BreakLogWindow     `json:"window"`
+	Pods         []BreakLogPod      `json:"pods"`
+	Lines        []BreakLogLine     `json:"lines"`
+	Markers      []BreakLogMarker   `json:"markers"`
+	Counts       BreakLogCounts     `json:"counts"`
+	Rate         []BreakLogRate     `json:"rate"`
+	Patterns     []BreakLogPattern  `json:"patterns"`
+	Sources      []BreakLogSource   `json:"sources"`
+	Coverage     breaklogs.Coverage `json:"coverage"`
+	Next         string             `json:"next,omitempty"`
 	// Container is the applied filter: a container name, or "*" for all.
 	Container     string              `json:"container"`
 	MainContainer string              `json:"main_container,omitempty"`
@@ -156,10 +158,15 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, credentialEpochContextKey{}, service)
-	now := time.Now().UTC()
+	now := service.observationNow()
 	store := service.changeStore()
 	if store == nil {
 		return BreakLogPage{}, ErrClusterUnavailable
+	}
+
+	// A future-only root window exposes no inventory or retained evidence.
+	if query.From.After(now) && query.OccurrenceID == "" && query.Center.IsZero() && query.Cursor == "" {
+		return BreakLogPage{Window: BreakLogWindow{query.From, query.To}, Pods: []BreakLogPod{}, Lines: []BreakLogLine{}, Markers: []BreakLogMarker{}, Rate: []BreakLogRate{}, Patterns: []BreakLogPattern{}, Sources: []BreakLogSource{}, Containers: []BreakLogContainer{}, Container: breaklogs.AllContainers, Coverage: breaklogs.Coverage{State: "pending", Reason: "pending", Gaps: []breaklogs.Gap{{From: query.From, To: query.To, Reason: "pending"}}}}, nil
 	}
 	snapshot, _, refreshErr := service.IndexSnapshot(ctx, "Pod", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob")
 	ctx = captureReadContext(ctx, "")
@@ -167,12 +174,42 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	if err != nil {
 		return BreakLogPage{}, err
 	}
+	// Every response can carry protected identities, markers or retained gaps.
+	if err := service.authorizeEvidenceKind(ctx, query.Namespace, "core~v1~pods"); err != nil {
+		clearLinkedCache()
+		return BreakLogPage{}, err
+	}
+	query, err = service.resolveBreakLogSelection(ctx, query, state)
+	if err != nil {
+		return BreakLogPage{}, err
+	}
 	page := BreakLogPage{Window: BreakLogWindow{query.From, query.To}, Pods: []BreakLogPod{}, Lines: []BreakLogLine{}, Markers: []BreakLogMarker{}, Rate: []BreakLogRate{}, Patterns: []BreakLogPattern{}, Sources: []BreakLogSource{}}
+	page.OccurrenceID = query.OccurrenceID
+	linkedPods := manifestQueryPods(state, query)
+	selectedManifestIDs := map[string]bool{}
+	for _, manifest := range state.Manifests {
+		if !matchesBreakManifest(manifest, query) || manifest.To.Before(query.From) || manifest.From.After(query.To) {
+			continue
+		}
+		selectedManifestIDs[manifest.ID] = true
+		if page.OccurrenceID == "" && !query.Center.IsZero() {
+			page.OccurrenceID = manifest.OccurrenceID
+			if page.OccurrenceID == "" {
+				page.OccurrenceID = manifest.ID
+			}
+		}
+	}
 	pods := breakLogPods(snapshot.Records, query.Namespace, query.RootUID)
+	identityPods := append([]kubeindex.Record(nil), pods...)
 	rootSnapshots := []breaklogs.Snapshot{}
 	for _, item := range state.Snapshots {
 		if item.Namespace == query.Namespace && item.RootUID == query.RootUID {
 			rootSnapshots = append(rootSnapshots, item)
+		}
+	}
+	for _, pod := range linkedPods {
+		for _, container := range pod.Containers {
+			rootSnapshots = append(rootSnapshots, breaklogs.Snapshot{Container: container.Name, Init: container.Init})
 		}
 	}
 	page.Containers, page.MainContainer = breakLogContainers(pods, rootSnapshots)
@@ -206,8 +243,13 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	selectedPod := func(name, uid string) bool { return len(selected) == 0 || selected[name] || selected[uid] }
 	intervals := []breaklogs.Gap{}
 	failures := []breaklogs.Gap{}
+	for _, manifest := range state.Manifests {
+		if selectedManifestIDs[manifest.ID] && manifest.Truncated {
+			failures = append(failures, breaklogs.Gap{From: query.From, To: query.To, Reason: "budget"})
+		}
+	}
 	for _, gap := range state.Gaps {
-		if gap.Namespace == query.Namespace && gap.RootUID == query.RootUID {
+		if gap.Namespace == query.Namespace && (gap.RootUID == "" || gap.RootUID == query.RootUID) {
 			failures = append(failures, gap)
 		}
 	}
@@ -229,6 +271,9 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 		page.Pods = append(page.Pods, BreakLogPod{Name: name, UID: uid, State: status, Short: short})
 	}
 	addSnapshot := func(item breaklogs.Snapshot, source string) {
+		if item.Source == "linked" {
+			source = "linked"
+		}
 		if query.Mode != "" && query.Mode != "merged" && query.Mode != item.Slot || !selectedContainer(item.Container) {
 			return
 		}
@@ -252,6 +297,9 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	podSnapshots := []breaklogs.Snapshot{}
 	observations := []breaklogs.Snapshot{}
 	for _, item := range state.Snapshots {
+		if item.Source == "linked" && (query.OccurrenceID != "" || !query.Center.IsZero()) && !selectedManifestIDs[item.OccurrenceID] {
+			continue
+		}
 		if item.Namespace != query.Namespace || item.RootUID != query.RootUID || !selectedPod(item.Pod, item.PodUID) || item.To.Before(query.From) || item.From.After(query.To) {
 			continue
 		}
@@ -263,6 +311,9 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 		matching = append(matching, item)
 		observations = append(observations, item)
 		addSnapshot(item, "captured")
+		if item.Source == "linked" && item.Truncated {
+			failures = append(failures, breaklogs.Gap{SnapshotID: item.ID, From: item.From, To: item.To, Namespace: item.Namespace, RootUID: item.RootUID, PodUID: item.PodUID, Container: item.Container, Reason: "budget"})
+		}
 	}
 	if len(pods) > 5 {
 		failures = append(failures, breaklogs.Gap{From: query.From, To: query.To, Reason: "budget"})
@@ -350,7 +401,13 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	}
 	if len(pods) == 0 {
 		groups := map[string][]breaklogs.Gap{}
+		contentful := 0
 		for _, item := range matching {
+			// A capture with no lines proves nothing about the window.
+			if len(item.Lines) == 0 {
+				continue
+			}
+			contentful++
 			if query.Mode != "" && query.Mode != "merged" && query.Mode != item.Slot {
 				continue
 			}
@@ -366,7 +423,7 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 				failures = append(failures, gap)
 			}
 		}
-		if len(matching) == 0 {
+		if contentful == 0 {
 			reason := "pod_deleted"
 			if refreshErr != nil || snapshot.Kinds["Pod"].State != "ready" {
 				reason = "capture_late"
@@ -386,123 +443,125 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 			if source.Name != settings.Settings.BreakLogs.LinkedSource {
 				continue
 			}
-			reader, buildErr := source.Build(settings.Settings.BreakLogs.Fields[source.Type])
-			if buildErr != nil {
+			linkedPods = supplementLinkedPods(linkedPods, podSnapshots, identityPods, snapshot.Kinds["Pod"].ObservedAt)
+			if len(linkedPods) > breaklogs.MaxManifestPods {
+				linkedPods = linkedPods[:breaklogs.MaxManifestPods]
+				page.Coverage.Gaps = append(page.Coverage.Gaps, breaklogs.Gap{From: query.From, To: query.To, Reason: "budget"})
+			}
+			if len(linkedPods) == 0 {
 				break
 			}
-			linkedQuery := breaklogs.LinkedQuery{Namespace: query.Namespace, From: query.From, To: minTime(query.To, now), Limit: 2000}
-			for _, record := range snapshot.Records {
-				if record.UID == query.RootUID && record.Namespace == query.Namespace {
-					linkedQuery.PodPrefix = record.Name
+			for _, pod := range linkedPods {
+				if selectedPod(pod.Name, pod.UID) {
+					addPod(pod.Name, pod.UID, "crashed")
+				}
+			}
+			// Persisted progress fences cache reuse after another process settles.
+			selectedProgress := []breaklogs.Manifest{}
+			for _, manifest := range state.Manifests {
+				if selectedManifestIDs[manifest.ID] {
+					selectedProgress = append(selectedProgress, manifest)
+				}
+			}
+			rawState, _ := json.Marshal([]any{selectedProgress, rootSnapshots})
+			stateDigest := sha256.Sum256(rawState)
+			accepted, result, readErr := service.readLinkedBreak(ctx, query, linkedPods, settings.Settings.BreakLogs, source, true, hex.EncodeToString(stateDigest[:]))
+			ready := query.To.Add(settings.Settings.BreakLogs.IngestionDelay(source.Type))
+			if readErr != nil {
+				if errors.Is(readErr, ErrForbidden) || errors.Is(readErr, ErrUnauthorized) || errors.Is(readErr, ErrCredentialUnavailable) {
+					return BreakLogPage{}, readErr
+				}
+				reason := "source_error"
+				switch readErr.Error() {
+				case "timeout", "unauthorized", "not_found", "invalid_mapping", "unavailable":
+					reason = readErr.Error()
+				}
+				page.Sources = append(page.Sources, BreakLogSource{Kind: "linked", Name: source.Name, Type: source.Type, At: now})
+				page.Coverage.Gaps = append(page.Coverage.Gaps, breaklogs.Gap{From: query.From, To: query.To, Reason: reason})
+				page.Coverage.Reason = reason
+				if now.Before(ready) {
+					page.Coverage.Gaps = append(page.Coverage.Gaps, breaklogs.Gap{From: query.From, To: query.To, Reason: "linked_pending", ReadyAt: ready})
+					page.Coverage.Reason = "linked_pending"
+				}
+				break
+			}
+			for _, line := range accepted {
+				identity, _ := json.Marshal([]any{line.PodUID, line.Container, line.Init, line.Slot, line.At, line.Text})
+				if !seenLines[string(identity)] {
+					seenLines[string(identity)] = true
+					page.Lines = append(page.Lines, line)
+				}
+			}
+			page.Sources = append(page.Sources, BreakLogSource{Kind: "linked", Name: source.Name, Type: source.Type, At: time.Now().UTC()})
+			for _, complete := range result.Complete {
+				// Older ingested rows cannot prove that the selected tail is ready.
+				if now.Before(ready) {
+					continue
+				}
+				leafLines := []BreakLogLine{}
+				for _, line := range accepted {
+					if !line.At.Before(complete.From) && !line.At.After(complete.To) {
+						leafLines = append(leafLines, line)
+					}
+				}
+				intervals = page.closeLinkedGaps(intervals, leafLines, complete.To, complete.From)
+			}
+			retainedFailures := []breaklogs.Gap{}
+			for i := range page.Coverage.Gaps {
+				gap := &page.Coverage.Gaps[i]
+				original := *gap
+				if gap.Reason == "pending" {
+					continue
+				}
+				switch {
+				case result.Truncated || gap.Reason == "budget":
+					gap.Reason = "budget"
+				case now.Before(ready):
+					gap.Reason, gap.ReadyAt = "linked_pending", ready
+				case len(result.Lines) == 0 && !result.Rejected:
+					gap.Reason = "no_logs"
+				}
+				if original.Reason != "" && original.Reason != gap.Reason {
+					retainedFailures = append(retainedFailures, original)
+				}
+			}
+			if result.Truncated && now.Before(ready) && len(page.Coverage.Gaps) > 0 {
+				page.Coverage.Gaps = append(page.Coverage.Gaps, breaklogs.Gap{From: query.From, To: query.To, Reason: "linked_pending", ReadyAt: ready})
+			}
+			for _, gap := range page.Coverage.Gaps {
+				if gap.Reason != "pending" {
+					page.Coverage.Reason = gap.Reason
 					break
 				}
 			}
-			byName := map[string]string{}
-			createdAt := map[string]time.Time{}
-			ambiguousNames := map[string]bool{}
-			for _, item := range podSnapshots {
-				if !item.PodCreatedAt.IsZero() {
-					createdAt[item.PodUID] = item.PodCreatedAt
-					if item.PodCreatedAt.After(linkedQuery.From) {
-						ambiguousNames[item.Pod] = true
-					}
-				}
-			}
-			for _, pod := range pods {
-				if !pod.CreatedAt.IsZero() {
-					createdAt[pod.UID] = pod.CreatedAt
-				}
-			}
-			for _, pod := range page.Pods {
-				uid, seen := byName[pod.Name]
-				if !seen {
-					linkedQuery.Pods = append(linkedQuery.Pods, pod.Name)
-				}
-				if uid != "" && pod.UID != "" && uid != pod.UID {
-					ambiguousNames[pod.Name] = true
-				}
-				if uid == "" {
-					byName[pod.Name] = pod.UID
-				}
-			}
-			for _, pod := range snapshot.Records {
-				if pod.Kind == "Pod" && pod.Namespace == query.Namespace && pod.CreatedAt.After(linkedQuery.From) {
-					ambiguousNames[pod.Name] = true
-				}
-			}
-			if len(linkedQuery.Pods) == 0 && linkedQuery.PodPrefix == "" {
-				break
-			}
-			started := time.Now()
-			linkedCtx, stop := context.WithTimeout(ctx, 10*time.Second)
-			result, readErr := reader.Read(linkedCtx, linkedQuery)
-			stop()
-			if healthErr := service.recordLogHealth(ctx, source.Name, started, readErr); healthErr != nil {
-				return BreakLogPage{}, healthErr
-			}
-			if readErr != nil {
-				break
-			}
-			accepted := []BreakLogLine{}
-			for _, line := range result.Lines {
-				if line.At.Before(linkedQuery.From) || line.At.After(linkedQuery.To) || line.Container == "" || !selectedContainer(line.Container) {
-					continue
-				}
-				inGap := false
-				for _, gap := range page.Coverage.Gaps {
-					if !line.At.Before(gap.From) && !line.At.After(gap.To) {
-						inGap = true
-						break
-					}
-				}
-				if !inGap {
-					continue
-				}
-				if byName[line.Pod] == "" || ambiguousNames[line.Pod] {
-					continue
-				}
-				created := createdAt[byName[line.Pod]]
-				if created.IsZero() || line.At.Before(created) {
-					continue
-				}
-				text := service.scrubber.Scrub(line.Text)
-				slot := "current"
-				init := false
-				for _, item := range matching {
-					if item.PodUID == byName[line.Pod] && item.Container == line.Container {
-						init = item.Init
-						if !item.TerminationAt.IsZero() && !line.At.After(item.TerminationAt) {
-							slot = "previous"
-						}
-					}
-				}
-				for _, pod := range pods {
-					if pod.UID == byName[line.Pod] {
-						for _, container := range pod.Containers {
-							if container.Name == line.Container {
-								init = container.Init
-								if !container.TerminatedAt.IsZero() && !line.At.After(container.TerminatedAt) {
-									slot = "previous"
-								}
-							}
-						}
-					}
-				}
-				if query.Mode != "" && query.Mode != "merged" && query.Mode != slot {
-					continue
-				}
-				accepted = append(accepted, BreakLogLine{At: line.At, Pod: line.Pod, PodUID: byName[line.Pod], Container: line.Container, Init: init, Slot: slot, Level: breaklogs.Level(text), Text: text, Source: "linked"})
-			}
-			page.Lines = append(page.Lines, accepted...)
-			page.Sources = append(page.Sources, BreakLogSource{Kind: "linked", Name: source.Name, Type: source.Type, At: time.Now().UTC()})
-			if !result.Truncated {
-				page.closeLinkedGaps(intervals, accepted, linkedQuery.To)
-			}
+			page.Coverage.Gaps = append(page.Coverage.Gaps, retainedFailures...)
 			break
 		}
 	}
+	// Covered historical time needs no linked read, but a selected future tail
+	// still carries ingestion readiness so the open panel can schedule itself.
+	if page.Coverage.State == "pending" && !page.Coverage.Tip && query.From.Before(now) && len(page.Pods) > 0 {
+		provider, key := service.logSettingsStore()
+		settings, settingsErr := breaklogs.LoadSettings(provider, key)
+		if settingsErr == nil {
+			for _, source := range service.configuredLogSources() {
+				if source.Name != settings.Settings.BreakLogs.LinkedSource {
+					continue
+				}
+				ready := query.To.Add(settings.Settings.BreakLogs.IngestionDelay(source.Type))
+				for i := range page.Coverage.Gaps {
+					if page.Coverage.Gaps[i].Reason == "pending" {
+						page.Coverage.Gaps[i].Reason, page.Coverage.Gaps[i].ReadyAt = "linked_pending", ready
+					}
+				}
+				page.Coverage.Reason = "linked_pending"
+				page.Sources = append(page.Sources, BreakLogSource{Kind: "linked", Name: source.Name, Type: source.Type, At: now})
+				break
+			}
+		}
+	}
 	for _, root := range kubebreaks.Classify(snapshot.Records, now) {
-		if root.Root.UID == query.RootUID && root.Root.Namespace == query.Namespace && !root.BrokeAt.IsZero() {
+		if root.Root.UID == query.RootUID && root.Root.Namespace == query.Namespace && !root.BrokeAt.IsZero() && query.Center.IsZero() {
 			page.Markers = append(page.Markers, BreakLogMarker{Type: "break", At: root.BrokeAt, Label: "Break"})
 		}
 	}
@@ -518,6 +577,10 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 		}
 	}
 	hasBreak := false
+	if !query.Center.IsZero() {
+		page.Markers = append(page.Markers, BreakLogMarker{Type: "break", At: query.Center, Label: "Break"})
+		hasBreak = true
+	}
 	for _, marker := range page.Markers {
 		if marker.Type == "break" {
 			hasBreak = true
@@ -525,16 +588,47 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	}
 	// The break marker belongs to the whole break, so any container's capture
 	// may place it; termination markers follow the container filter.
+	addTermination := func(uid, container string, at time.Time, reason string, exitCode int32) {
+		key := uid + "\x00" + container + "\x00" + at.Format(time.RFC3339Nano)
+		if !selectedContainer(container) || crashMarkers[key] || at.IsZero() || at.Before(query.From) || at.After(query.To) {
+			return
+		}
+		label := container + " previous termination"
+		if reason = safeBreakReason(service.scrubber.Scrub(safeBreakReason(reason))); reason != "" {
+			label = container + " " + reason + " exit " + strconv.FormatInt(int64(exitCode), 10)
+		}
+		page.Markers = append(page.Markers, BreakLogMarker{Type: "crash", At: at, Label: label})
+		crashMarkers[key] = true
+	}
+	// The immutable manifest outlives both kubelet slots and crash-history
+	// availability. Never infer its cause from a later live lastState.
+	for _, manifest := range state.Manifests {
+		if !selectedManifestIDs[manifest.ID] {
+			continue
+		}
+		for _, pod := range manifest.Pods {
+			if !selectedPod(pod.Name, pod.UID) {
+				continue
+			}
+			for _, container := range pod.Containers {
+				if container.TerminationReason != "" {
+					addTermination(pod.UID, container.Name, container.TerminationAt, container.TerminationReason, container.TerminationExitCode)
+				}
+			}
+		}
+	}
+	// Prefer cause-bearing snapshots before legacy generic markers.
+	for _, item := range podSnapshots {
+		if item.TerminationReason != "" {
+			addTermination(item.PodUID, item.Container, item.TerminationAt, item.TerminationReason, item.TerminationExitCode)
+		}
+	}
 	for _, item := range podSnapshots {
 		if !hasBreak && !item.BreakAt.IsZero() && !item.BreakAt.Before(query.From) && !item.BreakAt.After(query.To) {
 			page.Markers = append(page.Markers, BreakLogMarker{Type: "break", At: item.BreakAt, Label: "Break"})
 			hasBreak = true
 		}
-		key := item.PodUID + "\x00" + item.Container + "\x00" + item.TerminationAt.Format(time.RFC3339Nano)
-		if selectedContainer(item.Container) && !crashMarkers[key] && !item.TerminationAt.IsZero() && !item.TerminationAt.Before(query.From) && !item.TerminationAt.After(query.To) {
-			page.Markers = append(page.Markers, BreakLogMarker{Type: "crash", At: item.TerminationAt, Label: item.Container + " previous termination"})
-			crashMarkers[key] = true
-		}
+		addTermination(item.PodUID, item.Container, item.TerminationAt, item.TerminationReason, item.TerminationExitCode)
 	}
 	sort.Slice(page.Markers, func(left, right int) bool { return page.Markers[left].At.Before(page.Markers[right].At) })
 	sort.SliceStable(page.Lines, func(left, right int) bool {
@@ -616,10 +710,21 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	if err := service.validateCredential(ctx); err != nil {
 		return BreakLogPage{}, err
 	}
+	if err := service.authorizeEvidenceKind(ctx, query.Namespace, "core~v1~pods"); err != nil {
+		clearLinkedCache()
+		return BreakLogPage{}, err
+	}
 	return page, nil
 }
 
-func (page *BreakLogPage) closeLinkedGaps(intervals []breaklogs.Gap, lines []BreakLogLine, until time.Time) {
+func (page *BreakLogPage) closeLinkedGaps(intervals []breaklogs.Gap, lines []BreakLogLine, until time.Time, starts ...time.Time) []breaklogs.Gap {
+	if len(lines) == 0 {
+		return intervals
+	}
+	start := page.Window.From
+	if len(starts) > 0 {
+		start = starts[0]
+	}
 	remaining := []breaklogs.Gap{}
 	for _, gap := range page.Coverage.Gaps {
 		if gap.Reason == "pending" {
@@ -630,15 +735,34 @@ func (page *BreakLogPage) closeLinkedGaps(intervals []breaklogs.Gap, lines []Bre
 			continue
 		}
 		matched := func(uid, name string) bool {
-			for _, line := range lines {
-				if line.At.Before(gap.From) || line.At.After(gap.To) || line.At.After(until) || gap.Container != "" && gap.Container != line.Container {
-					continue
-				}
-				if uid != "" && line.PodUID == uid || uid == "" && line.Pod == name {
-					return true
+			required := []string{gap.Container}
+			if gap.Container == "" && page.Container != "" {
+				required = nil
+				for _, container := range page.Containers {
+					if page.Container == breaklogs.AllContainers || page.Container == container.Name {
+						required = append(required, container.Name)
+					}
 				}
 			}
-			return false
+			if len(required) == 0 {
+				required = []string{gap.Container}
+			}
+			for _, requiredContainer := range required {
+				found := false
+				for _, line := range lines {
+					if line.At.Before(gap.From) || line.At.After(gap.To) || line.At.After(until) || requiredContainer != "" && requiredContainer != line.Container {
+						continue
+					}
+					if uid != "" && line.PodUID == uid || uid == "" && line.Pod == name {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
+			return true
 		}
 		covered := false
 		if gap.PodUID != "" {
@@ -649,17 +773,32 @@ func (page *BreakLogPage) closeLinkedGaps(intervals []breaklogs.Gap, lines []Bre
 				covered = covered && matched(pod.UID, pod.Name)
 			}
 		}
-		if !covered || !until.After(gap.From) {
+		if !covered || !until.After(gap.From) || !gap.To.After(start) {
 			remaining = append(remaining, gap)
 			continue
 		}
-		intervals = append(intervals, breaklogs.Gap{From: gap.From, To: minTime(gap.To, until)})
+		if gap.From.Before(start) {
+			before := gap
+			before.To = start
+			remaining = append(remaining, before)
+		}
+		intervals = append(intervals, breaklogs.Gap{From: maxTime(gap.From, start), To: minTime(gap.To, until)})
 		if gap.To.After(until) {
 			gap.From = until
 			remaining = append(remaining, gap)
 		}
 	}
-	page.Coverage = breaklogs.CoverObserved(page.Window.From, page.Window.To, until, intervals, remaining)
+	failures := []breaklogs.Gap{}
+	for _, gap := range remaining {
+		if gap.Reason != "" || gap.PodUID != "" || gap.Container != "" {
+			failures = append(failures, gap)
+		}
+	}
+	page.Coverage = breaklogs.CoverObserved(page.Window.From, page.Window.To, until, intervals, failures)
+	if len(starts) > 0 {
+		page.Coverage = breaklogs.CoverObserved(page.Window.From, page.Window.To, time.Now().UTC(), intervals, failures)
+	}
+	return intervals
 }
 
 func minTime(left, right time.Time) time.Time {

@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+// ReadError is a safe upstream class. It deliberately contains neither the
+// upstream response body nor credential-bearing transport/configuration text.
+type ReadError struct {
+	Class string
+}
+
+func (err *ReadError) Error() string { return err.Class }
+
 type Fields struct {
 	Namespace string `json:"namespace"`
 	Pod       string `json:"pod"`
@@ -96,6 +104,8 @@ type LinkedLine struct {
 type Result struct {
 	Lines     []LinkedLine
 	Truncated bool
+	Complete  []Gap
+	Rejected  bool
 }
 
 type LinkedReader interface {
@@ -104,6 +114,7 @@ type LinkedReader interface {
 }
 
 type Source struct {
+	CacheKey  string                             `json:"-"`
 	Name      string                             `json:"name"`
 	Type      string                             `json:"type"`
 	Scope     string                             `json:"scope"`

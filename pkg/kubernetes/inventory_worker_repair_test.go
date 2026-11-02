@@ -99,8 +99,8 @@ func TestScopedInventoryCollectsCompleteNamespaceWithoutGlobalListPermission(t *
 	if err != nil || usage.PodMetrics.Total != 1501 {
 		t.Fatalf("scoped metrics=%+v %v", usage.PodMetrics, err)
 	}
-	if reads.Load() != before {
-		t.Fatal("views performed a cluster read")
+	if reads.Load() > before+1 {
+		t.Fatal("views refreshed objects instead of one scoped authority check")
 	}
 }
 

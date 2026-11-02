@@ -51,7 +51,7 @@ func (controller *KubernetesAdminController) requireSettingsWrite(ctx *fiber.Ctx
 }
 
 func (controller *KubernetesAdminController) breakLogs(ctx *fiber.Ctx) error {
-	for _, key := range []string{"cluster", "namespace", "root_uid", "since", "until", "mode", "level", "q", "cursor", "limit", "container"} {
+	for _, key := range []string{"cluster", "namespace", "root_uid", "since", "until", "mode", "level", "q", "cursor", "limit", "container", "occurrence_id", "center"} {
 		if len(ctx.Context().QueryArgs().PeekMulti(key)) > 1 {
 			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
 		}
@@ -78,6 +78,16 @@ func (controller *KubernetesAdminController) breakLogs(ctx *fiber.Ctx) error {
 		}
 	}
 	query := breaklogs.Query{Namespace: strings.Clone(ctx.Query("namespace")), RootUID: strings.Clone(ctx.Query("root_uid")), From: from, To: to, Mode: strings.Clone(ctx.Query("mode")), Level: strings.Clone(ctx.Query("level")), Search: strings.Clone(ctx.Query("q")), Container: strings.Clone(ctx.Query("container")), Cursor: strings.Clone(ctx.Query("cursor")), Limit: limit, Pods: pods}
+	query.OccurrenceID = strings.Clone(ctx.Query("occurrence_id"))
+	if ctx.Context().QueryArgs().Has("occurrence_id") && query.OccurrenceID == "" {
+		return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+	}
+	if ctx.Context().QueryArgs().Has("center") {
+		query.Center, err = parseKubernetesTime(ctx.Query("center"))
+		if err != nil || query.Center.IsZero() {
+			return writeKubernetes(ctx, nil, kubernetes.ErrInvalidArguments)
+		}
+	}
 	value, err := requestKubernetesService(ctx).BreakLogs(ctx.UserContext(), query)
 	if err == nil {
 		value.Patterns = breakLogPatterns(value.PatternInput)

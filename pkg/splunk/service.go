@@ -40,16 +40,17 @@ var namespacePattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 var outputFieldPattern = regexp.MustCompile(`^[_A-Za-z][_A-Za-z0-9.]{0,63}$`)
 
 type Service struct {
-	extraProjection []string
-	stringFields    []string
-	client          *http.Client
-	address         string
-	path            string
-	config          config.AgentSplunkSourceConfig
-	scope           []clause
-	index           string
-	scrubber        core.Scrubber
-	now             func() time.Time
+	windowAlternatives []string
+	extraProjection    []string
+	stringFields       []string
+	client             *http.Client
+	address            string
+	path               string
+	config             config.AgentSplunkSourceConfig
+	scope              []clause
+	index              string
+	scrubber           core.Scrubber
+	now                func() time.Time
 }
 
 func NewService(cfg config.AgentSplunkSourceConfig, scrubber core.Scrubber) (*Service, error) {
@@ -299,6 +300,7 @@ func (service *Service) query(ctx context.Context, filters []clause, lookback ti
 	for _, item := range append(append([]clause(nil), service.scope...), filters...) {
 		parts = append(parts, item.field+"="+item.value)
 	}
+	parts = append(parts, service.windowAlternatives...)
 	end := service.now().UTC()
 	form := url.Values{"search": {"search " + strings.Join(parts, " AND ")}, "earliest_time": {strconv.FormatInt(end.Add(-lookback).Unix(), 10)}, "latest_time": {strconv.FormatInt(end.Unix(), 10)}, "output_mode": {"json"}, "exec_mode": {"normal"}, "max_count": {strconv.Itoa(limit)}, "max_time": {"8"}, "ttl": {"10"}, "auto_cancel": {"10"}}
 	projection := append(append([]string(nil), resultFields...), service.extraProjection...)

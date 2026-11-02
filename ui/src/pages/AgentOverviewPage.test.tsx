@@ -41,7 +41,7 @@ beforeEach(() => {
 });
 
 describe("Agent Overview workspace", () => {
-  it("stacks every section on desktop instead of tabs", async () => {
+  it("stacks every section on desktop with the whole heatmap last", async () => {
     renderPage();
     expect(await screen.findByRole("heading", { name: "Service Heatmap" })).toBeTruthy();
     expect(await screen.findByRole("heading", { name: "Agent Activity" })).toBeTruthy();
@@ -49,6 +49,11 @@ describe("Agent Overview workspace", () => {
     expect(await screen.findByText("Log spike")).toBeTruthy();
     expect(screen.queryByRole("navigation", { name: "Overview views" })).toBeNull();
     expect(screen.queryByText("Learning and activity history")).toBeNull();
+    const sections = document.querySelectorAll(".agent-overview-sections > section");
+    expect(sections).toHaveLength(3);
+    for (const [index, title] of ["Agent Activity", "Learning", "Service Heatmap"].entries()) {
+      expect(within(sections[index] as HTMLElement).getByRole("heading", { name: title, exact: true })).toBeTruthy();
+    }
   });
 
   it("leads each section title with its own icon", async () => {

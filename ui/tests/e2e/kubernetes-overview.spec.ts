@@ -2680,6 +2680,578 @@ test.describe("Pod log streaming fixtures", () => {
     });
   });
 
+  // Extend the shared populated timeline fixture; all linked responses here are
+  // synthetic browser evidence, not proof of provider ingestion or authority.
+  async function linkedPendingFixture(page: Page, paging = false, defaultFilters = false) {
+    const now = new Date("2026-10-31T16:00:00Z");
+    await page.clock.install({ time: now });
+    await page.clock.pauseAt(now);
+    await page.addInitScript(() => {
+      const timers: Array<{ scheduledAt: number; dueAt: number }> = [];
+      Object.defineProperty(window, "linkedRetryTimers", { value: timers });
+      const original = window.setTimeout.bind(window);
+      // Observe the hook's first retry without changing its callback or budget.
+      Object.defineProperty(window, "setTimeout", { value: (handler: TimerHandler, delay?: number, ...args: unknown[]) => {
+        if (typeof handler === "function" && handler.name === "refresh" && delay === 15_000) {
+          timers.push({ scheduledAt: Date.now(), dueAt: Date.now() + delay });
+        }
+        return original(handler, delay, ...args);
+      } });
+    });
+    const at = "2026-10-31T15:59:00.123456789Z";
+    const occurrence = "retained-nanos";
+    let reopenArmed = false, session = 0;
+    await page.route("**/api/admin/kubernetes/clusters*", route => route.fulfill({ json: { multiple: false, clusters: [] } }));
+    const issue = { root: { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" },
+      occurrence_id: occurrence, broke_at: at, rule: "pod.crash_loop", severity: "critical", count: 1, broken: true, history: "complete" };
+    await page.route("**/api/admin/kubernetes/issues*", route => {
+      if (reopenArmed) {
+        session++;
+        version = 0;
+        held = undefined;
+        reopenArmed = false;
+      }
+      const query = new URL(route.request().url()).searchParams;
+      const selected = { ...issue, occurrence_id: query.get("occurrence_id") || occurrence, broke_at: query.get("center") || at };
+      return route.fulfill({ json: {
+        items: [selected], selected_occurrence: selected, selection_status: "resolved",
+        root_context: { root: issue.root, occurrence: selected, retained: true }, totals: { critical: 1 }, broken: { total: 1 },
+        sync: { state: "ready", partial: false, age_s: 0 },
+      } });
+    });
+    const reads: Array<{ time: number; query: Record<string, string>; session: number }> = [];
+    const responses: number[] = [], failures: string[] = [];
+    page.on("response", response => {
+      if (new URL(response.url()).pathname.endsWith("/break-logs")) responses.push(response.status());
+    });
+    page.on("requestfailed", request => {
+      if (new URL(request.url()).pathname.endsWith("/break-logs")) failures.push(request.failure()?.errorText || "failed");
+    });
+    let version = 0, empty = false, fail = false, source = "loki-prod", readyAt = "2026-10-31T16:01:30.123456789Z";
+    let held: Promise<void> | undefined;
+    const line = (text: string, timestamp = "2026-10-31T15:58:00.123456789Z"): KubernetesBreakLogPage["lines"][number] => ({
+      at: timestamp, pod: "checkout-retained", pod_uid: "retained-uid", container: "api", init: false,
+      slot: "previous", level: "error", text, source: "linked",
+    });
+    const old = Array.from({ length: 65 }, (_, index) => line(`synthetic old evidence ${index}`));
+    const repeated = line("synthetic repeated identical");
+    await page.route("**/api/admin/kubernetes/break-logs*", async route => {
+      const query = Object.fromEntries(new URL(route.request().url()).searchParams);
+      const time = await page.evaluate(() => Date.now());
+      reads.push({ time, query, session });
+      const responseSource = source, responseVersion = version;
+      // Reopen fixtures follow the resolved server record and first request,
+      // not a guessed wall-clock deadline. Source observation is deliberately old.
+      const responseReadyAt = defaultFilters ? new Date(time + 600_000).toISOString() : readyAt;
+      const sourceAt = defaultFilters ? new Date(time - 360_000).toISOString() : now.toISOString();
+      if (held) await held;
+      if (fail) return route.fulfill({ status: 503, json: { error: "Synthetic late source failure" } }).catch(() => {});
+      const lines = paging && query.cursor === "p2" ? [line("synthetic cursor c"), line("synthetic cursor duplicate")]
+        : paging && query.cursor === "p3" ? [line("synthetic cursor duplicate"), line("synthetic cursor duplicate")]
+        : empty ? [] : [...old, repeated, repeated, ...(responseVersion >= 1 ? [line("synthetic late failure", "2026-10-31T15:57:59.123456789Z"), repeated] : [])];
+      const result: KubernetesBreakLogPage = {
+        ...(paging ? { next: query.cursor === "p3" ? "p4" : query.cursor === "p2" ? "p3" : "p2" } : {}),
+        occurrence_id: query.occurrence_id || occurrence, window: { from: query.since, to: query.until },
+        pods: [{ name: "checkout-retained", uid: "retained-uid", state: "deleted", short: "retained" }],
+        main_container: "api", containers: [{ name: "api", main: true }, { name: "sidecar" }],
+        lines, markers: [{ type: "break", at, label: "synthetic pinned break" }], rate: [],
+        patterns: [{ template: "synthetic old evidence", count: 65, level: "error" }],
+        sources: [{ kind: "linked", name: responseSource, type: "loki", at: sourceAt }],
+        counts: { all: lines.length, errors: lines.length, warnings: 0 },
+        coverage: { state: empty ? "partial" : "pending", reason: empty ? "no_logs" : "linked_pending", tip: false,
+          gaps: [{ from: now.toISOString(), to: query.until, reason: empty ? "no_logs" : "linked_pending",
+            ...(!empty ? { ready_at: responseReadyAt } : {}) }] },
+      };
+      await route.fulfill({ json: result }).catch(() => {});
+    });
+    const url = `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&occurrence_id=${occurrence}&center=${at}${defaultFilters ? "" : "&logs_pod=retained-uid&logs_container=api&logs_mode=previous"}`;
+    const open = async (beforeReady?: () => Promise<void>) => {
+      await openApp(page, url);
+      await expect.poll(async () => {
+        await page.clock.runFor(defaultFilters ? 1 : 100);
+        return page.getByRole("log", { name: "Break log lines" }).count();
+      }).toBe(1);
+      await beforeReady?.();
+      await page.clock.runFor(0);
+      await settle();
+    };
+    const settle = async (advance = 1) => {
+      // Route completion and query notifications run on separate browser tasks.
+      // A zero-time tick cannot drain notifications queued for a future task.
+      const started = await page.evaluate(() => Date.now());
+      await page.waitForTimeout(50);
+      await expect.poll(async () => {
+        expect(await page.evaluate(() => Date.now()) - started).toBeLessThan(100);
+        await page.clock.runFor(advance);
+        return page.getByRole("log", { name: "Break log lines" }).getAttribute("aria-busy");
+      }).toBe("false");
+      await expect.poll(async () => {
+        await page.clock.runFor(1);
+        return page.locator("[data-break-log-spinner] [role=status]").count();
+      }).toBe(0);
+    };
+    const retryOrigin = async (initialRequest: number) => {
+      const timers = await page.evaluate(() => (window as unknown as {
+        linkedRetryTimers: Array<{ scheduledAt: number; dueAt: number }>;
+      }).linkedRetryTimers);
+      const first = timers.find(timer => timer.scheduledAt >= reads[initialRequest].time);
+      expect(first, "Pending readiness must schedule the hook's first retry").toBeDefined();
+      return first!.dueAt - 15_000;
+    };
+    const advanceTo = async (start: number, offset: number) => {
+      const remaining = start + offset - await page.evaluate(() => Date.now());
+      expect(remaining).toBeGreaterThanOrEqual(0);
+      await page.clock.runFor(remaining);
+    };
+    return { reads, responses, failures, url, at, open, settle, retryOrigin, advanceTo, freeze: async () => { await page.clock.runFor(0); },
+      setVersion: (value: number) => { version = value; }, setEmpty: () => { empty = true; },
+      setFail: () => { fail = true; }, setReadyAt: (value: string) => { readyAt = value; },
+      armReopen: () => { reopenArmed = true; },
+      setSource: (value: string) => { source = value; }, hold: (value?: Promise<void>) => { held = value; } };
+  }
+
+  for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`Break timeline linked ingestion append and expanded reading ${width} ${theme} theme`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const fixture = await linkedPendingFixture(page);
+      let releaseLoading!: () => void;
+      fixture.hold(new Promise<void>(resolve => { releaseLoading = resolve; }));
+      await fixture.open(async () => {
+        await expect(page.getByRole("log", { name: "Break log lines" })).toHaveAttribute("aria-busy", "true");
+        await page.screenshot({ path: capturePath("linked-break", width, theme, "loading"), animations: "disabled" });
+        fixture.hold(); releaseLoading();
+      });
+      const logs = page.getByRole("region", { name: "Logs at break", exact: true });
+      const output = page.getByRole("log", { name: "Break log lines" });
+      await expect(output).toContainText("synthetic old evidence 64");
+      await fixture.freeze();
+      await expect(logs).toContainText("Waiting for loki-prod to ingest");
+      await expect(logs.getByRole("button", { name: "Log coverage tip" })).toHaveCount(0);
+      const filter = logs.getByRole("textbox", { name: "Search in log window" });
+      await filter.fill("synthetic");
+      await page.clock.runFor(0);
+      await expect.poll(() => fixture.reads.length).toBe(2);
+      await fixture.settle();
+      await expect(output).toContainText("synthetic old evidence 64");
+      const start = await fixture.retryOrigin(1);
+      const sliders = page.getByRole("slider", { name: /Log window (start|end)/ });
+      const bracket = await sliders.evaluateAll(elements => elements.map(element => element.getAttribute("aria-valuenow")));
+      await output.evaluate(element => { element.scrollTop = 200; (element as HTMLElement).dataset.reading = "old"; });
+      const before = await output.evaluate(element => ({ top: element.scrollTop, first: element.querySelector("time")?.parentElement?.parentElement?.textContent }));
+      await page.screenshot({ path: capturePath("linked-break", width, theme, "pending"), animations: "disabled" });
+      fixture.setVersion(1);
+      await fixture.advanceTo(start, 14_999);
+      expect(fixture.reads).toHaveLength(2);
+      await fixture.advanceTo(start, 15_000);
+      await expect.poll(() => fixture.reads.length).toBe(3);
+      await fixture.settle();
+      await expect(output).toContainText("synthetic late failure");
+      await expect(output.getByText("synthetic repeated identical", { exact: true })).toHaveCount(3);
+      expect(await output.evaluate(element => element.scrollTop)).toBe(before.top);
+      expect(await output.getAttribute("data-reading")).toBe("old");
+      expect(await output.evaluate(element => element.querySelector("time")?.parentElement?.parentElement?.textContent)).toBe(before.first);
+      await expect(filter).toHaveValue("synthetic");
+      await expect(filter).toBeFocused();
+      await expect(output).toContainText("synthetic pinned break");
+      await expect(logs.getByRole("combobox", { name: "Log container" })).toHaveValue("api");
+      await expect(logs.getByRole("button", { name: "Previous container", exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(logs.getByRole("button", { name: "checkout-retained", exact: true })).toHaveAttribute("aria-pressed", "true");
+      expect(await sliders.evaluateAll(elements => elements.map(element => element.getAttribute("aria-valuenow")))).toEqual(bracket);
+      await fixture.advanceTo(start, 45_000);
+      await expect.poll(() => fixture.reads.length).toBe(4);
+      await fixture.settle();
+      await expect(output.getByText("synthetic repeated identical", { exact: true })).toHaveCount(3);
+      await logs.getByRole("button", { name: "Expand logs", exact: true }).click();
+      const expanded = page.getByRole("dialog", { name: "Logs at break", exact: true });
+      await expect(expanded).toBeVisible();
+      await expect(expanded.getByRole("log")).toContainText("synthetic late failure");
+      await expect(expanded.getByRole("textbox", { name: "Search in log window" })).toHaveValue("synthetic");
+      expect.soft(await expanded.getByRole("log").evaluate(element => element.scrollTop), "Expanding the still-open reader must preserve its reading position").toBe(before.top);
+      expect.soft(await expanded.getByRole("log").evaluate(element => element.querySelector("time")?.parentElement?.parentElement?.textContent),
+        "Changing reader size must not reorder the appended earlier failure before existing rows").toBe(before.first);
+      await page.screenshot({ path: capturePath("linked-break", width, theme, "expanded-pending"), animations: "disabled" });
+      expect.soft(await expanded.getByText(/Waiting for .* to ingest/).count(), "Expanded reader must explain why more linked evidence is pending").toBe(1);
+      await page.keyboard.press("Escape");
+      await expect(expanded).toHaveCount(0);
+      expect.soft(await output.evaluate(element => element.scrollTop), "Closing expanded mode must restore compact reading position").toBe(before.top);
+      await testInfo.attach("reading-anchor", { body: JSON.stringify({ qualification: "fixture; rendered browser measurements",
+        before, compactAfterEscape: await output.evaluate(element => ({ top: element.scrollTop, first: element.querySelector("time")?.parentElement?.parentElement?.textContent })),
+        bracket, marker: fixture.at, filter: await filter.inputValue() }), contentType: "application/json" });
+      fixture.setEmpty();
+      await fixture.advanceTo(start, 105_000);
+      await expect.poll(() => fixture.reads.length).toBe(5);
+      await fixture.settle();
+      await expect.poll(async () => { await page.clock.runFor(1); return logs.innerText(); }).not.toContain("Waiting for");
+      await expect(output).toContainText("synthetic late failure");
+      await expect(output.getByText("synthetic repeated identical", { exact: true })).toHaveCount(3);
+      await page.clock.runFor(180_000);
+      expect(fixture.reads).toHaveLength(5);
+      expect(fixture.reads.every(read => read.query.center === fixture.at && read.query.occurrence_id === "retained-nanos"
+        && read.query.since.endsWith(".123456789Z") && read.query.until.endsWith(".123456789Z"))).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+      await page.screenshot({ path: capturePath("linked-break", width, theme, "mature-kept"), animations: "disabled" });
+      fixture.setFail();
+      await logs.getByRole("button", { name: "Current", exact: true }).click();
+      await expect.poll(async () => { await page.clock.runFor(1); return logs.getByRole("alert").count(); }).toBe(1);
+      await expect(logs.getByRole("alert")).toContainText("Break logs unavailable");
+      const failedReads = fixture.reads.length;
+      await page.clock.runFor(60_000);
+      expect(fixture.reads).toHaveLength(failedReads);
+      await page.screenshot({ path: capturePath("linked-break", width, theme, "source-error"), animations: "disabled" });
+      await testInfo.attach("linked-response-counts", { body: JSON.stringify({ qualification: "fixture; virtual browser time", reads: fixture.reads }), contentType: "application/json" });
+    });
+  }
+
+  for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`Break timeline linked cursor load more replay and genuine duplicate multiplicity ${width} ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const fixture = await linkedPendingFixture(page, true);
+      await fixture.open();
+      const output = page.getByRole("log", { name: "Break log lines" });
+      const more = page.getByRole("button", { name: "Load more logs", exact: true });
+      await more.click();
+      await expect.poll(() => fixture.reads.length).toBe(2);
+      await fixture.settle();
+      await expect(output.getByText("synthetic cursor duplicate", { exact: true })).toHaveCount(1);
+      await page.clock.runFor(15_000);
+      await expect.poll(() => fixture.reads.length).toBe(3);
+      await fixture.settle();
+      await expect(output.getByText("synthetic cursor duplicate", { exact: true })).toHaveCount(1);
+      await expect(output).toContainText("synthetic cursor c");
+      await more.click();
+      await expect.poll(() => fixture.reads.length).toBe(4);
+      await fixture.settle();
+      expect(fixture.reads.map(read => read.query.cursor ?? null)).toEqual([null, "p2", null, "p3"]);
+      await expect(output.getByText("synthetic cursor duplicate", { exact: true })).toHaveCount(3);
+      await expect(output.getByText("synthetic repeated identical", { exact: true })).toHaveCount(2);
+      await page.clock.runFor(30_000);
+      await expect.poll(() => fixture.reads.length).toBe(5);
+      await fixture.settle();
+      await expect(output.getByText("synthetic cursor duplicate", { exact: true })).toHaveCount(3);
+      await expect(output).toContainText("synthetic pinned break");
+      expect(fixture.reads.every(read => read.query.center === fixture.at && read.query.occurrence_id === "retained-nanos"
+        && read.query.since.endsWith(".123456789Z") && read.query.until.endsWith(".123456789Z"))).toBe(true);
+      await page.screenshot({ path: capturePath("linked-cursor", width, theme, "replayed-multiplicity"), animations: "disabled" });
+      await testInfo.attach("cursor-multiplicity", { body: JSON.stringify({ qualification: "fixture; genuine identical records in separate transport pages",
+        multiplicity: 3, reads: fixture.reads }), contentType: "application/json" });
+    });
+
+    test(`Break timeline linked reopen same pinned query starts a fresh bounded schedule ${width} ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const fixture = await linkedPendingFixture(page, false, true);
+      await fixture.open();
+      await testInfo.attach("bootstrap-ready", { body: JSON.stringify({ qualification: "fixture; 1ms notification task quantum",
+        busy: await page.getByRole("log", { name: "Break log lines" }).getAttribute("aria-busy"),
+        time: await page.evaluate(() => Date.now()), initialRequest: fixture.reads[0] }), contentType: "application/json" });
+      const { advanceTo } = fixture;
+      expect(fixture.reads).toHaveLength(1);
+      const firstStart = await fixture.retryOrigin(0);
+      const pinned = fixture.reads[0].query;
+      for (const offset of [15_000, 45_000, 105_000, 165_000, 225_000]) {
+        const count = fixture.reads.length;
+        await advanceTo(firstStart, offset);
+        await expect.poll(() => fixture.reads.length).toBe(count + 1);
+        await fixture.settle();
+      }
+      let release!: () => void;
+      fixture.setVersion(1);
+      fixture.hold(new Promise<void>(resolve => { release = resolve; }));
+      await advanceTo(firstStart, 285_000);
+      await expect.poll(() => fixture.reads.length).toBe(7);
+      await advanceTo(firstStart, 299_999);
+      expect(fixture.failures).toHaveLength(0);
+      await advanceTo(firstStart, 300_000);
+      await expect.poll(() => fixture.failures.length).toBe(1);
+      expect(fixture.failures[0]).toContain("ERR_ABORTED");
+      expect(await page.evaluate(() => Date.now()) - firstStart).toBe(300_000);
+      expect(fixture.reads.map(read => read.time - firstStart)).toEqual([0, 15_000, 45_000, 105_000, 165_000, 225_000, 285_000]);
+      await page.getByRole("tab", { name: "Overview", exact: true }).click();
+      await expect(page.getByRole("log", { name: "Break log lines" })).toHaveCount(0);
+      await page.clock.runFor(60_000);
+      expect(fixture.reads).toHaveLength(7);
+      fixture.armReopen();
+      await page.getByRole("button", { name: "Timeline for checkout", exact: true }).click();
+      await expect.poll(async () => { await page.clock.runFor(1); return page.getByRole("log", { name: "Break log lines" }).count(); }).toBe(1);
+      await expect.poll(() => fixture.reads.length).toBe(8);
+      await fixture.settle();
+      const start = await fixture.retryOrigin(7);
+      expect(fixture.reads.at(-1)!.session).toBe(1);
+      expect(fixture.reads.at(-1)!.query).toEqual(pinned);
+      release();
+      await fixture.settle();
+      const output = page.getByRole("log", { name: "Break log lines" });
+      await expect(output).toContainText("synthetic old evidence 64");
+      await expect(output).not.toContainText("synthetic late failure");
+      await advanceTo(start, 14_999);
+      expect(fixture.reads).toHaveLength(8);
+      for (const offset of [15_000, 45_000, 105_000, 165_000, 225_000, 285_000]) {
+        const count = fixture.reads.length;
+        await advanceTo(start, offset);
+        await expect.poll(() => fixture.reads.length).toBe(count + 1);
+        await fixture.settle();
+      }
+      await advanceTo(start, 300_000);
+      expect(fixture.reads).toHaveLength(14);
+      await advanceTo(start, 420_000);
+      expect(fixture.reads).toHaveLength(14);
+      // Initial fetch is offset zero for the request; automatic retries are
+      // measured from actual pending readiness, not notification drain time.
+      const initialRequest = fixture.reads[7].time;
+      expect(initialRequest).toBeLessThanOrEqual(start);
+      expect(fixture.reads.slice(7).map((read, index) => read.time - (index === 0 ? initialRequest : start)))
+        .toEqual([0, 15_000, 45_000, 105_000, 165_000, 225_000, 285_000]);
+      expect(fixture.reads.every(read => JSON.stringify(read.query) === JSON.stringify(pinned))).toBe(true);
+      await expect(output).not.toContainText("synthetic late failure");
+      await expect(page.getByRole("textbox", { name: "Search in log window" })).toHaveValue("");
+      await page.screenshot({ path: capturePath("linked-reopen", width, theme, "bounded-again"), animations: "disabled" });
+      await testInfo.attach("reopened-budget", { body: JSON.stringify({ qualification: "fixture; virtual browser time; root and panel unmount without page reload; retained-provider case belongs to the existing actual-panel unit test",
+        firstStart, secondStart: start, secondInitialRequest: initialRequest, pendingReadinessDelay: start - initialRequest,
+        failures: fixture.failures, reads: fixture.reads }), contentType: "application/json" });
+    });
+  }
+
+  test("Break timeline linked ingestion exact five minute retry and in-flight abort budget", async ({ page }, testInfo) => {
+    const fixture = await linkedPendingFixture(page);
+    fixture.setReadyAt("2026-10-31T16:10:00.123456789Z");
+    await fixture.open();
+    await expect(page.getByRole("log", { name: "Break log lines" })).toContainText("synthetic old evidence 64");
+    await fixture.freeze();
+    await page.getByRole("textbox", { name: "Search in log window" }).fill("synthetic");
+    await page.clock.runFor(0);
+    await expect.poll(() => fixture.reads.length).toBe(2);
+    await fixture.settle();
+    const bootstrapReads = fixture.reads.slice(0, 1);
+    const budgetReads = () => fixture.reads.slice(1);
+    const start = await fixture.retryOrigin(1);
+    for (const [offset, count] of [[15_000, 2], [45_000, 3], [105_000, 4], [165_000, 5], [225_000, 6]]) {
+      await fixture.advanceTo(start, offset);
+      await expect.poll(() => budgetReads().length).toBe(count);
+      await fixture.settle();
+      await expect(page.locator("[data-break-log-spinner] [role=status]")).toHaveCount(0);
+    }
+    let release!: () => void;
+    fixture.hold(new Promise<void>(resolve => { release = resolve; }));
+    fixture.setVersion(1);
+    await fixture.advanceTo(start, 285_000);
+    await expect.poll(() => budgetReads().length).toBe(7);
+    await fixture.advanceTo(start, 299_999);
+    expect(await page.evaluate(() => Date.now()) - start).toBe(299_999);
+    expect(fixture.failures).toHaveLength(0);
+    await fixture.advanceTo(start, 300_000);
+    await expect.poll(() => fixture.failures.length).toBe(1);
+    expect(fixture.failures[0]).toContain("ERR_ABORTED");
+    release();
+    await page.waitForTimeout(100);
+    await expect(page.getByRole("log", { name: "Break log lines" })).not.toContainText("synthetic late failure");
+    await page.clock.runFor(120_000);
+    expect(budgetReads()).toHaveLength(7);
+    expect(fixture.responses).toEqual(Array(7).fill(200));
+    expect(budgetReads().map(read => read.time - start)).toEqual([0, 15_000, 45_000, 105_000, 165_000, 225_000, 285_000]);
+    await testInfo.attach("exact-retry-budget", { body: JSON.stringify({ budget_ms: 300_000, scope_requests: 7, total_requests: 8, automatic_retries: 6,
+      scope_completed_responses: fixture.responses.length - bootstrapReads.length, total_completed_responses: fixture.responses.length,
+      aborted_at_ms: 300_000, failures: fixture.failures, response_statuses: fixture.responses, bootstrapReads, reads: budgetReads() }), contentType: "application/json" });
+  });
+
+  for (const transition of ["close", "hidden", "window", "occurrence", "source", "denied", "credentials", "container", "mode", "filter", "pod"] as const) {
+    test(`Break timeline linked ingestion late response fence on ${transition}`, async ({ page }, testInfo) => {
+      const fixture = await linkedPendingFixture(page);
+      await fixture.open();
+      const output = page.getByRole("log", { name: "Break log lines" });
+      await expect(output).toContainText("synthetic old evidence 64");
+      await fixture.freeze();
+      let release!: () => void;
+      fixture.hold(new Promise<void>(resolve => { release = resolve; }));
+      fixture.setVersion(1);
+      await page.clock.runFor(15_000);
+      await expect.poll(() => fixture.reads.length).toBe(2);
+      fixture.hold();
+      fixture.setVersion(0);
+      if (transition === "close") await page.getByRole("tab", { name: "Overview", exact: true }).click();
+      if (transition === "hidden") await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      if (transition === "window") await page.getByRole("slider", { name: "Log window start", exact: true }).press("ArrowRight");
+      if (transition === "occurrence") {
+        const url = new URL(page.url()); url.searchParams.set("occurrence_id", "another-nanos"); url.searchParams.set("center", fixture.at.replace("789Z", "790Z"));
+        await page.goto(url.href);
+        await expect.poll(async () => { await page.clock.runFor(100); return output.count(); }).toBe(1);
+        await fixture.settle();
+      }
+      if (transition === "container") await page.getByRole("combobox", { name: "Log container" }).selectOption("sidecar");
+      if (transition === "mode") await page.getByRole("button", { name: "Current", exact: true }).click();
+      if (transition === "filter") await page.getByRole("textbox", { name: "Search in log window" }).fill("synthetic");
+      if (transition === "pod") await page.getByRole("button", { name: "All pods 1", exact: true }).click();
+      if (transition === "source") {
+        fixture.setSource("new-source");
+        await page.getByRole("combobox", { name: "Log container" }).selectOption("sidecar");
+        await page.clock.runFor(0);
+        await fixture.settle(1);
+      }
+      if (transition === "denied" || transition === "credentials") {
+        await page.route("**/api/admin/kubernetes/issues*", route => route.fulfill({ status: transition === "denied" ? 403 : 401, json: { error: "Synthetic authority revoked" } }));
+        await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
+        await expect.poll(async () => { await page.clock.runFor(1); return output.count(); }).toBe(0);
+      }
+      release();
+      await page.waitForTimeout(200);
+      if (transition === "close" || transition === "denied" || transition === "credentials") await expect(output).toHaveCount(0);
+      else await expect.poll(async () => { await page.clock.runFor(1); return output.innerText(); }).not.toContain("synthetic late failure");
+      if (transition === "close" || transition === "hidden") {
+        const count = fixture.reads.length;
+        await page.clock.runFor(60_000);
+        expect(fixture.reads).toHaveLength(count);
+        if (transition === "hidden") await page.evaluate(() => {
+          Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+        else {
+          await page.getByRole("tab", { name: "Overview", exact: true }).click();
+          await page.getByRole("button", { name: "Timeline for checkout", exact: true }).click();
+          await expect.poll(async () => { await page.clock.runFor(100); return output.count(); }).toBe(1);
+        }
+        await page.clock.runFor(60_000);
+        await expect.poll(() => fixture.reads.length).toBeGreaterThan(count);
+      }
+      await testInfo.attach("fenced-requests", { body: JSON.stringify({ transition, qualification: "fixture; hidden is synthetic visibilitychange", reads: fixture.reads }), contentType: "application/json" });
+    });
+  }
+
+  for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`Break timeline linked ingestion optional delay defaults zero and bounds ${width} ${theme} theme`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const fixture = await linkedPendingFixture(page);
+      const settings: KubernetesAgentSettings = {
+        learning: { logs: true, metrics: true, traces: false, scope: { include: [], exclude: [] } },
+        break_logs: { linked_source: "loki-prod", fields: {
+          loki: { namespace: "namespace", pod: "pod", container: "container" },
+          elasticsearch: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name", time: "@timestamp", message: "message" },
+          cloudwatchlogs: { namespace: "kubernetes.namespace_name", pod: "kubernetes.pod_name", container: "kubernetes.container_name", message: "log" },
+          graylog: { namespace: "kubernetes_namespace_name", pod: "kubernetes_pod_name", container: "kubernetes_container_name" },
+          splunk: { namespace: "namespace", pod: "pod", container: "container_name" },
+          signoz: { namespace: "k8s.namespace.name", pod: "k8s.pod.name", container: "k8s.container.name" },
+        } },
+        sources: [{ type: "loki", name: "loki-prod", scope: '{cluster="fixture"}', health: "healthy" }],
+        detected: { workloads: 1, namespaces: 1, metrics_server: true, traces: null }, can_write: true, linked_source_missing: false,
+      };
+      const writes: unknown[] = [];
+      await page.route("**/api/admin/kubernetes/agent-settings*", async route => {
+        if (route.request().method() === "PUT") {
+          const body = route.request().postDataJSON();
+          writes.push(body);
+          Object.assign(settings, body);
+        }
+        await route.fulfill({ json: settings });
+      });
+      await fixture.open();
+      await page.getByRole("tab", { name: "Agent", exact: true }).click();
+      const agent = page.getByRole("region", { name: "Kubernetes Agent", exact: true });
+      const input = agent.getByRole("spinbutton", { name: "Ingestion delay override (seconds)" });
+      await expect.poll(async () => { await page.clock.runFor(100); return input.count(); }).toBe(1);
+      await expect(input).toHaveValue("");
+      await input.focus(); await expect(input).toBeFocused();
+      for (const invalid of ["-1", "3601", "1.5"]) {
+        await input.fill(invalid);
+        await expect(input).toHaveAttribute("aria-invalid", "true");
+        await expect(agent.getByRole("button", { name: "Save settings", exact: true })).toBeDisabled();
+        await agent.getByRole("button", { name: /^(Save|Use this source)$/ }).click();
+        expect(writes).toHaveLength(0);
+      }
+      await page.screenshot({ path: capturePath("linked-delay", width, theme, "invalid"), animations: "disabled" });
+      for (const valid of ["0", "3600", ""]) {
+        await input.fill(valid);
+        await expect(input).toHaveAttribute("aria-invalid", "false");
+        const response = page.waitForResponse(r => r.request().method() === "PUT" && new URL(r.url()).pathname.endsWith("/agent-settings"));
+        await agent.getByRole("button", { name: "Save settings", exact: true }).click();
+        expect((await response).status()).toBe(200);
+        await page.clock.runFor(1);
+        await expect.poll(async () => { await page.clock.runFor(1); return agent.getByText("Agent settings saved.", { exact: true }).count(); }).toBe(1);
+        const sent = writes.at(-1) as { break_logs: { ingest_delay?: number } };
+        if (valid === "") expect(Object.hasOwn(sent.break_logs, "ingest_delay")).toBe(false);
+        else expect(sent.break_logs.ingest_delay).toBe(Number(valid));
+        await page.screenshot({ path: capturePath("linked-delay", width, theme, valid === "" ? "default" : `seconds-${valid}`), animations: "disabled" });
+      }
+      expect(writes).toHaveLength(3);
+      await testInfo.attach("optional-delay-payloads", { body: JSON.stringify(writes), contentType: "application/json" });
+    });
+  }
+
+  for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`Break timeline focused paging stops after five pages through empty replay ${width} ${theme} theme`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const fixture = await linkedPendingFixture(page);
+      const reads: Array<{ path: string; query: Record<string, string> }> = [];
+      await page.route(/\/api\/admin\/kubernetes\/(changes|crashes)\?/, async route => {
+        const url = new URL(route.request().url()), query = Object.fromEntries(url.searchParams);
+        reads.push({ path: url.pathname, query });
+        const index = Number(query.cursor || 0);
+        const sync = { state: "ready", age_s: 0, partial: false };
+        if (url.pathname.endsWith("/changes")) {
+          const item = (id: string) => ({ id, cluster: "fixture", kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid", type: "image_changed", fields: [{ path: "image", from: "v1", to: id }], at: fixture.at });
+          return route.fulfill({ json: { items: index === 1 ? [] : index === 0 ? [item("first")] : [item("first"), item(`page-${index}`)],
+            next: String(index + 1), gaps: [], sync } });
+        }
+        const item = (id: string) => ({ id, sequence: index + 1, cluster: "fixture", namespace: "shop", pod: `checkout-${id}`, pod_uid: id, root_uid: "checkout-uid", root_kind: "Deployment", root_name: "checkout", container: "api", type: "termination", reason: "OOMKilled", exit_code: 137, at: fixture.at, observed_at: fixture.at, time_source: "finished_at" });
+        return route.fulfill({ json: { items: index === 1 ? [] : index === 0 ? [item("first")] : [item("first"), item(`page-${index}`)],
+          next: String(index + 1), since: query.since, until: query.until, gaps: [], capture_gaps: [], coverage: {}, limitations: [],
+          capture: { mode: "continuous", behind: false }, sync } });
+      });
+      await fixture.open();
+      for (const endpoint of ["changes", "crashes"]) await expect.poll(async () => {
+        await page.clock.runFor(1);
+        return reads.filter(read => read.path.endsWith(`/${endpoint}`)).length;
+      }).toBe(5);
+      await page.clock.runFor(5000);
+      for (const endpoint of ["changes", "crashes"]) {
+        const scoped = reads.filter(read => read.path.endsWith(`/${endpoint}`));
+        expect(scoped).toHaveLength(5);
+        expect(scoped.map(read => read.query.cursor || "0")).toEqual(["0", "1", "2", "3", "4"]);
+        expect(new Set(scoped.map(read => JSON.stringify([read.query.namespace, read.query.root_uid, read.query.since, read.query.until]))).size).toBe(1);
+      }
+      const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
+      await expect(chart.locator('[data-marker="change"]')).toHaveCount(4);
+      await expect(page.getByRole("button", { name: /^(Next|Previous|Prev)( page| crash page)?$/ })).toHaveCount(0);
+      await expect(page.getByRole("region", { name: "Kubernetes change timeline" })).toContainText(/incomplete|more .*remain|bounded|limited/i);
+      await page.screenshot({ path: capturePath("focused-paging", width, theme, "five-page-cap"), animations: "disabled" });
+      await testInfo.attach("focused-page-counts", { body: JSON.stringify({ qualification: "fixture; five HTTP pages per independent focused transport", reads }), contentType: "application/json" });
+    });
+  }
+
+  for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
+    test(`Break timeline linked fallback confirmation rejects one nanosecond drift ${width} ${theme} theme`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.emulateMedia({ colorScheme: theme });
+      await page.addInitScript(value => localStorage.setItem("versus.theme", value), theme);
+      const fixture = await linkedPendingFixture(page);
+      const root = { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" };
+      const wrong = { root, occurrence_id: "retained-nanos", broke_at: fixture.at.replace("789Z", "788Z"),
+        rule: "pod.crash_loop", severity: "critical", count: 1, broken: true, history: "complete" };
+      await page.route("**/api/admin/kubernetes/issues*", route => route.fulfill({ json: {
+        items: [wrong], selected_occurrence: wrong, selection_status: "resolved",
+        root_context: { root, occurrence: wrong, retained: true }, totals: { critical: 1 }, broken: { total: 1 },
+        sync: { state: "ready", partial: false, age_s: 0 },
+      } }));
+      const url = new URL(fixture.url, "http://127.0.0.1:4175");
+      url.searchParams.delete("occurrence_id");
+      await openApp(page, url.pathname + url.search);
+      await expect.poll(async () => { await page.clock.runFor(100); return page.getByRole("region", { name: "Kubernetes change timeline" }).count(); }).toBe(1);
+      await page.clock.runFor(1000);
+      await testInfo.attach("raw-fallback-selection", { body: JSON.stringify({ selected_center: fixture.at, returned_center: wrong.broke_at, reads: fixture.reads }), contentType: "application/json" });
+      await page.screenshot({ path: capturePath("linked-fallback", width, theme, "nanos-mismatch"), animations: "disabled" });
+      expect(fixture.reads, "A resolved occurrence one nanosecond off the selected fallback center must not enable a protected log read").toHaveLength(0);
+    });
+  }
+
   for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
     test(`Break timeline logs at break and Agent mappings ${viewport.name}`, async ({ page }) => {
       const errors: string[] = [];
@@ -4813,6 +5385,7 @@ test.describe("Workloads and focused investigation worst-case browser gate", () 
         if (url.pathname.endsWith("/break-logs")) {
           if (holdDetail) { heldDetail++; await detailBarrier; }
           return reply({
+          occurrence_id: query.occurrence_id,
           window: { from: query.since, to: query.until }, pods: [{ name: "retained-pod", uid: "retained-pod", state: "deleted", short: "retained" }],
           main_container: "api", containers: [{ name: "api", main: true }], markers: [],
           lines: state === "no-logs" || state === "deleted" ? [] : [{ at, pod: "retained-pod", pod_uid: "retained-pod", container: "api", init: false, slot: "previous", level: "error", text: "synthetic-filter pinned retained line", source: "captured" }], rate: [], patterns: [], sources: [], counts: { all: state === "no-logs" || state === "deleted" ? 0 : 1, errors: state === "no-logs" || state === "deleted" ? 0 : 1, warnings: 0 },

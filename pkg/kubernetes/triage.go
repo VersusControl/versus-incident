@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 )
@@ -148,7 +149,60 @@ func (service *Service) Issues(ctx context.Context, options IssueOptions) (Issue
 		}
 		return service.historicalIssues(ctx, options)
 	}
-	return service.issuesSnapshot(ctx, options)
+	page, err := service.issuesSnapshot(ctx, options)
+	if err == nil && !options.captureOnly {
+		if err = service.pinOpenOccurrences(ctx, &page); err != nil {
+			return IssuePage{}, err
+		}
+	}
+	return page, err
+}
+
+// pinOpenOccurrences makes live broken items carry the identity and break time
+// of their persisted open occurrence, so a selection built from the live list
+// keeps resolving after the live condition time moves.
+func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage) error {
+	if service.evidenceStore() == nil {
+		return nil
+	}
+	need := map[string][]int{}
+	for position, issue := range page.Items {
+		if issue.Broken && issue.Root.UID != "" {
+			need[issue.Root.UID] = append(need[issue.Root.UID], position)
+		}
+	}
+	for rootUID, positions := range need {
+		lookup, stop := context.WithTimeout(ctx, 500*time.Millisecond)
+		stored, err := service.historicalIssues(lookup, IssueOptions{RootUID: rootUID, Namespace: page.Items[positions[0]].Root.Namespace, Since: time.Now().UTC().Add(-breaklogs.Retention), Until: time.Now().UTC(), Limit: 100})
+		stop()
+		if err != nil {
+			return err
+		}
+		incomplete := stored.Sync.Partial || stored.Next != ""
+		if incomplete {
+			page.Sync.Partial = true
+			page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: "historical_evidence_unavailable"})
+		}
+		for _, position := range positions {
+			live := &page.Items[position]
+			if incomplete {
+				// Unavailable history cannot authorize a live condition time as
+				// an occurrence selector. A decoded open record below can.
+				live.OccurrenceID, live.BrokeAt, live.BrokeAtSource = "", nil, ""
+				live.Partial = true
+			}
+			for _, item := range stored.Items {
+				if item.Rule == live.Rule && item.Broken && item.ClosedAt == nil && item.BrokeAt != nil && item.OccurrenceID != "" {
+					live.OccurrenceID, live.BrokeAt = item.OccurrenceID, item.BrokeAt
+					if item.BrokeAtSource != "" {
+						live.BrokeAtSource = item.BrokeAtSource
+					}
+					break
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // Top returns the highest-usage pods or nodes from the Metrics API.

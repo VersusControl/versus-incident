@@ -105,6 +105,7 @@ func (service *Service) enqueueBreakLogs(snapshot kubeindex.Snapshot, owner stri
 func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex.Snapshot, owner string) {
 	store := service.changeStore()
 	now := time.Now().UTC()
+	service.observeBreakInventory(ctx, snapshot, owner)
 	state, err := store.BreakLogs(now)
 	if err != nil {
 		return
@@ -112,8 +113,21 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 	if err := service.commitCredential(ctx, func() error { return store.CheckCaptureLease(owner) }); err != nil {
 		return
 	}
+
 	roots, _ := classifyReadyBreaks(snapshot, now)
+	logRoots := roots[:0]
 	for _, root := range roots {
+		// Cluster-scoped breaks remain issues, but have no namespace Pod logs.
+		// A manifest requires a namespace; one Node must not reject the batch.
+		if root.Root.Namespace != "" {
+			logRoots = append(logRoots, root)
+		}
+	}
+	roots = logRoots
+	manifests := make([]breaklogs.Manifest, len(roots))
+	// Admit every root before slow container reads can consume this cycle.
+	for i := range roots {
+		root := &roots[i]
 		if root.Source == "first_seen" {
 			service.changes.mu.Lock()
 			first := service.changes.firstSeen[service.indexScope()][root.Root.Namespace+"\x00"+root.Root.UID]
@@ -122,20 +136,43 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 				root.BrokeAt = first
 			}
 		}
+		manifests[i] = service.newBreakManifest(ctx, *root, state, now)
+		root.BrokeAt = manifests[i].BreakAt
+	}
+	if service.evidenceStore() != nil {
+		// Without the persisted occurrence the center may still drift, so the
+		// manifest would not resolve by occurrence later. Retry next cycle.
+		kept := roots[:0]
+		keptManifests := manifests[:0]
+		for i := range roots {
+			if manifests[i].OccurrenceID != "" {
+				kept = append(kept, roots[i])
+				keptManifests = append(keptManifests, manifests[i])
+			}
+		}
+		roots, manifests = kept, keptManifests
+	}
+
+	admissionContext := ctx
+	stopAdmission := func() {}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		// Optional enrichment cannot discard already-authorized inventory metadata.
+		// Credential retirement and capture leases still fence the bounded commit.
+		admissionContext, stopAdmission = context.WithTimeout(service.identity.ctx, time.Second)
+	}
+	defer stopAdmission()
+	if err := service.commitCredential(admissionContext, func() error { return store.CommitBreakLogs(nil, nil, "", owner, time.Now().UTC(), manifests...) }); err != nil {
+
+		return
+	}
+	for i, root := range roots {
 		pods := breakLogPods(snapshot.Records, root.Root.Namespace, root.Root.UID)
 		job := logJobID(root, pods)
 		if _, exists := state.Jobs[job]; exists {
 			continue
 		}
-		from := root.BrokeAt.Add(-5 * time.Minute)
-		if root.Source == "first_seen" {
-			service.changes.mu.Lock()
-			first := service.changes.firstSeen[service.indexScope()][root.Root.Namespace+"\x00"+root.Root.UID]
-			service.changes.mu.Unlock()
-			if !first.IsZero() {
-				from = first.Add(-5 * time.Minute)
-			}
-		}
+		manifest := manifests[i]
+		from := manifest.From
 		if root.BrokeAt.IsZero() {
 			from = now.Add(-5 * time.Minute)
 		}
@@ -183,7 +220,7 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		if ctx.Err() != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				commitContext, stop := context.WithTimeout(service.identity.ctx, time.Second)
-				commitErr := service.commitCredential(commitContext, func() error { return store.CommitBreakLogs(items, gaps, "", owner, time.Now().UTC()) })
+				commitErr := service.commitCredential(commitContext, func() error { return store.CommitBreakLogs(items, gaps, "", owner, time.Now().UTC(), manifest) })
 				stop()
 				if commitErr != nil {
 					return
@@ -195,7 +232,9 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		if retry {
 			completedJob = ""
 		}
-		err = service.commitCredential(ctx, func() error { return store.CommitBreakLogs(items, gaps, completedJob, owner, time.Now().UTC()) })
+		err = service.commitCredential(ctx, func() error {
+			return store.CommitBreakLogs(items, gaps, completedJob, owner, time.Now().UTC(), manifest)
+		})
 		if err != nil {
 			return
 		}
@@ -204,16 +243,21 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 
 func (service *Service) readBreakContainer(ctx context.Context, pod kubeindex.Record, rootUID string, container kubeindex.ContainerState, slot string, from, to time.Time) (breaklogs.Snapshot, *breaklogs.Gap) {
 	item := breaklogs.Snapshot{Cluster: service.scope.ClusterID, Namespace: pod.Namespace, RootUID: rootUID, Pod: pod.Name, PodUID: pod.UID, Container: container.Name, Init: container.Init, Slot: slot, TerminationAt: container.TerminatedAt, Restarts: container.RestartCount, CapturedAt: time.Now().UTC(), From: from, To: to, Lines: []breaklogs.Line{}}
+	item.TerminationReason = safeBreakReason(service.scrubber.Scrub(safeBreakReason(container.TerminatedReason)))
+	item.TerminationExitCode = container.ExitCode
 	item.PodCreatedAt = pod.CreatedAt
 	item.ID = breaklogs.Identity(item)
 	if slot == "previous" && !container.TerminatedAt.IsZero() {
-		item.To = minTime(item.To, container.TerminatedAt)
+		item.To = minTime(item.To, breaklogs.TerminationEnd(container.TerminatedAt))
 	}
 	bounds := podLogBounds{LimitBytes: 64 << 10}
-	if slot == "current" {
+	if slot == "current" || container.CurrentTermination {
 		bounds.SinceTime = from
 	}
-	logs, err := service.podLogs(ctx, pod.Namespace, pod.Name, container.Name, slot == "previous", 0, 500, true, bounds)
+	// A terminated current incarnation still occupies kubelet's current slot
+	// until it restarts. The snapshot remains terminated-window evidence.
+	previous := slot == "previous" && !container.CurrentTermination
+	logs, err := service.podLogs(ctx, pod.Namespace, pod.Name, container.Name, previous, 0, 500, true, bounds)
 	if err != nil {
 		reason := "capture_late"
 		var throttled *ErrThrottled
@@ -252,9 +296,6 @@ func (service *Service) readBreakContainer(ctx context.Context, pod kubeindex.Re
 		}
 		item.Lines = append(item.Lines, breaklogs.Line{At: at, Text: message})
 	}
-	if slot == "previous" && !container.TerminatedAt.IsZero() && container.TerminatedAt.Before(item.To) {
-		item.To = container.TerminatedAt
-	}
 	if len(item.Lines) == 500 {
 		item.Truncated = true
 	}
@@ -266,6 +307,9 @@ func (service *Service) readBreakContainer(ctx context.Context, pod kubeindex.Re
 	}
 	if item.Truncated && len(item.Lines) == 0 {
 		item.From = item.To
+	}
+	if len(item.Lines) == 0 {
+		return item, &breaklogs.Gap{SnapshotID: item.ID, ObservedAt: item.CapturedAt, From: from, To: to, Namespace: pod.Namespace, RootUID: rootUID, PodUID: pod.UID, Container: container.Name, Reason: "capture_late"}
 	}
 	return item, nil
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubegraph "github.com/VersusControl/versus-incident/pkg/kubernetes/graph"
@@ -38,6 +39,7 @@ func TestRunningTimestampAndFullLogContainerCatalog(t *testing.T) {
 		containers = append(containers, map[string]any{"name": name})
 		statuses = append(statuses, map[string]any{"name": name, "state": map[string]any{"running": map[string]any{"startedAt": started.Format(time.RFC3339Nano)}}})
 	}
+
 	raw := map[string]any{"kind": "Pod", "metadata": map[string]any{"name": "api", "uid": "pod", "annotations": map[string]any{"kubectl.kubernetes.io/default-container": "app-10"}}, "spec": map[string]any{"containers": containers}, "status": map[string]any{"containerStatuses": statuses}}
 	projected := service.projectResource(ResourceDefinition{Kind: "Pod"}, raw)
 	record := indexRecord(projected)
@@ -48,6 +50,61 @@ func TestRunningTimestampAndFullLogContainerCatalog(t *testing.T) {
 	var decoded any
 	if json.Unmarshal(encoded, &decoded) != nil || len(indexedLogContainers(decoded)) != 12 || !indexedLogContainers(decoded)[10].StartedAt.Equal(started) {
 		t.Fatal("timestamp lost in JSON round trip")
+	}
+}
+
+func TestTerminatedIncarnationStartsSurviveProjectionAndPinning(t *testing.T) {
+	start := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	end := start.Add(time.Second)
+	for _, current := range []bool{false, true} {
+		terminated := map[string]any{"startedAt": start.Format(time.RFC3339Nano), "finishedAt": end.Format(time.RFC3339Nano), "reason": "Error", "exitCode": float64(1)}
+		state := map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}}
+		if current {
+			state = map[string]any{"terminated": terminated}
+		}
+		items := projectCrashContainers(map[string]any{"containerStatuses": []any{map[string]any{"name": "app", "restartCount": float64(8), "state": state, "lastState": map[string]any{"terminated": terminated}}}})
+		encoded, err := json.Marshal(items)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded any
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		containers := indexedContainers(decoded)
+		pods := verifiedBreakPods(kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}, Records: []kubeindex.Record{{Kind: "Pod", Namespace: "shop", Name: "api-0", UID: "pod", CreatedAt: start.Add(-time.Hour), Containers: containers}}})
+		if len(pods) != 1 {
+			t.Fatalf("missing pinned pod: %+v", pods)
+		}
+		for _, at := range []time.Time{start.Add(time.Millisecond), end.Add(500 * time.Millisecond)} {
+			if _, _, ok := breaklogs.ResolveLinkedLine(pods, breaklogs.LinkedLine{At: at, Pod: "api-0", Container: "app"}); !ok {
+				t.Fatalf("verified terminated incarnation rejected (current=%v) at %v: %+v", current, at, pods)
+			}
+		}
+		for _, at := range []time.Time{start.Add(-time.Nanosecond), end.Add(time.Second)} {
+			if _, _, ok := breaklogs.ResolveLinkedLine(pods, breaklogs.LinkedLine{At: at, Pod: "api-0", Container: "app"}); ok {
+				t.Fatalf("unproven incarnation accepted (current=%v) at %v", current, at)
+			}
+		}
+	}
+}
+
+func TestLinkedPinnedIncarnationFillsOnlyMatchingStatusBounds(t *testing.T) {
+	start := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	end := start.Add(time.Second)
+	for _, later := range []bool{false, true} {
+		pinned := []breaklogs.ManifestPod{{Namespace: "shop", Name: "api-0", UID: "pod", CreatedAt: start.Add(-time.Hour), Containers: []breaklogs.ManifestContainer{{Name: "app", Restarts: 8, TerminationAt: end}}}}
+		current := kubeindex.ContainerState{Name: "app", RestartCount: 8, PreviousStartedAt: start, TerminatedAt: end}
+		if later {
+			current.RestartCount++
+			current.PreviousStartedAt = start.Add(time.Minute)
+			current.TerminatedAt = end.Add(time.Minute)
+		}
+		pods := supplementLinkedPods(pinned, nil, []kubeindex.Record{{UID: "pod", Containers: []kubeindex.ContainerState{current}}}, end.Add(time.Minute))
+		_, _, ok := breaklogs.ResolveLinkedLine(pods, breaklogs.LinkedLine{At: start.Add(time.Millisecond), Pod: "api-0", Container: "app"})
+		if ok == later {
+			t.Fatalf("pinned incarnation enriched from wrong restart or matching bound omitted: later=%v pods=%+v", later, pods)
+		}
 	}
 }
 

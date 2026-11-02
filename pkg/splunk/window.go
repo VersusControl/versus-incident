@@ -3,8 +3,42 @@ package splunk
 import (
 	"context"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// ReadWindowWithOneOfFields performs one bounded native search job for exact
+// multi-value identity filters. The existing six-request lifecycle bound covers
+// creation, polling, results and cleanup; values never become raw search syntax.
+func (service *Service) ReadWindowWithOneOfFields(ctx context.Context, filters map[string]string, oneOf map[string][]string, from, to time.Time, limit int, fields []string) (ReadResult, error) {
+	if len(oneOf) > 3 || len(filters)+len(oneOf) > 3 {
+		return ReadResult{}, ErrInvalidArgument
+	}
+	copy := *service
+	copy.windowAlternatives = nil
+	copy.stringFields = append([]string(nil), fields...)
+	for field := range filters {
+		copy.stringFields = append(copy.stringFields, field)
+	}
+	for field, values := range oneOf {
+		if !outputFieldPattern.MatchString(field) || field == "index" || field == "sourcetype" || len(values) < 1 || len(values) > 20 {
+			return ReadResult{}, ErrInvalidArgument
+		}
+		parts := []string{}
+		for _, value := range values {
+			if !literal.MatchString(value) {
+				return ReadResult{}, ErrInvalidArgument
+			}
+			parts = append(parts, field+"="+strconv.Quote(value))
+		}
+		copy.windowAlternatives = append(copy.windowAlternatives, "("+strings.Join(parts, " OR ")+")")
+		copy.stringFields = append(copy.stringFields, field)
+		fields = append(append([]string(nil), fields...), field)
+	}
+	sort.Strings(copy.windowAlternatives)
+	return copy.ReadWindowWithFields(ctx, filters, from, to, limit, fields)
+}
 
 func (service *Service) ReadWindow(ctx context.Context, filters map[string]string, from, to time.Time, limit int, prefixes ...map[string]string) (ReadResult, error) {
 	return service.ReadWindowWithFields(ctx, filters, from, to, limit, nil, prefixes...)
