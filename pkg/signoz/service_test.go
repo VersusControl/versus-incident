@@ -659,6 +659,23 @@ func TestServiceBoundsReferenceV5RowsFixture(t *testing.T) {
 	}
 }
 
+func TestServiceCursorAtExactRowLimitIsTruncatedWithoutPaging(t *testing.T) {
+	calls := 0
+	server, roots := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls++
+		fmt.Fprint(writer, `{"data":{"data":{"results":[{"nextCursor":"page-2","rows":[{"timestamp":"2026-09-11T10:00:00Z","data":{"body":"first"}}]}]}}}`)
+	}))
+	service, err := NewService(testConfig(server, roots, testAPIKey), Policy{MaximumRows: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now().UTC().Add(-time.Minute)
+	result, err := service.SearchLogs(t.Context(), SearchRequest{Start: end.Add(-time.Hour), End: end, Limit: 1})
+	if err != nil || calls != 1 || result.Count != 1 || !result.Truncated || fmt.Sprint(result.Truncation) != "[rows]" {
+		t.Fatal("exact row limit hid cursor or issued additional pages", calls, result, err)
+	}
+}
+
 func TestNewServiceValidatesConnection(t *testing.T) {
 	for _, config := range []Config{{Address: "", APIKey: testAPIKey}, {Address: "ftp://host", APIKey: testAPIKey}, {Address: "https://user@host", APIKey: testAPIKey}, {Address: "https://host?token=x", APIKey: testAPIKey}, {Address: "https://host"}, {Address: "https://host", APIKey: "short"}} {
 		if _, err := NewService(config, ToolPolicy()); !errors.Is(err, ErrInvalidConfig) {

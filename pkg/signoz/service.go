@@ -325,6 +325,9 @@ func (service *Service) boundValue(value any, shape responseShape, limit int) (a
 	walk = func(current any) any {
 		switch typed := current.(type) {
 		case map[string]any:
+			if cursor, ok := typed["nextCursor"].(string); shape == responseRows && ok && cursor != "" {
+				reasons["rows"] = true
+			}
 			out := make(map[string]any, len(typed))
 			keys := make([]string, 0, len(typed))
 			for key := range typed {

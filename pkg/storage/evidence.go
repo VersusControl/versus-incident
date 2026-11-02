@@ -388,6 +388,9 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 		if exists && observed.LastSeen.Before(active.LastSeen) {
 			continue
 		}
+		if exists && active.Broken && observed.Broken {
+			observed.Payload = pinIssueBreakTime(active.Payload, observed.Payload)
+		}
 		advanced := !exists || observed.LastSeen.After(active.LastSeen)
 		changed := !exists || active.Broken != observed.Broken || active.AuthorizationKind != observed.AuthorizationKind || !sameIssueEvidence(active.Payload, observed.Payload)
 		eventType := "issue_observed"
@@ -447,6 +450,28 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 
 // Poll timestamps describe occurrence freshness, not a new evidence payload.
 // Journal rows stay immutable so a pinned page never acquires later poll data.
+// Preserve the opening condition time while an occurrence remains open; later
+// condition transitions refresh evidence, not the occurrence identity.
+func pinIssueBreakTime(previous, current json.RawMessage) json.RawMessage {
+	var old, next map[string]json.RawMessage
+	if json.Unmarshal(previous, &old) != nil || json.Unmarshal(current, &next) != nil || next == nil {
+		return current
+	}
+	var at time.Time
+	if json.Unmarshal(old["broke_at"], &at) != nil || at.IsZero() {
+		return current
+	}
+	next["broke_at"] = old["broke_at"]
+	if source, ok := old["broke_at_source"]; ok {
+		next["broke_at_source"] = source
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return current
+	}
+	return raw
+}
+
 func sameIssueEvidence(a, b json.RawMessage) bool {
 	normalize := func(raw json.RawMessage) []byte {
 		var value map[string]any

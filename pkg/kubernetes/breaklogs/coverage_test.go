@@ -89,3 +89,12 @@ func TestAssessInfersContainerCoverageReasons(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptySnapshotCannotCloseCoverage(t *testing.T) {
+	at := time.Now().UTC()
+	from := at.Add(-time.Minute)
+	got := Assess(from, at, []Snapshot{{PodUID: "pod", Container: "app", From: from, To: at}}, ContainerObservation{PodUID: "pod", Container: "app"})
+	if got.State == "complete" || len(got.Gaps) == 0 {
+		t.Fatalf("empty snapshot counted as coverage: %+v", got)
+	}
+}

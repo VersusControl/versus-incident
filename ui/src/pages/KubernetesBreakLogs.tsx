@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { Activity, FileText, Lightbulb, Loader2, Maximize2, MessageSquare, Search } from "lucide-react";
@@ -66,6 +66,7 @@ const tips: Record<string, string> = {
   rotated: "The node rotated these logs before the window start.",
   forbidden: "The Kubernetes reader cannot read pod logs.",
   budget: "Capture was deferred to stay within the read budget.",
+  no_logs: "The source has ingested this window but returned no matching logs.",
 };
 
 function sourceName(source: KubernetesBreakLogPage["sources"][number]) {
@@ -111,11 +112,18 @@ function BreakLogViewer({ expanded }: { expanded: boolean }) {
   const { page, query } = state;
   const loading = !page && !query.isError;
   const paneHeight = expanded ? "h-[60vh]" : "h-80";
-  const rows = [
+  const rowScope = JSON.stringify([state.window, state.issue?.root, page?.occurrence_id, page?.sources.filter(source => source.kind === "linked").map(source => [source.name, source.type]), state.pods, state.mode, state.level, state.search, state.selectedContainer]);
+  const stableRows = useRef<{ scope: string; rows: Array<{ at: string; key: string; line: KubernetesBreakLogPage["lines"][number] | undefined; marker: KubernetesBreakLogPage["markers"][number] | undefined }>; lines: typeof state.lines }>({ scope: "", rows: [], lines: [] });
+  const initialRows = [
     ...state.lines.map((line, index) => ({ at: line.at, key: `line:${index}`, line, marker: undefined })),
     ...(page?.markers ?? []).map((marker, index) => ({ at: marker.at, key: `marker:${index}`, line: undefined, marker })),
   ].sort((left, right) => Date.parse(left.at) - Date.parse(right.at) || Number(Boolean(right.marker)) - Number(Boolean(left.marker)));
+  const previous = stableRows.current;
+  const appendOnly = previous.rows.length > 0 && previous.scope === rowScope && previous.lines.length <= state.lines.length && previous.lines.every((line, index) => JSON.stringify(line) === JSON.stringify(state.lines[index]));
+  const rows = appendOnly ? [...previous.rows, ...state.lines.slice(previous.lines.length).map((line, index) => ({ at: line.at, key: `line:${previous.lines.length + index}`, line, marker: undefined }))] : initialRows;
+  stableRows.current = { scope: rowScope, rows, lines: state.lines };
   return <div className="min-w-0">
+    {page?.coverage.gaps.filter(gap => gap.reason === "linked_pending" && gap.ready_at).slice(0, 1).map(gap => <p key={gap.ready_at} role="status" className="py-2 text-xs text-ink-300">Waiting for {page.sources.find(source => source.kind === "linked")?.name ?? "the linked source"} to ingest, about {Math.max(0, Math.ceil((Date.parse(gap.ready_at!) - Date.now()) / 1000))} s. Logs update automatically while this panel is open.</p>)}
     {/* One fixed-height row that scrolls sideways: pod pills arriving with
         the data must never wrap and push the log pane down. */}
     <div role="group" aria-label="Log filters" data-break-log-filters className="flex h-14 min-w-0 flex-nowrap items-center gap-2 overflow-x-auto overflow-y-hidden border-b border-ink-600 text-xs [&>*]:shrink-0">
@@ -165,7 +173,42 @@ function ContainerSelect() {
 
 export function KubernetesBreakLogs({ pending = false, mounted = false }: { pending?: boolean; mounted?: boolean }) {
   const state = useBreakLogs();
+  const setPanelActive = state?.setPanelActive;
+  useLayoutEffect(() => {
+    setPanelActive?.(true);
+    return () => setPanelActive?.(false);
+  }, [setPanelActive]);
   const [expanded, setExpanded] = useState(false);
+  // Move one reader DOM tree between hosts rather than remounting it. Its
+  // append order, filters, text selection and summary state belong to the
+  // investigation, not to the size of its presentation.
+  const [readerHost] = useState(() => document.createElement("div"));
+  const readingPosition = useRef<Array<{ element: HTMLElement; top: number; left: number }>>([]);
+  const selectedText = useRef<{ anchor: Node; anchorOffset: number; focus: Node; focusOffset: number } | null>(null);
+  const attachReader = useCallback((element: HTMLDivElement | null) => {
+    if (element) element.appendChild(readerHost);
+  }, [readerHost]);
+  const changeExpanded = useCallback((value: boolean) => {
+    readingPosition.current = Array.from(readerHost.querySelectorAll<HTMLElement>("[data-break-log-pane], [data-break-log-side], [data-break-log-filters]"))
+      .map(element => ({ element, top: element.scrollTop, left: element.scrollLeft }));
+    const selection = window.getSelection();
+    selectedText.current = selection?.anchorNode && selection.focusNode && readerHost.contains(selection.anchorNode) && readerHost.contains(selection.focusNode)
+      ? { anchor: selection.anchorNode, anchorOffset: selection.anchorOffset, focus: selection.focusNode, focusOffset: selection.focusOffset } : null;
+    setExpanded(value);
+  }, [readerHost]);
+  const closeExpanded = useCallback(() => changeExpanded(false), [changeExpanded]);
+  useLayoutEffect(() => {
+    for (const { element, top, left } of readingPosition.current) {
+      element.scrollTop = top;
+      element.scrollLeft = left;
+    }
+  }, [expanded]);
+  // Restore after the dialog has placed/restored focus, which can collapse a
+  // text selection even though the reader nodes themselves were preserved.
+  useEffect(() => {
+    const selection = selectedText.current;
+    if (selection) window.getSelection()?.setBaseAndExtent(selection.anchor, selection.anchorOffset, selection.focus, selection.focusOffset);
+  }, [expanded]);
   const [tipOpen, setTipOpen] = useState(false);
   const tipID = useId();
   const { cluster } = useKubernetesCluster();
@@ -183,11 +226,12 @@ export function KubernetesBreakLogs({ pending = false, mounted = false }: { pend
       {state.issue?.broke_at_source === "observed_at" && ready && <span className="text-ink-400">Observation time; finish time unknown</span>}
       <ContainerSelect />
       {showTip && <div className="relative" onKeyDown={(event) => { if (event.key === "Escape") setTipOpen(false); }}><button type="button" aria-label="Log coverage tip" title="Log coverage tip" aria-expanded={tipOpen} aria-controls={tipID} className="btn-icon" onClick={() => setTipOpen(!tipOpen)}><Lightbulb size={14} /></button>{tipOpen && <section id={tipID} aria-label="Log coverage tip" className="fixed inset-x-4 bottom-20 z-20 max-w-[calc(100vw-2rem)] space-y-3 rounded-control border border-ink-500 bg-surface-raised p-4 shadow-overlay sm:absolute sm:inset-x-auto sm:bottom-auto sm:left-0 sm:top-full sm:w-72"><h4 className="font-medium text-ink-100">Some logs are not available from Kubernetes</h4><p className="text-ink-200">{page.coverage.reason === "capture_late" && page.coverage.gaps?.[0] ? `Logs before ${time(page.coverage.gaps[0].to)} were not available when Versus captured.` : tips[page.coverage.reason] ?? "Kubernetes could not cover the full log window."}</p><Link to={`/agent/kubernetes?${params}`} className="block text-link">Link a source in Agent tab</Link></section>}</div>}
-      <div className="ml-auto hidden flex-wrap items-center gap-2 sm:flex">{spinner(true)}{actions}</div><button type="button" className="btn-icon" title="Expand logs" aria-label="Expand logs" disabled={!ready} onClick={() => setExpanded(true)}><Maximize2 size={14} /></button>
+      <div className="ml-auto hidden flex-wrap items-center gap-2 sm:flex">{spinner(true)}{actions}</div><button type="button" className="btn-icon" title="Expand logs" aria-label="Expand logs" disabled={!ready} onClick={() => changeExpanded(true)}><Maximize2 size={14} /></button>
     </header>
     {!ready && !pending && <p role="status" className="py-4 text-xs text-ink-300">Log time range is unavailable for this observation.</p>}
-    {!expanded && (ready || pending) && <BreakLogViewer expanded={false} />}
+    {!expanded && (ready || pending) && <div ref={attachReader} />}
     {!expanded && ready && createPortal(<div role="toolbar" aria-label="Break log actions" className="fixed inset-x-0 bottom-0 z-overlay flex flex-wrap items-center justify-center gap-2 border-t border-ink-600 bg-surface-raised px-2 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:hidden">{spinner(false)}{actions}</div>, document.body)}
-    {expanded && <Modal title="Logs at break" size="2xl" onClose={() => setExpanded(false)} footer={<>{spinner(false)}{actions}</>}><BreakLogViewer expanded /></Modal>}
+    {expanded && <Modal title="Logs at break" size="2xl" onClose={closeExpanded} footer={<>{spinner(false)}{actions}</>}><div ref={attachReader} /></Modal>}
+    {(ready || pending) && createPortal(<BreakLogViewer expanded={expanded} />, readerHost)}
   </section>;
 }

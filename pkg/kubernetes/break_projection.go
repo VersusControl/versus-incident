@@ -166,9 +166,11 @@ func projectCrashContainers(status map[string]any) []kubeindex.ContainerState {
 			item.WaitingReason = safeBreakReason(stringValue(waiting["reason"]))
 			last, _ := container["lastState"].(map[string]any)
 			terminated, _ := last["terminated"].(map[string]any)
+			item.PreviousStartedAt = breakTimestamp(terminated["startedAt"])
 			if current, ok := state["terminated"].(map[string]any); ok {
 				terminated = current
 				item.CurrentTermination = true
+				item.StartedAt = breakTimestamp(current["startedAt"])
 			}
 			item.TerminatedReason = safeBreakReason(stringValue(terminated["reason"]))
 			if value, ok := terminated["exitCode"].(float64); ok && value >= -2147483648 && value <= 2147483647 {
@@ -239,7 +241,7 @@ func indexedContainerLimit(value any, limit int) []kubeindex.ContainerState {
 		ready, _ := item["ready"].(bool)
 		running, _ := item["running"].(bool)
 		known, _ := item["state_known"].(bool)
-		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), Init: init, Ready: ready, Running: running, StartedAt: breakTimestamp(item["started_at"]), StateKnown: known, CurrentTermination: current, WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), Signal: int32(triageSummaryIntValue(item, "last_terminated_signal")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
+		result = append(result, kubeindex.ContainerState{Name: stringValue(item["name"]), Init: init, Ready: ready, Running: running, StartedAt: breakTimestamp(item["started_at"]), PreviousStartedAt: breakTimestamp(item["previous_started_at"]), StateKnown: known, CurrentTermination: current, WaitingReason: safeBreakReason(stringValue(item["waiting_reason"])), TerminatedReason: safeBreakReason(stringValue(item["last_terminated_reason"])), ExitCode: int32(triageSummaryIntValue(item, "last_terminated_exit_code")), Signal: int32(triageSummaryIntValue(item, "last_terminated_signal")), RestartCount: int32(triageSummaryIntValue(item, "restart_count")), TerminatedAt: breakTimestamp(item["last_terminated_at"])})
 	}
 	return result
 }

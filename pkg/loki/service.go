@@ -220,6 +220,8 @@ func (service *Service) Discover(ctx context.Context, request DiscoveryRequest) 
 }
 
 type ReadRequest struct {
+	// Forward selects the oldest records first; the default remains newest first.
+	Forward         bool
 	PrefixLabels    map[string]string
 	Labels          map[string]string
 	Service, Search string
@@ -296,7 +298,11 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 	ctx, cancel := context.WithTimeout(ctx, service.policy.Timeout)
 	defer cancel()
 	end := service.now().UTC()
-	values := url.Values{"query": {query}, "start": {strconv.FormatInt(end.Add(-request.Lookback).UnixNano(), 10)}, "end": {strconv.FormatInt(end.UnixNano(), 10)}, "direction": {"backward"}, "limit": {strconv.Itoa(min(service.policy.MaxRows, request.Offset+request.Limit+1))}}
+	direction := "backward"
+	if request.Forward {
+		direction = "forward"
+	}
+	values := url.Values{"query": {query}, "start": {strconv.FormatInt(end.Add(-request.Lookback).UnixNano(), 10)}, "end": {strconv.FormatInt(end.UnixNano(), 10)}, "direction": {direction}, "limit": {strconv.Itoa(min(service.policy.MaxRows, request.Offset+request.Limit+1))}}
 	data, err := service.get(ctx, "/loki/api/v1/query_range", values)
 	if err != nil {
 		return ReadResult{}, err
@@ -341,7 +347,12 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 			all = append(all, Record{Timestamp: time.Unix(0, nanos).UTC(), Message: service.scrub(entry[1], 4096), Labels: labels})
 		}
 	}
-	sort.SliceStable(all, func(left, right int) bool { return all[left].Timestamp.After(all[right].Timestamp) })
+	sort.SliceStable(all, func(left, right int) bool {
+		if request.Forward {
+			return all[left].Timestamp.Before(all[right].Timestamp)
+		}
+		return all[left].Timestamp.After(all[right].Timestamp)
+	})
 	result := ReadResult{Offset: request.Offset, Limit: request.Limit}
 	for index := request.Offset; index < len(all) && result.Count < request.Limit; index++ {
 		candidate := append(result.Records, all[index])

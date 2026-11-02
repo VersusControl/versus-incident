@@ -2,9 +2,12 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strconv"
@@ -21,6 +24,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/loki"
 	"github.com/VersusControl/versus-incident/pkg/signoz"
 	"github.com/VersusControl/versus-incident/pkg/splunk"
+	"github.com/aws/smithy-go"
 )
 
 type breakLogAdapter struct {
@@ -54,6 +58,10 @@ func BuildBreakLogSources(sources []config.AgentSourceConfig, scrubber core.Scru
 			continue
 		}
 		copy := source
+		// Include pointer-valued immutable TLS trust configuration as well as
+		// serialized settings. Only the digest, never credentials, leaves here.
+		digest := sha256.Sum256([]byte(fmt.Sprintf("%#v", copy)))
+		cacheKey := hex.EncodeToString(digest[:])
 		scope := ""
 		switch source.Type {
 		case "loki":
@@ -75,7 +83,7 @@ func BuildBreakLogSources(sources []config.AgentSourceConfig, scrubber core.Scru
 		if len(scope) > 1024 {
 			scope = strings.ToValidUTF8(scope[:1024], "")
 		}
-		result = append(result, breaklogs.Source{Name: source.Name, Type: source.Type, Scope: scope, Health: "not_checked", Build: func(fields breaklogs.Fields) (breaklogs.LinkedReader, error) {
+		result = append(result, breaklogs.Source{CacheKey: cacheKey, Name: source.Name, Type: source.Type, Scope: scope, Health: "not_checked", Build: func(fields breaklogs.Fields) (breaklogs.LinkedReader, error) {
 			normalized, err := breaklogs.NormalizeFields(copy.Type, fields)
 			if err != nil || scrubber == nil || copy.Type == "loki" && !linkedLokiSelector.MatchString(strings.TrimSpace(copy.Loki.Query)) {
 				return nil, errors.New("invalid_mapping")
@@ -115,6 +123,7 @@ func (adapter *breakLogAdapter) plan(query breaklogs.LinkedQuery, pod string) li
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	multiple := pod == "" && len(query.Pods) > 0 && query.Pods[0] != ""
 	plan := linkedReadPlan{Type: adapter.source.Type, From: query.From, To: query.To, Limit: min(50, query.Limit)}
 	switch adapter.source.Type {
 	case "loki":
@@ -125,7 +134,15 @@ func (adapter *breakLogAdapter) plan(query breaklogs.LinkedQuery, pod string) li
 				selector += "," + key + "=" + strconv.Quote(filters[key])
 			}
 			if pod == "" {
-				selector += "," + fields.Pod + "=~" + strconv.Quote(regexp.QuoteMeta(query.PodPrefix)+"-.*")
+				pattern := regexp.QuoteMeta(query.PodPrefix) + "-.*"
+				if multiple {
+					names := []string{}
+					for _, name := range query.Pods {
+						names = append(names, regexp.QuoteMeta(name))
+					}
+					pattern = strings.Join(names, "|")
+				}
+				selector += "," + fields.Pod + "=~" + strconv.Quote(pattern)
 			}
 			selector += "}"
 		}
@@ -137,7 +154,11 @@ func (adapter *breakLogAdapter) plan(query breaklogs.LinkedQuery, pod string) li
 			clauses = append(clauses, map[string]any{"term": map[string]string{key: filters[key]}})
 		}
 		if pod == "" {
-			clauses = append(clauses, map[string]any{"prefix": map[string]string{fields.Pod: query.PodPrefix + "-"}})
+			if multiple {
+				clauses = append(clauses, map[string]any{"terms": map[string]any{fields.Pod: query.Pods}})
+			} else {
+				clauses = append(clauses, map[string]any{"prefix": map[string]string{fields.Pod: query.PodPrefix + "-"}})
+			}
 		}
 		clauses = append(clauses, map[string]any{"range": map[string]any{fields.Time: map[string]string{"gte": query.From.Format(time.RFC3339Nano), "lte": query.To.Format(time.RFC3339Nano)}}})
 		plan.Scope = adapter.source.Elasticsearch.Index
@@ -148,7 +169,15 @@ func (adapter *breakLogAdapter) plan(query breaklogs.LinkedQuery, pod string) li
 			parts = append(parts, key+":"+strconv.Quote(filters[key]))
 		}
 		if pod == "" {
-			parts = append(parts, fields.Pod+":"+strings.ReplaceAll(query.PodPrefix+"-", "-", `\-`)+"*")
+			if multiple {
+				names := []string{}
+				for _, name := range query.Pods {
+					names = append(names, fields.Pod+":"+strconv.Quote(name))
+				}
+				parts = append(parts, "("+strings.Join(names, " OR ")+")")
+			} else {
+				parts = append(parts, fields.Pod+":"+strings.ReplaceAll(query.PodPrefix+"-", "-", `\-`)+"*")
+			}
 		}
 		if scope := adapter.source.Graylog.Query; scope != "" && scope != "*" {
 			configured := []string{}
@@ -168,7 +197,15 @@ func (adapter *breakLogAdapter) plan(query breaklogs.LinkedQuery, pod string) li
 			parts = append(parts, key+"="+filters[key])
 		}
 		if pod == "" {
-			parts = append(parts, fields.Pod+"="+query.PodPrefix+"-*")
+			if multiple {
+				names := []string{}
+				for _, name := range query.Pods {
+					names = append(names, fields.Pod+"="+strconv.Quote(name))
+				}
+				parts = append(parts, "("+strings.Join(names, " OR ")+")")
+			} else {
+				parts = append(parts, fields.Pod+"="+query.PodPrefix+"-*")
+			}
 		}
 		plan.Scope = adapter.source.Splunk.Search
 		plan.Query = "search " + strings.Join(parts, " AND ")
@@ -181,13 +218,21 @@ func (adapter *breakLogAdapter) plan(query breaklogs.LinkedQuery, pod string) li
 			parts = append(parts, key+" = '"+strings.ReplaceAll(strings.ReplaceAll(filters[key], "\\", "\\\\"), "'", "\\'")+"'")
 		}
 		if pod == "" {
-			parts = append(parts, fields.Pod+" LIKE '"+strings.ReplaceAll(strings.ReplaceAll(query.PodPrefix, "_", "\\_"), "%", "\\%")+"-%'")
+			if multiple {
+				names := []string{}
+				for _, name := range query.Pods {
+					names = append(names, fields.Pod+" = '"+strings.ReplaceAll(strings.ReplaceAll(name, "\\", "\\\\"), "'", "\\'")+"'")
+				}
+				parts = append(parts, "("+strings.Join(names, " OR ")+")")
+			} else {
+				parts = append(parts, fields.Pod+" LIKE '"+strings.ReplaceAll(strings.ReplaceAll(query.PodPrefix, "_", "\\_"), "%", "\\%")+"-%'")
+			}
 		}
 		plan.Scope = adapter.source.Signoz.Query
 		plan.Query = "(" + strings.Join(parts, " AND ") + ")"
 	case "cloudwatchlogs":
 		plan.Scope = adapter.source.CloudWatchLogs.LogGroupName
-		plan.Query = map[string]any{"operation": "FilterLogEvents", "filter_pattern": adapter.source.CloudWatchLogs.FilterPattern, "stream_prefix": adapter.source.CloudWatchLogs.LogStreamPrefix, "match_json_fields": filters, "pod_prefix": query.PodPrefix, "message_field": fields.Message}
+		plan.Query = map[string]any{"operation": "FilterLogEvents", "filter_pattern": adapter.cloudPattern(query, pod), "stream_prefix": adapter.source.CloudWatchLogs.LogStreamPrefix, "match_json_fields": filters, "pods": query.Pods, "pod_prefix": query.PodPrefix, "message_field": fields.Message}
 	}
 	return plan
 }
@@ -196,6 +241,8 @@ func (adapter *breakLogAdapter) Preview(query breaklogs.LinkedQuery) string {
 	plans := []linkedReadPlan{}
 	pods := query.Pods
 	if len(pods) == 0 {
+		pods = []string{""}
+	} else if len(pods) > 1 {
 		pods = []string{""}
 	}
 	for _, pod := range pods {
@@ -247,7 +294,11 @@ func (adapter *breakLogAdapter) Read(ctx context.Context, query breaklogs.Linked
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	bytes := 0
-	for _, pod := range query.Pods {
+	readPods := query.Pods
+	if len(query.Pods) > 1 {
+		readPods = []string{""}
+	}
+	for _, pod := range readPods {
 		if len(result.Lines) >= query.Limit {
 			result.Truncated = true
 			break
@@ -255,7 +306,12 @@ func (adapter *breakLogAdapter) Read(ctx context.Context, query breaklogs.Linked
 		if err := ctx.Err(); err != nil {
 			return result, errors.New("timeout")
 		}
+		if !breaklogs.AdmitLinkedCall(ctx) {
+			result.Truncated = true
+			break
+		}
 		plan := adapter.plan(query, pod)
+		plan.Limit = min(50, query.Limit-len(result.Lines))
 		rows, truncated, err := adapter.readPlan(ctx, query, pod, plan)
 		if err != nil {
 			return result, safeLinkedError(ctx, err)
@@ -269,7 +325,16 @@ func (adapter *breakLogAdapter) Read(ctx context.Context, query breaklogs.Linked
 			if row.At.Before(query.From) || row.At.After(query.To) {
 				continue
 			}
-			if row.Pod == "" || !linkedValue.MatchString(row.Pod) || pod != "" && row.Pod != pod || pod == "" && !strings.HasPrefix(row.Pod, query.PodPrefix+"-") {
+			selected := pod != "" && row.Pod == pod
+			if pod == "" {
+				for _, name := range query.Pods {
+					selected = selected || name != "" && name == row.Pod
+				}
+				if query.Pods[0] == "" {
+					selected = strings.HasPrefix(row.Pod, query.PodPrefix+"-")
+				}
+			}
+			if row.Pod == "" || !linkedValue.MatchString(row.Pod) || !selected {
 				result.Truncated = true
 				continue
 			}
@@ -290,26 +355,85 @@ func (adapter *breakLogAdapter) Read(ctx context.Context, query breaklogs.Linked
 }
 
 func safeLinkedError(ctx context.Context, err error) error {
+	safe := func(class string) error { return &breaklogs.ReadError{Class: class} }
 	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-		return errors.New("timeout")
+		return safe("timeout")
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return safe("timeout")
+	}
+	var upstream smithy.APIError
+	if errors.As(err, &upstream) {
+		switch strings.ToLower(upstream.ErrorCode()) {
+		case "accessdenied", "accessdeniedexception", "unauthorizedexception", "unrecognizedclientexception", "invalidsignatureexception":
+			return safe("unauthorized")
+		case "resourcenotfoundexception", "notfoundexception":
+			return safe("not_found")
+		case "requesttimeout", "requesttimeoutexception":
+			return safe("timeout")
+		default:
+			return safe("unavailable")
+		}
 	}
 	value := strings.ToLower(err.Error())
 	if errors.Is(err, elasticsearch.ErrForbidden) || errors.Is(err, elasticsearch.ErrUnauthorized) || strings.Contains(value, "401") || strings.Contains(value, "403") || strings.Contains(value, "accessdenied") || strings.Contains(value, "unauthorized") {
-		return errors.New("unauthorized")
+		return safe("unauthorized")
 	}
 	if errors.Is(err, elasticsearch.ErrNotFound) || strings.Contains(value, "404") || strings.Contains(value, "notfound") {
-		return errors.New("not_found")
+		return safe("not_found")
 	}
-	return errors.New("invalid_mapping")
+	if errors.Is(err, graylog.ErrInvalidArgument) || errors.Is(err, graylog.ErrInvalidConfig) || errors.Is(err, graylog.ErrUnsupportedScope) || errors.Is(err, splunk.ErrInvalidArgument) || errors.Is(err, splunk.ErrInvalidConfig) || errors.Is(err, cloudwatchlogs.ErrScope) || errors.Is(err, loki.ErrInvalidConfig) || errors.Is(err, loki.ErrInvalidArgument) || err.Error() == "invalid_mapping" {
+		return safe("invalid_mapping")
+	}
+	return safe("unavailable")
+}
+
+// CloudWatch evaluates the exact Pod alternatives server-side, so unrelated
+// streams cannot consume the bounded pages before verified Pods are queried.
+func (adapter *breakLogAdapter) cloudPattern(query breaklogs.LinkedQuery, pod string) string {
+	parts := []string{"$." + adapter.fields.Namespace + " = " + strconv.Quote(query.Namespace)}
+	if query.Container != "" {
+		parts = append(parts, "$."+adapter.fields.Container+" = "+strconv.Quote(query.Container))
+	}
+	names := query.Pods
+	if pod != "" {
+		names = []string{pod}
+	}
+	if len(names) > 0 && names[0] != "" {
+		matches := []string{}
+		for _, name := range names {
+			matches = append(matches, "$."+adapter.fields.Pod+" = "+strconv.Quote(name))
+		}
+		parts = append(parts, "("+strings.Join(matches, " || ")+")")
+	}
+	identity := "{ " + strings.Join(parts, " && ") + " }"
+	scope := strings.TrimSpace(adapter.source.CloudWatchLogs.FilterPattern)
+	if scope == "" {
+		return identity
+	}
+	// JSON filter patterns can be combined without broadening the configured
+	// scope. Preserve legacy non-JSON scopes as one bounded scope sample with
+	// exact identity filtering after retrieval; unrelated rows may exhaust its
+	// native pages, in which case coverage stays explicitly truncated.
+	if strings.HasPrefix(scope, "{") && strings.HasSuffix(scope, "}") {
+		return "{ (" + strings.TrimSpace(scope[1:len(scope)-1]) + ") && (" + strings.Join(parts, " && ") + ") }"
+	}
+	return scope
 }
 
 func (adapter *breakLogAdapter) readPlan(ctx context.Context, query breaklogs.LinkedQuery, pod string, plan linkedReadPlan) ([]breaklogs.LinkedLine, bool, error) {
 	fields := adapter.fields
 	filters := map[string]string{fields.Namespace: query.Namespace, fields.Pod: pod}
 	prefixes := map[string]string{}
+	oneOf := map[string][]string{}
 	if pod == "" {
 		delete(filters, fields.Pod)
-		prefixes[fields.Pod] = query.PodPrefix
+		if query.Pods[0] != "" {
+			oneOf[fields.Pod] = append([]string(nil), query.Pods...)
+		} else {
+			prefixes[fields.Pod] = query.PodPrefix
+		}
 	}
 	if query.Container != "" {
 		filters[fields.Container] = query.Container
@@ -335,7 +459,9 @@ func (adapter *breakLogAdapter) readPlan(ctx context.Context, query breaklogs.Li
 		if err != nil {
 			return nil, false, err
 		}
-		result, err := service.ReadWindow(ctx, loki.ReadRequest{Limit: plan.Limit}, query.From, query.To)
+		// A bounded linked excerpt must contribute the head missing from the
+		// kubelet's retained tail, rather than spend its budget on duplicates.
+		result, err := service.ReadWindow(ctx, loki.ReadRequest{Limit: plan.Limit, Forward: true}, query.From, query.To)
 		for _, row := range result.Records {
 			if row.Labels[fields.Namespace] != query.Namespace || row.Labels[fields.Pod] == "" || query.Container != "" && row.Labels[fields.Container] != query.Container {
 				invalidRows = true
@@ -346,6 +472,10 @@ func (adapter *breakLogAdapter) readPlan(ctx context.Context, query breaklogs.Li
 		return rows, result.Truncated || invalidRows, err
 	case "elasticsearch":
 		cfg := adapter.source.Elasticsearch
+		// Native address failover is bounded independently of planner calls.
+		// Other adapters use one request (Loki/SigNoz), three native pages
+		// (CloudWatch/Graylog), or six lifecycle requests (Splunk) per query.
+		cfg.Addresses = append([]string(nil), cfg.Addresses[:min(3, len(cfg.Addresses))]...)
 		cfg.TimeField = fields.Time
 		cfg.MessageField = fields.Message
 		cfg.ExtraFields = append(append([]string(nil), cfg.ExtraFields...), fields.Namespace, fields.Pod, fields.Container)
@@ -373,7 +503,7 @@ func (adapter *breakLogAdapter) readPlan(ctx context.Context, query breaklogs.Li
 		if err != nil {
 			return nil, false, err
 		}
-		result, err := service.ReadWindow(ctx, graylog.ReadRequest{Filters: filters, PrefixFilters: prefixes, StringFields: []string{fields.Namespace, fields.Pod, fields.Container}, Limit: plan.Limit}, query.From, query.To)
+		result, err := service.ReadWindow(ctx, graylog.ReadRequest{Filters: filters, OneOfFilters: oneOf, PrefixFilters: prefixes, MaxRequests: 3, StringFields: []string{fields.Namespace, fields.Pod, fields.Container}, Limit: plan.Limit}, query.From, query.To)
 		for _, row := range result.Records {
 			at, _ := time.Parse(time.RFC3339Nano, row.Timestamp)
 			add(at, row.Message, row.Fields[fields.Container], row.Fields[fields.Pod])
@@ -384,7 +514,12 @@ func (adapter *breakLogAdapter) readPlan(ctx context.Context, query breaklogs.Li
 		if err != nil {
 			return nil, false, err
 		}
-		result, err := service.ReadWindowWithStringFields(ctx, filters, query.From, query.To, plan.Limit, []string{fields.Container}, prefixes)
+		var result splunk.ReadResult
+		if len(oneOf) > 0 {
+			result, err = service.ReadWindowWithOneOfFields(ctx, filters, oneOf, query.From, query.To, plan.Limit, []string{fields.Container})
+		} else {
+			result, err = service.ReadWindowWithStringFields(ctx, filters, query.From, query.To, plan.Limit, []string{fields.Container}, prefixes)
+		}
 		for _, row := range result.Records {
 			if row.Fields[fields.Namespace] != query.Namespace || query.Container != "" && row.Fields[fields.Container] != query.Container {
 				invalidRows = true
@@ -432,6 +567,10 @@ func (adapter *breakLogAdapter) readPlan(ctx context.Context, query breaklogs.Li
 		return rows, result.Truncated || invalidRows, err
 	case "cloudwatchlogs":
 		cfg := adapter.source.CloudWatchLogs
+		cfg.FilterPattern = adapter.cloudPattern(query, pod)
+		if cfg.FilterPattern == "" {
+			return nil, false, errors.New("invalid_mapping")
+		}
 		api := adapter.cloudAPI
 		var err error
 		if api == nil {
@@ -459,7 +598,7 @@ func (adapter *breakLogAdapter) readPlan(ctx context.Context, query breaklogs.Li
 				}
 			}
 			foundPod := mappedString(object, fields.Pod)
-			if pod == "" && !strings.HasPrefix(foundPod, query.PodPrefix+"-") {
+			if pod == "" && len(oneOf) == 0 && !strings.HasPrefix(foundPod, query.PodPrefix+"-") {
 				matches = false
 			}
 			if matches {

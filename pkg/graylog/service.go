@@ -174,6 +174,10 @@ func (service *Service) Discover(ctx context.Context, request DiscoveryRequest) 
 }
 
 type ReadRequest struct {
+	// OneOfFilters matches a bounded set of exact values in one native query.
+	OneOfFilters map[string][]string
+	// MaxRequests lowers the native page bound for a bounded window planner.
+	MaxRequests   int
 	PrefixFilters map[string]string
 	Filters       map[string]string
 	StringFields  []string
@@ -200,6 +204,24 @@ type ReadResult struct {
 }
 
 func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResult, error) {
+	if len(request.OneOfFilters) > 3 || request.MaxRequests < 0 || request.MaxRequests > maximumSearchRequests {
+		return ReadResult{}, ErrInvalidArgument
+	}
+	alternatives := []string{}
+	for field, values := range request.OneOfFilters {
+		if !fieldName.MatchString(field) || len(values) < 1 || len(values) > 20 {
+			return ReadResult{}, ErrInvalidArgument
+		}
+		parts := []string{}
+		for _, value := range values {
+			if !exactValue.MatchString(value) {
+				return ReadResult{}, ErrInvalidArgument
+			}
+			parts = append(parts, field+":"+strconv.Quote(value))
+		}
+		alternatives = append(alternatives, "("+strings.Join(parts, " OR ")+")")
+	}
+	sort.Strings(alternatives)
 	if request.Offset < 0 || request.Offset > MaximumOffset || request.Limit < 0 || request.Limit > MaximumLimit || request.Lookback < 0 || len(request.Filters)+len(request.PrefixFilters) > 12 || (request.Search != "" && !exactValue.MatchString(request.Search)) {
 		return ReadResult{}, ErrInvalidArgument
 	}
@@ -263,13 +285,17 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 			result.Partial = true
 			break
 		}
-		if searchRequests >= maximumSearchRequests {
+		maxRequests := maximumSearchRequests
+		if request.MaxRequests > 0 {
+			maxRequests = request.MaxRequests
+		}
+		if searchRequests >= maxRequests {
 			result.Truncation = append(result.Truncation, "request_limit")
 			result.Partial = true
 			break
 		}
 		searchRequests++
-		response, err := service.search(ctx, filters, request.Lookback, request.Offset+result.Count, batch)
+		response, err := service.search(ctx, filters, request.Lookback, request.Offset+result.Count, batch, alternatives...)
 		if errors.Is(err, ErrResponseTooLarge) {
 			if batch > 1 {
 				batch = max(1, batch/2)
@@ -407,7 +433,7 @@ type searchResponse struct {
 	TotalResults int `json:"total_results"`
 }
 
-func (service *Service) search(ctx context.Context, filters []clause, lookback time.Duration, offset, limit int) (searchResponse, error) {
+func (service *Service) search(ctx context.Context, filters []clause, lookback time.Duration, offset, limit int, alternatives ...string) (searchResponse, error) {
 	end := service.now().UTC()
 	clauses := append([]clause(nil), service.scope...)
 	clauses = append(clauses, filters...)
@@ -422,6 +448,9 @@ func (service *Service) search(ctx context.Context, filters []clause, lookback t
 			}
 		}
 		query = strings.Join(parts, " AND ")
+	}
+	if len(alternatives) > 0 {
+		query += " AND " + strings.Join(alternatives, " AND ")
 	}
 	values := url.Values{"query": {query}, "from": {end.Add(-lookback).Format("2006-01-02T15:04:05.000Z")}, "to": {end.Format("2006-01-02T15:04:05.000Z")}, "offset": {strconv.Itoa(offset)}, "limit": {strconv.Itoa(limit)}, "sort": {"timestamp:desc"}}
 	if len(service.config.Fields) > 0 {

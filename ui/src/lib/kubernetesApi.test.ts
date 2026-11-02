@@ -9,6 +9,16 @@ afterEach(() => {
 });
 
 describe("Kubernetes resource API", () => {
+  it("forwards raw break-log selectors and pinned nanosecond windows with cancellation", async () => {
+    const center = "2026-10-31T12:00:00.123456789Z";
+    const options = { occurrence_id: "selected", center, since: "2026-10-31T11:55:00.123456781Z", until: "2026-10-31T12:02:00.123456799Z", root_uid: "root", namespace: "shop" };
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ occurrence_id: "selected", coverage: { state: "pending", tip: false, gaps: [{ reason: "linked_pending", ready_at: center }] } })));
+    const signal = new AbortController().signal;
+    const result = await createKubernetesApi("east").kubernetesBreakLogs(options, signal);
+    expect(Object.fromEntries(new URL(String(fetch.mock.calls[0][0]), "http://localhost").searchParams)).toEqual({ ...options, cluster: "east" });
+    expect(fetch.mock.calls[0][1]?.signal).toBe(signal);
+    expect(result).toMatchObject({ occurrence_id: "selected", coverage: { state: "pending", tip: false } });
+  });
   it("carries selected occurrence and center separately from date-free retained root identity", async () => {
     const selected = { occurrence_id: "selected", root: { uid: "root" }, broke_at: "2026-10-14T12:00:00Z" };
     const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ items: [], selected_occurrence: selected, selection_status: "resolved" })));

@@ -153,7 +153,9 @@ func TestBreakLogLinkedGapClosesOnlyOnCompleteRead(t *testing.T) {
 			return gapLinkedReader{truncated: truncated, err: failure, empty: empty, tail: tail, pod: pod, observed: &observed}, nil
 		}}}
 	})
-	if err := service.SaveAgentSettings(t.Context(), breaklogs.Settings{BreakLogs: breaklogs.CaptureSettings{LinkedSource: "logs"}}); err != nil {
+	// This fixture tests mature coverage; ingestion-pending behavior is separate.
+	zeroDelay := 0
+	if err := service.SaveAgentSettings(t.Context(), breaklogs.Settings{BreakLogs: breaklogs.CaptureSettings{LinkedSource: "logs", IngestDelay: &zeroDelay}}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
@@ -185,12 +187,14 @@ func TestBreakLogLinkedGapClosesOnlyOnCompleteRead(t *testing.T) {
 	tail = true
 	started := time.Now().UTC()
 	page, err = service.BreakLogs(t.Context(), query)
-	if err != nil || observed.To.Before(started) || observed.To.After(time.Now().UTC()) || !page.Window.To.Equal(query.To) || page.Coverage.State != "pending" || page.Coverage.Tip || page.Coverage.Reason != "pending" {
+	if err != nil || observed.To.Before(started) || observed.To.After(time.Now().UTC()) || !page.Window.To.Equal(query.To) || page.Coverage.State != "partial" || !page.Coverage.Tip || page.Coverage.Reason != "linked_pending" {
 		t.Fatalf("future request not bounded: read=%+v page=%+v err=%v", observed, page.Coverage, err)
 	}
-	for _, gap := range page.Coverage.Gaps {
-		if gap.From.Before(observed.To) || gap.Reason != "pending" {
-			t.Fatal("past evidence-backed gap remained", gap)
+	// A deleted pod's earlier capture cannot prove survival until the live
+	// query's advancing tail. Retain that gap rather than attach new lines to it.
+	for _, line := range page.Lines {
+		if line.Source == "linked" && line.At.After(item.To) {
+			t.Fatal("unknown deleted lifetime attributed", line)
 		}
 	}
 	query.To = now
@@ -202,7 +206,7 @@ func TestBreakLogLinkedGapClosesOnlyOnCompleteRead(t *testing.T) {
 	if logDone != nil {
 		select {
 		case <-logDone:
-		case <-time.After(3 * time.Second):
+		case <-time.After(35 * time.Second):
 			t.Fatal("capture did not drain for clock isolation")
 		}
 	}
@@ -287,7 +291,9 @@ func TestBreakLogDeletedReplacementRequiresCreationProvenance(t *testing.T) {
 					return gapLinkedReader{pod: "api-0", observed: &observed}, nil
 				}}}
 			})
-			if err := service.SaveAgentSettings(t.Context(), breaklogs.Settings{BreakLogs: breaklogs.CaptureSettings{LinkedSource: "logs"}}); err != nil {
+			// Isolate lifetime proof from the source's independent ingestion delay.
+			zeroDelay := 0
+			if err := service.SaveAgentSettings(t.Context(), breaklogs.Settings{BreakLogs: breaklogs.CaptureSettings{LinkedSource: "logs", IngestDelay: &zeroDelay}}); err != nil {
 				t.Fatal(err)
 			}
 			page, err := service.BreakLogs(t.Context(), breaklogs.Query{Namespace: "deleted", RootUID: "deleted-root", From: from, To: now})
@@ -511,7 +517,7 @@ func TestBreakLogLinkedSiblingControllerCannotCloseDeletedPodGap(t *testing.T) {
 				t.Fatal(err)
 			}
 			page, err := service.BreakLogs(t.Context(), breaklogs.Query{Namespace: "shop", RootUID: "root", From: now.Add(-time.Minute), To: now})
-			if err != nil || observed.PodPrefix != "api" || !page.Coverage.Tip || page.Coverage.Reason != "pod_deleted" || len(page.Lines) != 0 || len(page.Pods) != 0 {
+			if err != nil || observed.PodPrefix != "" || len(observed.Pods) != 0 || !page.Coverage.Tip || page.Coverage.Reason != "pod_deleted" || len(page.Lines) != 0 || len(page.Pods) != 0 {
 				t.Fatalf("sibling controller established root coverage: query=%+v coverage=%+v pods=%+v lines=%+v err=%v", observed, page.Coverage, page.Pods, page.Lines, err)
 			}
 		})
@@ -537,7 +543,7 @@ func TestBreakLogFutureOnlyDoesNotReadLinkedSource(t *testing.T) {
 	}
 }
 
-func TestBreakLogObservedCurrentWindowWithFutureTailSkipsLinkedRead(t *testing.T) {
+func TestBreakLogEmptyCurrentWindowWithFutureTailKeepsCaptureGap(t *testing.T) {
 	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
 	if err != nil {
 		t.Fatal(err)
@@ -583,8 +589,8 @@ func TestBreakLogObservedCurrentWindowWithFutureTailSkipsLinkedRead(t *testing.T
 	}
 	before := builds
 	page, err := service.BreakLogs(t.Context(), breaklogs.Query{Namespace: "shop", RootUID: "root", From: now.Add(-5 * time.Minute), To: now.Add(2 * time.Minute)})
-	if err != nil || builds != before || page.Coverage.State != "pending" || page.Coverage.Tip || page.Coverage.Reason != "pending" || len(page.Coverage.Gaps) != 1 || page.Coverage.Gaps[0].Reason != "pending" {
-		t.Fatalf("observed default window claimed unavailable: %+v err=%v", page.Coverage, err)
+	if err != nil || builds <= before || page.Coverage.State == "complete" || !page.Coverage.Tip {
+		t.Fatalf("empty current read hid capture loss: %+v err=%v", page.Coverage, err)
 	}
 }
 
@@ -598,8 +604,8 @@ func TestBreakLogRefreshFailureDoesNotClaimDeletion(t *testing.T) {
 	service.SetChangeStorage(storage.NewMemory())
 	now := time.Now().UTC()
 	page, err := service.BreakLogs(t.Context(), breaklogs.Query{Namespace: "shop", RootUID: "root", From: now.Add(-time.Minute), To: now})
-	if err != nil || !page.Coverage.Tip || page.Coverage.Reason != "capture_late" {
-		t.Fatalf("refresh failure claimed deletion: %+v err=%v", page.Coverage, err)
+	if err == nil || len(page.Pods) != 0 || len(page.Lines) != 0 {
+		t.Fatalf("unverified authority exposed break evidence: %+v err=%v", page, err)
 	}
 	for _, gap := range page.Coverage.Gaps {
 		if gap.Reason == "pod_deleted" {

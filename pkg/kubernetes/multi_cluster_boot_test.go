@@ -1125,6 +1125,9 @@ func (passthroughScrubber) Scrub(value string) string { return value }
 // time there. Arriving as a whole kind is not a creation: no created or deleted
 // changes, no false break and no alert on either cluster.
 func TestKindFirstListedLaterProducesNoChangesOrBreaks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: await autonomous discovery and journal cycles for a newly served kind")
+	}
 	base := storage.NewMemory()
 	fleet := newBootFleet(t, "acme", base, "boot")
 	late := newFakeCluster(t, "late-token", "late-api")
@@ -1264,6 +1267,9 @@ func TestAbsentKindSurvivesThePublishedGenerationForANewReplica(t *testing.T) {
 // state. A relay that records the generation as a listing with no objects makes
 // the kind's first real listing arrive as created objects.
 func TestRelayedGenerationKeepsAnUnservedKindUnlistedForTheJournal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: wait out the real refresh window before relaying a newly served kind")
+	}
 	base := storage.NewMemory()
 	fleet := newBootFleet(t, "acme", base, "boot")
 	late := newFakeCluster(t, "late-token", "late-api")

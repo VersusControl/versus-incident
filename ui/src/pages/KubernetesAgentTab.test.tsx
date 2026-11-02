@@ -32,6 +32,60 @@ function mount(value = settings) {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("Kubernetes Agent settings", () => {
+  it.each(types)("preserves absent defaults when saving a %s source and mapping without an override", async type => {
+    const save = vi.spyOn(api, "kubernetesSaveAgentSettings").mockImplementation(async input => ({ ...settings, ...input }));
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: /source-loki/ }));
+    fireEvent.click(within(screen.getByLabelText("Configured log sources")).getByRole("button", { name: new RegExp(`source-${type}`) }));
+    const mapping = screen.getAllByRole("textbox")[0];
+    fireEvent.change(mapping, { target: { value: "custom_namespace" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0][0].break_logs).not.toHaveProperty("ingest_delay");
+    expect(save.mock.calls[0][0].break_logs.linked_source).toBe(`source-${type}`);
+    expect((screen.getByRole("spinbutton") as HTMLInputElement).value).toBe("");
+  });
+
+  it.each([0, 3600])("saves the optional ingestion delay boundary %s and restores defaults by clearing", async seconds => {
+    const save = vi.spyOn(api, "kubernetesSaveAgentSettings").mockImplementation(async input => ({ ...settings, ...input }));
+    mount();
+    const input = await screen.findByRole("spinbutton", { name: "Ingestion delay override (seconds)" });
+    expect((input as HTMLInputElement).value).toBe("");
+    fireEvent.change(input, { target: { value: String(seconds) } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0][0].break_logs.ingest_delay).toBe(seconds);
+    await screen.findByText("Agent settings saved.");
+    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1][0].break_logs).not.toHaveProperty("ingest_delay");
+  });
+
+  it.each(["-1", "3601", "0.5"])("blocks an invalid ingestion delay %s, including mapping saves", async value => {
+    const save = vi.spyOn(api, "kubernetesSaveAgentSettings");
+    mount();
+    fireEvent.change(await screen.findByRole("spinbutton"), { target: { value } });
+    expect(screen.getByRole("spinbutton").getAttribute("aria-invalid")).toBe("true");
+    expect((screen.getByRole("button", { name: "Save settings" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Save", exact: true }));
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect((screen.getByRole("spinbutton") as HTMLInputElement).value).toBe("");
+  });
+
+  it("keeps the persisted override on mapping edits and displays it read-only without a new switch", async () => {
+    const save = vi.spyOn(api, "kubernetesSaveAgentSettings").mockImplementation(async input => ({ ...settings, ...input }));
+    mount({ ...settings, break_logs: { ...settings.break_logs, ingest_delay: 90 } });
+    fireEvent.change(await screen.findByLabelText("Namespace label"), { target: { value: "custom" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save.mock.calls[0][0].break_logs.ingest_delay).toBe(90);
+    cleanup();
+    mount({ ...settings, can_write: false, break_logs: { ...settings.break_logs, ingest_delay: 90 } });
+    await screen.findByText("Ingestion delay: 90 seconds");
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+  });
   it("locks learning and scope while preserving persisted values on log-source saves", async () => {
     const persisted = { ...settings, learning: { ...settings.learning, scope: { include: ["shop"], exclude: ["sandbox"] } } };
     const save = vi.spyOn(api, "kubernetesSaveAgentSettings").mockImplementation(async (input) => ({ ...settings, ...input }));

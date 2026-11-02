@@ -1,11 +1,12 @@
-.agent-overview { padding: 0 24px 32px; }
+.agent-overview { min-width: 0; padding: 0 24px 32px; }
 .agent-overview-navigation { margin-bottom: 12px; overflow-x: auto; }
 .agent-overview-tabs { display: flex; gap: 4px; }
 .agent-overview-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 12px 14px; color: rgb(var(--ink-300)); font-size: 13px; position: relative; }
 .agent-overview-tabs button[aria-current="page"] { color: rgb(var(--link)); font-weight: 600; }
 .agent-overview-tabs button[aria-current="page"]::after { content: ""; position: absolute; bottom: 2px; left: 14px; right: 14px; height: 2px; background: rgb(var(--accent)); }
 .agent-overview-tabs button:focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: -2px; }
-.agent-overview-sections { display: grid; gap: 48px; }
+.agent-overview-sections { display: grid; grid-template-columns: minmax(0, 1fr); gap: 48px; }
+.agent-overview-sections > section { min-width: 0; }
 .overview-section-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
 .overview-section-heading h2 { display: inline-flex; align-items: center; gap: 9px; font-size: 18px; font-weight: 600; color: rgb(var(--ink-50)); }
 .overview-section-heading h2 svg { color: rgb(var(--ink-300)); flex-shrink: 0; }

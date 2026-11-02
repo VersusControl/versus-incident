@@ -443,3 +443,38 @@ func TestCurrentCaptureDoesNotSeedUnversionedOccurrenceState(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenOccurrencePinsBreakTimeAcrossConditionChanges(t *testing.T) {
+	store := NewMemory().(EvidenceStore)
+	scope := EvidenceScope{OrgID: "default", ClusterID: "cluster", ClusterUID: "physical"}
+	at := time.Now().UTC().Add(-time.Minute)
+	var id string
+	for i := 0; i < 2; i++ {
+		cp, err := store.EvidenceCheckpoint(t.Context(), scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, _ := json.Marshal(map[string]any{"broke_at": at.Add(time.Duration(i) * time.Second), "broke_at_source": []string{"pod_condition", "workload_condition"}[i], "count": i + 1})
+		b := EvidenceBatch{ID: fmt.Sprint("cycle", i), Expected: cp.ID, Generation: cp.Generation, Epoch: "synthetic", At: at.Add(time.Duration(i) * time.Second), Issues: []EvidenceIssue{{Key: "root-rule", Kind: "Pod", UID: "root", Namespace: "shop", Rule: "pod.crash_loop", Broken: true, Payload: payload}}}
+		if err = store.CommitEvidence(t.Context(), scope, b); err != nil {
+			t.Fatal(err)
+		}
+		page, err := store.QueryEvidence(t.Context(), scope, EvidenceQuery{Since: at.Add(-time.Minute), Until: time.Now().UTC(), Type: "occurrence", Limit: 10})
+		if err != nil || len(page.Items) != 1 {
+			t.Fatal(page, err)
+		}
+		var observation EvidenceIssue
+		json.Unmarshal(page.Items[0].Payload, &observation)
+		var value struct {
+			BrokeAt time.Time `json:"broke_at"`
+			Count   int       `json:"count"`
+		}
+		json.Unmarshal(observation.Payload, &value)
+		if i == 0 {
+			id = observation.OccurrenceID
+		}
+		if observation.OccurrenceID != id || !value.BrokeAt.Equal(at) || value.Count != i+1 {
+			t.Fatalf("occurrence center drifted or freshness frozen: %+v %+v", observation, value)
+		}
+	}
+}

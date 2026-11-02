@@ -700,6 +700,20 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		indexKinds = append(indexKinds, candidate.Kind)
 	}
 	view, status, indexErr := service.CachedNamespaceSnapshot(ctx, options.Namespace, indexKinds...)
+	// Cold, unobserved pending pages contain no rows or authorized counts.
+	requiresAuthority := indexErr != nil || status.State != "syncing"
+	for _, record := range view.Records {
+		requiresAuthority = requiresAuthority || isWorkloadKind(record.Kind)
+	}
+	for _, resource := range workloadResources {
+		state := view.Kinds[resource.Kind]
+		requiresAuthority = requiresAuthority || state.State == "ready" || !state.ObservedAt.IsZero()
+	}
+	if requiresAuthority && (indexErr == nil || errors.Is(indexErr, ErrInventoryNotReady)) {
+		if err := service.authorizeWorkloadRead(ctx, options.Namespace); err != nil {
+			return WorkloadPage{}, err
+		}
+	}
 	if indexErr != nil {
 		// An unavailable or unauthorized cold snapshot is not an empty LIST.
 		// Falling back would discard this error and manufacture successful zeros.
@@ -802,6 +816,11 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 	result.Truncated = result.Truncated || sizeTruncated
 	if sizeTruncated {
 		result.Next = encodeWorkloadCursor(strconv.Itoa(start+len(result.Items)), digest)
+	}
+	if requiresAuthority {
+		if err := service.authorizeWorkloadRead(ctx, options.Namespace); err != nil {
+			return WorkloadPage{}, err
+		}
 	}
 	return result, nil
 }
@@ -1474,4 +1493,40 @@ func uniqueObjectRefs(values []ObjectRef) []ObjectRef {
 		}
 	}
 	return result
+}
+
+// A current scoped LIST witness distinguishes partial permission loss from a
+// deployment with no workload authority. Cached publication is not a grant.
+func (service *Service) authorizeWorkloadRead(ctx context.Context, namespace string) error {
+	if err := service.validateCredential(ctx); err != nil {
+		return err
+	}
+	if service.client == nil {
+		return ErrCredentialUnavailable
+	}
+	if namespace == "" {
+		namespace = service.client.namespace
+	}
+	binding := logIdentity(service.cacheKey() + "\x00" + namespace)
+	return service.workloadAuthority.verifyCurrentRead(ctx, binding, func() error {
+		proof, cancel := withOperationBudget(context.WithValue(ctx, captureReadContextKey{}, nil), 6*time.Second, 16, 2<<20, 10000)
+		defer cancel()
+		var unavailable error
+		for _, resource := range workloadResources {
+			err := service.authorizeLiveInventoryTarget(proof, inventoryAuthorityTarget{id: resource.ResourceID, namespace: namespace})
+			if err == nil {
+				return service.validateCredential(proof)
+			}
+			if errors.Is(err, ErrUnauthorized) {
+				return err
+			}
+			if !errors.Is(err, ErrForbidden) {
+				unavailable = err
+			}
+		}
+		if unavailable != nil {
+			return unverifiedInventoryAuthority(unavailable)
+		}
+		return ErrForbidden
+	})
 }

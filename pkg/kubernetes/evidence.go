@@ -167,6 +167,9 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 			continue
 		}
 		batch.At = maxTime(batch.At, state.ObservedAt)
+		// LIST starts at ObservedAt, but returned objects can change while the
+		// request is in flight. Their evidence was observed by completion.
+		batch.At = maxTime(batch.At, state.CompletedAt)
 		from := checkpoint.Coverage[kind].From
 		if from.IsZero() {
 			from = state.ObservedAt
@@ -357,6 +360,8 @@ func (service *Service) evidenceClusterUID(ctx context.Context) (string, error) 
 // authorizeEvidence proves physical cluster identity and present read authority
 // without consulting live inventory or using credential-scoped cached objects.
 func (service *Service) authorizeEvidence(ctx context.Context, namespace string) (storage.EvidenceScope, error) {
+	// Authorization is a bounded control read, not bulk inventory collection.
+	ctx = context.WithValue(ctx, captureReadContextKey{}, nil)
 	if service == nil || service.client == nil {
 		return storage.EvidenceScope{}, ErrCredentialUnavailable
 	}
@@ -390,6 +395,7 @@ func (service *Service) authorizeEvidence(ctx context.Context, namespace string)
 }
 
 func (service *Service) authorizeEvidenceKind(ctx context.Context, namespace, id string) error {
+	ctx = context.WithValue(ctx, captureReadContextKey{}, nil)
 	parts := strings.Split(id, "~")
 	if len(parts) != 3 {
 		return ErrInvalidArguments

@@ -24,6 +24,9 @@ import (
 )
 
 func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration: await autonomous inventory and verify HTTP enrichment after permission changes")
+	}
 	gateway := middleware.GatewayAuthEnabled()
 	middleware.SetGatewayAuthEnabled(false)
 	t.Cleanup(func() { middleware.SetGatewayAuthEnabled(gateway) })
@@ -259,15 +262,34 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 		}
 	}
 	denyProof.Store(true)
-	status, denied := request(base + "&namespace=payments&include=changes&limit=50")
-	foundDenial := false
-	for _, partial := range denied.Partial {
-		foundDenial = foundDenial || partial.ResourceID == "kubernetes.history" && partial.Class == "forbidden"
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, base+"&namespace=payments&include=changes&limit=50", nil), 15000)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if status != http.StatusOK || !foundDenial {
-		t.Fatalf("current Issues must retain the current history authority denial: status=%d denial=%t", status, foundDenial)
+	defer response.Body.Close()
+	var denied map[string]json.RawMessage
+	if err := json.NewDecoder(response.Body).Decode(&denied); err != nil {
+		t.Fatal(err)
 	}
-	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&namespace=payments", nil), 15000)
+	var code string
+	if err := json.Unmarshal(denied["code"], &code); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusForbidden || code != "cluster_permission_denied" {
+		t.Fatalf("current Issues must fail closed on current authority denial: status=%d code=%q", response.StatusCode, code)
+	}
+	for field := range denied {
+		switch field {
+		case "error", "code", "action", "retryable", "partial":
+		default:
+			t.Fatalf("denied Issues exposed protected payload field %q", field)
+		}
+	}
+	var partial bool
+	if err := json.Unmarshal(denied["partial"], &partial); err != nil || !partial {
+		t.Fatalf("denied Issues must have only a partial diagnostic flag: partial=%t err=%v", partial, err)
+	}
+	response, err = app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&namespace=payments", nil), 15000)
 	if err != nil {
 		t.Fatal(err)
 	}

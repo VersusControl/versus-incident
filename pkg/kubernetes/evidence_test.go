@@ -16,6 +16,79 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
+func TestEvidenceAdmissionWithInFlightChangesAndUIDLessNodeWarning(t *testing.T) {
+	for _, scenario := range []string{"in-flight-change", "node-warning-without-uid", "both"} {
+		t.Run(scenario, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{}})
+			}))
+			defer server.Close()
+			service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
+			provider := storage.NewMemory()
+			service.SetChangeStorage(provider)
+			service.changes.evidenceEnabled = true
+			started := time.Now().UTC().Add(-time.Minute)
+			completed := started.Add(12 * time.Second)
+			kinds := map[string]kubeindex.KindStatus{}
+			for kind := range indexedResourceIDs {
+				kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: started, CompletedAt: completed}
+			}
+			records := []kubeindex.Record{
+				{Kind: "Namespace", Name: "kube-system", UID: "physical"},
+				{Kind: "Deployment", Namespace: "shop", Name: "api", UID: "root", CreatedAt: started.Add(-time.Hour)},
+				{Kind: "ReplicaSet", Namespace: "shop", Name: "api-revision", UID: "revision", Owners: []kubeindex.OwnerRef{{Kind: "Deployment", UID: "root", Controller: true}}},
+				{Kind: "Pod", Namespace: "shop", Name: "api-0", UID: "pod", CreatedAt: started.Add(-time.Hour), Owners: []kubeindex.OwnerRef{{Kind: "ReplicaSet", UID: "revision", Controller: true}}, Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 2, TerminatedAt: started.Add(-time.Second)}}},
+			}
+			if scenario != "node-warning-without-uid" {
+				records = append(records, kubeindex.Record{Kind: "Pod", Namespace: "shop", Name: "new-pod", UID: "new-pod", CreatedAt: started.Add(8 * time.Second)})
+			}
+			if scenario != "in-flight-change" {
+				// Kubelet Node Events can have an involvedObject name but no UID.
+				records = append(records, kubeindex.Record{Kind: "Event", Namespace: "default", Name: "node-warning", UID: "event", EventType: "Warning", EventCount: 5, EventFirstAt: started.Add(-time.Second), EventLastAt: started, Target: &kubeindex.OwnerRef{Kind: "Node", Name: "worker"}, Summary: map[string]string{"type": "Warning", "count": "5"}})
+			}
+			generation := inventoryGeneration{View: kubeindex.Snapshot{Kinds: kinds, Records: records}}
+			if err := service.prepareEvidence(t.Context(), &generation, inventoryGeneration{}); err != nil {
+				t.Fatalf("unrelated observation blocked occurrence admission: %v", err)
+			}
+			if !generation.EvidenceBatch.At.Equal(completed) || !generation.EvidenceBatch.CoveredThrough.Equal(started) {
+				t.Fatalf("completion must bound evidence without advancing coverage: %+v", generation.EvidenceBatch)
+			}
+			warning := false
+			for _, issue := range generation.EvidenceBatch.Issues {
+				if issue.Rule == "event.warning" {
+					warning = true
+					if issue.Kind != "Event" || issue.UID != "event" || issue.AuthorizationKind != "Event" {
+						t.Fatalf("UID-less target invented an owner: %+v", issue)
+					}
+				}
+			}
+			if scenario != "in-flight-change" && !warning {
+				t.Fatal("UID-less warning was discarded")
+			}
+			if err := service.commitEvidence(t.Context(), generation); err != nil {
+				t.Fatal(err)
+			}
+			page, err := provider.(storage.EvidenceStore).QueryEvidence(t.Context(), generation.EvidenceScope, storage.EvidenceQuery{Since: started.Add(-time.Minute), Until: time.Now().UTC(), Limit: 100})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, record := range page.Items {
+				if record.Type == "issue_opened" && record.RootUID == "root" && record.Rule == "pod.crash_loop" {
+					var issue storage.EvidenceIssue
+					if err := json.Unmarshal(record.Payload, &issue); err != nil || issue.OccurrenceID == "" {
+						t.Fatalf("missing persisted occurrence: %+v %v", issue, err)
+					}
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("CrashLoop occurrence not persisted")
+			}
+		})
+	}
+}
+
 func TestCaptureEvidenceLifecycleSurvivesRestartAndDeletedInventory(t *testing.T) {
 	var forbidden atomic.Bool
 	var replaced atomic.Bool

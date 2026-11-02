@@ -245,6 +245,8 @@ type Scrubber interface{ Scrub(string) string }
 
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
+	workloadAuthority      inventoryAuthorityProofState
+	observationClock       func() time.Time
 	inventoryRestore       *inventoryRestoreAuthority
 	recovery               *clusterRecovery
 	issueAlertSink         func(context.Context, IssueAlert) (Outcome, error)
@@ -264,6 +266,7 @@ type Service struct {
 	captureMode            string
 	identity               *credentialEpoch
 	configuredCredentialID string
+	persistentCredentialID string
 	logSources             func(string) []breaklogs.Source
 	usageHistory           *usageHistoryState
 }
@@ -282,6 +285,22 @@ func (service *Service) SetScrubber(scrubber Scrubber) {
 // NewService constructs a scoped read-only Kubernetes application service.
 func NewService(client *Client, scope Scope, discoveryTTL time.Duration) *Service {
 	return newService(context.Background(), client, scope, discoveryTTL)
+}
+
+// NewServiceWithObservationClock injects evidence-read time for deterministic
+// replay. It does not replace real worker scheduling, transport deadlines,
+// lease clocks, or held-response synchronization.
+func NewServiceWithObservationClock(client *Client, scope Scope, discoveryTTL time.Duration, clock func() time.Time) *Service {
+	service := NewService(client, scope, discoveryTTL)
+	service.observationClock = clock
+	return service
+}
+
+func (service *Service) observationNow() time.Time {
+	if service.observationClock != nil {
+		return service.observationClock().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func newService(parent context.Context, client *Client, scope Scope, discoveryTTL time.Duration) *Service {
@@ -310,6 +329,10 @@ func newService(parent context.Context, client *Client, scope Scope, discoveryTT
 	} else if client != nil {
 		service.scope.CredentialID = service.captureCredentialID()
 	}
+	service.persistentCredentialID = service.scope.CredentialID
+	if client != nil {
+		service.persistentCredentialID = service.captureCredentialIDAtGeneration(0)
+	}
 	return service
 }
 
@@ -328,13 +351,16 @@ func (service *Service) Scoped(scope Scope) *Service {
 		configured = service.configuredCredentialID
 		scope.CredentialID = service.scope.CredentialID
 	}
-	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, inventoryLog: service.inventoryLog, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.logSources}
+	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, inventoryLog: service.inventoryLog, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.breakLogSourceResolver()}
 	scoped.inventoryRestore = service.inventoryRestore
+	scoped.persistentCredentialID = service.persistentCredentialID
+	scoped.observationClock = service.observationClock
 	scoped.recovery = service.recovery
 	scoped.issueAlertSink = service.issueAlertSink
 	scoped.usageHistory = service.usageHistory
 	if configured != service.configuredCredentialID && service.client != nil {
 		scoped.scope.CredentialID = scoped.captureCredentialID()
+		scoped.persistentCredentialID = scoped.captureCredentialIDAtGeneration(0)
 	}
 	return scoped
 }
@@ -577,6 +603,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		// Replacements fence delayed responses even when a provider returns the same bearer.
 		previous.client.authGeneration.Add(1)
 		fresh = newService(ctx, previous.client, scope, previous.ttl)
+		fresh.observationClock = previous.observationClock
 		fresh.recovery = previous.recovery
 		if err := fresh.validateCredential(ctx); err != nil {
 			fresh.identity.cancel()
@@ -603,7 +630,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		}
 		fresh.scrubber, fresh.captureMode, fresh.logStreamContext = previous.scrubber, previous.captureMode, previous.logStreamContext
 		fresh.issueAlertSink = previous.issueAlertSink
-		fresh.logSources = previous.logSources
+		fresh.SetBreakLogSources(previous.breakLogSourceResolver())
 		fresh.usageHistory = previous.usageHistory
 		previous.changes.mu.Lock()
 		provider := previous.changes.provider
@@ -1439,6 +1466,9 @@ func (service *Service) podLogs(ctx context.Context, namespace, pod, container s
 	if err != nil {
 		return PodLogs{}, err
 	}
+	// Kubelet may honor limitBytes exactly, without an extra byte for the
+	// client-side truncation detector. An exhausted cap is not full coverage.
+	truncated = truncated || len(payload) >= byteLimit
 	text := strings.ToValidUTF8(string(payload), "")
 	if service.scrubber != nil {
 		text = service.scrubber.Scrub(text)

@@ -87,6 +87,7 @@ func collectionEnvelopeAuthorityError(ctx context.Context, cache *inventoryCache
 
 type inventoryAuthorityCall struct {
 	binding, episode string
+	abandoned        bool
 	done             chan struct{}
 	err              error
 }
@@ -151,6 +152,52 @@ func (state *inventoryAuthorityProofState) verify(ctx context.Context, binding, 
 		state.binding, state.episode = binding, episode
 		state.result = result
 		state.completed = true
+		state.next = state.now().Add(inventoryAuthorityProbeInterval)
+		close(call.done)
+		state.mu.Unlock()
+		return result
+	}
+}
+
+// A short scoped control-read cache coalesces concurrent UI polling without
+// treating publication freshness as authorization for the next denial episode.
+func (state *inventoryAuthorityProofState) verifyCurrentRead(ctx context.Context, binding string, probe func() error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		state.mu.Lock()
+		if call := state.running; call != nil {
+			state.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-call.done:
+			}
+			if call.binding == binding {
+				if call.abandoned {
+					continue
+				}
+				return call.err
+			}
+			continue
+		}
+		if state.completed && state.binding == binding && state.now().Before(state.next) {
+			result := state.result
+			state.mu.Unlock()
+			return result
+		}
+		call := &inventoryAuthorityCall{binding: binding, done: make(chan struct{})}
+		state.running = call
+		state.mu.Unlock()
+		result := probe()
+		state.mu.Lock()
+		call.err = result
+		call.abandoned = ctx.Err() != nil
+		state.running = nil
+		state.binding = binding
+		state.result = result
+		state.completed = ctx.Err() == nil
 		state.next = state.now().Add(inventoryAuthorityProbeInterval)
 		close(call.done)
 		state.mu.Unlock()

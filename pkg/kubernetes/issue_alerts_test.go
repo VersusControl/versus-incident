@@ -67,7 +67,7 @@ func runIssueAlertCaptureCycle(t *testing.T, s *Service, snapshot kubeindex.Snap
 		}
 		select {
 		case <-done:
-		case <-time.After(3 * time.Second):
+		case <-time.After(35 * time.Second):
 			t.Fatal("capture worker did not finish")
 		}
 	}

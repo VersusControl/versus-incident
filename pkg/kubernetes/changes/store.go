@@ -79,6 +79,7 @@ type warningCheckpoint struct {
 type Lease struct {
 	Owner   string    `json:"owner"`
 	Expires time.Time `json:"expires"`
+	Epoch   time.Time `json:"epoch,omitempty,omitzero"`
 }
 
 type Store struct {
@@ -453,7 +454,11 @@ func (store *Store) ClaimLease(owner string, now time.Time, ttl time.Duration) e
 		if current.Lease != nil && current.Lease.Owner != owner && current.Lease.Expires.After(now) {
 			return ErrLeaseLost
 		}
-		current.Lease = &Lease{Owner: owner, Expires: now.Add(ttl)}
+		epoch := time.Now().UTC()
+		if current.Lease != nil && current.Lease.Owner == owner && current.Lease.Expires.After(now) {
+			epoch = current.Lease.Epoch
+		}
+		current.Lease = &Lease{Owner: owner, Expires: now.Add(ttl), Epoch: epoch}
 		return nil
 	})
 }

@@ -39,6 +39,7 @@ import { KubernetesWarnings } from "./KubernetesWarnings";
 import { failureWarnings, issueWarnings } from "./kubernetesWarningItems";
 import { KubernetesAgentTab } from "./KubernetesAgentTab";
 import { KubernetesBreakLogs, KubernetesBreakLogsProvider } from "./KubernetesBreakLogs";
+import { timestampNanos } from "@/lib/useKubernetesBreakLogs";
 import { focusedChanges, type FocusedCoverage } from "@/lib/kubernetesFocusedHistory";
 
 const virtualViewportHeight = 440;
@@ -900,6 +901,14 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
         || selected.root.namespace !== context.root.namespace || selected.root.kind !== context.root.kind || selected.root.name !== context.root.name
         || occurrenceID && selected.occurrence_id !== occurrenceID)) {
         throw new ApiError(502, "Selected occurrence does not match this selection", { code: "root_context_mismatch" });
+      }
+      // A fallback center selects an exact instant, not the nearest recurrence.
+      // Keep authorized retained identity for historical views even when that
+      // occurrence cannot supply a verified break time. Crash IDs are pinned
+      // separately to their journal observation.
+      if (selected && !occurrenceID && !crashID && centered
+        && (timestampNanos(center!) === undefined || timestampNanos(selected.broke_at ?? "") !== timestampNanos(center!))) {
+        return { ...page, selected_occurrence: undefined, selection_status: "not_found" as const };
       }
       return page;
     },

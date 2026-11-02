@@ -64,6 +64,7 @@ type ContainerState struct {
 	Ready              bool      `json:"ready"`
 	Running            bool      `json:"running"`
 	StartedAt          time.Time `json:"started_at,omitempty,omitzero"`
+	PreviousStartedAt  time.Time `json:"previous_started_at,omitempty,omitzero"`
 	StateKnown         bool      `json:"state_known,omitempty"`
 	Name               string    `json:"name"`
 	Init               bool      `json:"init,omitempty"`

@@ -108,6 +108,9 @@ func TestInvalidStoredSettingsReturnDiagnosedDefaultsAndCanBeRepaired(t *testing
 }
 
 func TestSnapshotHistoryTrimsToMarshaledByteLimit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("endurance: repeatedly persist maximum-size snapshot history")
+	}
 	store := storage.NewMemory()
 	manager := servicehealth.NewManager(store)
 	services := make([]servicehealth.ServiceSnapshot, servicehealth.MaxServicesPerSnapshot)

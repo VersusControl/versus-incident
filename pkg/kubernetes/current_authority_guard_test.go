@@ -222,7 +222,7 @@ func TestCurrentAuthorityProofDistinguishesPartialScopedAndUnknownAuthority(t *t
 			count := reads.Load()
 			for i := 0; i < 20; i++ {
 				workloads, workErr := service.Workloads(t.Context(), WorkloadListOptions{})
-				if !errors.Is(workErr, ErrInventoryNotReady) || len(workloads.Items) != 0 {
+				if (!errors.Is(workErr, ErrInventoryNotReady) && !errors.Is(workErr, ErrForbidden)) || len(workloads.Items) != 0 {
 					t.Fatalf("unknown authority exposed protected data: %v", workErr)
 				}
 				report, reportErr := service.SyncHealth(t.Context())
@@ -233,8 +233,8 @@ func TestCurrentAuthorityProofDistinguishesPartialScopedAndUnknownAuthority(t *t
 					t.Fatal("probe error claimed ready")
 				}
 			}
-			if reads.Load() != count {
-				t.Fatal("API polling issued authority probes")
+			if reads.Load() > count+int32(len(workloadResources)) {
+				t.Fatal("API polling repeated unverified scoped authority probes")
 			}
 		})
 	}
@@ -268,5 +268,71 @@ func TestCurrentAuthorityProbeBudgetDoesNotInferUniversalDenial(t *testing.T) {
 	}
 	if reads.Load() != inventoryAuthorityProbeRequests {
 		t.Fatalf("probe requests=%d limit=%d", reads.Load(), inventoryAuthorityProbeRequests)
+	}
+}
+
+func TestWorkloadReadAuthorityCacheExpiresAndBindsScope(t *testing.T) {
+	at := time.Now()
+	state := inventoryAuthorityProofState{clock: func() time.Time { return at }}
+	calls := 0
+	denied := false
+	probe := func() error {
+		calls++
+		if denied {
+			return ErrForbidden
+		}
+		return nil
+	}
+	for i := 0; i < 20; i++ {
+		if err := state.verifyCurrentRead(t.Context(), "cluster-shop", probe); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("polling multiplied authority probes: %d", calls)
+	}
+	denied = true
+	at = at.Add(inventoryAuthorityProbeInterval)
+	if err := state.verifyCurrentRead(t.Context(), "cluster-shop", probe); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("old grant survived expiry: %v", err)
+	}
+	if err := state.verifyCurrentRead(t.Context(), "cluster-other", probe); !errors.Is(err, ErrForbidden) || calls != 3 {
+		t.Fatalf("authority crossed namespace scope: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestWorkloadAuthorityDoesNotCacheCanceledCaller(t *testing.T) {
+	var state inventoryAuthorityProofState
+	ctx, cancel := context.WithCancel(t.Context())
+	if err := state.verifyCurrentRead(ctx, "scope", func() error { cancel(); return context.Canceled }); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	calls := 0
+	if err := state.verifyCurrentRead(t.Context(), "scope", func() error { calls++; return nil }); err != nil || calls != 1 {
+		t.Fatalf("canceled caller poisoned next read: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestWorkloadAuthorityWaiterRetriesCanceledLeader(t *testing.T) {
+	var state inventoryAuthorityProofState
+	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	defer cancelLeader()
+	entered, release := make(chan struct{}), make(chan struct{})
+	leader := make(chan error, 1)
+	go func() {
+		leader <- state.verifyCurrentRead(leaderCtx, "scope", func() error { close(entered); <-release; return context.Canceled })
+	}()
+	<-entered
+	waiterCtx := &authorityWaitContext{Context: t.Context(), observed: make(chan struct{})}
+	waiter := make(chan error, 1)
+	go func() { waiter <- state.verifyCurrentRead(waiterCtx, "scope", func() error { return nil }) }()
+	<-waiterCtx.observed
+	cancelLeader()
+	close(release)
+	if err := <-leader; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if err := <-waiter; err != nil {
+		t.Fatalf("live waiter inherited canceled leader: %v", err)
 	}
 }

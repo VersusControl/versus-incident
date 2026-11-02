@@ -114,9 +114,14 @@ func (service *Service) StartCapture(parent context.Context) {
 	}
 	loop := &captureLoop{ctx: ctx, cancel: cancel, done: make(chan struct{}), owner: uuid.NewString(), next: map[string]time.Time{}, success: map[string]time.Time{}, completed: map[string]time.Time{}, gapFrom: map[string]time.Time{}, status: effective}
 	service.changes.captures[scope] = loop
+	_, settleStorage := service.changes.provider.(storage.BlobCAS)
 	service.changes.mu.Unlock()
 	if effective.Mode == "demand" {
-		close(loop.done)
+		if settleStorage && effective.Reason == "" {
+			go service.runDemandBreakSettles(loop)
+		} else {
+			close(loop.done)
+		}
 		if effective.Reason != "" {
 			log.Printf("kubernetes: capture using demand mode: %s", effective.Reason)
 		}
@@ -428,10 +433,13 @@ func (service *Service) captureOwned(loop *captureLoop, store *kubechanges.Store
 	}()
 	usageDone := make(chan struct{})
 	go service.runUsageSampler(ownedContext, usageDone)
+	settleDone := make(chan struct{})
+	go service.runBreakSettles(ownedContext, loop.owner, settleDone)
 	defer func() {
 		cancelOwned()
 		<-renewDone
 		<-usageDone
+		<-settleDone
 		loop.mu.Lock()
 		loop.owned = false
 		loop.ownedContext = nil
@@ -511,11 +519,20 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 	events, crashGaps, podRead := crashes.resolve(snapshot, now)
 	broken, deferredRoots := classifyReadyBreaks(snapshot, now)
 	if loop == nil || loop.status.Mode == "demand" {
-		if err := service.commitLegacyCapture(store, collected, gaps, nil, "", now, events, crashGaps, podRead); err != nil {
+		owner := ""
+		var ownedContext context.Context
+		if loop != nil {
+			loop.mu.Lock()
+			if loop.owned && loop.ownedContext != nil && loop.ownedContext.Err() == nil {
+				owner, ownedContext = loop.owner, loop.ownedContext
+			}
+			loop.mu.Unlock()
+		}
+		if err := service.commitLegacyCapture(store, collected, gaps, nil, owner, now, events, crashGaps, podRead); err != nil {
 			return err
 		}
 		service.rememberBreaks(broken, "", now, partial, deferredRoots...)
-		service.enqueueBreakLogs(snapshot, "", nil)
+		service.enqueueBreakLogs(snapshot, owner, ownedContext)
 		return nil
 	}
 	loop.mu.Lock()

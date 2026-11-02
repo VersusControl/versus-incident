@@ -1305,6 +1305,9 @@ func TestSessionStoreTouchIndexReinsertsMissingEntry(t *testing.T) {
 }
 
 func TestSessionStoreBoundsAggregateTraceAndBlobGrowth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("endurance: persist 100 worst-case turns through aggregate compaction")
+	}
 	provider := storage.NewMemory()
 	store := NewSessionStore(provider, tenancy.DefaultOrgScope(), time.Now)
 	if _, err := store.Create("session-growth"); err != nil {

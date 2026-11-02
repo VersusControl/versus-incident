@@ -31,6 +31,9 @@ func Assess(from, to time.Time, snapshots []Snapshot, container ContainerObserva
 		if item.PodUID != container.PodUID || item.Container != container.Container || item.Init != container.Init || container.Slot != "" && item.Slot != container.Slot {
 			continue
 		}
+		if len(item.Lines) == 0 {
+			continue
+		}
 		found = true
 		intervals = append(intervals, Gap{From: item.From, To: item.To})
 		if item.Truncated {

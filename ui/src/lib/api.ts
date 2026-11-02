@@ -2913,7 +2913,7 @@ export type KubernetesLogSourceType = "loki" | "elasticsearch" | "cloudwatchlogs
 export interface KubernetesLogFields { namespace: string; pod: string; container: string; time?: string; message?: string }
 export interface KubernetesAgentSettingsInput {
   learning: { logs: boolean; metrics: boolean; traces: boolean; scope: { include: string[]; exclude: string[] } };
-  break_logs: { linked_source: string; fields: Record<KubernetesLogSourceType, KubernetesLogFields> };
+  break_logs: { linked_source: string; fields: Record<KubernetesLogSourceType, KubernetesLogFields>; ingest_delay?: number };
 }
 export interface KubernetesAgentSettings extends KubernetesAgentSettingsInput {
   sources: Array<{ name: string; type: KubernetesLogSourceType; scope: string; health: "healthy" | "slow" | "failing" | "not_checked"; checked_at?: string }>;
@@ -2936,12 +2936,14 @@ export interface KubernetesIssueAlertsSettings extends KubernetesIssueAlertsInpu
 }
 export interface KubernetesBreakLogQuery {
   namespace: string; root_uid: string; since: string; until: string; pods?: string[];
+  occurrence_id?: string; center?: string;
   mode?: "merged" | "previous" | "current"; level?: "error" | "warning" | "info" | "debug"; q?: string; cursor?: string; limit?: number;
   /** One container name, or `kubernetesAllContainers`; omitted lets the server pick the main container. */
   container?: string;
 }
 export const kubernetesAllContainers = "*";
 export interface KubernetesBreakLogPage {
+  occurrence_id?: string;
   window: { from: string; to: string };
   pods: Array<{ name: string; uid: string; state: string; short: string }>;
   lines: Array<{ at: string; pod?: string; pod_uid: string; container: string; init: boolean; slot: string; level: string; text: string; source: string }>;
@@ -2950,7 +2952,7 @@ export interface KubernetesBreakLogPage {
   rate: Array<{ minute: string; total: number; errors: number }>;
   patterns: Array<{ template: string; level: string; count: number }>;
   sources: Array<{ kind: string; name: string; type?: string; at: string }>;
-  coverage: { state: "complete" | "partial" | "none"; gaps: Array<{ from: string; to: string }>; reason: string; tip: boolean };
+  coverage: { state: "complete" | "partial" | "none" | "pending"; gaps: Array<{ from: string; to: string; reason?: string; ready_at?: string }>; reason: string; tip: boolean };
   next?: string;
   /** Applied container filter: a name, or `kubernetesAllContainers`. */
   container?: string;

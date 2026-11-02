@@ -26,6 +26,21 @@ type Learning struct {
 type CaptureSettings struct {
 	LinkedSource string            `json:"linked_source"`
 	Fields       map[string]Fields `json:"fields"`
+	IngestDelay  *int              `json:"ingest_delay,omitempty"`
+}
+
+func (settings CaptureSettings) IngestionDelay(kind string) time.Duration {
+	if settings.IngestDelay != nil {
+		return time.Duration(*settings.IngestDelay) * time.Second
+	}
+	switch kind {
+	case "loki":
+		return 30 * time.Second
+	case "splunk", "cloudwatchlogs":
+		return 2 * time.Minute
+	default:
+		return time.Minute
+	}
 }
 
 type Settings struct {

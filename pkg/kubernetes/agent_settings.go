@@ -14,7 +14,22 @@ import (
 )
 
 func (service *Service) SetBreakLogSources(resolve func(string) []breaklogs.Source) {
+	if service == nil || service.changes == nil {
+		return
+	}
+	service.changes.mu.Lock()
 	service.logSources = resolve
+	service.changes.mu.Unlock()
+	clearLinkedCache()
+}
+
+func (service *Service) breakLogSourceResolver() func(string) []breaklogs.Source {
+	if service == nil || service.changes == nil {
+		return nil
+	}
+	service.changes.mu.Lock()
+	defer service.changes.mu.Unlock()
+	return service.logSources
 }
 
 func (service *Service) logSettingsStore() (storage.Provider, string) {
@@ -24,10 +39,11 @@ func (service *Service) logSettingsStore() (storage.Provider, string) {
 }
 
 func (service *Service) configuredLogSources() []breaklogs.Source {
-	if service.logSources == nil {
+	resolve := service.breakLogSourceResolver()
+	if resolve == nil {
 		return []breaklogs.Source{}
 	}
-	return service.logSources(service.scope.OrgID)
+	return resolve(service.scope.OrgID)
 }
 
 type TraceBackend struct {
@@ -134,6 +150,9 @@ func (service *Service) SaveAgentSettings(ctx context.Context, settings breaklog
 	if len(settings.Learning.Scope.Include) > 100 || len(settings.Learning.Scope.Exclude) > 100 || len(settings.BreakLogs.Fields) > 6 || len(settings.BreakLogs.LinkedSource) > 128 {
 		return ErrInvalidArguments
 	}
+	if settings.BreakLogs.IngestDelay != nil && (*settings.BreakLogs.IngestDelay < 0 || *settings.BreakLogs.IngestDelay > 3600) {
+		return ErrInvalidArguments
+	}
 	for _, namespace := range append(append([]string(nil), settings.Learning.Scope.Include...), settings.Learning.Scope.Exclude...) {
 		if !validPodLogName(namespace, 63, false) {
 			return ErrInvalidArguments
@@ -175,6 +194,7 @@ func (service *Service) SaveAgentSettings(ctx context.Context, settings breaklog
 		settings.BreakLogs.Fields = map[string]breaklogs.Fields{}
 	}
 	provider, key := service.logSettingsStore()
+	clearLinkedCache()
 	return service.commitCredential(ctx, func() error {
 		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
 			settings.Alerts = state.Settings.Alerts

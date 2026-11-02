@@ -15,6 +15,9 @@ const MaxSnapshots = 2000
 const MaxBytes = 8 << 20
 const Retention = 24 * time.Hour
 
+// ClockTolerance permits bounded replica skew without rewriting evidence time.
+const ClockTolerance = 5 * time.Second
+
 var ErrInvalid = errors.New("invalid break logs request")
 
 type Line struct {
@@ -23,29 +26,34 @@ type Line struct {
 }
 
 type Snapshot struct {
-	BreakAt       time.Time `json:"break_at,omitempty"`
-	ID            string    `json:"id"`
-	Cluster       string    `json:"cluster"`
-	Namespace     string    `json:"namespace"`
-	RootUID       string    `json:"root_uid"`
-	Pod           string    `json:"pod"`
-	PodUID        string    `json:"pod_uid"`
-	PodCreatedAt  time.Time `json:"pod_created_at,omitempty"`
-	Container     string    `json:"container"`
-	Init          bool      `json:"init"`
-	Slot          string    `json:"slot"`
-	TerminationAt time.Time `json:"termination_at,omitempty"`
-	Restarts      int32     `json:"restarts"`
-	CapturedAt    time.Time `json:"captured_at"`
-	From          time.Time `json:"from"`
-	To            time.Time `json:"to"`
-	Lines         []Line    `json:"lines"`
-	Truncated     bool      `json:"truncated"`
+	Source              string    `json:"source,omitempty"`
+	OccurrenceID        string    `json:"occurrence_id,omitempty"`
+	BreakAt             time.Time `json:"break_at,omitempty,omitzero"`
+	ID                  string    `json:"id"`
+	Cluster             string    `json:"cluster"`
+	Namespace           string    `json:"namespace"`
+	RootUID             string    `json:"root_uid"`
+	Pod                 string    `json:"pod"`
+	PodUID              string    `json:"pod_uid"`
+	PodCreatedAt        time.Time `json:"pod_created_at,omitempty,omitzero"`
+	Container           string    `json:"container"`
+	Init                bool      `json:"init"`
+	Slot                string    `json:"slot"`
+	TerminationAt       time.Time `json:"termination_at,omitempty,omitzero"`
+	TerminationReason   string    `json:"termination_reason,omitempty"`
+	TerminationExitCode int32     `json:"termination_exit_code,omitempty"`
+	Restarts            int32     `json:"restarts"`
+	CapturedAt          time.Time `json:"captured_at"`
+	From                time.Time `json:"from"`
+	To                  time.Time `json:"to"`
+	Lines               []Line    `json:"lines"`
+	Truncated           bool      `json:"truncated"`
 }
 
 type Gap struct {
+	ReadyAt    time.Time `json:"ready_at,omitempty,omitzero"`
 	SnapshotID string    `json:"snapshot_id,omitempty"`
-	ObservedAt time.Time `json:"observed_at,omitempty"`
+	ObservedAt time.Time `json:"observed_at,omitempty,omitzero"`
 	From       time.Time `json:"from"`
 	To         time.Time `json:"to"`
 	Namespace  string    `json:"namespace,omitempty"`
@@ -56,18 +64,31 @@ type Gap struct {
 }
 
 type State struct {
-	Snapshots []Snapshot           `json:"snapshots"`
-	Gaps      []Gap                `json:"gaps"`
-	Jobs      map[string]time.Time `json:"jobs,omitempty"`
+	PodHistoryAt          time.Time            `json:"pod_history_at,omitempty,omitzero"`
+	PodHistoryTruncatedAt time.Time            `json:"pod_history_truncated_at,omitempty,omitzero"`
+	PodHistoryGaps        []Gap                `json:"pod_history_gaps,omitempty"`
+	Manifests             []Manifest           `json:"manifests,omitempty"`
+	PodHistory            []ManifestPod        `json:"pod_history,omitempty"`
+	Snapshots             []Snapshot           `json:"snapshots"`
+	Gaps                  []Gap                `json:"gaps"`
+	Jobs                  map[string]time.Time `json:"jobs,omitempty"`
 }
 
 func Identity(snapshot Snapshot) string {
+	if snapshot.Source == "linked" {
+		encoded, _ := json.Marshal([]any{snapshot.Cluster, snapshot.RootUID, snapshot.OccurrenceID, snapshot.PodUID, snapshot.Container, snapshot.Init, snapshot.Slot, snapshot.TerminationAt, snapshot.Source})
+		digest := sha256.Sum256(encoded)
+		return hex.EncodeToString(digest[:])
+	}
 	encoded, _ := json.Marshal([]any{snapshot.Cluster, snapshot.PodUID, snapshot.Container, snapshot.Init, snapshot.Slot, snapshot.TerminationAt})
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:])
 }
 
 func Merge(current *State, incoming []Snapshot, gaps []Gap, job string, now time.Time) error {
+	if err := MergeManifests(current, nil, now); err != nil {
+		return err
+	}
 	current.Snapshots = append([]Snapshot(nil), current.Snapshots...)
 	positions := map[string]int{}
 	for position, item := range current.Snapshots {
@@ -75,7 +96,25 @@ func Merge(current *State, incoming []Snapshot, gaps []Gap, job string, now time
 	}
 	for _, item := range incoming {
 		position, exists := positions[item.ID]
-		if !exists || item.Slot != "current" || item.ID != Identity(item) || item.CapturedAt.After(now) || !item.CapturedAt.After(current.Snapshots[position].CapturedAt) {
+		if exists && item.Source == "linked" {
+			old := current.Snapshots[position]
+			if len(item.Lines) > 0 && item.CapturedAt.After(old.CapturedAt) {
+				merged, gap, err := mergeCurrent(old, item)
+				if err != nil {
+					return err
+				}
+				merged.CapturedAt = item.CapturedAt
+				if gap == nil && !item.Truncated && !item.From.After(old.From) && !item.To.Before(old.To) {
+					merged.Truncated = false
+				}
+				current.Snapshots[position] = merged
+				if gap != nil {
+					gaps = append(gaps, *gap)
+				}
+			}
+			continue
+		}
+		if !exists || item.Slot != "current" || item.ID != Identity(item) || item.CapturedAt.After(now.Add(ClockTolerance)) || !item.CapturedAt.After(current.Snapshots[position].CapturedAt) {
 			continue
 		}
 		old := current.Snapshots[position]
@@ -94,7 +133,7 @@ func Merge(current *State, incoming []Snapshot, gaps []Gap, job string, now time
 	kept := make([]Snapshot, 0, len(current.Snapshots)+len(incoming))
 	seen := map[string]bool{}
 	for _, item := range append(append([]Snapshot(nil), current.Snapshots...), incoming...) {
-		if item.ID != Identity(item) || item.CapturedAt.IsZero() || item.CapturedAt.After(now) || item.From.IsZero() || item.To.Before(item.From) || len(item.Lines) > 500 || item.Slot != "previous" && item.Slot != "current" || item.RootUID == "" || item.PodUID == "" || item.Container == "" {
+		if item.ID != Identity(item) || item.CapturedAt.IsZero() || item.CapturedAt.After(now.Add(ClockTolerance)) || item.From.IsZero() || item.To.Before(item.From) || len(item.Lines) > 500 || item.Slot != "previous" && item.Slot != "current" || item.RootUID == "" || item.PodUID == "" || item.Container == "" {
 			return ErrInvalid
 		}
 		textBytes := 0
@@ -145,6 +184,10 @@ func Merge(current *State, incoming []Snapshot, gaps []Gap, job string, now time
 		current.Gaps = append(current.Gaps, Gap{From: item.From, To: item.To, Namespace: item.Namespace, RootUID: item.RootUID, PodUID: item.PodUID, Container: item.Container, Reason: "rotated"})
 		compactGaps(current, now)
 		encoded, _ = json.Marshal(current)
+	}
+	// Rotation markers are metadata too; their own budget must still hold.
+	if err := boundMetadata(current, now); err != nil {
+		return err
 	}
 	return nil
 }
@@ -230,12 +273,43 @@ func compactGaps(state *State, now time.Time) {
 		kept = append(kept, gap)
 	}
 	if len(kept) > 2000 {
-		kept = kept[len(kept)-2000:]
+		// Coarsen actual loss within affected roots rather than silently erasing
+		// old pending/rotated evidence markers at the count cap.
+		coarsen := func(namespaceOnly bool) []Gap {
+			scopes := map[string]Gap{}
+			for _, gap := range kept {
+				gap.SnapshotID, gap.PodUID, gap.Container = "", "", ""
+				if namespaceOnly {
+					gap.RootUID = ""
+				}
+				key := gap.Namespace + "\x00" + gap.RootUID + "\x00" + gap.Reason
+				if prior, exists := scopes[key]; exists {
+					gap.From = minTimestamp(prior.From, gap.From)
+					gap.To = maxTimestamp(prior.To, gap.To)
+				}
+				scopes[key] = gap
+			}
+			result := []Gap{}
+			for _, gap := range scopes {
+				result = append(result, gap)
+			}
+			sort.Slice(result, func(i, j int) bool {
+				a, b := result[i], result[j]
+				return a.Namespace+"\x00"+a.RootUID+"\x00"+a.Reason < b.Namespace+"\x00"+b.RootUID+"\x00"+b.Reason
+			})
+			return result
+		}
+		kept = coarsen(false)
+		if len(kept) > 2000 {
+			kept = coarsen(true)
+		}
 	}
 	state.Gaps = kept
 }
 
 type Query struct {
+	OccurrenceID                                    string
+	Center                                          time.Time
 	Namespace, RootUID, Mode, Level, Search, Cursor string
 	// Container selects one container by name. Empty asks for the break's main
 	// container and AllContainers merges every container.
@@ -249,6 +323,9 @@ type Query struct {
 const AllContainers = "*"
 
 func (query Query) Validate() error {
+	if len(query.OccurrenceID) > 256 || strings.ContainsAny(query.OccurrenceID, "\x00\r\n") || !query.Center.IsZero() && (query.Center.Before(query.From) || query.Center.After(query.To)) {
+		return ErrInvalid
+	}
 	if query.Namespace == "" || query.RootUID == "" || len(query.Namespace) > 253 || len(query.RootUID) > 256 || strings.ContainsAny(query.Namespace+query.RootUID, "\x00\r\n\t /\\") || query.From.IsZero() || !query.To.After(query.From) || query.To.Sub(query.From) > 2*time.Hour || query.Limit < 0 || query.Limit > 500 || len(query.Search) > 256 || len(query.Cursor) > 2048 || len(query.Pods) > 100 || len(query.Container) > 63 || strings.ContainsAny(query.Container, "\x00\r\n\t /\\") {
 		return ErrInvalid
 	}

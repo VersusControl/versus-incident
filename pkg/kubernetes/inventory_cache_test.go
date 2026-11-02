@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +20,13 @@ import (
 
 func seedInventory(t *testing.T, service *Service, records []kubeindex.Record) {
 	t.Helper()
+	if service.client == nil {
+		client, err := NewClient(Config{Endpoint: inventoryProjectionEndpoint(t), AllowLoopbackHTTP: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		service.client = client
+	}
 	kinds := map[string]kubeindex.KindStatus{}
 	for kind := range indexedResourceIDs {
 		kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: time.Now().UTC(), CompletedAt: time.Now().UTC()}
@@ -31,8 +39,17 @@ func seedInventory(t *testing.T, service *Service, records []kubeindex.Record) {
 	}
 }
 
+func inventoryProjectionEndpoint(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"apiVersion": "v1", "kind": "List", "items": []any{}})
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
 func TestWorkloadsPinsPartialPublicationAcrossReplacement(t *testing.T) {
-	client, err := NewClient(Config{Endpoint: "http://127.0.0.1:1", AllowLoopbackHTTP: true, Timeout: time.Second})
+	client, err := NewClient(Config{Endpoint: inventoryProjectionEndpoint(t), AllowLoopbackHTTP: true, Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +92,7 @@ func TestWorkloadsPinsPartialPublicationAcrossReplacement(t *testing.T) {
 }
 
 func TestNamespaceProjectionDoesNotResurrectDeletedGlobalRecords(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	seedInventory(t, service, nil)
 	cache := service.changes.inventories[service.indexScope()]
 	cache.generation.Namespaces = map[string]kubeindex.Snapshot{"shop": {
@@ -93,7 +110,7 @@ func TestNamespaceProjectionDoesNotResurrectDeletedGlobalRecords(t *testing.T) {
 }
 
 func TestNamespaceProjectionPrefersNewerCompleteScopedReplacement(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	seedInventory(t, service, []kubeindex.Record{{UID: "deleted-pod", Kind: "Pod", Namespace: "shop", Name: "reused-name"}})
 	cache := service.changes.inventories[service.indexScope()]
 	state := cache.generation.View.Kinds["Pod"]
@@ -125,7 +142,7 @@ func TestNamespaceProjectionPreservesObservationAuthorityAndFailure(t *testing.T
 		{name: "whole-cycle-denial", globalError: "forbidden", cycle: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+			service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 			seedInventory(t, service, []kubeindex.Record{{UID: "current-pod", Kind: "Pod", Namespace: "shop", Name: "reused-name"}})
 			cache := service.changes.inventories[service.indexScope()]
 			now := time.Now().UTC()
@@ -177,7 +194,7 @@ func TestNamespaceProjectionPreservesObservationAuthorityAndFailure(t *testing.T
 }
 
 func TestWorkloadCountsBeforePublicationAndCommittedEmpty(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	for _, namespace := range []string{"", "shop"} {
 		page, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: namespace})
 		if err != nil || len(page.Items) != 0 || len(page.Counts) != 0 || page.Sync.State != "syncing" || page.Sync.Partial || len(page.Sync.Pending) != len(workloadResources) || page.Sync.PendingKinds != len(indexedResourceIDs) {
@@ -199,7 +216,7 @@ func TestWorkloadCountsBeforePublicationAndCommittedEmpty(t *testing.T) {
 }
 
 func TestWorkloadCursorBindsCommittedSnapshotAndFilters(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	records := []kubeindex.Record{
 		{UID: "c", Kind: "Deployment", Namespace: "shop", Name: "web"},
 		{UID: "a", Kind: "Deployment", Namespace: "payments", Name: "ledger"},
@@ -250,7 +267,7 @@ func TestWorkloadCursorBindsCommittedSnapshotAndFilters(t *testing.T) {
 }
 
 func TestWorkloadPendingKindCountIsUnknown(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	seedInventory(t, service, []kubeindex.Record{{UID: "pod", Kind: "Pod", Namespace: "shop", Name: "pod"}})
 	cache := service.changes.inventories[service.indexScope()]
 	delete(cache.generation.View.Kinds, "CronJob")
@@ -284,7 +301,7 @@ func TestCachedNamespaceSnapshotIgnoresRecordCounts(t *testing.T) {
 		{name: "empty", pods: -1, empty: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+			service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 			input := []kubeindex.Record{
 				{UID: "pod-a", Kind: "Pod", Namespace: "shop"},
 				{UID: "node", Kind: "Node"},
@@ -350,9 +367,15 @@ func TestCachedNamespaceSnapshotIgnoresRecordCounts(t *testing.T) {
 	}
 }
 
-func TestInventoryViewsNeverReadCluster(t *testing.T) {
-	var reads atomic.Int32
+func TestInventoryViewsReadAuthorityWithoutRefreshingObjects(t *testing.T) {
+	var reads, authorityReads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("limit") == "1" && (strings.HasPrefix(r.URL.Path, "/apis/apps/v1/") || strings.HasPrefix(r.URL.Path, "/apis/batch/v1/") || strings.HasSuffix(r.URL.Path, "/pods")) {
+			authorityReads.Add(1)
+			writeJSON(w, map[string]any{"items": []any{}})
+			return
+		}
+		t.Logf("unexpected request: %s?%s", r.URL.Path, r.URL.RawQuery)
 		reads.Add(1)
 		http.Error(w, "unexpected cluster read", http.StatusInternalServerError)
 	}))
@@ -396,7 +419,7 @@ func TestInventoryViewsNeverReadCluster(t *testing.T) {
 	if err != nil || len(namespaces.Items) != 1 || namespaces.Items[0] != "shop" {
 		t.Fatalf("namespaces=%+v %v", namespaces, err)
 	}
-	if reads.Load() != 0 {
+	if reads.Load() != 0 || authorityReads.Load() != 1 {
 		t.Fatalf("views made %d cluster reads", reads.Load())
 	}
 }
@@ -660,7 +683,7 @@ func TestInventoryOverviewReportsNodeAllocatableFromBackgroundCache(t *testing.T
 }
 
 func TestInventoryOverviewExcludesTerminatedPodReservations(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	records := []kubeindex.Record{}
 	for index, phase := range []string{"Running", "Pending", "Unknown", "", "Succeeded", "Failed"} {
 		records = append(records, kubeindex.Record{
@@ -743,6 +766,10 @@ func TestInventoryFirstSyncProgressIsMonotonicAndEndsAtPublication(t *testing.T)
 			t.Fatal(err)
 		}
 		progress := overview.Sync.Progress
+		if overview.Sync.State == "syncing" && progress == nil && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
 		if overview.Sync.State != "syncing" || progress == nil {
 			t.Fatalf("cold overview reported %q with progress %+v before the first generation published", overview.Sync.State, progress)
 		}
@@ -1045,7 +1072,7 @@ func seedCoreInventoryAt(t *testing.T, service *Service, records []kubeindex.Rec
 }
 
 func TestPendingKindsNeverAppearAsFailuresInAnyView(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetChangeStorage(storage.NewMemory())
 	owner := func(kind, name, uid string) []kubeindex.OwnerRef {
 		return []kubeindex.OwnerRef{{Kind: kind, Name: name, UID: uid, Namespace: "shop", Controller: true, ControllerKnown: true}}
@@ -1214,7 +1241,7 @@ func coreBreakRecords() []kubeindex.Record {
 }
 
 func TestAgedCoreDataIsStaleEvenWhileOtherKindsLoad(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetChangeStorage(storage.NewMemory())
 	seedCoreInventoryAt(t, service, coreBreakRecords(), time.Now().UTC().Add(-30*time.Minute))
 	_, status, err := service.CachedIndexSnapshot(t.Context(), "Pod", "ConfigMap")
@@ -1237,7 +1264,7 @@ func TestAgedCoreDataIsStaleEvenWhileOtherKindsLoad(t *testing.T) {
 }
 
 func TestLoadingEvidenceKeepsRealCorrelationPartials(t *testing.T) {
-	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetChangeStorage(storage.NewMemory())
 	seedCoreInventory(t, service, coreBreakRecords())
 	read := func() Issue {

@@ -16,6 +16,9 @@ import (
 )
 
 func TestRegistryRenewsTwentyEpochsWithoutBrowserOrResolveRequests(t *testing.T) {
+	if testing.Short() {
+		t.Skip("endurance: observe twenty autonomous credential-epoch replacements")
+	}
 	base := storage.NewMemory()
 	fleet := newBootFleet(t, "org", base, "autonomous")
 	fixture := newFakeCluster(t, "initially-unaccepted", "api")
