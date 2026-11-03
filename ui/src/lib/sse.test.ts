@@ -10,6 +10,22 @@ function parse(chunks: string[]) {
 }
 
 describe("SSEParser", () => {
+  it("preserves fragmented event IDs for resume and ignores invalid IDs", () => {
+    expect(parse(["id: 4", "2\r\nevent: committed\r\ndata: {}\r\n\r\nid: bad\0id\ndata: next\n\n"])).toEqual([
+      { event: "committed", data: "{}", id: "42" },
+      { event: "message", data: "next", id: "42" },
+    ]);
+  });
+
+  it("cancels a silent connection within the idle budget", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } });
+    await expect(readEventStream(stream, () => undefined, {
+      maxLineBytes: 1024, maxFrameBytes: 2048, maxTotalBytes: 4096, maxEvents: 10,
+      maxDurationMs: 1000, maxIdleMs: 10,
+    })).rejects.toBeInstanceOf(SSELimitError);
+    expect(cancelled).toBe(true);
+  });
   it("joins multiline data and honors event names", () => {
     expect(parse(["event: model_delta\ndata: first\ndata: second\n\n"])).toEqual([
       { event: "model_delta", data: "first\nsecond" },

@@ -46,7 +46,9 @@ func dropAllVersusTables(t *testing.T, dsn string) {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'vs\_%'`)
+	// Evidence tables are included: an earlier test may have swapped them to
+	// partitioned parents, which the evidence migrations cannot re-apply onto.
+	rows, err := db.Query(`SELECT tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE 'vs\_%' OR tablename LIKE 'kubernetes\_evidence\_%' OR tablename LIKE 'evidence\_%\_month\_%')`)
 	if err != nil {
 		t.Fatalf("list vs_ tables: %v", err)
 	}
@@ -74,6 +76,11 @@ func dropAllVersusTables(t *testing.T, dsn string) {
 	// fresh-boot repro this helper sets up.
 	if _, err := db.Exec("DROP TABLE IF EXISTS versus_schema_migrations CASCADE"); err != nil {
 		t.Fatalf("drop migration ledger: %v", err)
+	}
+	for _, fn := range []string{"versus_ensure_evidence_partition(regclass,timestamptz)", "versus_mirror_evidence_event()", "versus_mirror_evidence_observation()"} {
+		if _, err := db.Exec("DROP FUNCTION IF EXISTS " + fn + " CASCADE"); err != nil {
+			t.Fatalf("drop %s: %v", fn, err)
+		}
 	}
 }
 

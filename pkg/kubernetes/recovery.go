@@ -9,12 +9,21 @@ import (
 	"time"
 )
 
+// recoveryScope is one read authority's view of the shared provider. The provider
+// is shared per cluster, but a denial belongs to the identity that answered it, so
+// one scope's denial or cooldown never stands in for another scope's answer.
+type recoveryScope struct {
+	next   time.Time
+	denied bool
+}
+
 // clusterRecovery survives credential epochs. Neither request traffic nor a
 // successor's construction is evidence of recovery; only publication resets it.
 type clusterRecovery struct {
 	mu                sync.Mutex
 	failures          int
 	replacementStreak int
+	scopes            map[string]*recoveryScope
 	next              time.Time
 	lastCommitted     time.Time
 	revision          string
@@ -35,15 +44,92 @@ func (r *clusterRecovery) deadline() time.Time {
 	return r.next
 }
 
-func (r *clusterRecovery) failed(err error, client *Client) {
+// requestGate reports whether this org read scope may not serve a request yet. A
+// recorded provider failure in the scope gates request traffic because accepted
+// material deliberately outlives it. A permission denial in the scope does not:
+// the API server answered, so the read path reports that denial instead of hiding
+// it behind unavailability. The empty key is the credential itself, whose answer
+// applies to every scope.
+func (r *clusterRecovery) requestGate(orgID string) bool {
 	if r == nil {
-		return
+		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	credential, scope := r.scopes[""], r.scopes[orgID]
+	if credential != nil && credential.denied || scope != nil && scope.denied {
+		return false
+	}
 	now := time.Now()
-	// Concurrent failures from a single attempt do not multiply the streak.
+	if credential != nil && now.Before(credential.next) {
+		return true
+	}
+	return scope != nil && now.Before(scope.next)
+}
+
+// gate applies the scope's decision to the shared retry schedule.
+func (r *clusterRecovery) gate(orgID string, now time.Time, denied bool) {
+	if r.scopes == nil {
+		r.scopes = map[string]*recoveryScope{}
+	}
+	scope := r.scopes[orgID]
+	if scope == nil {
+		scope = &recoveryScope{}
+		r.scopes[orgID] = scope
+	}
+	if denied {
+		scope.denied = true
+	}
+	scope.next = maxTime(scope.next, now)
+}
+
+// recovered clears the per-scope gates: a committed publication proves the
+// identity could read the cluster again.
+func (r *clusterRecovery) recovered() {
+	for _, scope := range r.scopes {
+		scope.next, scope.denied = time.Time{}, false
+	}
+}
+
+// answerDenied reports whether the API server answered that this identity may not
+// read the cluster. Collection reports an answered denial through wrappers whose
+// own error is a not-ready state, so the classification looks through them: a
+// denial buried behind a wrapper must still never be reported as unavailability.
+func answerDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Collection reports an unverified authority through a wrapper whose own error
+	// is a not-ready state, so the cause decides what the API server answered.
+	var unverified *inventoryAuthorityUnavailable
+	if errors.As(err, &unverified) {
+		return answerDenied(unverified.cause)
+	}
+	if errors.Is(err, ErrForbidden) || errors.Is(err, ErrUnauthorized) {
+		return true
+	}
+	switch errorClass(err) {
+	case "forbidden", "unauthorized":
+		return true
+	}
+	return false
+}
+
+func (r *clusterRecovery) failed(err error, client *Client, orgID string) {
+	if r == nil {
+		return
+	}
+	// An answered denial is recorded before anything else, because concurrent
+	// failures from a single attempt must not drop the one fact that has to reach
+	// the reader: the API server refused this identity.
+	denied := answerDenied(err)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	// Concurrent failures from a single attempt do not multiply the streak, but the
+	// scope gate still follows every recorded failure.
 	if now.Before(r.next) && r.failures > 0 {
+		r.gate(orgID, r.next, denied)
 		return
 	}
 	r.failures++
@@ -55,6 +141,7 @@ func (r *clusterRecovery) failed(err error, client *Client) {
 		r.next = maxTime(r.next, client.backoffUntil)
 		client.backoffMu.Unlock()
 	}
+	r.gate(orgID, r.next, denied)
 	log.Printf("kubernetes: recovery stage=credential_recovery reason=%s attempt=%d retry_ms=%d", recoveryReason(err, "credential_recovery"), r.failures, time.Until(r.next).Milliseconds())
 }
 
@@ -66,6 +153,7 @@ func (r *clusterRecovery) committed(revision string) {
 	defer r.mu.Unlock()
 	r.failures, r.next, r.lastCommitted, r.revision = 0, time.Time{}, time.Now().UTC(), revision
 	r.replacementStreak = 0
+	r.recovered()
 }
 
 func waitRecovery(ctx context.Context, r *clusterRecovery) error {
@@ -132,7 +220,7 @@ func (registry *ServiceRegistry) superviseCluster(ctx context.Context, clusterID
 		_, err := registry.resolveCluster(attempt, current.scope.OrgID, clusterID)
 		cancel()
 		if err != nil && ctx.Err() == nil {
-			recovery.failed(err, current.client)
+			recovery.failed(err, current.client, current.scope.OrgID)
 		}
 		select {
 		case <-ctx.Done():
@@ -168,6 +256,7 @@ func (r *clusterRecovery) published(generation inventoryGeneration, orgID string
 	}
 	r.failures, r.next, r.lastCommitted, r.revision = 0, time.Time{}, time.Now().UTC(), generation.Revision
 	r.replacementStreak = 0
+	r.recovered()
 }
 
 type recoveryStage struct {

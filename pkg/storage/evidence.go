@@ -9,8 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,15 +20,41 @@ var ErrInvalidEvidence = errors.New("storage: invalid evidence data")
 var ErrEvidenceConflict = errors.New("storage: evidence checkpoint conflict")
 var ErrEvidenceLimit = errors.New("storage: evidence operation exceeds budget")
 
+// ErrEvidenceNotReady reports a scope whose read models are still being built.
+// History reads are served only from read models, so a scope that is still
+// converting answers this fast, retryable error.
+var ErrEvidenceNotReady = errors.New("storage: evidence read models are not ready")
+
+type evidenceReadContextKey struct{}
+
+// EvidenceReadContext routes metadata reads through the isolated history pool.
+// Collection checkpoints and writes retain the writer pool.
+func EvidenceReadContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, evidenceReadContextKey{}, true)
+}
+
 // EvidenceStore is optional. Scope is explicit even when a provider is wrapped.
 // Implementations atomically commit observations, lifecycle events and checkpoint.
 // Query bounds limit work, never the history retained by a database.
 type EvidenceStore interface {
+	SetEvidenceAuthority(context.Context, EvidenceScope, string, map[string]EvidenceAuthority) error
 	EvidencePolicy() EvidencePolicy
 	CommitEvidence(context.Context, EvidenceScope, EvidenceBatch) error
 	QueryEvidence(context.Context, EvidenceScope, EvidenceQuery) (EvidencePage, error)
 	EvidenceCheckpoint(context.Context, EvidenceScope) (EvidenceCheckpoint, error)
 	DeleteEvidence(context.Context, EvidenceScope) error
+}
+
+// EvidenceAuthorityStore can persist a positive denial before a collection
+// finishes. It may change only the matching principal's authorization proof.
+type EvidenceAuthorityStore interface {
+	SetEvidenceAuthority(context.Context, EvidenceScope, string, map[string]EvidenceAuthority) error
+}
+
+// EvidenceScopeLookup resolves committed physical identity without reading an
+// unbounded blob catalog or contacting a cluster.
+type EvidenceScopeLookup interface {
+	FindEvidenceScope(context.Context, string, string, string) (EvidenceScope, error)
 }
 
 type EvidencePolicy struct {
@@ -90,7 +114,11 @@ type EvidenceIssue struct {
 type EvidenceInterval struct{ From, To time.Time }
 
 type EvidenceCheckpoint struct {
-	OccurrenceRevision uint64 `json:"occurrence_revision,omitempty"`
+	CommitRevision     uint64                       `json:"commit_revision,omitempty"`
+	HighSequence       uint64                       `json:"high_sequence,omitempty"`
+	Principal          string                       `json:"principal,omitempty"`
+	Authority          map[string]EvidenceAuthority `json:"authority,omitempty"`
+	OccurrenceRevision uint64                       `json:"occurrence_revision,omitempty"`
 	// Generation survives explicit deletion and fences captures prepared before it.
 	Generation     uint64                      `json:"generation,omitempty"`
 	PruneRevision  uint64                      `json:"prune_revision,omitempty"`
@@ -104,16 +132,28 @@ type EvidenceCheckpoint struct {
 	PrunedThrough time.Time `json:"pruned_through,omitempty"`
 }
 
+// EvidenceAuthority records a completed collection proof, not a credential claim.
+// Empty namespace means an all-namespaces LIST. Unknown is never an allow.
+type EvidenceAuthority struct {
+	Namespace string    `json:"namespace,omitempty"`
+	State     string    `json:"state"`
+	ProvedAt  time.Time `json:"proved_at"`
+}
+
 type EvidenceBatch struct {
-	Generation     uint64
-	HistoricalOnly bool
-	Coverage       map[string]EvidenceInterval
-	GuardKey       string
-	GuardExpected  []byte
-	ID             string
-	Expected       string
-	At             time.Time
-	Epoch          string
+	ScopeBinding         string
+	Principal            string
+	Authority            map[string]EvidenceAuthority
+	ObservationHeartbeat time.Duration
+	Generation           uint64
+	HistoricalOnly       bool
+	Coverage             map[string]EvidenceInterval
+	GuardKey             string
+	GuardExpected        []byte
+	ID                   string
+	Expected             string
+	At                   time.Time
+	Epoch                string
 	// Only sufficient successful observations may advance CoveredThrough.
 	// A partial batch can add findings but cannot close absent issues.
 	CoveredThrough time.Time
@@ -122,6 +162,16 @@ type EvidenceBatch struct {
 }
 
 type EvidenceQuery struct {
+	Authorities map[string]EvidenceAuthority
+	Lookup      bool
+	// Authority is supplied by the trusted service from its persisted checkpoint.
+	// Projection remains for compatibility, but is applied only to the bounded page.
+	EnforceAuthority   bool
+	AllowedKinds       []string
+	AuthorityNamespace string
+	OccurrenceID       string
+	Center             time.Time
+	PointInTime        bool
 	// Projection transforms unavailable records into explicit gaps before counts
 	// and pagination. Identity and ordering fields must remain unchanged.
 	Projection                                  func(EvidenceRecord) EvidenceRecord
@@ -140,6 +190,8 @@ type EvidenceQuery struct {
 }
 
 type EvidencePage struct {
+	CountCapped  bool   `json:"count_capped,omitempty"`
+	Authority    string `json:"authority,omitempty"`
 	Since, Until time.Time
 	Total        int
 	Counts       map[string]int
@@ -150,6 +202,11 @@ type EvidencePage struct {
 }
 
 type evidenceState struct {
+	updatedOccurrences map[string]struct{}
+	RootLatest         map[string]string
+	RootCenters        map[string][]string
+	Occurrences        map[string]EvidenceIssue
+	LastObservations   map[string]time.Time
 	OccurrenceVersions map[string]EvidenceIssue
 	OccurrenceHeads    map[string]string
 	Observations       []occurrenceObservation
@@ -162,6 +219,7 @@ type evidenceState struct {
 }
 
 type evidenceCursor struct {
+	Ordering        string
 	CaptureScope    string
 	OccurrenceHighs []uint64
 	Generations     []uint64
@@ -216,6 +274,7 @@ func mergeEvidenceCheckpoint(current, next EvidenceCheckpoint) EvidenceCheckpoin
 	if next.PrunedThrough.After(current.PrunedThrough) {
 		current.PrunedThrough = next.PrunedThrough
 	}
+	current.PruneRevision = max(current.PruneRevision, next.PruneRevision)
 	kinds := map[string]bool{}
 	for _, kind := range current.Kinds {
 		kinds[kind] = true
@@ -245,6 +304,25 @@ func evidenceScopeKey(scope EvidenceScope) (string, error) {
 func (batch EvidenceBatch) Validate() error { return validEvidenceBatch(batch) }
 
 func validEvidenceBatch(batch EvidenceBatch) error {
+	if batch.Principal == "" && len(batch.Authority) > 0 {
+		return ErrInvalidEvidence
+	}
+	if len(batch.ScopeBinding) > 256 || strings.ContainsAny(batch.ScopeBinding, "\x00\r\n") {
+		return ErrInvalidEvidence
+	}
+	if len(batch.Principal) > 256 || len(batch.Authority) > 4096 {
+		return ErrEvidenceLimit
+	}
+	for kind, proof := range batch.Authority {
+		if kind == "" || len(kind) > 512 || len(proof.Namespace) > 256 || proof.ProvedAt.IsZero() ||
+			(proof.State != "allowed" && proof.State != "denied" && proof.State != "unknown") {
+			return ErrInvalidEvidence
+		}
+		_, namespace, _ := strings.Cut(kind, "@")
+		if namespace != proof.Namespace || strings.ContainsAny(kind, "\x00\r\n") {
+			return ErrInvalidEvidence
+		}
+	}
 	if len(batch.GuardKey) > 1024 || len(batch.GuardExpected) > 16<<10 || len(batch.Expected) > 256 {
 		return ErrEvidenceLimit
 	}
@@ -317,6 +395,10 @@ func validEvidenceRecord(record EvidenceRecord) bool {
 // applyEvidence is shared by the transactional and CAS-backed implementations.
 // Active state is never subject to file history pruning.
 func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord, error) {
+	if state.Checkpoint.Principal != "" && batch.Principal == "" {
+		return nil, ErrInvalidEvidence
+	}
+	state.updatedOccurrences = map[string]struct{}{}
 	if state.Checkpoint.Generation != batch.Generation {
 		return nil, ErrEvidenceConflict
 	}
@@ -334,7 +416,40 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 	if state.Checkpoint.OccurrenceRevision >= uint64(1<<63-1) {
 		return nil, ErrEvidenceLimit
 	}
+	state.Checkpoint.CommitRevision = max(state.Checkpoint.CommitRevision, state.Checkpoint.OccurrenceRevision) + 1
 	state.Checkpoint.OccurrenceRevision++
+	if state.Occurrences == nil {
+		state.Occurrences = map[string]EvidenceIssue{}
+		for _, observation := range state.Observations {
+			issue, ok := state.OccurrenceVersions[observation.Version]
+			if ok {
+				issue.LastSeen = observation.LastSeen
+				state.Occurrences[issue.OccurrenceID] = issue
+			}
+		}
+	}
+	if state.LastObservations == nil {
+		state.LastObservations = map[string]time.Time{}
+		for _, observation := range state.Observations {
+			if observation.At.After(state.LastObservations[observation.OccurrenceID]) {
+				state.LastObservations[observation.OccurrenceID] = observation.At
+			}
+		}
+	}
+	heartbeat := batch.ObservationHeartbeat
+	if heartbeat <= 0 {
+		heartbeat = 5 * time.Minute
+	}
+	if batch.Principal != "" {
+		if state.Checkpoint.Principal != batch.Principal {
+			state.Checkpoint.Authority = nil
+		}
+		state.Checkpoint.Principal = batch.Principal
+	}
+	if state.Checkpoint.Authority == nil {
+		state.Checkpoint.Authority = map[string]EvidenceAuthority{}
+	}
+	mergeEvidenceAuthority(&state.Checkpoint, batch.Authority)
 	if state.Active == nil {
 		state.Active = map[string]EvidenceIssue{}
 	}
@@ -375,9 +490,20 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 			if observed.FirstSeen.IsZero() {
 				observed.FirstSeen = observed.LastSeen
 			}
-			observed.OccurrenceID = evidenceDigest(batch.ID, observed.Key, "observation")
-			addOccurrenceObservation(state, observed, state.Checkpoint.OccurrenceRevision, true)
-			added = append(added, issueEvidence(observed, batch, "issue_observed"))
+			observed.OccurrenceID = evidenceDigest(observed.Key, "observation", observed.FirstSeen.UTC().Format("2006-01-02"))
+			previous, exists := state.Occurrences[observed.OccurrenceID]
+			changed := !exists || !sameIssueEvidence(previous.Payload, observed.Payload) || previous.Broken != observed.Broken || previous.AuthorizationKind != observed.AuthorizationKind
+			if exists {
+				observed.FirstSeen = previous.FirstSeen
+			}
+			state.Occurrences[observed.OccurrenceID] = observed
+			state.updatedOccurrences[observed.OccurrenceID] = struct{}{}
+			if changed || observed.LastSeen.Sub(state.LastObservations[observed.OccurrenceID]) >= heartbeat {
+				addOccurrenceObservation(state, observed, state.Checkpoint.OccurrenceRevision, changed)
+			}
+			if changed {
+				added = append(added, issueEvidence(observed, batch, "issue_observed"))
+			}
 			continue
 		}
 		present[observed.Key] = true
@@ -388,10 +514,10 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 		if exists && observed.LastSeen.Before(active.LastSeen) {
 			continue
 		}
-		if exists && active.Broken && observed.Broken {
+		if exists {
 			observed.Payload = pinIssueBreakTime(active.Payload, observed.Payload)
 		}
-		advanced := !exists || observed.LastSeen.After(active.LastSeen)
+		advanced := !exists || observed.LastSeen.Sub(state.LastObservations[active.OccurrenceID]) >= heartbeat
 		changed := !exists || active.Broken != observed.Broken || active.AuthorizationKind != observed.AuthorizationKind || !sameIssueEvidence(active.Payload, observed.Payload)
 		eventType := "issue_observed"
 		if !exists {
@@ -407,6 +533,8 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 		active.Broken = observed.Broken
 		active.LastSeen, active.Epoch, active.Payload = observed.LastSeen, batch.Epoch, append(json.RawMessage(nil), observed.Payload...)
 		state.Active[observed.Key] = active
+		state.Occurrences[active.OccurrenceID] = active
+		state.updatedOccurrences[active.OccurrenceID] = struct{}{}
 		if changed || advanced {
 			addOccurrenceObservation(state, active, state.Checkpoint.OccurrenceRevision, changed)
 		}
@@ -421,6 +549,8 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 			}
 			closed := batch.CoveredThrough
 			active.ClosedAt = &closed
+			state.Occurrences[active.OccurrenceID] = active
+			state.updatedOccurrences[active.OccurrenceID] = struct{}{}
 			addOccurrenceObservation(state, active, state.Checkpoint.OccurrenceRevision, true)
 			added = append(added, issueEvidence(active, batch, "issue_resolved"))
 			delete(state.Active, key)
@@ -445,6 +575,7 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 	if batch.CoveredThrough.After(state.Checkpoint.CoveredThrough) {
 		state.Checkpoint.CoveredThrough = batch.CoveredThrough
 	}
+	updateOccurrenceLookups(state)
 	return added, nil
 }
 
@@ -482,6 +613,12 @@ func sameIssueEvidence(a, b json.RawMessage) bool {
 		}
 		delete(value, "first_seen")
 		delete(value, "last_seen")
+		delete(value, "count")
+		// These are mutable measurements, not occurrence identity or lifecycle.
+		delete(value, "evidence")
+		for _, field := range []string{"examples", "of", "changes", "more_changes", "history", "gaps", "rebuilt", "untracked", "partial", "pending"} {
+			delete(value, field)
+		}
 		normalized, _ := json.Marshal(value)
 		return normalized
 	}
@@ -555,6 +692,7 @@ func prepareEvidenceQuery(scope EvidenceScope, query EvidenceQuery) (EvidenceQue
 	if query.ProjectionID != "" {
 		binding = evidenceDigest(binding, query.ProjectionID)
 	}
+	binding = evidenceDigest(binding, query.OccurrenceID, query.Center.UTC().Format(time.RFC3339Nano), strconv.FormatBool(query.PointInTime))
 	if query.Cursor != "" && cursor.Binding != binding {
 		return query, cursor, ErrInvalidEvidence
 	}
@@ -576,6 +714,42 @@ func evidenceTypeMatches(recordType, filter string, broken bool) bool {
 	default:
 		return recordType == filter
 	}
+}
+
+// evidenceTimelineCrashMarker applies the timeline marker rule to a retained crash
+// record, and matches the native and Postgres rule exactly: a record that declares
+// no subtype keeps its legacy marker, a declared terminal marker keeps it, and a
+// declared status observation is not a marker. Only a declared string subtype
+// participates, so a declared non-string subtype is not a marker anywhere and a
+// payload that cannot be decoded is never silently promoted to a marker.
+func evidenceTimelineCrashMarker(record EvidenceRecord) bool {
+	if len(record.Payload) == 0 {
+		return false
+	}
+	var payload any
+	if json.Unmarshal(record.Payload, &payload) != nil {
+		return false
+	}
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return true
+	}
+	value, declared := object["type"]
+	if !declared || value == nil {
+		return true
+	}
+	subtype, ok := value.(string)
+	if !ok {
+		return false
+	}
+	return subtype == "" || subtype == "termination"
+}
+
+func evidenceRecordTypeMatches(record EvidenceRecord, filter string) bool {
+	if filter == "timeline" && record.Type == "crash" {
+		return evidenceTimelineCrashMarker(record)
+	}
+	return evidenceTypeMatches(record.Type, filter, record.Broken)
 }
 
 func evidenceRetentionTime(record EvidenceRecord) time.Time {
@@ -602,10 +776,17 @@ func evidenceMatches(record EvidenceRecord, query EvidenceQuery, cursor evidence
 		}
 	} else {
 		at := evidenceTime(record, query)
-		if at.Before(query.Since) || at.After(query.Until) {
-			return false
+		if query.Type == "occurrence" {
+			var issue EvidenceIssue
+			if json.Unmarshal(record.Payload, &issue) != nil || issue.FirstSeen.After(query.Until) || issue.ClosedAt != nil && issue.ClosedAt.Before(query.Since) {
+				return false
+			}
+		} else {
+			if at.Before(query.Since) || at.After(query.Until) {
+				return false
+			}
 		}
-		if query.Namespace != "" && record.Namespace != query.Namespace || query.Kind != "" && record.Kind != query.Kind || query.UID != "" && record.UID != query.UID || query.RootUID != "" && record.RootUID != query.RootUID || query.PodUID != "" && record.PodUID != query.PodUID || query.Rule != "" && record.Rule != query.Rule || !evidenceTypeMatches(record.Type, query.Type, record.Broken) || query.Name != "" && record.Name != query.Name || query.ResourceUID != "" && record.UID != query.ResourceUID && record.RootUID != query.ResourceUID && record.PodUID != query.ResourceUID {
+		if query.Namespace != "" && record.Namespace != query.Namespace || query.Kind != "" && record.Kind != query.Kind || query.UID != "" && record.UID != query.UID || query.RootUID != "" && record.RootUID != query.RootUID || query.PodUID != "" && record.PodUID != query.PodUID || query.Rule != "" && record.Rule != query.Rule || !evidenceRecordTypeMatches(record, query.Type) || query.Name != "" && record.Name != query.Name || query.ResourceUID != "" && record.UID != query.ResourceUID && record.RootUID != query.ResourceUID && record.PodUID != query.ResourceUID {
 			return false
 		}
 	}
@@ -693,6 +874,7 @@ func blobEvidenceCommit(ctx context.Context, p Provider, policy EvidencePolicy, 
 				continue
 			}
 			state.Sequence++
+			state.Checkpoint.HighSequence = state.Sequence
 			record.Sequence = state.Sequence
 			state.Records = append(state.Records, record)
 			seen[version] = true
@@ -823,7 +1005,13 @@ func blobEvidenceQuery(ctx context.Context, p Provider, policy EvidencePolicy, s
 		page.Checkpoint = mergeEvidenceCheckpoint(page.Checkpoint, state.Checkpoint)
 		latest := map[string]EvidenceRecord{}
 		if query.Type == "occurrence" {
-			records, occurrenceErr := occurrenceRecords(state, cursor.OccurrenceHighs[i], query)
+			var records []EvidenceRecord
+			var occurrenceErr error
+			if query.Lookup && state.Occurrences != nil {
+				records = lookupOccurrenceRecords(state, query)
+			} else {
+				records, occurrenceErr = occurrenceRecords(state, cursor.OccurrenceHighs[i], query)
+			}
 			if occurrenceErr != nil {
 				return page, occurrenceErr
 			}
@@ -858,15 +1046,37 @@ func blobEvidenceQuery(ctx context.Context, p Provider, policy EvidencePolicy, s
 			}
 			matches := evidenceMatches(record, query, evidenceCursor{})
 			inPage := evidenceMatches(record, query, cursor)
+			if matches {
+				record = projectEvidenceAuthority(record, query)
+			}
 			if matches && query.Projection != nil {
 				record = query.Projection(record)
 			}
-			if matches {
+			if matches && query.Cursor == "" && page.Total < 1001 {
 				page.Total++
 				page.Counts[record.Type]++
+				if query.Type == "occurrence" && record.Type != "coverage_gap" {
+					var wrapper EvidenceIssue
+					var facts struct {
+						Severity string `json:"severity"`
+					}
+					if json.Unmarshal(record.Payload, &wrapper) == nil && json.Unmarshal(wrapper.Payload, &facts) == nil && facts.Severity != "" {
+						page.Counts["severity:"+facts.Severity]++
+						if wrapper.Broken {
+							page.Counts["broken:"+facts.Severity]++
+						}
+					}
+				}
 			}
 			if inPage {
 				page.Items = append(page.Items, record)
+				sort.Slice(page.Items, func(i, j int) bool {
+					a, b := page.Items[i], page.Items[j]
+					return evidenceTime(a, query).After(evidenceTime(b, query)) || evidenceTime(a, query).Equal(evidenceTime(b, query)) && a.ID > b.ID
+				})
+				if len(page.Items) > query.Limit+1 {
+					page.Items = page.Items[:query.Limit+1]
+				}
 			}
 		}
 
@@ -875,9 +1085,28 @@ func blobEvidenceQuery(ctx context.Context, p Provider, policy EvidencePolicy, s
 		a, b := page.Items[i], page.Items[j]
 		return evidenceTime(a, query).After(evidenceTime(b, query)) || evidenceTime(a, query).Equal(evidenceTime(b, query)) && a.ID > b.ID
 	})
+	page.CountCapped = page.Total > 1000
 	return finishEvidencePage(page, query, cursor), nil
 }
 
+func projectEvidenceAuthority(record EvidenceRecord, query EvidenceQuery) EvidenceRecord {
+	if !query.EnforceAuthority || record.Type == "coverage_gap" {
+		return record
+	}
+	if len(query.Authorities) > 0 {
+		if EvidenceAuthorityAllows(query.Authorities, record.AuthorizationKind, record.Namespace) {
+			return record
+		}
+	} else {
+		for _, kind := range query.AllowedKinds {
+			if kind != "" && kind == record.AuthorizationKind {
+				return record
+			}
+		}
+	}
+	raw, _ := json.Marshal(struct{ From, To time.Time }{record.At, record.At})
+	return EvidenceRecord{ID: record.ID, Type: "coverage_gap", At: record.At, ObservedAt: record.ObservedAt, Sequence: record.Sequence, GapFrom: record.At, GapTo: record.At, Payload: raw}
+}
 func (p *fileProvider) EvidencePolicy() EvidencePolicy {
 	return EvidencePolicy{Mode: "bounded_file", Retention: 24 * time.Hour, MaxRecords: 5000, MaxBytes: 4 << 20}
 }
@@ -891,24 +1120,124 @@ func (p *memoryProvider) CommitEvidence(ctx context.Context, s EvidenceScope, b 
 	return blobEvidenceCommit(ctx, p, p.EvidencePolicy(), s, b)
 }
 func (p *fileProvider) QueryEvidence(ctx context.Context, s EvidenceScope, q EvidenceQuery) (EvidencePage, error) {
-	return blobEvidenceQuery(ctx, p, p.EvidencePolicy(), s, q)
+	index, err := p.evidenceIndex()
+	if err != nil {
+		return EvidencePage{}, err
+	}
+	return index.query(ctx, p.EvidencePolicy(), s, q)
 }
 func (p *memoryProvider) QueryEvidence(ctx context.Context, s EvidenceScope, q EvidenceQuery) (EvidencePage, error) {
-	return blobEvidenceQuery(ctx, p, p.EvidencePolicy(), s, q)
+	index, err := p.evidenceIndex()
+	if err != nil {
+		return EvidencePage{}, err
+	}
+	return index.query(ctx, p.EvidencePolicy(), s, q)
 }
 func (p *fileProvider) EvidenceCheckpoint(ctx context.Context, s EvidenceScope) (EvidenceCheckpoint, error) {
-	state, err := blobEvidenceRead(ctx, p, s)
-	return state.Checkpoint, err
+	key, err := evidenceScopeKey(s)
+	if err != nil {
+		return EvidenceCheckpoint{}, err
+	}
+	index, err := p.evidenceIndex()
+	if err != nil {
+		return EvidenceCheckpoint{}, err
+	}
+	return index.checkpoint(ctx, key)
 }
 func (p *memoryProvider) EvidenceCheckpoint(ctx context.Context, s EvidenceScope) (EvidenceCheckpoint, error) {
-	state, err := blobEvidenceRead(ctx, p, s)
-	return state.Checkpoint, err
+	key, err := evidenceScopeKey(s)
+	if err != nil {
+		return EvidenceCheckpoint{}, err
+	}
+	index, err := p.evidenceIndex()
+	if err != nil {
+		return EvidenceCheckpoint{}, err
+	}
+	return index.checkpoint(ctx, key)
 }
 func (p *fileProvider) DeleteEvidence(ctx context.Context, s EvidenceScope) error {
 	return blobEvidenceDelete(ctx, p, s)
 }
 func (p *memoryProvider) DeleteEvidence(ctx context.Context, s EvidenceScope) error {
 	return blobEvidenceDelete(ctx, p, s)
+}
+
+// EvidenceAuthorityAllows evaluates a namespace proof only if it is at least as
+// recent as the all-namespaces proof. Missing proof is never an allow.
+func EvidenceAuthorityAllows(proofs map[string]EvidenceAuthority, kind, namespace string) bool {
+	if kind == "" {
+		return false
+	}
+	proof := proofs[kind]
+	if namespace != "" {
+		if scoped, ok := proofs[kind+"@"+namespace]; ok && (scoped.ProvedAt.After(proof.ProvedAt) || scoped.ProvedAt.Equal(proof.ProvedAt) && scoped.State != "allowed") {
+			proof = scoped
+		}
+	}
+	return proof.State == "allowed"
+}
+
+func blobEvidenceAuthority(ctx context.Context, p Provider, scope EvidenceScope, principal string, proofs map[string]EvidenceAuthority) error {
+	key, err := evidenceScopeKey(scope)
+	if err != nil {
+		return err
+	}
+	cas, ok := p.(BlobCAS)
+	if !ok {
+		return ErrUnsupported
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		raw, err := p.ReadBlob(key)
+		if err != nil {
+			return err
+		}
+		if len(raw) == 0 {
+			return nil
+		}
+		var state evidenceState
+		if err = json.Unmarshal(raw, &state); err != nil {
+			return err
+		}
+		if state.Checkpoint.Principal != principal {
+			return ErrEvidenceConflict
+		}
+		mergeEvidenceAuthority(&state.Checkpoint, proofs)
+		state.Checkpoint.CommitRevision = max(state.Checkpoint.CommitRevision, state.Checkpoint.OccurrenceRevision) + 1
+		next, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+		won, err := cas.CompareAndSwapBlob(key, raw, next)
+		if err != nil || won {
+			return err
+		}
+	}
+	return ErrEvidenceConflict
+}
+
+func mergeEvidenceAuthority(cp *EvidenceCheckpoint, proofs map[string]EvidenceAuthority) {
+	if cp.Authority == nil {
+		cp.Authority = map[string]EvidenceAuthority{}
+	}
+	for kind, proof := range proofs {
+		if proof.ProvedAt.Before(cp.Authority[kind].ProvedAt) {
+			continue
+		}
+		if proof.ProvedAt.Equal(cp.Authority[kind].ProvedAt) && cp.Authority[kind].State == "denied" && proof.State == "allowed" {
+			continue
+		}
+		cp.Authority[kind] = proof
+	}
+}
+
+func (p *memoryProvider) SetEvidenceAuthority(ctx context.Context, scope EvidenceScope, principal string, proofs map[string]EvidenceAuthority) error {
+	return blobEvidenceAuthority(ctx, p, scope, principal, proofs)
+}
+func (p *fileProvider) SetEvidenceAuthority(ctx context.Context, scope EvidenceScope, principal string, proofs map[string]EvidenceAuthority) error {
+	return blobEvidenceAuthority(ctx, p, scope, principal, proofs)
 }
 
 // Replacing the whole scoped state under CAS clears history atomically while
@@ -937,7 +1266,7 @@ func blobEvidenceDelete(ctx context.Context, p Provider, scope EvidenceScope) er
 		if state.Checkpoint.Generation == ^uint64(0) {
 			return ErrEvidenceLimit
 		}
-		replacement, err := json.Marshal(evidenceState{Checkpoint: EvidenceCheckpoint{Generation: state.Checkpoint.Generation + 1}})
+		replacement, err := json.Marshal(evidenceState{Checkpoint: EvidenceCheckpoint{Generation: state.Checkpoint.Generation + 1, CommitRevision: max(state.Checkpoint.CommitRevision, state.Checkpoint.OccurrenceRevision) + 1}})
 		if err != nil {
 			return err
 		}
@@ -962,6 +1291,14 @@ func (p *memoryProvider) compareEvidenceBlob(key string, expected, replacement [
 	if (expected == nil && exists) || (expected != nil && !exists) || !bytes.Equal(current, expected) {
 		return false, nil
 	}
+	index, err := p.evidenceIndex()
+	if err != nil {
+		return false, err
+	}
+	won, err := index.swap(context.Background(), key, expected, replacement, false)
+	if err != nil || !won {
+		return won, localEvidenceError(err)
+	}
 	if !exists {
 		p.blobNames = append(p.blobNames, key)
 		sort.Strings(p.blobNames)
@@ -972,6 +1309,10 @@ func (p *memoryProvider) compareEvidenceBlob(key string, expected, replacement [
 }
 
 func (p *fileProvider) compareEvidenceBlob(key string, expected, replacement []byte, guard string, guardExpected []byte) (bool, error) {
+	index, err := p.evidenceIndex()
+	if err != nil {
+		return false, err
+	}
 	target, guardPath := p.blobPath(key), p.blobPath(guard)
 	shard := func(path string) uint32 {
 		hash := fnv.New32a()
@@ -988,34 +1329,14 @@ func (p *fileProvider) compareEvidenceBlob(key string, expected, replacement []b
 		fileBlobLocks[b].Lock()
 		defer fileBlobLocks[b].Unlock()
 	}
-	guardData, err := os.ReadFile(guardPath)
+	guardData, err := p.ReadBlob(guard)
 	if err != nil {
 		return false, err
 	}
 	if !bytes.Equal(guardData, guardExpected) {
 		return false, ErrEvidenceConflict
 	}
-	current, err := os.ReadFile(target)
-	if errors.Is(err, os.ErrNotExist) {
-		if expected != nil {
-			return false, nil
-		}
-		current = nil
-	} else if err != nil {
-		return false, err
-	} else if expected == nil {
-		return false, nil
-	}
-	if !bytes.Equal(current, expected) {
-		return false, nil
-	}
-	if err = os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		return false, err
-	}
-	if err = writeFileAtomicSync(target, replacement, 0644); err != nil {
-		return false, err
-	}
-	return true, nil
+	return index.swap(context.Background(), key, expected, replacement, false)
 }
 
 // Changes may gain stronger observed facts after reconstruction. Immutable

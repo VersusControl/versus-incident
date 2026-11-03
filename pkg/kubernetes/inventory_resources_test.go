@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -20,6 +21,7 @@ func TestColdInventoryViewsOnlyReportSyncing(t *testing.T) {
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
 	service.SetChangeStorage(storage.NewMemory())
+	service.changes.evidenceEnabled = true
 	defer service.StopCapture()
 	overview, err := service.Overview(t.Context())
 	if err != nil || overview.Sync.State != "syncing" || overview.Sync.Partial || overview.Truncated || len(overview.Partial) > 0 {
@@ -38,7 +40,7 @@ func TestColdInventoryViewsOnlyReportSyncing(t *testing.T) {
 		t.Fatalf("cold nodes=%+v %v", page, err)
 	}
 	crashes, err := service.Crashes(t.Context(), kubechanges.CrashQuery{})
-	if err != nil || crashes.Sync.State != "syncing" || crashes.Sync.Partial {
+	if !errors.Is(err, storage.ErrUnsupported) && !errors.Is(err, errHistoryNotEstablished) || len(crashes.Items) != 0 {
 		t.Fatalf("cold crashes=%+v %v", crashes, err)
 	}
 	if reads.Load() != 0 {

@@ -245,8 +245,19 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 					t.Errorf("terminal live Issues: count=%d err=%v", len(deniedIssues.Items), err)
 				}
 				deniedHistory, err := service.Issues(t.Context(), IssueOptions{Since: since, Until: time.Now().UTC()})
-				if !errors.Is(err, ErrForbidden) || len(deniedHistory.Items) != 0 {
+				if scenario == "all" && (!errors.Is(err, ErrForbidden) || len(deniedHistory.Items) != 0) || scenario != "all" && err != nil && !errors.Is(err, ErrForbidden) {
 					t.Errorf("terminal history: count=%d err=%v", len(deniedHistory.Items), err)
+				}
+				for _, item := range deniedHistory.Items {
+					source := item.Root.Kind
+					if strings.HasPrefix(item.Rule, "pod.") {
+						source = "Pod"
+					} else if strings.HasPrefix(item.Rule, "event.") {
+						source = "Event"
+					}
+					if source == "Pod" || source == "Deployment" {
+						t.Errorf("denied source metadata exposed through retained issue: rule=%s", item.Rule)
+					}
 				}
 				after, afterRecord, err := readInventoryGeneration(provider, scope, "")
 				if err != nil {

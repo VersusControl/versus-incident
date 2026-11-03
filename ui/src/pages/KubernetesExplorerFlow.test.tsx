@@ -497,7 +497,7 @@ describe("Persisted root identity independent of historical windows", () => {
     await screen.findByRole("button", { name: "Retry root context" });
     expect(screen.queryByRole("region", { name: "Logs at break" })).toBeNull();
     expect(logs).not.toHaveBeenCalled();
-    expect(changes).not.toHaveBeenCalled();
+    expect(changes).toHaveBeenCalledTimes(1);
   });
 
   it("keeps persisted identity when the selected window predates capture, without inventing markers or totals", async () => {
@@ -540,8 +540,8 @@ describe("Persisted root identity independent of historical windows", () => {
     await screen.findByText(partial ? "Retained root context is incomplete." : "No retained root context for this selection.");
     expect(screen.queryByText(/Root not found/)).toBeNull();
     expect(screen.queryByText("No captured markers in this range.")).toBeNull();
-    expect(changes).not.toHaveBeenCalled();
-    expect(crashes).not.toHaveBeenCalled();
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(crashes).toHaveBeenCalledTimes(1);
   });
 
   it.each(["root UID", "occurrence UID", "namespace", "identity name"])("rejects mismatched persisted context: %s", async mismatch => {
@@ -559,8 +559,8 @@ describe("Persisted root identity independent of historical windows", () => {
     await screen.findByRole("button", { name: "Retry root context" });
     expect(screen.queryByText(/foreign-name|foreign-uid/)).toBeNull();
     expect(screen.queryByRole("region", { name: "Timeline lane checkout" })).toBeNull();
-    expect(changes).not.toHaveBeenCalled();
-    expect(crashes).not.toHaveBeenCalled();
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(crashes).toHaveBeenCalledTimes(1);
   });
 
   it("preserves persisted identity while reporting a separate historical-window error", async () => {
@@ -632,7 +632,7 @@ describe("Persisted root identity independent of historical windows", () => {
     expect(historyCounts().every((count, index) => count > beforeRetry[index])).toBe(true);
     expect(contextCalls().at(-1)?.[0]).toMatchObject({ context: "persisted", root_uid: "checkout-uid", namespace: explicitNamespace ? "shop" : undefined, center: issue.broke_at });
     expect(changes.mock.calls.at(-1)?.[0]).toEqual(selected);
-    expect(crashes.mock.calls.every(([options]) => options?.namespace === "shop")).toBe(true);
+    expect(crashes.mock.calls.every(([options]) => options?.root_uid === "checkout-uid" && (!options.namespace || options.namespace === "shop"))).toBe(true);
     expect(client.getQueryData(contextKey)).toMatchObject({ items: [], totals: {}, root_context: { retained: true } });
     expect(client.getQueryData(otherKey)).toEqual({ identity: "unaffected" });
     expect(related).not.toHaveBeenCalled();

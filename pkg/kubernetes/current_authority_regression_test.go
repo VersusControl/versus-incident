@@ -216,7 +216,11 @@ func TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood(
 					return false
 				}
 				_, fresh, err := readInventoryGeneration(provider, originalScope, "")
-				return err == nil && fresh.Revision != record.Revision
+				if err != nil || fresh.Revision == record.Revision {
+					return false
+				}
+				page, err := service.Issues(t.Context(), IssueOptions{Since: since, Until: time.Now().UTC()})
+				return err == nil && len(page.Items) > 0
 			})
 			recovered, err := service.Workloads(t.Context(), WorkloadListOptions{})
 			if err != nil || len(recovered.Items) == 0 {
@@ -224,7 +228,8 @@ func TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood(
 			}
 			recoveredHistory, err := service.Issues(t.Context(), IssueOptions{Since: since, Until: time.Now().UTC()})
 			if err != nil || len(recoveredHistory.Items) == 0 {
-				t.Fatalf("history did not recover under current authority: %+v %v", recoveredHistory, err)
+				_, proof, _ := service.persistedHistoryScope(t.Context())
+				t.Fatalf("history did not recover under current authority: %+v %v code=%s pod=%+v deployment=%+v", recoveredHistory, err, DiagnoseError(err).Code, proof.Authority["Pod"], proof.Authority["Deployment"])
 			}
 			_, priorSecret, err := readInventoryGeneration(provider, originalScope, "")
 			if err != nil {

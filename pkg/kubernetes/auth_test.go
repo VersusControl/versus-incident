@@ -6,12 +6,15 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,10 +22,412 @@ import (
 	"time"
 
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
+
+func TestSelfSubjectReviewRejectsUnprovedEnvelopesAndAnonymous(t *testing.T) {
+	for _, tc := range []struct {
+		name, version, kind, username string
+	}{
+		{"missing-envelope", "", "", "reader"},
+		{"wrong-version", "v1", "SelfSubjectReview", "reader"},
+		{"wrong-kind", "authentication.k8s.io/v1", "Status", "reader"},
+		{"anonymous", "authentication.k8s.io/v1", "SelfSubjectReview", "system:anonymous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": tc.version, "kind": tc.kind, "status": map[string]any{"userInfo": map[string]any{"username": tc.username}}})
+			}))
+			defer server.Close()
+			service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "review"})
+			if principal, err := service.client.selfSubjectPrincipal(t.Context(), "Bearer test", nil); err == nil || principal != "" {
+				t.Fatalf("unproved principal accepted: %q, %v", principal, err)
+			}
+			service.client.credentials = &credentialSource{authorization: func(context.Context) (string, error) { return "Bearer test", nil }}
+			err := service.acceptCredential(t.Context(), "Bearer test")
+			if service.identity.known {
+				t.Fatal("invalid review proved principal equivalence")
+			}
+			if tc.username == "system:anonymous" && (!errors.Is(err, ErrUnauthorized) || service.identity.ctx.Err() == nil || service.historyPrincipal() != "") {
+				t.Fatal("authenticated source accepted anonymous authority")
+			}
+		})
+	}
+}
+
+func TestUnsupportedSelfSubjectReviewIsCachedOnlyForAcceptedMaterial(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusForbidden} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "review"})
+			service.client.credentials = &credentialSource{authorization: func(context.Context) (string, error) { return "Bearer first", nil }}
+			service = NewService(service.client, service.Scope(), 0)
+			for range 4 {
+				if err := service.validateCredential(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if calls.Load() != 1 || service.identity.known {
+				t.Fatalf("unsupported review retried or guessed principal: calls=%d", calls.Load())
+			}
+			generation := service.identity.requestGeneration.Load()
+			if err := service.acceptCredential(t.Context(), "Bearer second"); !errors.Is(err, ErrCredentialUnavailable) {
+				t.Fatalf("unproved replacement accepted: %v", err)
+			}
+			if calls.Load() != 2 || service.identity.requestGeneration.Load() != generation || service.identity.ctx.Err() == nil {
+				t.Fatal("changed material skipped review or escaped retirement fence")
+			}
+		})
+	}
+}
+
+func TestHistoryScopePointerCannotCrossOrgOrTrustStoredOrg(t *testing.T) {
+	provider := storage.NewMemory()
+	first := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "first", ClusterID: "same"})
+	first.SetChangeStorage(provider)
+	first.changes.evidenceEnabled = true
+	second := first.Scoped(Scope{OrgID: "second", ClusterID: "same"})
+	if first.historyScopeKey() == second.historyScopeKey() {
+		t.Fatal("history pointer is not org-bound")
+	}
+	scope := storage.EvidenceScope{OrgID: "first", ClusterID: "same", ClusterUID: "protected-physical"}
+	if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, storage.EvidenceBatch{ID: "first", Epoch: "test", At: time.Now().UTC(), Principal: first.historyPrincipal(), Authority: map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: time.Now().UTC()}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.rememberHistoryScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _, err := second.persistedHistoryScope(t.Context())
+	if !errors.Is(err, errHistoryNotEstablished) || resolved.ClusterUID != "" {
+		t.Fatalf("other org learned physical history identity: %+v, %v", resolved, err)
+	}
+	raw, err := json.Marshal(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.WriteBlob(second.historyScopeKey(), raw); err != nil {
+		t.Fatal(err)
+	}
+	if resolved, _, err := second.persistedHistoryScope(t.Context()); !errors.Is(err, errHistoryAuthority) || resolved.ClusterUID != "" {
+		t.Fatalf("stored org was silently rewritten or exposed: %+v, %v", resolved, err)
+	}
+	if err := second.rememberHistoryScope(scope); !errors.Is(err, errHistoryAuthority) {
+		t.Fatalf("foreign pointer was published: %v", err)
+	}
+	second.denyHistoryAuthority(t.Context(), "/api/v1/pods", false)
+	cp, err := provider.(storage.EvidenceStore).EvidenceCheckpoint(t.Context(), scope)
+	if err != nil || cp.Authority["Pod"].State != "allowed" {
+		t.Fatal("foreign pointer redirected denial persistence across orgs")
+	}
+}
+
+func TestRevokedCredentialPersistsDenialWithoutInventoryCache(t *testing.T) {
+	service := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "default", ClusterID: "revoked"})
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.changes.evidenceEnabled = true
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "revoked", ClusterUID: "physical"}
+	principal := service.historyPrincipal()
+	if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, storage.EvidenceBatch{ID: "committed", Epoch: "test", At: time.Now().UTC(), Principal: principal, Authority: map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: time.Now().UTC()}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.rememberHistoryScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	service.identity.cancel()
+	service.denyHistoryAuthority(t.Context(), "/api/v1/pods", true)
+	cp, err := provider.(storage.EvidenceStore).EvidenceCheckpoint(t.Context(), scope)
+	if err != nil || cp.Authority["Pod"].State != "denied" {
+		t.Fatalf("retirement prevented durable denial: %+v, %v", cp.Authority, err)
+	}
+}
+
+func TestHistoryDenialBeforeFirstCommitOutranksMissingProof(t *testing.T) {
+	for _, state := range []string{"unestablished", "revoked", "forbidden", "unauthorized"} {
+		t.Run(state, func(t *testing.T) {
+			service := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "default", ClusterID: "empty"})
+			service.SetChangeStorage(storage.NewMemory())
+			service.changes.evidenceEnabled = true
+			want := errHistoryAuthority
+			switch state {
+			case "unestablished":
+				want = errHistoryNotEstablished
+			case "revoked":
+				service.identity.cancel()
+			default:
+				service.denyHistoryAuthority(t.Context(), "/api/v1/pods", state == "unauthorized")
+			}
+			page, err := service.persistedHistoryQuery(t.Context(), storage.EvidenceQuery{})
+			if !errors.Is(err, want) || len(page.Items) != 0 {
+				t.Fatalf("precommit authority=%v, items=%d; want %v", err, len(page.Items), want)
+			}
+			if _, err := service.CommitStatus(t.Context()); !errors.Is(err, want) {
+				t.Fatalf("commit status authority=%v; want %v", err, want)
+			}
+		})
+	}
+}
+
+func TestHistoryWithoutKindAuthorityCannotExposeStoredPayload(t *testing.T) {
+	service := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "default", ClusterID: "protected"})
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.changes.evidenceEnabled = true
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "protected", ClusterUID: "physical"}
+	at := time.Now().UTC()
+	change := Change{ID: "protected", Cluster: "protected", Kind: "Pod", Namespace: "private", Name: "protected", UID: "pod", RootUID: "root", Type: kubechanges.Created, Source: "observed", At: at}
+	raw, err := json.Marshal(change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := storage.EvidenceRecord{ID: "change:protected", Type: "change", Kind: "Pod", Namespace: "private", Name: "protected", UID: "pod", RootUID: "root", Rule: string(change.Type), At: at, ObservedAt: at, Epoch: "test", Payload: raw}
+	if service.projectEvidence(record).Type != "change" {
+		t.Fatal("fixture is not a valid protected payload")
+	}
+	if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, storage.EvidenceBatch{ID: "committed", At: at, Epoch: "test", Principal: service.historyPrincipal(), Records: []storage.EvidenceRecord{record}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.rememberHistoryScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	// Prove the fixture contains a payload before testing authority filtering.
+	stored, err := provider.(storage.EvidenceStore).QueryEvidence(t.Context(), scope, storage.EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Minute)})
+	if err != nil || len(stored.Items) != 1 {
+		t.Fatalf("protected fixture was not stored: items=%d, %v", len(stored.Items), err)
+	}
+	page, err := service.persistedHistoryQuery(t.Context(), storage.EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Minute)})
+	if err != nil && !errors.Is(err, errHistoryAuthority) && !errors.Is(err, errHistoryNotEstablished) {
+		t.Fatal(err)
+	}
+	for _, item := range page.Items {
+		if item.Type != "coverage_gap" || item.Namespace != "" || item.Name != "" || item.UID != "" || item.RootUID != "" || strings.Contains(string(item.Payload), "protected") || strings.Contains(string(item.Payload), "private") {
+			t.Fatal("missing kind authority exposed protected payload")
+		}
+	}
+	if err := service.persistedPodAuthority(t.Context(), "private"); !errors.Is(err, errHistoryAuthority) {
+		t.Fatalf("saved log payload accepted missing authority: %v", err)
+	}
+}
+
+func TestNamespaceFallbackRetainsGlobalDenialWithRealScopedProofTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/namespaces/allowed/pods") {
+			t.Errorf("unexpected fallback request: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "PodList", "metadata": map[string]any{}, "items": []any{}})
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "fallback"})
+	service.SetChangeStorage(storage.NewMemory())
+	service.changes.evidenceEnabled = true
+	cycleStart := time.Now().Add(-time.Minute).UTC()
+	deniedAt := time.Now().UTC()
+	service.rememberHistoryDenials(storage.EvidenceScope{OrgID: "default", ClusterID: "fallback"}, service.historyPrincipal(), map[string]storage.EvidenceAuthority{"Pod": {State: "denied", ProvedAt: deniedAt}})
+	generation := inventoryGeneration{View: kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "error", Error: "forbidden", LastAttemptAt: cycleStart}}}}
+	cache := &inventoryCache{namespaces: map[string]bool{"allowed": true}}
+	ctx := context.WithValue(t.Context(), indexDefinitionContextKey{}, map[string]ResourceDefinition{"Pod": {Version: "v1", Resource: "pods", Kind: "Pod", Namespaced: true}})
+	started := time.Now().UTC()
+	if err := service.collectScopedInventory(ctx, cache, &generation, []string{"Pod"}, cycleStart); err != nil {
+		t.Fatal(err)
+	}
+	finished := time.Now().UTC()
+	proofs := historyProofs(generation)
+	if proofs["Pod"].State != "denied" {
+		t.Fatal("namespace fallback erased cluster-wide denial")
+	}
+	scoped := proofs["Pod@allowed"]
+	if scoped.State != "allowed" || scoped.ProvedAt.Before(started) || scoped.ProvedAt.After(finished) {
+		t.Fatalf("scoped proof has manufactured or cycle-start freshness: %+v", scoped)
+	}
+	cp := storage.EvidenceCheckpoint{Authority: proofs}
+	service.overlayHistoryDenials(storage.EvidenceScope{OrgID: "default", ClusterID: "fallback"}, service.historyPrincipal(), &cp)
+	if effectiveHistoryProof(cp, "Pod", "allowed").State != "allowed" || effectiveHistoryProof(cp, "Pod", "other").State != "denied" {
+		t.Fatal("actual later scoped proof did not supersede global denial only in its namespace")
+	}
+	// Reusing a prior scoped snapshot must not re-date its proof.
+	stale := generation.Namespaces["allowed"].Kinds["Pod"]
+	stale.ObservedAt = cycleStart
+	snapshot := generation.Namespaces["allowed"]
+	snapshot.Kinds["Pod"] = stale
+	generation.Namespaces["allowed"] = snapshot
+	cp.Authority = historyProofs(generation)
+	service.overlayHistoryDenials(storage.EvidenceScope{OrgID: "default", ClusterID: "fallback"}, service.historyPrincipal(), &cp)
+	if effectiveHistoryProof(cp, "Pod", "allowed").State != "denied" {
+		t.Fatal("older namespace proof escaped positive denial")
+	}
+}
+
+func TestCertificateReviewAndRequestsPinAcceptedMaterial(t *testing.T) {
+	first := &tls.Certificate{Certificate: [][]byte{[]byte("accepted")}}
+	second := &tls.Certificate{Certificate: [][]byte{[]byte("replacement")}}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return second, nil }}}
+	client := &Client{http: &http.Client{Transport: transport, Timeout: time.Second}}
+	pinned, closeTransport, err := client.certificateHTTP(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTransport()
+	fixed := pinned.Transport.(*http.Transport)
+	certificate, err := fixed.TLSClientConfig.GetClientCertificate(&tls.CertificateRequestInfo{})
+	if err != nil || certificate != first || !fixed.DisableKeepAlives {
+		t.Fatal("certificate review could reuse another credential's connection")
+	}
+	if pinned.Timeout != time.Second || transport.DisableKeepAlives {
+		t.Fatal("request pinning mutated shared client")
+	}
+	if _, _, err = (*Client)(nil).certificateHTTP(first); !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatal("nil client accepted")
+	}
+}
+
+func TestDelayedCredentialDenialCannotRetireVerifiedReplacement(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			started, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/selfsubjectreviews") {
+					_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview", "status": map[string]any{"userInfo": map[string]any{"username": "verified", "uid": "identity", "groups": []string{"readers"}}}})
+					return
+				}
+				close(started)
+				<-release
+				http.Error(w, "old request", status)
+			}))
+			defer server.Close()
+			defer releaseOnce.Do(func() { close(release) })
+			service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "rotation"})
+			var bearer atomic.Value
+			bearer.Store("Bearer original")
+			service.client.credentials = &credentialSource{authorization: func(context.Context) (string, error) { return bearer.Load().(string), nil }}
+			if err := service.acceptCredential(t.Context(), "Bearer original"); err != nil {
+				t.Fatal(err)
+			}
+			provider := storage.NewMemory()
+			service.SetChangeStorage(provider)
+			service.changes.evidenceEnabled = true
+			scope := storage.EvidenceScope{OrgID: "default", ClusterID: "rotation", ClusterUID: "physical"}
+			at := time.Now().UTC()
+			principal := service.historyPrincipal()
+			if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, storage.EvidenceBatch{ID: "proof", At: at, Epoch: "stable", Principal: principal, Authority: map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: at}}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := service.rememberHistoryScope(scope); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := service.credentialContext(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				var result struct {
+					Items []json.RawMessage `json:"items"`
+				}
+				done <- service.client.GetMetadataJSON(ctx, "/api/v1/pods", &result)
+			}()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("request did not start")
+			}
+			bearer.Store("Bearer replacement")
+			if err := service.acceptCredential(t.Context(), "Bearer replacement"); err != nil {
+				t.Fatal(err)
+			}
+			releaseOnce.Do(func() { close(release) })
+			if err := <-done; err == nil {
+				t.Fatal("old failing response unexpectedly succeeded")
+			}
+			if service.identity.ctx.Err() != nil || service.historyPrincipal() != principal {
+				t.Fatal("old response retired replacement")
+			}
+			cp, err := provider.(storage.EvidenceStore).EvidenceCheckpoint(t.Context(), scope)
+			if err != nil || cp.Authority["Pod"].State != "allowed" {
+				t.Fatal("old response revoked replacement authority")
+			}
+		})
+	}
+}
+
+func TestUnverifiedProviderHintCannotProvePrincipalEquivalence(t *testing.T) {
+	now := time.Now().UTC()
+	token := "first"
+	source := &expiringBearerSource{principal: "configured-client-id", now: func() time.Time { return now }, refresh: func(context.Context) (string, time.Time, error) { return token, now.Add(time.Minute), nil }}
+	service := NewService(&Client{credentials: source}, Scope{OrgID: "default", ClusterID: "unknown"}, 0)
+	if service.identity.known {
+		t.Fatal("configured provider identity became proof")
+	}
+	now = now.Add(2 * time.Minute)
+	token = "replacement"
+	if err := service.validateCredential(t.Context()); !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatalf("unproved bearer change retained epoch: %v", err)
+	}
+	if service.identity.ctx.Err() == nil {
+		t.Fatal("unproved principal retained live inventory")
+	}
+}
+
+func TestSelfSubjectReviewProvesCompletePrincipalEquivalence(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apis/authentication.k8s.io/v1/selfsubjectreviews" || r.Method != http.MethodPost {
+			t.Error("unexpected identity request")
+			http.NotFound(w, r)
+			return
+		}
+		calls.Add(1)
+		groups := []string{"team-a", "system:authenticated"}
+		if r.Header.Get("Authorization") == "Bearer renewed" {
+			groups = []string{"system:authenticated", "team-a"}
+		}
+		if r.Header.Get("Authorization") == "Bearer changed" {
+			groups = []string{"system:authenticated", "team-b"}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview", "status": map[string]any{"userInfo": map[string]any{"username": "same-subject", "uid": "principal-uid", "groups": groups, "extra": map[string][]string{"scope": {"a", "b"}}}}})
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "principal"})
+	service.client.credentials = &credentialSource{
+		authorization: func(context.Context) (string, error) { return "Bearer initial", nil },
+		certificate:   func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return nil, nil },
+	}
+	if err := service.acceptCredential(t.Context(), "Bearer initial"); err != nil {
+		t.Fatal(err)
+	}
+	identity := service.historyPrincipal()
+	if identity == "" {
+		t.Fatal("no verified history binding")
+	}
+	for i := 0; i < 3; i++ {
+		if err := service.acceptCredential(t.Context(), "Bearer initial"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("unchanged bearer repeated identity review: %d", calls.Load())
+	}
+	if err := service.acceptCredential(t.Context(), "Bearer renewed"); err != nil {
+		t.Fatal(err)
+	}
+	if service.historyPrincipal() != identity || service.identity.ctx.Err() != nil {
+		t.Fatal("equivalent verified principal retired epoch")
+	}
+	if err := service.acceptCredential(t.Context(), "Bearer changed"); !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatalf("same subject with different groups accepted: %v", err)
+	}
+	if service.historyPrincipal() != "" || service.identity.ctx.Err() == nil {
+		t.Fatal("principal change retained saved-history authority")
+	}
+}
 
 func TestExpiringBearerSourceRefreshesOnceWithSkew(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
@@ -410,6 +815,10 @@ func TestProjectedCaptureTransientRenewalPreservesOwnerUntilExpiry(t *testing.T)
 			started := make(chan struct{}, 1)
 			config, sign := projectedAuthFixture(t, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+					if request.URL.Path == "/apis/authentication.k8s.io/v1/selfsubjectreviews" {
+						http.NotFound(writer, request)
+						return
+					}
 					if unavailable.Load() && request.URL.Path == "/.well-known/openid-configuration" {
 						select {
 						case started <- struct{}{}:
@@ -1327,10 +1736,10 @@ func TestRejectedBearerRefreshCoalescesAndStaleRejectionCannotRetireSuccessor(t 
 
 func TestRecoveryCooldownSurvivesRequestWakesAndOnlyPublicationResets(t *testing.T) {
 	r := &clusterRecovery{}
-	r.failed(ErrCredentialUnavailable, nil)
+	r.failed(ErrCredentialUnavailable, nil, "org")
 	deadline := r.deadline()
 	for i := 0; i < 100; i++ {
-		r.failed(ErrCredentialUnavailable, nil)
+		r.failed(ErrCredentialUnavailable, nil, "org")
 	}
 	if !r.deadline().Equal(deadline) || r.failures != 1 {
 		t.Fatal("concurrent failures reset or multiplied cooldown")
@@ -1355,7 +1764,7 @@ func TestUncommittedCredentialReplacementsKeepTheirStableCooldown(t *testing.T) 
 		t.Fatal("success-less epoch changes reset replacement backoff")
 	}
 	reserved := recovery.deadline()
-	recovery.failed(ErrUnauthorized, nil)
+	recovery.failed(ErrUnauthorized, nil, "org")
 	if recovery.deadline().Before(reserved) {
 		t.Fatal("a rejection shortened the stable replacement cooldown")
 	}

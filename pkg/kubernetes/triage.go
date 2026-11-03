@@ -77,6 +77,8 @@ type BrokenTotals struct {
 }
 
 type IssuePage struct {
+	Authority          string                `json:"authority,omitempty"`
+	CountCapped        bool                  `json:"count_capped,omitempty"`
 	SelectedOccurrence *Issue                `json:"selected_occurrence,omitempty"`
 	SelectionStatus    string                `json:"selection_status,omitempty"`
 	RootContext        *PersistedRootContext `json:"root_context,omitempty"`
@@ -134,7 +136,14 @@ func (service *Service) Issues(ctx context.Context, options IssueOptions) (Issue
 	if options.OccurrenceID != "" || !options.Center.IsZero() {
 		return IssuePage{}, ErrInvalidArguments
 	}
-	if !options.Since.IsZero() || !options.Until.IsZero() {
+	currentCursor := options.Cursor != ""
+	for _, ch := range options.Cursor {
+		if ch < '0' || ch > '9' {
+			currentCursor = false
+			break
+		}
+	}
+	if !options.Since.IsZero() || !options.Until.IsZero() || options.Cursor != "" && !currentCursor {
 		if options.Severity != "" && options.Severity != "critical" && options.Severity != "warning" && options.Severity != "info" {
 			return IssuePage{}, ErrInvalidArguments
 		}
@@ -144,7 +153,7 @@ func (service *Service) Issues(ctx context.Context, options IssueOptions) (Issue
 		if options.Until.IsZero() && options.Cursor == "" {
 			options.Until = time.Now().UTC()
 		}
-		if options.Since.IsZero() || !options.Until.IsZero() && options.Since.After(options.Until) {
+		if options.Since.IsZero() && options.Cursor == "" || !options.Since.IsZero() && !options.Until.IsZero() && options.Since.After(options.Until) {
 			return IssuePage{}, ErrInvalidArguments
 		}
 		return service.historicalIssues(ctx, options)

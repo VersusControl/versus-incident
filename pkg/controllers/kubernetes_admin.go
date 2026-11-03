@@ -59,6 +59,7 @@ func (controller *KubernetesAdminController) Register(router fiber.Router) {
 	group.Get("/overview", controller.overview)
 	group.Get("/namespaces", controller.namespaces)
 	group.Get("/stream", controller.stream)
+	group.Get("/commits/stream", controller.commitStream)
 	group.Get("/changes", controller.changes)
 	group.Get("/timeline", controller.timeline)
 	group.Get("/crashes", controller.crashes)
@@ -121,7 +122,9 @@ func (controller *KubernetesAdminController) requireClusterView(ctx *fiber.Ctx, 
 	}
 	var service *kubernetes.Service
 	var err error
-	if controller != nil && controller.resolve != nil {
+	if persistedHistoryRequest(ctx) && controller != nil && controller.registry != nil {
+		service, err = controller.registry.LocalReportService(middleware.OrgFromContext(ctx), clusterID)
+	} else if controller != nil && controller.resolve != nil {
 		service, err = controller.resolve(middleware.OrgFromContext(ctx), clusterID)
 	}
 	if err != nil {
@@ -156,7 +159,7 @@ func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) e
 	if controller == nil || controller.registry == nil || len(controller.registry.Clusters()) == 0 {
 		return writeKubernetes(ctx, nil, kubernetes.ErrConnectorNotConfigured)
 	}
-	if !controller.registry.Multiple() {
+	if !controller.registry.Multiple() && !persistedHistoryRequest(ctx) {
 		// Resolving the org is where the credential is validated, so it is also
 		// where a configured cluster with a dead credential fails. That answer has
 		// to name the fault: "not configured" would send a surface to the setup
@@ -166,6 +169,91 @@ func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) e
 		}
 	}
 	return ctx.Next()
+}
+
+func persistedHistoryRequest(ctx *fiber.Ctx) bool {
+	path := ctx.Path()
+	return strings.HasSuffix(path, "/timeline") || strings.HasSuffix(path, "/changes") ||
+		strings.HasSuffix(path, "/crashes") || strings.HasSuffix(path, "/commits/stream") ||
+		strings.HasSuffix(path, "/break-logs") || strings.HasSuffix(path, "/issues") &&
+		(ctx.Query("context") == "persisted" || ctx.Query("since") != "" || ctx.Query("until") != "" || ctx.Query("cursor") != "")
+}
+
+func (controller *KubernetesAdminController) commitStream(ctx *fiber.Ctx) error {
+	service := requestKubernetesService(ctx)
+	streamContext := ctx.UserContext()
+	wakeup, unsubscribe, err := service.SubscribeCommitNotifications()
+	if err != nil {
+		return writeKubernetes(ctx, nil, err)
+	}
+	initial, err := service.CommitStatus(streamContext)
+	if err != nil {
+		unsubscribe()
+		return writeKubernetes(ctx, nil, err)
+	}
+	// Streams are short leases: reconnect runs the gateway, license, session,
+	// org and current role gates again. No request-buffer-backed strings escape.
+	ctx.Set(fiber.HeaderContentType, "text/event-stream")
+	ctx.Set(fiber.HeaderCacheControl, "no-cache, no-store")
+	ctx.Set("X-Accel-Buffering", "no")
+	ctx.Context().SetBodyStreamWriter(func(writer *bufio.Writer) {
+		defer unsubscribe()
+		write := func(event string, value any, id uint64) bool {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return false
+			}
+			if _, err = fmt.Fprintf(writer, "id: %d\nevent: %s\ndata: %s\n\n", id, event, raw); err != nil {
+				return false
+			}
+			return writer.Flush() == nil
+		}
+		last := initial
+		if !write("committed", initial, initial.Revision) {
+			return
+		}
+		poll := time.NewTicker(time.Second)
+		defer poll.Stop()
+		lease := time.NewTimer(30 * time.Second)
+		defer lease.Stop()
+		refresh := func() bool {
+			readCtx, cancel := context.WithTimeout(streamContext, 2*time.Second)
+			current, err := service.CommitStatus(readCtx)
+			cancel()
+			if err != nil {
+				return false
+			}
+			if current.Revision != last.Revision {
+				if !write("committed", current, current.Revision) {
+					return false
+				}
+				last = current
+			}
+			age := max(0, time.Since(current.At).Seconds())
+			state, reason := "ready", ""
+			if age > 120 {
+				state, reason = "refreshing", "collection_stale"
+			}
+			return write("sync", fiber.Map{"state": state, "age": age, "reason": reason, "cluster_id": current.ClusterID}, current.Revision)
+		}
+		for {
+			select {
+			case <-streamContext.Done():
+				return
+			case <-lease.C:
+				return
+			case <-poll.C:
+				if !refresh() {
+					return
+				}
+			case <-wakeup:
+				if !refresh() {
+					return
+				}
+			}
+		}
+	})
+	return nil
 }
 
 // requireReportPermission is the permission gate for a route whose answer is a
@@ -704,6 +792,12 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 		status = fiber.StatusNotFound
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, kubernetes.ErrOperationBudget):
 		status = fiber.StatusGatewayTimeout
+	}
+	switch detail.Code {
+	case "history_store_timeout", "history_store_unavailable", "history_not_established", "history_upgrading":
+		status = fiber.StatusServiceUnavailable
+	case "history_authority_denied", "authority_mismatch":
+		status = fiber.StatusForbidden
 	}
 	response := fiber.Map{
 		"error":     detail.Message,

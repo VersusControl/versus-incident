@@ -213,6 +213,8 @@ storage:
   # (preferred for production). Example DSN:
   #   postgres://user:pass@postgres:5432/versus?sslmode=require
   postgres:
+    maxOpenConns: 20
+    historyReadConcurrency: 8
     # Inline DSN — templated into the chart Secret under "postgres_dsn".
     dsn: ""
     # Reference an existing Secret instead (keeps the DSN out of the release).
@@ -222,6 +224,11 @@ storage:
 # AI SRE Agent (opt-in). When agent.enable=false (default) nothing
 # changes: no goroutines start, no AI calls are made, no extra config
 # blocks are rendered. See docs: src/agent/ai-detect-mode.md
+kubernetes:
+  evidence:
+    observationHeartbeat: 5m
+    retention: "0"
+
 agent:
   enable: false
   # training | shadow | detect

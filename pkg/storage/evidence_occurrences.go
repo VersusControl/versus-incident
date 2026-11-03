@@ -7,9 +7,72 @@ import (
 	"time"
 )
 
+func occurrenceCenterKey(issue EvidenceIssue) string {
+	var facts struct {
+		BrokeAt *time.Time `json:"broke_at"`
+	}
+	if json.Unmarshal(issue.Payload, &facts) != nil || facts.BrokeAt == nil {
+		return ""
+	}
+	return issue.UID + "\x00" + facts.BrokeAt.UTC().Format(time.RFC3339Nano)
+}
+
+func updateOccurrenceLookups(state *evidenceState) {
+	ids := state.updatedOccurrences
+	if state.RootLatest == nil {
+		state.RootLatest = map[string]string{}
+		ids = map[string]struct{}{}
+		for id := range state.Occurrences {
+			ids[id] = struct{}{}
+		}
+	}
+	if state.RootCenters == nil {
+		state.RootCenters = map[string][]string{}
+	}
+	for id := range ids {
+		issue := state.Occurrences[id]
+		prior := state.Occurrences[state.RootLatest[issue.UID]]
+		if prior.OccurrenceID == "" || issue.LastSeen.After(prior.LastSeen) || issue.LastSeen.Equal(prior.LastSeen) && id > prior.OccurrenceID {
+			state.RootLatest[issue.UID] = id
+		}
+		key := occurrenceCenterKey(issue)
+		if key == "" {
+			continue
+		}
+		found := false
+		for _, existing := range state.RootCenters[key] {
+			found = found || existing == id
+		}
+		if !found && len(state.RootCenters[key]) < 2 {
+			state.RootCenters[key] = append(state.RootCenters[key], id)
+		}
+	}
+}
+
+func lookupOccurrenceRecords(state evidenceState, query EvidenceQuery) []EvidenceRecord {
+	ids := []string{}
+	if query.OccurrenceID != "" {
+		ids = append(ids, query.OccurrenceID)
+	} else if !query.Center.IsZero() {
+		ids = append(ids, state.RootCenters[query.RootUID+"\x00"+query.Center.UTC().Format(time.RFC3339Nano)]...)
+	} else if id := state.RootLatest[query.RootUID]; id != "" {
+		ids = append(ids, id)
+	}
+	records := []EvidenceRecord{}
+	for _, id := range ids {
+		if issue, ok := state.Occurrences[id]; ok {
+			record := occurrenceRecord(issue, occurrenceObservation{At: issue.LastSeen, LastSeen: issue.LastSeen})
+			record.At = issue.FirstSeen
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
 // An observation contains freshness only. Full payloads are versioned only when
 // evidence or lifecycle changes; a query pins the revision before pagination.
 type occurrenceObservation struct {
+	Measurements          json.RawMessage `json:",omitempty"`
 	Revision              uint64
 	At, LastSeen          time.Time
 	OccurrenceID, Version string
@@ -33,11 +96,16 @@ func addOccurrenceObservation(state *evidenceState, issue EvidenceIssue, revisio
 	if issue.ClosedAt != nil && issue.ClosedAt.After(at) {
 		at = *issue.ClosedAt
 	}
-	state.Observations = append(state.Observations, occurrenceObservation{Revision: revision, At: at, LastSeen: issue.LastSeen, OccurrenceID: issue.OccurrenceID, Version: version})
+	state.Observations = append(state.Observations, occurrenceObservation{Revision: revision, At: at, LastSeen: issue.LastSeen, OccurrenceID: issue.OccurrenceID, Version: version, Measurements: issueMeasurements(issue.Payload)})
+	if state.LastObservations == nil {
+		state.LastObservations = map[string]time.Time{}
+	}
+	state.LastObservations[issue.OccurrenceID] = at
 }
 
 func occurrenceRecord(issue EvidenceIssue, observation occurrenceObservation) EvidenceRecord {
 	issue.LastSeen = observation.LastSeen
+	issue.Payload = overlayIssueMeasurements(issue.Payload, observation.Measurements)
 	raw, _ := json.Marshal(issue)
 	kind := "issue_opened"
 	if issue.ObservationOnly {
@@ -68,6 +136,9 @@ func occurrenceVariantMatches(issue EvidenceIssue, variant string) bool {
 func occurrenceRecords(state evidenceState, high uint64, query EvidenceQuery) ([]EvidenceRecord, error) {
 	latest := map[string]occurrenceObservation{}
 	for _, observation := range state.Observations {
+		if query.OccurrenceID != "" && observation.OccurrenceID != query.OccurrenceID {
+			continue
+		}
 		if observation.Revision > high || observation.At.After(query.Until) {
 			continue
 		}
@@ -82,12 +153,51 @@ func occurrenceRecords(state evidenceState, high uint64, query EvidenceQuery) ([
 		if !ok {
 			return nil, ErrInvalidEvidence
 		}
-		records = append(records, occurrenceRecord(issue, observation))
+		if !query.Center.IsZero() {
+			var payload struct {
+				BrokeAt *time.Time `json:"broke_at"`
+			}
+			if json.Unmarshal(issue.Payload, &payload) != nil || payload.BrokeAt == nil || !payload.BrokeAt.Equal(query.Center) {
+				continue
+			}
+		}
+		record := occurrenceRecord(issue, observation)
+		record.At = issue.FirstSeen
+		records = append(records, record)
 	}
 	return records, nil
 }
 
 func pruneOccurrenceVersions(state *evidenceState) {
+	observed := map[string]bool{}
+	active := map[string]bool{}
+	for _, observation := range state.Observations {
+		observed[observation.OccurrenceID] = true
+	}
+	for _, issue := range state.Active {
+		active[issue.OccurrenceID] = true
+	}
+	removed := false
+	for id, issue := range state.Occurrences {
+		if active[id] || observed[id] {
+			continue
+		}
+		delete(state.Occurrences, id)
+		at := issue.LastSeen
+		if issue.ClosedAt != nil && issue.ClosedAt.After(at) {
+			at = *issue.ClosedAt
+		}
+		if at.After(state.Checkpoint.PrunedThrough) {
+			state.Checkpoint.PrunedThrough = at
+		}
+		state.Checkpoint.PruneRevision++
+		removed = true
+	}
+	if removed {
+		state.RootLatest = nil
+		state.RootCenters = nil
+		updateOccurrenceLookups(state)
+	}
 	referenced := map[string]bool{}
 	for _, observation := range state.Observations {
 		referenced[observation.Version] = true

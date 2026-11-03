@@ -152,30 +152,45 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	if service.scrubber == nil {
 		return BreakLogPage{}, ErrClusterUnavailable
 	}
-	if err := service.validateCredential(ctx); err != nil {
+	now := service.observationNow()
+	// This answer contains no protected identity or retained data.
+	if query.From.After(now) && query.OccurrenceID == "" && query.Center.IsZero() && query.Cursor == "" {
+		return BreakLogPage{Window: BreakLogWindow{query.From, query.To}, Pods: []BreakLogPod{}, Lines: []BreakLogLine{}, Markers: []BreakLogMarker{}, Rate: []BreakLogRate{}, Patterns: []BreakLogPattern{}, Sources: []BreakLogSource{}, Containers: []BreakLogContainer{}, Container: breaklogs.AllContainers, Coverage: breaklogs.Coverage{State: "pending", Reason: "pending", Gaps: []breaklogs.Gap{{From: query.From, To: query.To, Reason: "pending"}}}}, nil
+	}
+	if err := service.authorizeBreakLogHistory(ctx, query.Namespace); err != nil {
 		return BreakLogPage{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, credentialEpochContextKey{}, service)
-	now := service.observationNow()
 	store := service.changeStore()
 	if store == nil {
 		return BreakLogPage{}, ErrClusterUnavailable
 	}
 
-	// A future-only root window exposes no inventory or retained evidence.
-	if query.From.After(now) && query.OccurrenceID == "" && query.Center.IsZero() && query.Cursor == "" {
-		return BreakLogPage{Window: BreakLogWindow{query.From, query.To}, Pods: []BreakLogPod{}, Lines: []BreakLogLine{}, Markers: []BreakLogMarker{}, Rate: []BreakLogRate{}, Patterns: []BreakLogPattern{}, Sources: []BreakLogSource{}, Containers: []BreakLogContainer{}, Container: breaklogs.AllContainers, Coverage: breaklogs.Coverage{State: "pending", Reason: "pending", Gaps: []breaklogs.Gap{{From: query.From, To: query.To, Reason: "pending"}}}}, nil
+	var snapshot kubeindex.Snapshot
+	refreshErr := error(ErrInventoryNotReady)
+	if service.evidenceStore() == nil {
+		snapshot, _, refreshErr = service.IndexSnapshot(ctx, "Pod", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob")
+	} else {
+		service.changes.mu.Lock()
+		cache := service.changes.inventories[service.indexScope()]
+		service.changes.mu.Unlock()
+		if cache != nil {
+			cache.mu.RLock()
+			snapshot = cache.generation.View
+			cache.mu.RUnlock()
+		}
+		// Native kubelet reads belong to the capture worker, not a saved-history
+		// request. Retained manifests remain usable even with no live snapshot.
 	}
-	snapshot, _, refreshErr := service.IndexSnapshot(ctx, "Pod", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob")
 	ctx = captureReadContext(ctx, "")
 	state, err := store.BreakLogs(now)
 	if err != nil {
 		return BreakLogPage{}, err
 	}
 	// Every response can carry protected identities, markers or retained gaps.
-	if err := service.authorizeEvidenceKind(ctx, query.Namespace, "core~v1~pods"); err != nil {
+	if err := service.authorizeBreakLogHistory(ctx, query.Namespace); err != nil {
 		clearLinkedCache()
 		return BreakLogPage{}, err
 	}
@@ -707,10 +722,7 @@ func (service *Service) BreakLogs(ctx context.Context, query breaklogs.Query) (B
 	if stop < len(filtered) {
 		page.Next = breaklogs.NextCursor(scope, query, digest, stop, observed)
 	}
-	if err := service.validateCredential(ctx); err != nil {
-		return BreakLogPage{}, err
-	}
-	if err := service.authorizeEvidenceKind(ctx, query.Namespace, "core~v1~pods"); err != nil {
+	if err := service.authorizeBreakLogHistory(ctx, query.Namespace); err != nil {
 		clearLinkedCache()
 		return BreakLogPage{}, err
 	}

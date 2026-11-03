@@ -315,10 +315,10 @@ func (service *Service) resolveBreakLogSelection(ctx context.Context, query brea
 		selected = manifest
 	}
 	if selected != nil {
-		if !query.Center.IsZero() && !query.Center.Equal(selected.BreakAt) {
+		if query.OccurrenceID == "" && !query.Center.IsZero() && !query.Center.Equal(selected.BreakAt) {
 			return query, ErrInvalidArguments
 		}
-		if err := service.authorizeEvidenceKind(ctx, query.Namespace, "core~v1~pods"); err != nil {
+		if err := service.authorizeBreakLogHistory(ctx, query.Namespace); err != nil {
 			return query, err
 		}
 		query.Center = selected.BreakAt
@@ -327,7 +327,7 @@ func (service *Service) resolveBreakLogSelection(ctx context.Context, query brea
 		if err != nil {
 			return query, err
 		}
-		if resolved.SelectedOccurrence == nil || resolved.SelectedOccurrence.BrokeAt == nil || !query.Center.IsZero() && !query.Center.Equal(*resolved.SelectedOccurrence.BrokeAt) {
+		if resolved.SelectedOccurrence == nil || resolved.SelectedOccurrence.BrokeAt == nil || query.OccurrenceID == "" && !query.Center.IsZero() && !query.Center.Equal(*resolved.SelectedOccurrence.BrokeAt) {
 			return query, ErrInvalidArguments
 		}
 		query.Center = *resolved.SelectedOccurrence.BrokeAt
@@ -430,11 +430,7 @@ func supplementLinkedPods(manifest []breaklogs.ManifestPod, snapshots []breaklog
 // readLinkedBreak returns only scrubbed, lifetime-verified lines. The same
 // planner is used by detail and settle; neither path bypasses namespace proof.
 func (service *Service) readLinkedBreak(ctx context.Context, query breaklogs.Query, pods []breaklogs.ManifestPod, settings breaklogs.CaptureSettings, source breaklogs.Source, cache bool, versions ...string) ([]BreakLogLine, breaklogs.Result, error) {
-	if err := service.validateCredential(ctx); err != nil {
-		clearLinkedCache()
-		return nil, breaklogs.Result{}, err
-	}
-	if err := service.authorizeEvidenceKind(ctx, query.Namespace, "core~v1~pods"); err != nil {
+	if err := service.authorizeBreakLogHistory(ctx, query.Namespace); err != nil {
 		clearLinkedCache()
 		return nil, breaklogs.Result{}, err
 	}
@@ -551,7 +547,7 @@ func (service *Service) readLinkedBreak(ctx context.Context, query breaklogs.Que
 		if invalid {
 			result.Rejected, result.Complete = true, nil
 		}
-		if err := service.validateCredential(ctx); err != nil {
+		if err := service.authorizeBreakLogHistory(ctx, query.Namespace); err != nil {
 			clearLinkedCache()
 			return nil, breaklogs.Result{}, err
 		}
@@ -584,11 +580,11 @@ func (service *Service) readLinkedBreak(ctx context.Context, query breaklogs.Que
 		seen[string(id)] = true
 		lines = append(lines, BreakLogLine{At: line.At, Pod: pod.Name, PodUID: pod.UID, Container: container.Name, Init: container.Init, Slot: slot, Level: breaklogs.Level(text), Text: text, Source: "linked"})
 	}
-	if err := service.authorizeEvidenceKind(ctx, query.Namespace, "core~v1~pods"); err != nil {
+	if err := service.authorizeBreakLogHistory(ctx, query.Namespace); err != nil {
 		clearLinkedCache()
 		return nil, breaklogs.Result{}, err
 	}
-	return lines, result, service.validateCredential(ctx)
+	return lines, result, nil
 }
 
 func brokenManifestPod(pod breaklogs.ManifestPod) bool {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -289,6 +290,13 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 	}
 	request.Header.Set("Accept", "*/*")
 	authGeneration := client.authGeneration.Load()
+	var requestService *Service
+	var requestGeneration uint64
+	var certificate *tls.Certificate
+	if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
+		requestService = service
+		requestGeneration = service.identity.requestGeneration.Load()
+	}
 	if client.credentials != nil {
 		credentialContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 		authorization, credentialErr := client.credentials.Authorization(credentialContext)
@@ -297,13 +305,25 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 			return nil, ErrCredentialUnavailable
 		}
 		if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
-			if err := service.acceptCredential(ctx, authorization); err != nil {
+			accepted, pinned, err := service.acceptCredentialForRequest(ctx, authorization)
+			if err != nil {
 				return nil, err
+			}
+			requestService, requestGeneration, certificate = service, accepted, pinned
+		} else {
+			certificate, err = client.credentials.ClientCertificate(&tls.CertificateRequestInfo{})
+			if err != nil {
+				return nil, ErrCredentialUnavailable
 			}
 		}
 		request.Header.Set("Authorization", authorization)
 	}
-	response, err := client.streamHTTP.Do(request)
+	streamClient, closeTransport, err := client.certificateHTTP(certificate, client.streamHTTP)
+	if err != nil {
+		return nil, err
+	}
+	defer closeTransport()
+	response, err := streamClient.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -315,8 +335,10 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 	}
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
-		if response.StatusCode == http.StatusUnauthorized {
-			client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx))
+		if response.StatusCode == http.StatusUnauthorized && (requestService == nil || requestService.identity.requestGeneration.Load() == requestGeneration) {
+			if client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx)) && requestService != nil {
+				requestService.denyHistoryAuthority(ctx, apiPath, true)
+			}
 		}
 		if previous && response.StatusCode == http.StatusBadRequest {
 			body, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))

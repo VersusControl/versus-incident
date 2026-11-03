@@ -57,6 +57,10 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 	}
 	var denyProof atomic.Bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if denyProof.Load() && (strings.HasSuffix(r.URL.Path, "/statefulsets") || strings.HasSuffix(r.URL.Path, "/daemonsets")) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		if strings.Contains(r.Header.Get("Accept"), "as=PartialObjectMetadataList") && strings.Contains(r.URL.Path, "/namespaces/payments/") && (strings.HasSuffix(r.URL.Path, "/statefulsets") || strings.HasSuffix(r.URL.Path, "/daemonsets")) {
 			if denyProof.Load() {
 				http.Error(w, "forbidden", http.StatusForbidden)
@@ -144,7 +148,7 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 		}
 		change := kubechanges.Change{ID: fmt.Sprintf("synthetic-change-%03d", i), Cluster: "cluster", Kind: "Pod", Namespace: namespace, Name: "synthetic", UID: fmt.Sprintf("synthetic-history-%03d", i), Type: kubechanges.ImageChanged, At: now.Add(-time.Second)}
 		raw, _ := json.Marshal(change)
-		batch.Records = append(batch.Records, storage.EvidenceRecord{ID: change.ID, Type: "change", Kind: change.Kind, Namespace: change.Namespace, UID: change.UID, At: change.At, ObservedAt: now, Epoch: "synthetic", Payload: raw})
+		batch.Records = append(batch.Records, storage.EvidenceRecord{AuthorizationKind: "Pod", ID: "change:" + change.ID, Type: "change", Kind: change.Kind, Name: change.Name, Namespace: change.Namespace, UID: change.UID, Rule: string(change.Type), At: change.At, ObservedAt: now, Epoch: "synthetic", Payload: raw})
 	}
 	for attempt := 0; attempt < 8; attempt++ {
 		checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
@@ -152,6 +156,7 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 			t.Fatal(err)
 		}
 		batch.Expected, batch.Generation = checkpoint.ID, checkpoint.Generation
+		batch.Principal = checkpoint.Principal
 		if batch.At.Before(checkpoint.At) {
 			batch.At = checkpoint.At
 		}
@@ -262,6 +267,22 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 		}
 	}
 	denyProof.Store(true)
+	deadline = time.Now().Add(25 * time.Second)
+	for {
+		_, _, _ = service.IndexSnapshot(t.Context(), "StatefulSet", "DaemonSet")
+		checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		health, healthErr := service.SyncHealth(t.Context())
+		if checkpoint.Authority["StatefulSet"].State == "denied" && checkpoint.Authority["DaemonSet"].State == "denied" && healthErr == nil && health.Kinds["StatefulSet"].Error == "forbidden" && health.Kinds["DaemonSet"].Error == "forbidden" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("capture did not persist actual authority revocation")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	response, err := app.Test(httptest.NewRequest(http.MethodGet, base+"&namespace=payments&include=changes&limit=50", nil), 15000)
 	if err != nil {
 		t.Fatal(err)
@@ -272,6 +293,9 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 	var code string
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("current Issues must fail closed on collected authority denial: status=%d", response.StatusCode)
+	}
 	if err := json.Unmarshal(denied["code"], &code); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +318,17 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusForbidden {
-		t.Fatalf("dedicated historical data bypassed current permission denial: status=%d", response.StatusCode)
+	if response.StatusCode == http.StatusOK {
+		var retained kubernetes.TimelinePage
+		if err := json.NewDecoder(response.Body).Decode(&retained); err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range retained.Items {
+			if item.Change != nil && (item.Change.Kind == "StatefulSet" || item.Change.Kind == "DaemonSet") {
+				t.Fatal("denied source leaked retained change")
+			}
+		}
+	} else if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("unexpected historical denial response: %d", response.StatusCode)
 	}
 }

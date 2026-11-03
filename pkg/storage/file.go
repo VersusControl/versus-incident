@@ -31,10 +31,13 @@ type FileOptions struct {
 
 // fileProvider stores blobs as <DataDir>/<name>.json and incidents as
 // a single <DataDir>/incidents.json file kept in memory for fast list
-// queries. All writes are atomic (tmp + rename).
+// queries. Kubernetes evidence uses a private transactional SQLite image/index;
+// other blob writes remain atomic (tmp + rename).
 type fileProvider struct {
-	dir          string
-	maxIncidents int
+	evidenceMu    sync.Mutex
+	localEvidence *localEvidence
+	dir           string
+	maxIncidents  int
 
 	mu        sync.RWMutex
 	incidents []*IncidentRecord // newest last; persisted as is
@@ -94,6 +97,13 @@ func NewFile(opts FileOptions) (Provider, error) {
 	if err := p.loadAnalyses(); err != nil {
 		return nil, err
 	}
+	_, dbErr := os.Lstat(filepath.Join(dir, "kubernetes-evidence.sqlite"))
+	_, legacyErr := os.Stat(filepath.Join(dir, "kubernetes", "captured-evidence"))
+	if localEvidenceDriverRegistered() && (dbErr == nil || legacyErr == nil) {
+		if _, err := p.evidenceIndex(); err != nil {
+			return nil, err
+		}
+	}
 	return p, nil
 }
 
@@ -106,6 +116,13 @@ func (p *fileProvider) blobPath(name string) string {
 }
 
 func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
+	if isLocalEvidenceKey(name) {
+		index, err := p.evidenceIndex()
+		if err != nil {
+			return nil, err
+		}
+		return index.raw(context.Background(), name)
+	}
 	if _, _, ok := parseModelStateName(name); ok {
 		data, err := readSecureModelStateBlob(context.Background(), p.dir, name, -1)
 		if errors.Is(err, os.ErrNotExist) {
@@ -127,6 +144,17 @@ func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
 }
 
 func (p *fileProvider) WriteBlob(name string, data []byte) error {
+	if isLocalEvidenceKey(name) {
+		index, err := p.evidenceIndex()
+		if err != nil {
+			return err
+		}
+		lock := fileBlobLock(p.blobPath(name))
+		lock.Lock()
+		defer lock.Unlock()
+		_, err = index.swap(context.Background(), name, nil, data, true)
+		return localEvidenceError(err)
+	}
 	if _, _, ok := parseModelStateName(name); ok {
 		if err := writeSecureModelStateBlob(p.dir, name, data, true); err != nil {
 			return fmt.Errorf("storage: write blob %s: %w", name, err)
@@ -183,6 +211,16 @@ func (p *fileProvider) DeleteBlob(name string) error {
 // untouched and the call returns written==false so the caller re-reads the
 // stored bytes via ReadBlob.
 func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error) {
+	if isLocalEvidenceKey(name) {
+		index, err := p.evidenceIndex()
+		if err != nil {
+			return false, err
+		}
+		lock := fileBlobLock(p.blobPath(name))
+		lock.Lock()
+		defer lock.Unlock()
+		return index.swap(context.Background(), name, nil, data, false)
+	}
 	if _, _, ok := parseModelStateName(name); ok {
 		lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
 		lock.Lock()
@@ -228,6 +266,16 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 // is restricted to one process in HA configurations, so this coordinates all
 // provider instances that can address the same directory.
 func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	if isLocalEvidenceKey(name) {
+		index, err := p.evidenceIndex()
+		if err != nil {
+			return false, err
+		}
+		lock := fileBlobLock(p.blobPath(name))
+		lock.Lock()
+		defer lock.Unlock()
+		return index.swap(context.Background(), name, expected, replacement, false)
+	}
 	if _, _, ok := parseModelStateName(name); ok {
 		lock := fileBlobLock(filepath.Join(p.dir, ".indexes", name))
 		lock.Lock()
@@ -301,6 +349,9 @@ func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
 			return err
 		}
 		name := strings.TrimSuffix(filepath.ToSlash(rel), ".json")
+		if isLocalEvidenceKey(name) {
+			return nil
+		}
 		if !strings.HasPrefix(name, prefix) {
 			return nil
 		}
@@ -313,6 +364,17 @@ func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("storage: list blobs %q: %w", prefix, err)
+	}
+	if localEvidenceDriverRegistered() && (prefix == "" || strings.HasPrefix(localEvidencePrefix, prefix) || strings.HasPrefix(prefix, localEvidencePrefix)) {
+		index, err := p.evidenceIndex()
+		if err != nil {
+			return nil, err
+		}
+		blobs, err := index.blobs(context.Background(), prefix)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, blobs...)
 	}
 	return out, nil
 }
@@ -795,7 +857,14 @@ func (p *fileProvider) ListIncidentsPage(origin string, offset, limit int) ([]*I
 	return out, nil
 }
 
-func (p *fileProvider) Close() error { return nil }
+func (p *fileProvider) Close() error {
+	p.evidenceMu.Lock()
+	defer p.evidenceMu.Unlock()
+	if p.localEvidence != nil {
+		return p.localEvidence.db.Close()
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // Analyses

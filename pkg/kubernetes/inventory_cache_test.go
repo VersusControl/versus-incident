@@ -42,12 +42,41 @@ func seedInventory(t *testing.T, service *Service, records []kubeindex.Record) {
 func inventoryProjectionEndpoint(t *testing.T) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"apiVersion": "v1", "kind": "List", "items": []any{}})
+		if r.URL.Path == "/apis/authentication.k8s.io/v1/selfsubjectreviews" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/api/v1/namespaces/kube-system" {
+			writeJSON(w, map[string]any{"metadata": map[string]any{"uid": "physical"}})
+			return
+		}
+		items := []any{}
+		if r.URL.Path == "/api/v1/namespaces" {
+			items = append(items, map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": "physical"}})
+		}
+		if strings.Contains(r.Header.Get("Accept"), "as=PartialObjectMetadataList") {
+			writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": items})
+		} else {
+			writeJSON(w, map[string]any{"apiVersion": "v1", "kind": "List", "items": items})
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server.URL
 }
 
+// Bind synthetic retained payloads to the collector's actual physical identity,
+// principal and source proofs instead of treating legacy change blobs as grants.
+func commitInventoryFixtureHistory(t *testing.T, service *Service, batch storage.EvidenceBatch) {
+	t.Helper()
+	if service.usageProvider() == nil {
+		service.SetChangeStorage(storage.NewMemory())
+	}
+	service.changes.evidenceEnabled = true
+	store := reviewProvedHistoryStore{EvidenceStore: service.usageProvider().(storage.EvidenceStore), t: t, service: service}
+	if err := store.CommitEvidence(t.Context(), storage.EvidenceScope{OrgID: service.scope.OrgID, ClusterID: service.scope.ClusterID, ClusterUID: "physical"}, batch); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestWorkloadsPinsPartialPublicationAcrossReplacement(t *testing.T) {
 	client, err := NewClient(Config{Endpoint: inventoryProjectionEndpoint(t), AllowLoopbackHTTP: true, Timeout: time.Second})
 	if err != nil {
@@ -369,7 +398,17 @@ func TestCachedNamespaceSnapshotIgnoresRecordCounts(t *testing.T) {
 
 func TestInventoryViewsReadAuthorityWithoutRefreshingObjects(t *testing.T) {
 	var reads, authorityReads atomic.Int32
+	var collecting atomic.Bool
+	collecting.Store(true)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if collecting.Load() {
+			items := []any{}
+			if r.URL.Path == "/api/v1/namespaces" {
+				items = append(items, map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": "physical"}})
+			}
+			writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": items})
+			return
+		}
 		if r.URL.Query().Get("limit") == "1" && (strings.HasPrefix(r.URL.Path, "/apis/apps/v1/") || strings.HasPrefix(r.URL.Path, "/apis/batch/v1/") || strings.HasSuffix(r.URL.Path, "/pods")) {
 			authorityReads.Add(1)
 			writeJSON(w, map[string]any{"items": []any{}})
@@ -381,6 +420,9 @@ func TestInventoryViewsReadAuthorityWithoutRefreshingObjects(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
+	service.SetChangeStorage(storage.NewMemory())
+	commitInventoryFixtureHistory(t, service, storage.EvidenceBatch{ID: "capture:views", At: time.Now().UTC(), Epoch: "fixture"})
+	collecting.Store(false)
 	seedInventory(t, service, []kubeindex.Record{
 		{UID: "pod", Kind: "Pod", Namespace: "shop", Name: "pod", Phase: "Running", Summary: map[string]string{"phase": "Running"}},
 		{UID: "ns", Kind: "Namespace", Name: "shop", Phase: "Active", Summary: map[string]string{"phase": "Active"}},
@@ -425,7 +467,7 @@ func TestInventoryViewsReadAuthorityWithoutRefreshingObjects(t *testing.T) {
 }
 
 func TestInventoryIssuesHistoryRemainsReadableUnderCaptureLease(t *testing.T) {
-	service := newTestService(t, "http://127.0.0.1", Scope{OrgID: "default", ClusterID: "cluster"})
+	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetChangeStorage(storage.NewMemory())
 	seedInventory(t, service, []kubeindex.Record{{
 		UID: "pod", Kind: "Pod", Namespace: "shop", Name: "pod",
@@ -433,9 +475,9 @@ func TestInventoryIssuesHistoryRemainsReadableUnderCaptureLease(t *testing.T) {
 	}})
 	store := service.changeStore()
 	now := time.Now().UTC()
-	if err := store.Append([]kubechanges.Change{{ID: "image", Cluster: "cluster", Kind: "Pod", Namespace: "shop", Name: "pod", UID: "pod", Type: kubechanges.ImageChanged, At: now}}, now); err != nil {
-		t.Fatal(err)
-	}
+	change := Change{ID: "image", Cluster: "cluster", Kind: "Pod", Namespace: "shop", Name: "pod", UID: "pod", RootUID: "pod", Type: kubechanges.ImageChanged, At: now}
+	raw, _ := json.Marshal(change)
+	commitInventoryFixtureHistory(t, service, storage.EvidenceBatch{ID: "capture:leased", At: now, Epoch: "fixture", Records: []storage.EvidenceRecord{{ID: "change:image", Type: "change", AuthorizationKind: "Pod", Namespace: "shop", Name: "pod", Kind: "Pod", UID: "pod", RootUID: "pod", Rule: string(change.Type), At: now, ObservedAt: now, Epoch: "fixture", Payload: raw}}})
 	if err := store.ClaimLease("background", now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -1074,6 +1116,7 @@ func seedCoreInventoryAt(t *testing.T, service *Service, records []kubeindex.Rec
 func TestPendingKindsNeverAppearAsFailuresInAnyView(t *testing.T) {
 	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetChangeStorage(storage.NewMemory())
+	commitInventoryFixtureHistory(t, service, storage.EvidenceBatch{ID: "capture:pending-views", At: time.Now().UTC(), Epoch: "fixture"})
 	owner := func(kind, name, uid string) []kubeindex.OwnerRef {
 		return []kubeindex.OwnerRef{{Kind: kind, Name: name, UID: uid, Namespace: "shop", Controller: true, ControllerKnown: true}}
 	}
@@ -1160,7 +1203,12 @@ func TestPendingKindsNeverAppearAsFailuresInAnyView(t *testing.T) {
 				}
 			}
 		}
-		if sync["state"] != "unavailable" && sync["pending_kinds"] == nil {
+		historical := name == "timeline" || name == "timeline breaks" || name == "changes" || name == "crashes"
+		if historical {
+			if sync["state"] != "ready" || body["authority"] != "current" {
+				t.Errorf("%s did not describe committed checkpoint proof independently of inventory loading: %v", name, body)
+			}
+		} else if sync["state"] != "unavailable" && sync["pending_kinds"] == nil {
 			t.Errorf("%s does not say other kinds are loading: %v", name, sync)
 		}
 	}
@@ -1266,6 +1314,7 @@ func TestAgedCoreDataIsStaleEvenWhileOtherKindsLoad(t *testing.T) {
 func TestLoadingEvidenceKeepsRealCorrelationPartials(t *testing.T) {
 	service := newTestService(t, inventoryProjectionEndpoint(t), Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetChangeStorage(storage.NewMemory())
+	commitInventoryFixtureHistory(t, service, storage.EvidenceBatch{ID: "capture:loading-views", At: time.Now().UTC(), Epoch: "fixture"})
 	seedCoreInventory(t, service, coreBreakRecords())
 	read := func() Issue {
 		t.Helper()
@@ -1280,9 +1329,12 @@ func TestLoadingEvidenceKeepsRealCorrelationPartials(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	truncated := Change{ID: "truncated", Cluster: "cluster", Kind: "Deployment", Namespace: "shop", Name: "api", UID: "deploy", RootUID: "deploy", Type: kubechanges.ImageChanged, At: now.Add(-time.Minute), FieldsTruncated: true}
-	if err := service.changeStore().Append([]Change{truncated}, now); err != nil {
+	raw, _ := json.Marshal(truncated)
+	cp, err := service.evidenceStore().EvidenceCheckpoint(t.Context(), storage.EvidenceScope{OrgID: "default", ClusterID: "cluster", ClusterUID: "physical"})
+	if err != nil {
 		t.Fatal(err)
 	}
+	commitInventoryFixtureHistory(t, service, storage.EvidenceBatch{ID: "capture:truncated", Expected: cp.ID, Generation: cp.Generation, At: now, Epoch: "fixture", Records: []storage.EvidenceRecord{{ID: "change:truncated", Type: "change", AuthorizationKind: "Deployment", Kind: "Deployment", Namespace: "shop", Name: "api", UID: "deploy", RootUID: "deploy", Rule: string(truncated.Type), At: truncated.At, ObservedAt: now, Epoch: "fixture", Payload: raw}}})
 	item := read()
 	found := false
 	for _, linked := range item.Changes {

@@ -15,6 +15,8 @@ import (
 // memoryProvider is an in-memory backend used by tests. It is concurrency-safe
 // and never returns transport errors. Not exposed as a config option.
 type memoryProvider struct {
+	evidenceMu        sync.Mutex
+	localEvidence     *localEvidence
 	mu                sync.RWMutex
 	blobs             map[string][]byte
 	blobNames         []string
@@ -373,6 +375,15 @@ func (m *memoryProvider) ReadBlob(name string) ([]byte, error) {
 func (m *memoryProvider) WriteBlob(name string, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if isLocalEvidenceKey(name) {
+		index, err := m.evidenceIndex()
+		if err != nil {
+			return err
+		}
+		if _, err = index.swap(context.Background(), name, nil, data, true); err != nil {
+			return localEvidenceError(err)
+		}
+	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	if _, exists := m.blobs[name]; !exists {
@@ -395,6 +406,16 @@ func (m *memoryProvider) CreateBlobIfAbsent(name string, data []byte) (bool, err
 	if _, ok := m.blobs[name]; ok {
 		return false, nil
 	}
+	if isLocalEvidenceKey(name) {
+		index, err := m.evidenceIndex()
+		if err != nil {
+			return false, err
+		}
+		won, err := index.swap(context.Background(), name, nil, data, false)
+		if err != nil || !won {
+			return won, localEvidenceError(err)
+		}
+	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.blobs[name] = cp
@@ -413,6 +434,16 @@ func (m *memoryProvider) CompareAndSwapBlob(name string, expected, replacement [
 		}
 	} else if !exists || !bytes.Equal(current, expected) {
 		return false, nil
+	}
+	if isLocalEvidenceKey(name) {
+		index, err := m.evidenceIndex()
+		if err != nil {
+			return false, err
+		}
+		won, err := index.swap(context.Background(), name, expected, replacement, false)
+		if err != nil || !won {
+			return won, localEvidenceError(err)
+		}
 	}
 	if replacement == nil {
 		if !exists {
@@ -694,7 +725,14 @@ func (m *memoryProvider) ListIncidentsPage(origin string, offset, limit int) ([]
 	return out, nil
 }
 
-func (m *memoryProvider) Close() error { return nil }
+func (m *memoryProvider) Close() error {
+	m.evidenceMu.Lock()
+	defer m.evidenceMu.Unlock()
+	if m.localEvidence != nil {
+		return m.localEvidence.db.Close()
+	}
+	return nil
+}
 
 func (m *memoryProvider) SaveAnalysis(rec *AnalysisRecord) error {
 	if rec == nil || rec.ID == "" {
@@ -845,6 +883,19 @@ func (m *memoryProvider) PurgeOlderThan(domain string, cutoff time.Time) (int, e
 		n := 0
 		for name, at := range m.blobAt {
 			if at.Before(cutoff) {
+				if isLocalEvidenceKey(name) {
+					index, err := m.evidenceIndex()
+					if err != nil {
+						return n, err
+					}
+					won, err := index.swap(context.Background(), name, m.blobs[name], nil, false)
+					if err != nil {
+						return n, err
+					}
+					if !won {
+						return n, ErrEvidenceConflict
+					}
+				}
 				delete(m.blobs, name)
 				delete(m.blobAt, name)
 				m.removeBlobName(name)
@@ -880,6 +931,19 @@ func (m *memoryProvider) DeleteByID(domain, id string) error {
 	case DomainBlobs:
 		if _, ok := m.blobs[id]; !ok {
 			return ErrNotFound
+		}
+		if isLocalEvidenceKey(id) {
+			index, err := m.evidenceIndex()
+			if err != nil {
+				return err
+			}
+			won, err := index.swap(context.Background(), id, m.blobs[id], nil, false)
+			if err != nil {
+				return err
+			}
+			if !won {
+				return ErrEvidenceConflict
+			}
 		}
 		delete(m.blobs, id)
 		delete(m.blobAt, id)

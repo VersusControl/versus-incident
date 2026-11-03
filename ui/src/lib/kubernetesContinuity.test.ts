@@ -2,16 +2,284 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type ReactNode } from "react";
-import { afterEach, describe, expect, it } from "vitest";
-import { ApiError } from "./api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { api, ApiError } from "./api";
 import { hasKubernetesPublication, kubernetesAccessLost, kubernetesReadNeedsRecovery, kubernetesReportAuthorityLost, kubernetesQueryUsesKinds, kubernetesInventoryNotReady, retainKubernetesPublication } from "./kubernetesContinuity";
-import { useKubernetesQuery } from "./useKubernetesCluster";
+import { useKubernetesCommitEvents, useKubernetesQuery } from "./useKubernetesCluster";
 
 const committed = { items: ["checkout"], broken: { total: 3 }, allocatable_cpu: "8", observed_at: "2026-10-28T00:00:00Z", sync: { state: "ready", age_s: 20, partial: false } };
 const warming = { items: [], broken: { total: 0 }, allocatable_cpu: undefined, observed_at: "2026-10-28T00:13:00Z", sync: { state: "syncing", age_s: 800, partial: false } };
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
+
+describe("Kubernetes commit refresh", () => {
+  const event = (revision: number) => ({ event: "committed", id: String(revision), data: JSON.stringify({ revision, evidence_sequence: revision, kinds: ["Pod"], cluster_id: "east" }) });
+  const advance = async (ms = 1) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+  function setup() {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: cache }, children);
+    return { cache, wrapper };
+  }
+
+  it("recovers first-open history after collection establishes proof without a reload or poisoning live health", async () => {
+    vi.useFakeTimers();
+    let collected = false;
+    const notEstablished = () => new ApiError(503, "History not established", { code: "history_not_established", retryable: true });
+    const stream = vi.spyOn(api, "kubernetesCommitStream").mockImplementation(emit => {
+      if (!collected) return Promise.reject(notEstablished());
+      emit(event(1));
+      return new Promise<void>(() => undefined);
+    });
+    const { cache, wrapper } = setup();
+    const historyRead = vi.fn(async () => { if (!collected) throw notEstablished(); return committed; });
+    const { result, unmount } = renderHook(() => ({
+      feed: useKubernetesCommitEvents(true),
+      overview: useKubernetesQuery({ queryKey: ["kubernetes-overview"], queryFn: async () => ({ pods: 0 }), staleTime: Infinity }),
+      health: useKubernetesQuery({ queryKey: ["kubernetes-sync-health"], queryFn: async () => ({ state: "ready" }), staleTime: Infinity }),
+      history: useKubernetesQuery({ queryKey: ["kubernetes-timeline"], queryFn: historyRead, staleTime: Infinity }),
+    }), { wrapper });
+    await advance(1001);
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(result.current.feed.streamState).toBe("reconnecting");
+    expect(result.current.overview.error).toBeNull();
+    expect(result.current.health.error).toBeNull();
+    expect(result.current.overview.data).toEqual({ pods: 0 });
+    expect(result.current.history.data).toBeUndefined();
+    collected = true;
+    await advance(2101);
+    expect(stream).toHaveBeenCalledTimes(3);
+    expect(result.current.feed.streamState).toBe("live");
+    expect(result.current.history.data?.items).toEqual(["checkout"]);
+    expect(result.current.health.data?.state).toBe("ready");
+    expect(result.current.overview.error).toBeNull();
+    unmount();
+    expect(stream.mock.calls[2][1]?.aborted).toBe(true);
+    cache.clear();
+  });
+
+  it("fences a real history denial while preserving live recovery and never replays old rows before fresh authorized data", async () => {
+    vi.useFakeTimers();
+    const denied = () => new ApiError(403, "History denied", { code: "history_authority_denied" });
+    let rejectFirst!: (error: Error) => void;
+    let handshakeAllowed = false;
+    let freshRows = false;
+    let calls = 0;
+    const stream = vi.spyOn(api, "kubernetesCommitStream").mockImplementation(emit => {
+      if (++calls === 1) return new Promise<void>((_resolve, reject) => { rejectFirst = reject; });
+      if (!handshakeAllowed) return Promise.reject(denied());
+      emit(event(1));
+      return new Promise<void>(() => undefined);
+    });
+    const { cache, wrapper } = setup();
+    cache.setQueryData(["kubernetes", "_", "kubernetes-timeline"], committed);
+    cache.setQueryData(["kubernetes", "_", "break-seed", "private"], committed);
+    const read = vi.fn(async () => {
+      if (!freshRows) throw new ApiError(503, "Store unavailable", { code: "history_store_unavailable" });
+      return { ...committed, items: ["reauthorized"] };
+    });
+    const { result, unmount } = renderHook(() => ({
+      feed: useKubernetesCommitEvents(true),
+      overview: useKubernetesQuery({ queryKey: ["kubernetes-overview"], queryFn: async () => ({ pods: 1 }), staleTime: Infinity }),
+      health: useKubernetesQuery({ queryKey: ["kubernetes-sync-health"], queryFn: async () => ({ state: "ready" }), staleTime: Infinity }),
+      history: useKubernetesQuery({ queryKey: ["kubernetes-timeline"], queryFn: read, staleTime: Infinity }),
+    }), { wrapper });
+    await advance();
+    expect(result.current.history.data?.items).toEqual(["checkout"]);
+    await act(async () => { stream.mock.calls[0][0](event(9)); rejectFirst(denied()); });
+    await advance(2);
+    expect(result.current.history.data).toBeUndefined();
+    expect(cache.getQueryData(["kubernetes", "_", "break-seed", "private"])).toBeUndefined();
+    expect(result.current.overview.data).toEqual({ pods: 1 });
+    expect(result.current.overview.error).toBeNull();
+    expect(result.current.health.error).toBeNull();
+    await advance(30100);
+    expect(read).not.toHaveBeenCalled();
+    expect(stream.mock.calls.length).toBeGreaterThan(1);
+    stream.mock.calls[0][0](event(99));
+    handshakeAllowed = true;
+    await advance(31000);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(result.current.history.data).toBeUndefined();
+    expect(cache.getQueryData(["kubernetes", "_", "break-seed", "private"])).toBeUndefined();
+    freshRows = true;
+    act(() => stream.mock.calls.at(-1)![0](event(2)));
+    await advance(101);
+    expect(result.current.history.data?.items).toEqual(["reauthorized"]);
+    expect(result.current.overview.error).toBeNull();
+    expect(result.current.health.error).toBeNull();
+    unmount();
+    cache.clear();
+  });
+
+  it("falls back without stream success and aborts connections and timers on unmount", async () => {
+    vi.useFakeTimers();
+    const stream = vi.spyOn(api, "kubernetesCommitStream").mockRejectedValueOnce(new Error("offline"))
+      .mockImplementation(() => new Promise<void>(() => undefined));
+    const read = vi.fn(async () => committed);
+    const { cache, wrapper } = setup();
+    const { result, unmount } = renderHook(() => ({
+      feed: useKubernetesCommitEvents(true),
+      page: useKubernetesQuery({ queryKey: ["kubernetes-timeline"], queryFn: read, staleTime: Infinity }),
+    }), { wrapper });
+    await advance();
+    expect(result.current.feed.streamState).toBe("reconnecting");
+    await advance(30100);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(stream).toHaveBeenCalledTimes(2);
+    const callback = stream.mock.calls[1][0];
+    unmount();
+    expect(stream.mock.calls[1][1]?.aborted).toBe(true);
+    callback(event(1));
+    await advance(60000);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(stream).toHaveBeenCalledTimes(2);
+    cache.clear();
+  });
+
+  it("deduplicates bursts and performs one trailing refresh without aborting slow reads", async () => {
+    vi.useFakeTimers();
+    const stream = vi.spyOn(api, "kubernetesCommitStream").mockImplementation(() => new Promise<void>(() => undefined));
+    const { cache, wrapper } = setup();
+    cache.setQueryData(["kubernetes", "_", "kubernetes-timeline"], committed);
+    let finish: ((value: typeof committed) => void) | undefined;
+    let signal: AbortSignal | undefined;
+    let readCount = 0;
+    const read = vi.fn(({ signal: nextSignal }: { signal: AbortSignal }) => {
+      signal = nextSignal;
+      if (++readCount === 1) return new Promise<typeof committed>(resolve => { finish = resolve; });
+      return Promise.resolve(committed);
+    });
+    const { unmount } = renderHook(() => {
+      useKubernetesCommitEvents(true);
+      return useKubernetesQuery({ queryKey: ["kubernetes-timeline"], queryFn: read, staleTime: Infinity });
+    }, { wrapper });
+    const callback = stream.mock.calls[0][0];
+    act(() => { callback(event(10)); callback(event(10)); callback(event(11)); });
+    await advance(101);
+    expect(read).toHaveBeenCalledTimes(1);
+    act(() => { callback(event(12)); callback(event(13)); });
+    await advance(101);
+    expect(signal?.aborted).toBe(false);
+    expect(read).toHaveBeenCalledTimes(1);
+    await act(async () => { finish?.(committed); });
+    await advance();
+    expect(read).toHaveBeenCalledTimes(2);
+    callback(event(13));
+    await advance(101);
+    expect(read).toHaveBeenCalledTimes(2);
+    unmount();
+    cache.clear();
+  });
+
+  it("resumes with the last ID but invalidates a repeated reconnect snapshot and ignores a retired callback", async () => {
+    vi.useFakeTimers();
+    let close: (() => void) | undefined;
+    const stream = vi.spyOn(api, "kubernetesCommitStream").mockImplementation(() => new Promise<void>(resolve => { close = resolve; }));
+    const { cache, wrapper } = setup();
+    const read = vi.fn(async () => committed);
+    const { result, unmount } = renderHook(() => ({
+      feed: useKubernetesCommitEvents(true),
+      page: useKubernetesQuery({ queryKey: ["kubernetes-timeline"], queryFn: read, staleTime: Infinity }),
+    }), { wrapper });
+    await advance();
+    const first = stream.mock.calls[0][0];
+    act(() => first(event(9)));
+    await advance(101);
+    expect(read).toHaveBeenCalledTimes(2);
+    await act(async () => close?.());
+    await advance(1001);
+    expect(stream.mock.calls[1][2]).toBe("9");
+    first(event(10));
+    await advance(101);
+    expect(read).toHaveBeenCalledTimes(2);
+    act(() => stream.mock.calls[1][0](event(9)));
+    await advance(101);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(result.current.feed.streamState).toBe("live");
+    unmount();
+    cache.clear();
+  });
+
+  it("wipes protected cache on a real stream denial, without fallback replay", async () => {
+    vi.useFakeTimers();
+    let deny!: (error: Error) => void;
+    const stream = vi.spyOn(api, "kubernetesCommitStream").mockImplementation(() => new Promise<void>((_resolve, reject) => { deny = reject; }));
+    const { cache, wrapper } = setup();
+    cache.setQueryData(["kubernetes", "_", "break-seed", "private"], committed);
+    const read = vi.fn(async () => committed);
+    cache.setQueryData(["kubernetes", "_", "kubernetes-timeline"], committed);
+    const { result } = renderHook(() => ({
+      feed: useKubernetesCommitEvents(true),
+      page: useKubernetesQuery({ queryKey: ["kubernetes-timeline"], queryFn: read, staleTime: Infinity }),
+    }), { wrapper });
+    await act(async () => { stream.mock.calls[0][0](event(1)); deny(new ApiError(403, "denied")); });
+    await advance(2);
+    expect(result.current.page.data).toBeUndefined();
+    expect(cache.getQueryData(["kubernetes", "_", "break-seed", "private"])).toBeUndefined();
+    await advance(60100);
+    expect(read).not.toHaveBeenCalled();
+    cache.clear();
+  });
+});
 
 describe("Kubernetes publication continuity", () => {
+  it("preserves sampled totals along the returned cursor chain, not an unrelated refreshed first page", async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: cache }, children);
+    const firstKey = ["kubernetes", "_", "kubernetes-issues", "shop", "", undefined, undefined, undefined];
+    cache.setQueryData(firstKey, { ...committed, totals: { critical: 17 }, count_capped: true, next: "a" });
+    const { result, rerender } = renderHook(({ cursor, namespace }) => useKubernetesQuery({
+      queryKey: ["kubernetes-issues", namespace, "", undefined, undefined, cursor],
+      queryFn: async () => ({ ...committed, totals: {}, count_capped: false, next: cursor === "a" ? "b" : undefined }),
+    }), { wrapper, initialProps: { cursor: "a", namespace: "shop" } });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toMatchObject({ totals: { critical: 17 }, count_capped: true });
+    cache.setQueryData(firstKey, { ...committed, totals: { critical: 2 }, count_capped: false, next: "unrelated" });
+    rerender({ cursor: "b", namespace: "shop" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toMatchObject({ totals: { critical: 17 }, count_capped: true });
+    rerender({ cursor: "b", namespace: "other" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toMatchObject({ totals: {}, count_capped: false });
+    cache.clear();
+  });
+  it.each(["denied", "unknown"] as const)("discards stored %s authority even after a successful read", async authority => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: cache }, children);
+    let reply = { ...committed, authority: "current" as string };
+    const { result } = renderHook(() => useKubernetesQuery({ queryKey: ["history"], retry: false, queryFn: async () => reply }), { wrapper });
+    await waitFor(() => expect(result.current.data?.items).toEqual(["checkout"]));
+    reply = { ...reply, authority };
+    await act(async () => { await result.current.refetch(); });
+    await waitFor(() => expect(result.current.data).toBeUndefined());
+    expect(cache.getQueryData(["kubernetes", "_", "history"])).toBeUndefined();
+    cache.clear();
+  });
+
+  it("keeps a previous range after failed replacement, but never across filters or authority loss", async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client: cache }, children);
+    let failure: Error | undefined;
+    const { result, rerender } = renderHook(({ filter, range }) => useKubernetesQuery({
+      queryKey: ["history", filter, range], retry: false,
+      queryFn: async () => { if (failure) throw failure; return committed; },
+      placeholderData: (previous, query) => query?.queryKey[3] === filter ? previous : undefined,
+    }), { wrapper, initialProps: { filter: "shop", range: 60 } });
+    await waitFor(() => expect(result.current.data?.items).toEqual(["checkout"]));
+    failure = new ApiError(503, "store unavailable");
+    rerender({ filter: "shop", range: 120 });
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data?.items).toEqual(["checkout"]);
+    failure = new ApiError(403, "mismatched occurrence", { code: "authority_mismatch" });
+    await act(async () => { await result.current.refetch(); });
+    await waitFor(() => expect(result.current.data).toBeUndefined());
+    failure = new ApiError(504, "timeout");
+    await act(async () => { await result.current.refetch(); });
+    expect(result.current.data).toBeUndefined();
+    rerender({ filter: "other", range: 120 });
+    await waitFor(() => expect(result.current.isFetching).toBe(false));
+    expect(result.current.data).toBeUndefined();
+    cache.clear();
+  });
   it("requires published-cluster and committed projection proof for an initial partial timeout", () => {
     const partial = { items: [{ kind: "Deployment", namespace: "shop", name: "checkout" }], counts: { Deployment: 1, Job: 0 }, sync: { state: "error", partial: true },
       partial_failures: [{ resource_id: "batch~v1~cronjobs", class: "timeout" }] };

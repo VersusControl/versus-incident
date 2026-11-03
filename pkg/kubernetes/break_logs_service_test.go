@@ -1352,7 +1352,7 @@ func TestOccurrenceBreakLogsUsesControlReadLane(t *testing.T) {
 		t.Fatalf("occurrence blocked behind inventory: %v", err)
 	}
 }
-func TestBreakManifestHistoryUsesControlReadLane(t *testing.T) {
+func TestBreakManifestHistoryUsesPersistedAuthority(t *testing.T) {
 	service, _ := acceptanceLinkedService(t)
 	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
 	if err != nil {
@@ -1368,14 +1368,16 @@ func TestBreakManifestHistoryUsesControlReadLane(t *testing.T) {
 	}
 	service.client = client
 	service.changes.evidenceEnabled = true
+	reviewHistoryCycle(t, service)
+	before := proofs.Load()
 	service.client.indexLimiter = rate.NewLimiter(0, 1)
 	service.client.indexLimiter.Allow()
 	ctx, cancel := context.WithTimeout(captureReadContext(t.Context(), ""), time.Second)
 	defer cancel()
 	at := time.Now().UTC()
 	service.newBreakManifest(ctx, kubebreaks.Break{Root: kubebreaks.Ref(kubeindex.Record{Kind: "Pod", Namespace: "shop", Name: "api-0", UID: "pod"}), Rule: "pod.crash_loop", BrokeAt: at}, breaklogs.State{}, at)
-	if proofs.Load() < 8 || ctx.Err() != nil {
-		t.Fatalf("capture metadata blocked behind bulk inventory: proofs=%d err=%v", proofs.Load(), ctx.Err())
+	if proofs.Load() != before || ctx.Err() != nil {
+		t.Fatalf("manifest history performed a live proof: before=%d after=%d err=%v", before, proofs.Load(), ctx.Err())
 	}
 }
 func TestCachedWorkloadsReturnsTypedAuthorityFailure(t *testing.T) {
@@ -1403,7 +1405,7 @@ func TestCachedWorkloadsReturnsTypedAuthorityFailure(t *testing.T) {
 			}
 			cache.authorityFailure = nil
 			page, err := service.Workloads(t.Context(), WorkloadListOptions{})
-			if !errors.Is(err, want) || len(page.Items) > 0 {
+			if (!errors.Is(err, want) && !(status == 401 && errors.Is(err, ErrCredentialUnavailable))) || len(page.Items) > 0 {
 				t.Fatalf("cached publication bypassed authority: %+v %v", page, err)
 			}
 		})
@@ -1525,15 +1527,21 @@ func TestPreviousCaptureKeepsFractionalLinesInTerminationSecond(t *testing.T) {
 		t.Fatalf("API-rounded finishedAt dropped final-second lines: %+v %+v", item, gap)
 	}
 }
-func TestBreakCaptureAdmitsNamespacesDespiteSlowHistoricalProof(t *testing.T) {
+func TestBreakCaptureAdmitsProvedNamespacesWithoutLiveIdentity(t *testing.T) {
 	var ready atomic.Bool
+	var identityCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/namespaces/kube-system" {
+			identityCalls.Add(1)
 			if !ready.Load() {
 				<-r.Context().Done()
 				return
 			}
 			writeJSON(w, map[string]any{"metadata": map[string]any{"uid": "physical"}})
+			return
+		}
+		if r.URL.Path == "/api/v1/namespaces" {
+			writeJSON(w, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": "physical"}}}})
 			return
 		}
 		writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{}})
@@ -1554,9 +1562,6 @@ func TestBreakCaptureAdmitsNamespacesDespiteSlowHistoricalProof(t *testing.T) {
 		raw, _ := json.Marshal(Issue{Root: root, Rule: "pod.crash_loop", Broken: true, BrokeAt: &opened})
 		batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: namespace, Namespace: namespace, Kind: "Pod", AuthorizationKind: "Pod", UID: root.UID, Rule: "pod.crash_loop", Broken: true, Payload: raw})
 	}
-	if err := service.evidenceStore().CommitEvidence(t.Context(), storage.EvidenceScope{OrgID: "default", ClusterID: "cluster", ClusterUID: "physical"}, batch); err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	service.captureBreakLogs(ctx, snapshot, "")
@@ -1568,6 +1573,12 @@ func TestBreakCaptureAdmitsNamespacesDespiteSlowHistoricalProof(t *testing.T) {
 		t.Fatalf("deadline fallback admitted unpinned occurrence or marked it complete: %+v", state)
 	}
 	ready.Store(true)
+	proved := reviewProvedHistoryStore{EvidenceStore: service.evidenceStore(), t: t, service: service}
+	if err := proved.CommitEvidence(t.Context(), storage.EvidenceScope{OrgID: "default", ClusterID: "cluster", ClusterUID: "physical"}, batch); err != nil {
+		t.Fatal(err)
+	}
+	before := identityCalls.Load()
+	ready.Store(false)
 	// A later observation has a different condition time; retry must still
 	// admit the opening persisted occurrence rather than a fallback center.
 	for i := range snapshot.Records {
@@ -1576,6 +1587,9 @@ func TestBreakCaptureAdmitsNamespacesDespiteSlowHistoricalProof(t *testing.T) {
 	retry, stopRetry := context.WithTimeout(t.Context(), 3*time.Second)
 	defer stopRetry()
 	service.captureBreakLogs(retry, snapshot, "")
+	if identityCalls.Load() != before {
+		t.Fatal("persisted occurrence lookup waited for live identity")
+	}
 	state, err = service.changeStore().BreakLogs(time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)

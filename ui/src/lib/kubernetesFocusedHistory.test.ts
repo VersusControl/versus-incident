@@ -8,6 +8,21 @@ const event: KubernetesCrashEvent = { id: "crash", at: change.at, sequence: 1, c
 const crashPage: KubernetesCrashPage = { items: [event], since: change.at, until: change.at, retention_from: change.at, retention_basis: "capture", started_at: change.at, gaps: [], capture_gaps: [], coverage: { Pod: { from: change.at, to: change.at } }, limitations: [], capture: { mode: "continuous", behind: false }, sync };
 
 describe("Focused history continuation", () => {
+  it.each(["denied", "unknown"] as const)("does not keep earlier pages after a successful HTTP response with %s authority", async authority => {
+    const fetch = vi.fn<(cursor?: string) => Promise<KubernetesChangesPage>>()
+      .mockResolvedValueOnce({ items: [change], next: "next", sync, authority: "current" })
+      .mockResolvedValueOnce({ items: [], sync, authority });
+    await expect(focusedChanges(fetch, new AbortController().signal)).rejects.toMatchObject({ status: 403 });
+  });
+  it("preserves first-page capped crash totals when continuations reset their counters", async () => {
+    const fetch = vi.fn<(cursor?: string) => Promise<KubernetesCrashPage>>()
+      .mockResolvedValueOnce({ ...crashPage, crash_count: 1001, count_capped: true, next: "next" })
+      .mockResolvedValueOnce({ ...crashPage, items: [{ ...event, id: "older" }], crash_count: 0, count_capped: false });
+    const result = await focusedCrashes(fetch, new AbortController().signal);
+    expect(result.crash_count).toBe(1001);
+    expect(result.count_capped).toBe(true);
+    expect(result.items).toHaveLength(2);
+  });
   it("follows an empty intermediate page, deduplicates stable IDs and retains every gap and failure", async () => {
     const gap = { from: "2026-10-14T11:00:00Z", to: change.at };
     const fetch = vi.fn<(cursor?: string) => Promise<KubernetesChangesPage>>()

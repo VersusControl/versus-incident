@@ -208,6 +208,10 @@ func TestIssuesNamespaceOnlyReadScope(t *testing.T) {
 
 func TestIssuesEvidencePartialIsRootLocalAndTotalsRemainKnown(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("limit") == "1" {
+			writeJSON(writer, map[string]any{"items": []any{}})
+			return
+		}
 		t.Errorf("fresh seeded index unexpectedly read upstream: %s", request.URL.Path)
 		http.NotFound(writer, request)
 	}))

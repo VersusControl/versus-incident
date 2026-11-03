@@ -2332,7 +2332,25 @@ export interface KubernetesIssue {
   pending?: string[];
 }
 
-export interface KubernetesIssuePage {
+export interface KubernetesHistoryCounts {
+  count_capped?: boolean;
+  total?: number;
+}
+
+/** Continuations carry rows, while the first page owns snapshot count metadata. */
+export function retainKubernetesHistoryCounts<T>(first: unknown, page: T): T {
+  if (!first || typeof first !== "object") return page;
+  const prior = first as Record<string, unknown>;
+  if (prior.authority === "denied" || prior.authority === "unknown") return page;
+  const incoming = page as { authority?: string; partial_failures?: Array<{ class?: string }> } | undefined;
+  if (incoming?.authority === "denied" || incoming?.authority === "unknown"
+    || incoming?.partial_failures?.some(failure => ["forbidden", "unauthorized", "namespace_scope", "credential_unavailable"].includes(failure.class ?? ""))) return page;
+  const fields = ["total", "counts", "totals", "crash_count", "broken", "count_capped"];
+  return { ...page, ...Object.fromEntries(fields.filter(field => field in prior).map(field => [field, prior[field]])) };
+}
+
+export interface KubernetesIssuePage extends KubernetesHistoryCounts {
+  authority?: "current" | "stale" | "denied" | "unknown";
   selected_occurrence?: KubernetesIssue;
   selection_status?: "not_requested" | "not_found" | "resolved" | "ambiguous" | "partial";
   /** Persisted UID identity, independent of the selected history window and its totals. */
@@ -2397,7 +2415,8 @@ export interface KubernetesCrashQuery {
   cursor?: string;
 }
 
-export interface KubernetesCrashPage {
+export interface KubernetesCrashPage extends KubernetesHistoryCounts {
+  authority?: "current" | "stale" | "denied" | "unknown";
   crash_count?: number;
   items: KubernetesCrashEvent[];
   next?: string;
@@ -2414,7 +2433,8 @@ export interface KubernetesCrashPage {
   sync: KubernetesSync;
 }
 
-export interface KubernetesChangesPage {
+export interface KubernetesChangesPage extends KubernetesHistoryCounts {
+  authority?: "current" | "stale" | "denied" | "unknown";
   items: KubernetesChange[];
   next?: string;
   truncated?: boolean;
@@ -2428,7 +2448,8 @@ export type KubernetesTimelineEntry =
   | { type: "crash"; id: string; at: string; crash: KubernetesCrashEvent }
   | { type: "break"; id: string; at: string; issue: KubernetesIssue };
 
-export interface KubernetesTimelinePage {
+export interface KubernetesTimelinePage extends KubernetesHistoryCounts {
+  authority?: "current" | "stale" | "denied" | "unknown";
   items: KubernetesTimelineEntry[];
   next?: string;
   sync: KubernetesSync;
@@ -2970,6 +2991,7 @@ export function createKubernetesApi(cluster?: string) {
     if (pageMode === "single") return request<T>(`${path}?${query}`, { signal });
     const seen = new Set<string>();
     const gaps: unknown[] = [];
+    let firstPage: T | undefined;
     let restarted = false;
     for (let page = 0; ; page++) {
       signal?.throwIfAborted();
@@ -2982,9 +3004,14 @@ export function createKubernetesApi(cluster?: string) {
         query.delete("cursor");
         seen.clear();
         gaps.length = 0;
+        firstPage = undefined;
         restarted = true;
         continue;
       }
+      const authority = (result as { authority?: string }).authority;
+      if (authority === "denied" || authority === "unknown") return result;
+      if (!query.has("cursor")) firstPage = result;
+      if (firstPage && result !== firstPage) result = retainKubernetesHistoryCounts(firstPage, result);
       gaps.push(...(result.gaps ?? []));
       if (result.items?.length || !result.next || page >= 15) return gaps.length ? { ...result, gaps } : result;
       if (seen.has(result.next) || result.next === query.get("cursor")) throw new ApiError(502, "History continuation did not advance.");
@@ -3221,6 +3248,25 @@ export function createKubernetesApi(cluster?: string) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     return request<KubernetesGitOpsPage>(`/api/admin/kubernetes/gitops/apps?${query}`);
+  },
+  kubernetesCommitStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal, lastEventID?: string): Promise<void> => {
+    const headers = new Headers({ Accept: "text/event-stream" });
+    const secret = getSecret();
+    if (secret) headers.set("X-Gateway-Secret", secret);
+    if (lastEventID) headers.set("Last-Event-ID", lastEventID);
+    const response = await fetch(`${API_BASE}${kubernetesClusterPath("/api/admin/kubernetes/commits/stream", cluster)}`, {
+      headers, credentials: "same-origin", cache: "no-store", signal,
+    });
+    if (!response.ok || !response.body) {
+      if (response.status === 401) notifyAuthExpired();
+      const body: unknown = await response.json().catch(() => undefined);
+      throw new ApiError(response.status, "Kubernetes commit stream unavailable.", body);
+    }
+    if (!response.headers.get("Content-Type")?.toLowerCase().startsWith("text/event-stream")) {
+      await response.body.cancel();
+      throw new ApiError(502, "Kubernetes commit stream returned an invalid content type.");
+    }
+    await readEventStream(response.body, onEvent, { ...ANALYSIS_SSE_LIMITS, maxTotalBytes: 16 << 20, maxEvents: 10000, maxIdleMs: 60000 });
   },
   kubernetesStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal): Promise<void> => {
     const headers = new Headers({ Accept: "text/event-stream" });

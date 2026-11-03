@@ -12,6 +12,7 @@ import (
 	"time"
 
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/google/uuid"
 )
 
@@ -84,6 +85,14 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				// The cluster's own metadata decides the first ready moment here,
 				// whichever branch below takes the data.
 				candidate = withFirstReady(candidate, record)
+				if org != service.scope.OrgID {
+					// Read-fallback inventory may seed a fresh collection, but
+					// its journal receipt belongs to its original writer. Never
+					// retry that receipt using another organization's lease.
+					candidate.EvidenceBatch = nil
+					candidate.EvidenceScope = storage.EvidenceScope{}
+					candidate.EvidenceFailure = ""
+				}
 				if record.Revision != "" && record.Revision == generation.Revision {
 					generation.FirstReadyAt = candidate.FirstReadyAt
 					break
@@ -193,7 +202,7 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			renewal := service.identity.renewal
 			service.identity.mu.Unlock()
 			if !renewal {
-				service.recovery.failed(err, service.client)
+				service.recovery.failed(err, service.client, service.scope.OrgID)
 			}
 			index = nil
 			service.logInventoryCycle(err)
@@ -763,7 +772,10 @@ func (service *Service) collectScopedInventory(ctx context.Context, cache *inven
 				continue
 			}
 			attempted = true
-			refreshErr := scopeIndex.RefreshGuarded(ctx, kind, inventoryCadence(kind), now, func(ctx context.Context) ([]kubeindex.Record, bool, error) {
+			// This LIST starts after the global denial, not at cycle start.
+			// Retain the real observation time so scoped proof ordering does not
+			// manufacture freshness or inherit the earlier global attempt.
+			refreshErr := scopeIndex.RefreshGuarded(ctx, kind, inventoryCadence(kind), time.Now().UTC(), func(ctx context.Context) ([]kubeindex.Record, bool, error) {
 				snapshot, _ := service.namespaceIssueSnapshot(ctx, ns, []string{kind})
 				state := snapshot.Kinds[kind]
 				if state.Error != "" {

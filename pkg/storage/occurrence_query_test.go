@@ -100,7 +100,7 @@ func TestOccurrenceQueryPinsFreshnessPayloadAndDeletionGeneration(t *testing.T) 
 				store = reopened.(EvidenceStore)
 			}
 			next, err := store.QueryEvidence(t.Context(), scope, q)
-			if err != nil || len(next.Items) != 3 || next.Total != 13 {
+			if err != nil || len(next.Items) != 3 || next.Total != 0 {
 				t.Fatalf("old snapshot continuation: %+v %v", next, err)
 			}
 			for _, record := range next.Items {
@@ -144,7 +144,7 @@ func TestOccurrenceQueryPinsFreshnessPayloadAndDeletionGeneration(t *testing.T) 
 			q.Cursor = fresh.Next
 			capture("resolved", now.Add(-30*time.Second), "", false)
 			next, err = store.QueryEvidence(t.Context(), scope, q)
-			if err != nil || len(next.Items) != 3 || next.Total != 13 {
+			if err != nil || len(next.Items) != 3 || next.Total != 0 {
 				t.Fatalf("resolution changed pinned membership: %+v %v", next, err)
 			}
 			for _, record := range next.Items {
@@ -473,8 +473,21 @@ func TestOpenOccurrencePinsBreakTimeAcrossConditionChanges(t *testing.T) {
 		if i == 0 {
 			id = observation.OccurrenceID
 		}
-		if observation.OccurrenceID != id || !value.BrokeAt.Equal(at) || value.Count != i+1 {
-			t.Fatalf("occurrence center drifted or freshness frozen: %+v %+v", observation, value)
+		if observation.OccurrenceID != id || !value.BrokeAt.Equal(at) || value.Count != 1 || !observation.LastSeen.Equal(at) {
+			t.Fatalf("retained observation changed without a heartbeat: %+v %+v", observation, value)
+		}
+		current, err := store.QueryEvidence(t.Context(), scope, EvidenceQuery{Since: at.Add(-time.Minute), Until: time.Now().UTC(), Type: "occurrence", Lookup: true, Namespace: "shop", RootUID: "root", OccurrenceID: id, Limit: 1})
+		if err != nil || len(current.Items) != 1 {
+			t.Fatalf("current point lookup: %+v %v", current, err)
+		}
+		if err = json.Unmarshal(current.Items[0].Payload, &observation); err != nil {
+			t.Fatal(err)
+		}
+		if err = json.Unmarshal(observation.Payload, &value); err != nil {
+			t.Fatal(err)
+		}
+		if observation.OccurrenceID != id || !value.BrokeAt.Equal(at) || value.Count != i+1 || !observation.LastSeen.Equal(b.At) {
+			t.Fatalf("current occurrence center drifted or latest freshness froze: %+v %+v", observation, value)
 		}
 	}
 }

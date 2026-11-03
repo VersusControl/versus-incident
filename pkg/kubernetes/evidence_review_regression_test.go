@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -65,7 +66,6 @@ func TestPostgresAgedCheckpointMetadataDoesNotGrantUnmappedRows(t *testing.T) {
 		t.Fatal("isolated Postgres initialization failed")
 	}
 	defer provider.Close()
-	store := provider.(storage.EvidenceStore)
 	for _, optional := range []string{"", "Gateway", "SyntheticOptionalResource"} {
 		t.Run("checkpoint-"+optional, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,17 +73,22 @@ func TestPostgresAgedCheckpointMetadataDoesNotGrantUnmappedRows(t *testing.T) {
 					writeJSON(w, map[string]any{"metadata": map[string]any{"uid": "aged-physical"}})
 					return
 				}
+				if r.URL.Path == "/api/v1/namespaces" {
+					writeJSON(w, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": "aged-physical"}}}})
+					return
+				}
 				if strings.HasSuffix(r.URL.Path, "/gateways") {
 					http.Error(w, "not found", http.StatusNotFound)
 					return
 				}
-				writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "opaque-aged-version"}, "items": nil})
+				writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "opaque-aged-version"}, "items": []any{}})
 			}))
 			defer server.Close()
 			cluster := fmt.Sprintf("aged-checkpoint-%d", time.Now().UnixNano())
 			service := newTestService(t, server.URL, Scope{OrgID: "synthetic-history", ClusterID: cluster})
 			service.SetChangeStorage(provider)
 			service.changes.evidenceEnabled = true
+			store := reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service}
 			scope := storage.EvidenceScope{OrgID: "synthetic-history", ClusterID: cluster, ClusterUID: "aged-physical"}
 			now := time.Now().UTC().Truncate(time.Microsecond)
 			if optional == "SyntheticOptionalResource" {
@@ -140,7 +145,126 @@ func TestPostgresAgedCheckpointMetadataDoesNotGrantUnmappedRows(t *testing.T) {
 func syntheticChangeEvidence(cluster, kind, namespace, id string, at time.Time) storage.EvidenceRecord {
 	change := Change{ID: id, Cluster: cluster, Kind: kind, Namespace: namespace, Name: "synthetic-" + id, UID: "uid-" + id, RootUID: "synthetic-root", Type: kubechanges.Created, Source: "observed", At: at}
 	raw, _ := json.Marshal(change)
-	return storage.EvidenceRecord{ID: "change:" + change.ID, Type: "change", Kind: change.Kind, Name: change.Name, Namespace: change.Namespace, UID: change.UID, RootUID: change.RootUID, Rule: string(change.Type), At: change.At, ObservedAt: change.At, Epoch: "synthetic", Payload: raw}
+	return storage.EvidenceRecord{AuthorizationKind: kind, ID: "change:" + change.ID, Type: "change", Kind: change.Kind, Name: change.Name, Namespace: change.Namespace, UID: change.UID, RootUID: change.RootUID, Rule: string(change.Type), At: change.At, ObservedAt: change.At, Epoch: "synthetic", Payload: raw}
+}
+
+func TestPersistedTimelineTypedFiltersAcrossProviders(t *testing.T) {
+	for _, backend := range []string{"memory", "file", "postgres"} {
+		for _, filter := range []string{"status-marker", "resource-uid", "pod-uid"} {
+			t.Run(backend+"/"+filter, func(t *testing.T) {
+				service, store, scope := reviewHistoryService(t)
+				if backend != "memory" {
+					var provider storage.Provider
+					var err error
+					if backend == "file" {
+						provider, err = storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+					} else {
+						dsn := os.Getenv("TEST_POSTGRES_DSN")
+						if dsn == "" {
+							t.Skip("isolated Postgres required")
+						}
+						provider, err = storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer provider.Close()
+					service.SetChangeStorage(provider)
+					store = reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service}
+					scope.ClusterID = fmt.Sprintf("typed-filter-%d", time.Now().UnixNano())
+					service.scope.ClusterID = scope.ClusterID
+				}
+				at := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+				batch := storage.EvidenceBatch{ID: "capture:typed", At: at.Add(10 * time.Second), Epoch: "fixture"}
+				for i, kind := range []string{"Deployment", "Pod"} {
+					uid := []string{"workload", "pod"}[i]
+					change := Change{ID: "typed-" + uid, Cluster: scope.ClusterID, Kind: kind, Namespace: "shop", Name: uid, UID: uid, RootUID: "workload", Type: kubechanges.Created, At: at.Add(time.Duration(i) * time.Second)}
+					raw, _ := json.Marshal(change)
+					batch.Records = append(batch.Records, storage.EvidenceRecord{ID: "change:" + change.ID, Type: "change", AuthorizationKind: kind, Namespace: "shop", Name: uid, Kind: kind, UID: uid, RootUID: "workload", Rule: string(change.Type), At: change.At, ObservedAt: batch.At, Epoch: batch.Epoch, Payload: raw})
+				}
+				var terminationID string
+				for i, kind := range []string{"termination", "status"} {
+					event := kubechanges.CrashEvent{Cluster: scope.ClusterID, Namespace: "shop", Pod: "pod", PodUID: "pod", RootUID: "workload", RootKind: "Deployment", RootName: "workload", Container: "app", Type: kind, Reason: "Error", WaitingReason: "CrashLoopBackOff", ExitCode: 1, RestartCount: 1, At: at.Add(time.Duration(i+2) * time.Second), ObservedAt: batch.At, TimeSource: "observed_at"}
+					event.ID = kubechanges.CrashID(event)
+					if !event.Valid() {
+						t.Fatal("invalid typed crash fixture")
+					}
+					raw, _ := json.Marshal(event)
+					record := storage.EvidenceRecord{ID: "crash:" + event.ID, Type: "crash", AuthorizationKind: "Pod", Namespace: "shop", Kind: "Deployment", UID: "pod", RootUID: "workload", PodUID: "pod", At: event.At, ObservedAt: batch.At, Epoch: batch.Epoch, Payload: raw}
+					batch.Records = append(batch.Records, record)
+					if kind == "termination" {
+						terminationID = record.ID
+					}
+				}
+				if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+					t.Fatal(err)
+				}
+				query := TimelineQuery{Since: at.Add(-time.Second), Until: batch.At, Namespace: "shop", Limit: 1}
+				want := map[string]bool{"change:typed-workload": true, "change:typed-pod": true, terminationID: true}
+				if filter == "resource-uid" {
+					query.ResourceUID = "workload"
+					delete(want, "change:typed-pod")
+				}
+				if filter == "pod-uid" {
+					query.PodUID = "pod"
+					delete(want, "change:typed-workload")
+				}
+				seen := map[string]bool{}
+				committedLater := false
+				for pageNumber := 0; pageNumber < 10; pageNumber++ {
+					page, err := service.Timeline(t.Context(), query)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if query.Cursor == "" {
+						if page.Total != len(want) || page.Counts["crash"] != 1 || page.Counts["change"] != len(want)-1 || page.CountCapped {
+							t.Fatalf("typed filter counts: %+v", page)
+						}
+					} else if page.Total != 0 || page.Counts["crash"] != 0 || page.Counts["change"] != 0 {
+						t.Fatal("continuation repeated counts")
+					}
+					for _, item := range page.Items {
+						if !want[item.ID] || seen[item.ID] {
+							t.Fatalf("typed filter membership: %+v", item)
+						}
+						seen[item.ID] = true
+					}
+					if page.Next == "" {
+						break
+					}
+					if !committedLater {
+						cp, err := store.EvidenceCheckpoint(t.Context(), scope)
+						if err != nil {
+							t.Fatal(err)
+						}
+						uid, kind := "pod", "Pod"
+						if filter == "resource-uid" {
+							uid, kind = "workload", "Deployment"
+						}
+						change := Change{ID: "typed-later", Cluster: scope.ClusterID, Kind: kind, Namespace: "shop", Name: uid, UID: uid, RootUID: "workload", Type: kubechanges.Created, At: at.Add(5 * time.Second)}
+						raw, _ := json.Marshal(change)
+						later := storage.EvidenceBatch{ID: "capture:typed-later", Expected: cp.ID, Generation: cp.Generation, At: batch.At.Add(time.Second), Epoch: batch.Epoch, Records: []storage.EvidenceRecord{{ID: "change:typed-later", Type: "change", AuthorizationKind: kind, Namespace: "shop", Name: uid, Kind: kind, UID: uid, RootUID: "workload", Rule: string(change.Type), At: change.At, ObservedAt: batch.At.Add(time.Second), Epoch: batch.Epoch, Payload: raw}}}
+						if err := store.CommitEvidence(t.Context(), scope, later); err != nil {
+							t.Fatal(err)
+						}
+						committedLater = true
+					}
+					if page.Next == query.Cursor || len(page.Items) == 0 {
+						t.Fatal("typed keyset made no progress")
+					}
+					query.Cursor = page.Next
+				}
+				if len(seen) != len(want) {
+					t.Fatalf("typed traversal retained %d want%d", len(seen), len(want))
+				}
+				query.Cursor = ""
+				fresh, err := service.Timeline(t.Context(), query)
+				if err != nil || fresh.Total != len(want)+1 || len(fresh.Items) != 1 || fresh.Items[0].ID != "change:typed-later" {
+					t.Fatalf("fresh filtered snapshot did not advance independently of pin: %+v %v", fresh, err)
+				}
+			})
+		}
+	}
 }
 
 func syntheticCustomOwnerCrash(t *testing.T, cluster string, at time.Time, count int32) storage.EvidenceRecord {
@@ -208,29 +332,37 @@ func TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends(t *testing
 			}
 			defer provider.Close()
 			var denyPod, denyEvent atomic.Bool
+			var reads atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reads.Add(1)
 				if r.URL.Path == "/api/v1/namespaces/kube-system" {
 					writeJSON(w, map[string]any{"metadata": map[string]any{"uid": "custom-owner-physical"}})
+					return
+				}
+				if r.URL.Path == "/api/v1/namespaces" {
+					writeJSON(w, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": "custom-owner-physical"}}}})
 					return
 				}
 				if denyPod.Load() && strings.HasSuffix(r.URL.Path, "/pods") || denyEvent.Load() && strings.HasSuffix(r.URL.Path, "/events") {
 					http.Error(w, "forbidden", http.StatusForbidden)
 					return
 				}
-				writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "opaque-custom-owner-version"}, "items": nil})
+				writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "opaque-custom-owner-version"}, "items": []any{}})
 			}))
 			defer server.Close()
 			cluster := fmt.Sprintf("custom-owner-%d", time.Now().UnixNano())
 			service := newTestService(t, server.URL, Scope{OrgID: "synthetic-history", ClusterID: cluster})
 			service.SetChangeStorage(provider)
 			service.changes.evidenceEnabled = true
-			store := provider.(storage.EvidenceStore)
+			store := reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service}
 			scope := storage.EvidenceScope{OrgID: "synthetic-history", ClusterID: cluster, ClusterUID: "custom-owner-physical"}
 			now := time.Now().UTC().Truncate(time.Microsecond)
 			old := now.Add(-30 * time.Minute)
 			batch := storage.EvidenceBatch{ID: "capture:custom-owner", At: old, Epoch: "synthetic"}
 			for i := int32(1); i <= 6; i++ {
-				batch.Records = append(batch.Records, syntheticCustomOwnerCrash(t, cluster, old, i))
+				record := syntheticCustomOwnerCrash(t, cluster, old, i)
+				record.AuthorizationKind = "Pod"
+				batch.Records = append(batch.Records, record)
 			}
 			issue, _ := json.Marshal(Issue{Root: ObjectRef{Kind: "FluentBit", Namespace: "sample", Name: "synthetic-controller", UID: "synthetic-root"}, Rule: "event.warning", Severity: "warning", Count: 1})
 			batch.Issues = []storage.EvidenceIssue{{AuthorizationKind: "Event", Key: "synthetic-warning", Kind: "FluentBit", UID: "synthetic-root", Namespace: "sample", Rule: "event.warning", LastSeen: old, Payload: issue}}
@@ -245,8 +377,8 @@ func TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends(t *testing
 				t.Fatal("isolated legacy custom-owner capture failed")
 			}
 			checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
-			if err != nil || !containsString(checkpoint.Kinds, "FluentBit") {
-				t.Fatal("test did not reproduce the legacy display-kind checkpoint")
+			if err != nil || !containsString(checkpoint.Kinds, "Pod") || !containsString(checkpoint.Kinds, "Event") {
+				t.Fatal("custom-owner capture lost its actual source-kind checkpoint")
 			}
 			batch = storage.EvidenceBatch{ID: "capture:later", Expected: checkpoint.ID, Generation: checkpoint.Generation, At: now, Epoch: "synthetic"}
 			for i := 0; i < 501; i++ {
@@ -260,6 +392,7 @@ func TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends(t *testing
 			if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 				t.Fatal("isolated later capture failed")
 			}
+			before := reads.Load()
 			for _, namespace := range []string{"", "sample"} {
 				for _, limit := range []int{0, 5, 50, 100} {
 					query := TimelineQuery{Namespace: namespace, Since: now.Add(-time.Hour), Until: now, Limit: limit}
@@ -289,12 +422,25 @@ func TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends(t *testing
 					t.Fatalf("legacy metadata blocked an authorized empty window: %v", err)
 				}
 			}
+			if reads.Load() != before {
+				t.Fatal("retained custom-owner history performed live Kubernetes reads")
+			}
 			for _, permission := range []string{"pod", "event"} {
 				denyPod.Store(permission == "pod")
 				denyEvent.Store(permission == "event")
+				reviewHistoryCycle(t, service)
+				checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+				kind := "Pod"
+				if permission == "event" {
+					kind = "Event"
+				}
+				if err != nil || checkpoint.Authority[kind].State != "denied" {
+					t.Fatal("actual collection did not commit the denied source authority")
+				}
+				before := reads.Load()
 				page, err := service.Crashes(t.Context(), kubechanges.CrashQuery{Namespace: "sample", RootUID: "synthetic-root", Since: now.Add(-time.Hour), Until: now})
-				if !errors.Is(err, ErrForbidden) || len(page.Items) != 0 {
-					t.Fatalf("custom owner bypassed current %s denial: %v", permission, err)
+				if permission == "pod" && (err != nil && !errors.Is(err, ErrForbidden) || len(page.Items) != 0) || permission == "event" && (err != nil || len(page.Items) == 0) || reads.Load() != before {
+					t.Fatalf("custom-owner crash did not use only its actual Pod source under %s denial: %v", permission, err)
 				}
 			}
 		})
@@ -303,9 +449,15 @@ func TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends(t *testing
 
 func reviewHistoryService(t *testing.T) (*Service, storage.EvidenceStore, storage.EvidenceScope) {
 	t.Helper()
+	reads := &atomic.Int32{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
 		if r.URL.Path == "/api/v1/namespaces/kube-system" {
 			writeJSON(w, map[string]any{"metadata": map[string]any{"uid": "physical"}})
+			return
+		}
+		if r.URL.Path == "/api/v1/namespaces" {
+			writeJSON(w, map[string]any{"apiVersion": "v1", "kind": "NamespaceList", "items": []any{map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"uid": "physical", "name": "kube-system"}}}})
 			return
 		}
 		writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{}})
@@ -315,7 +467,71 @@ func reviewHistoryService(t *testing.T) (*Service, storage.EvidenceStore, storag
 	service := newTestService(t, server.URL, Scope{OrgID: "org", ClusterID: "cluster"})
 	service.SetChangeStorage(provider)
 	service.changes.evidenceEnabled = true
-	return service, provider.(storage.EvidenceStore), storage.EvidenceScope{OrgID: "org", ClusterID: "cluster", ClusterUID: "physical"}
+	return service, reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service, reads: reads}, storage.EvidenceScope{OrgID: "org", ClusterID: "cluster", ClusterUID: "physical"}
+}
+
+// Collect the same guarded kind reads used by the worker. Authority comes from
+// their actual results, including denials, rather than a synthetic allow map.
+func reviewHistoryGeneration(t *testing.T, service *Service) inventoryGeneration {
+	t.Helper()
+	service.client.indexLimiter = nil
+	index := kubeindex.NewUnbounded()
+	kinds := make([]string, 0, len(indexedResourceIDs))
+	for kind := range indexedResourceIDs {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	ctx := context.WithValue(captureReadContext(t.Context(), "fixture"), credentialEpochContextKey{}, service)
+	definitions := make(map[string]ResourceDefinition, len(indexedResourceIDs))
+	for kind, id := range indexedResourceIDs {
+		parts := strings.Split(id, "~")
+		group := parts[0]
+		if group == "core" {
+			group = ""
+		}
+		definitions[kind] = ResourceDefinition{ID: id, Kind: kind, Group: group, Version: parts[1], Resource: parts[2], Namespaced: kind != "Namespace" && kind != "Node", Available: true}
+	}
+	ctx = context.WithValue(ctx, indexDefinitionContextKey{}, definitions)
+	for _, kind := range kinds {
+		_ = index.RefreshGuarded(ctx, kind, 0, time.Now().UTC(), func(ctx context.Context) ([]kubeindex.Record, bool, error) {
+			return service.loadIndexKind(ctx, kind)
+		}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+	}
+	generation := inventoryGeneration{View: index.Snapshot()}
+	if err := service.prepareEvidence(ctx, &generation, inventoryGeneration{}); err != nil {
+		t.Fatal("prepare actually collected history authority:", err)
+	}
+	return generation
+}
+
+func reviewHistoryCycle(t *testing.T, service *Service) {
+	t.Helper()
+	if err := service.commitEvidence(t.Context(), reviewHistoryGeneration(t, service)); err != nil {
+		t.Fatal("commit actually collected history authority:", err)
+	}
+}
+
+type reviewProvedHistoryStore struct {
+	storage.EvidenceStore
+	t       *testing.T
+	service *Service
+	reads   *atomic.Int32
+}
+
+// Keep synthetic historical payloads and dates while binding them to a real
+// collection's principal, physical identity and per-kind authority.
+func (store reviewProvedHistoryStore) CommitEvidence(ctx context.Context, scope storage.EvidenceScope, batch storage.EvidenceBatch) error {
+	generation := reviewHistoryGeneration(store.t, store.service)
+	if generation.EvidenceScope.OrgID != scope.OrgID || generation.EvidenceScope.ClusterID != scope.ClusterID || generation.EvidenceScope.ClusterUID != scope.ClusterUID {
+		return ErrInvalidArguments
+	}
+	proof := generation.EvidenceBatch
+	batch.Principal, batch.Authority, batch.ScopeBinding = proof.Principal, proof.Authority, proof.ScopeBinding
+	if batch.Expected == "" {
+		batch.Expected, batch.Generation = proof.Expected, proof.Generation
+	}
+	generation.EvidenceBatch = &batch
+	return store.service.commitEvidence(ctx, generation)
 }
 
 func TestPersistedRootContextIgnoresEvidenceWindowAndLiveExistence(t *testing.T) {
@@ -323,7 +539,7 @@ func TestPersistedRootContextIgnoresEvidenceWindowAndLiveExistence(t *testing.T)
 	at := time.Now().UTC().Add(-72 * time.Hour)
 	root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "retained-controller", UID: "retained-root"}
 	raw, _ := json.Marshal(Issue{Root: root, Rule: "pod.crash_loop", Severity: "warning", Count: 1, Broken: true})
-	batch := storage.EvidenceBatch{ID: "capture:retained", At: at, Epoch: "synthetic", Issues: []storage.EvidenceIssue{{Key: "retained", Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: "pod.crash_loop", LastSeen: at, Payload: raw}}}
+	batch := storage.EvidenceBatch{ID: "capture:retained", At: at, Epoch: "synthetic", Issues: []storage.EvidenceIssue{{AuthorizationKind: "Pod", Key: "retained", Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: "pod.crash_loop", LastSeen: at, Payload: raw}}}
 	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 		t.Fatal(err)
 	}
@@ -333,6 +549,8 @@ func TestPersistedRootContextIgnoresEvidenceWindowAndLiveExistence(t *testing.T)
 	if err := store.CommitEvidence(t.Context(), scope, storage.EvidenceBatch{ID: "capture:recovered", Expected: checkpoint.ID, Generation: checkpoint.Generation, At: at.Add(time.Hour), CoveredThrough: at.Add(time.Hour), Epoch: "synthetic"}); err != nil {
 		t.Fatal(err)
 	}
+	reads := store.(reviewProvedHistoryStore).reads
+	before := reads.Load()
 	window, err := service.Issues(t.Context(), IssueOptions{RootUID: root.UID, Namespace: "shop", Since: time.Now().Add(-time.Hour), Until: time.Now()})
 	if err != nil || len(window.Items) != 0 {
 		t.Fatal("selected empty evidence interval changed")
@@ -365,6 +583,9 @@ func TestPersistedRootContextIgnoresEvidenceWindowAndLiveExistence(t *testing.T)
 			t.Fatal("retained identity escaped its UID or namespace")
 		}
 	}
+	if reads.Load() != before {
+		t.Fatal("persisted root/history reads contacted Kubernetes")
+	}
 }
 
 func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
@@ -378,7 +599,7 @@ func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
 				}
 				t.Cleanup(func() { provider.Close() })
 				service.SetChangeStorage(provider)
-				store = provider.(storage.EvidenceStore)
+				store = reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service}
 			}
 			at := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second).Add(123456789 * time.Nanosecond)
 			root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "retained", UID: "retained-root"}
@@ -390,7 +611,7 @@ func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
 				}
 				rule := fmt.Sprintf("synthetic.rule-%d", i)
 				raw, _ := json.Marshal(Issue{Root: root, Rule: rule, Broken: true, BrokeAt: &broke, Severity: "warning"})
-				batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: rule, Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: rule, LastSeen: at, ObservationOnly: true, Payload: raw})
+				batch.Issues = append(batch.Issues, storage.EvidenceIssue{AuthorizationKind: "Pod", Key: rule, Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: rule, LastSeen: at, ObservationOnly: true, Payload: raw})
 			}
 			if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 				t.Fatal(err)
@@ -405,6 +626,7 @@ func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
 				center                           time.Time
 			}{
 				{name: "exact", id: selected.OccurrenceID, status: "resolved"},
+				{name: "id-is-authoritative", id: selected.OccurrenceID, center: at.Add(30 * time.Minute), status: "resolved"},
 				{name: "mismatch", id: "missing-id", center: *selected.BrokeAt, status: "not_found"},
 				{name: "unique-center", center: at.Add(time.Minute), status: "resolved"},
 				{name: "millisecond-center-does-not-substitute", center: at.Add(time.Minute).Truncate(time.Millisecond), status: "not_found"},
@@ -424,6 +646,12 @@ func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
 					}
 					options.OccurrenceID, options.Center = test.id, test.center
 					page, err := service.Issues(t.Context(), options)
+					if test.name == "wrong-namespace" || test.name == "same-name-new-uid" {
+						if !errors.Is(err, errHistoryMismatch) || page.SelectedOccurrence != nil || page.RootContext != nil || len(page.Items) != 0 {
+							t.Fatal("foreign occurrence selector escaped its namespace or root")
+						}
+						return
+					}
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -459,7 +687,7 @@ func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
 	}
 }
 
-func TestPersistedRootSelectionReportsBoundedScanWithoutFalseUniqueness(t *testing.T) {
+func TestPersistedRootPointLookupDoesNotScanUnrelatedOccurrences(t *testing.T) {
 	service, store, scope := reviewHistoryService(t)
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "retained", UID: "retained-root"}
@@ -467,14 +695,18 @@ func TestPersistedRootSelectionReportsBoundedScanWithoutFalseUniqueness(t *testi
 	for i := 0; i < 1001; i++ {
 		rule := fmt.Sprintf("synthetic.rule-%04d", i)
 		raw, _ := json.Marshal(Issue{Root: root, Rule: rule, BrokeAt: &at, Broken: true, Severity: "warning"})
-		batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: rule, Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: rule, LastSeen: at, ObservationOnly: true, Payload: raw})
+		batch.Issues = append(batch.Issues, storage.EvidenceIssue{AuthorizationKind: "Pod", Key: rule, Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: rule, LastSeen: at, ObservationOnly: true, Payload: raw})
 	}
 	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 		t.Fatal(err)
 	}
 	page, err := service.Issues(t.Context(), IssueOptions{Context: "persisted", RootUID: root.UID, Namespace: root.Namespace, OccurrenceID: "not-in-scanned-prefix"})
-	if err != nil || page.SelectionStatus != "partial" || page.SelectedOccurrence != nil || page.RootContext == nil || !page.Sync.Partial {
-		t.Fatal("bounded scan claimed absence or erased retained root")
+	if err != nil || page.SelectionStatus != "not_found" || page.SelectedOccurrence != nil || page.RootContext != nil || page.Sync.Partial {
+		t.Fatal("missing point selector substituted a retained occurrence or scanned unrelated history")
+	}
+	page, err = service.Issues(t.Context(), IssueOptions{Context: "persisted", RootUID: root.UID, Namespace: root.Namespace})
+	if err != nil || page.SelectionStatus != "not_requested" || page.SelectedOccurrence != nil || page.RootContext == nil || page.RootContext.Root != root {
+		t.Fatal("independent retained root lookup lost its canonical identity")
 	}
 }
 
@@ -502,12 +734,16 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 			var denySecret, denyPod, denyRoot, wrongCluster atomic.Bool
 			var wrongScopeCalls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/v1/namespaces/kube-system" {
+				if r.URL.Path == "/api/v1/namespaces/kube-system" || r.URL.Path == "/api/v1/namespaces" {
 					uid := "scoped-physical"
 					if wrongCluster.Load() {
 						uid = "replacement-physical"
 					}
-					writeJSON(w, map[string]any{"metadata": map[string]any{"uid": uid}})
+					if r.URL.Path == "/api/v1/namespaces" {
+						writeJSON(w, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": uid}}}})
+					} else {
+						writeJSON(w, map[string]any{"metadata": map[string]any{"uid": uid}})
+					}
 					return
 				}
 				if strings.HasSuffix(r.URL.Path, "/gateways") || strings.HasSuffix(r.URL.Path, "/httproutes") {
@@ -523,20 +759,20 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 					http.Error(w, "forbidden", http.StatusForbidden)
 					return
 				}
-				writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "synthetic-version"}, "items": nil})
+				writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "synthetic-version"}, "items": []any{}})
 			}))
 			defer server.Close()
 			cluster := fmt.Sprintf("scope-projection-%d", time.Now().UnixNano())
 			service := newTestService(t, server.URL, Scope{OrgID: "synthetic-history", ClusterID: cluster})
 			service.SetChangeStorage(provider)
 			service.changes.evidenceEnabled = true
-			store := provider.(storage.EvidenceStore)
+			store := reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service}
 			scope := storage.EvidenceScope{OrgID: "synthetic-history", ClusterID: cluster, ClusterUID: "scoped-physical"}
 			at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 			batch := storage.EvidenceBatch{ID: "capture:mixed", At: at, Epoch: "synthetic"}
 			issueRaw, _ := json.Marshal(Issue{Root: ObjectRef{Kind: "Deployment", Namespace: "sample", Name: "deleted-controller", UID: "retained-root"}, Rule: "pod.crash_loop", Severity: "warning", Count: 1})
-			batch.Issues = []storage.EvidenceIssue{{Key: "retained", Namespace: "sample", Kind: "Deployment", UID: "retained-root", Rule: "pod.crash_loop", LastSeen: at, Payload: issueRaw}}
-			batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: "malformed-retained", Namespace: "sample", Kind: "Deployment", UID: "retained-root", Rule: "pod.image_pull", LastSeen: at, Payload: json.RawMessage(`[]`)})
+			batch.Issues = []storage.EvidenceIssue{{AuthorizationKind: "Pod", Key: "retained", Namespace: "sample", Kind: "Deployment", UID: "retained-root", Rule: "pod.crash_loop", LastSeen: at, Payload: issueRaw}}
+			batch.Issues = append(batch.Issues, storage.EvidenceIssue{AuthorizationKind: "Pod", Key: "malformed-retained", Namespace: "sample", Kind: "Deployment", UID: "retained-root", Rule: "pod.image_pull", LastSeen: at.Add(-time.Second), Payload: json.RawMessage(`[]`)})
 			for i, kind := range []string{"Pod", "Gateway", "HTTPRoute", "UnknownController", "AnotherController", "Secret"} {
 				record := syntheticChangeEvidence(cluster, kind, "sample", fmt.Sprintf("row-%d", i), at)
 				if kind == "Pod" {
@@ -595,6 +831,7 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 			}
 			for i, owner := range []string{"FluentBit", "SyntheticOperator", "AnotherOperator", "Deployment"} {
 				record := syntheticCustomOwnerCrash(t, cluster, at, int32(i+1))
+				record.AuthorizationKind = "Pod"
 				var crash kubechanges.CrashEvent
 				_ = json.Unmarshal(record.Payload, &crash)
 				crash.RootKind = owner
@@ -609,10 +846,17 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 			if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 				t.Fatal(err)
 			}
+			collectAuthority := func() {
+				t.Helper()
+				generation := reviewHistoryGeneration(t, service)
+				if err := store.SetEvidenceAuthority(t.Context(), scope, generation.EvidenceBatch.Principal, generation.EvidenceBatch.Authority); err != nil {
+					t.Fatal(err)
+				}
+			}
 			contextOptions := IssueOptions{Context: "persisted", RootUID: "retained-root", Namespace: "sample"}
 			contextPage, err := service.Issues(t.Context(), contextOptions)
-			if err != nil || contextPage.RootContext == nil || contextPage.RootContext.Root.UID != "retained-root" || len(contextPage.Items) != 0 || !contextPage.Sync.Partial {
-				t.Fatal("persisted context required a live object, hid a malformed observation, or leaked into history")
+			if err != nil || contextPage.RootContext == nil || contextPage.RootContext.Root.UID != "retained-root" || len(contextPage.Items) != 0 {
+				t.Fatalf("persisted point context required a live object or leaked into history: context=%v items=%d code=%s err=%v", contextPage.RootContext, len(contextPage.Items), DiagnoseError(err).Code, err)
 			}
 			contextOptions.OccurrenceID = contextPage.RootContext.Occurrence.OccurrenceID
 			selectedPage, err := service.Issues(t.Context(), contextOptions)
@@ -624,15 +868,23 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 				t.Fatal("occurrence projection did not preserve accurate counts and bounded opaque pagination")
 			}
 			denyRoot.Store(true)
+			collectAuthority()
+			if page, err := service.Issues(t.Context(), contextOptions); err != nil || page.RootContext == nil {
+				t.Fatal("display-owner denial replaced the actual Pod source proof")
+			}
+			denyPod.Store(true)
+			collectAuthority()
 			if _, err := service.Issues(t.Context(), contextOptions); !errors.Is(err, ErrForbidden) {
 				t.Fatal("persisted context bypassed current read authority")
 			}
 			denyRoot.Store(false)
+			denyPod.Store(false)
+			collectAuthority()
 			other := newTestService(t, server.URL, Scope{OrgID: "another-org", ClusterID: cluster})
 			other.SetChangeStorage(provider)
 			other.changes.evidenceEnabled = true
 			otherPage, err := other.Issues(t.Context(), contextOptions)
-			if err != nil || otherPage.RootContext != nil {
+			if !errors.Is(err, errHistoryNotEstablished) || otherPage.RootContext != nil {
 				t.Fatal("persisted root escaped organization scope")
 			}
 			query := storage.EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Minute), Namespace: "sample", Type: "timeline", Limit: 2}
@@ -643,7 +895,7 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 				if err != nil {
 					t.Fatal(err)
 				}
-				if page.Counts["coverage_gap"] != 6+len(malformed) || page.Counts["change"] != 1 || page.Counts["crash"] != 4 || page.Total != 11+len(malformed) || len(page.Items) > 2 {
+				if query.Cursor == "" && (page.Counts["coverage_gap"] != 6+len(malformed) || page.Counts["change"] != 1 || page.Counts["crash"] != 4 || page.Total != 11+len(malformed)) || query.Cursor != "" && (len(page.Counts) != 0 || page.Total != 0) || len(page.Items) > 2 {
 					t.Fatalf("projected counts or page bound incorrect: %#v", page.Counts)
 				}
 				for _, record := range page.Items {
@@ -679,24 +931,49 @@ func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *te
 			if _, err := service.queryEvidence(t.Context(), global); err != nil || wrongScopeCalls.Load() != 0 {
 				t.Fatal("cluster-scoped sources did not use cluster paths")
 			}
-			// A specifically requested absent kind is still an unavailable
-			// request scope, not an authorized empty page.
+			// An absent source is an unavailable slot, never protected data
+			// authorized merely by other readable kinds in the checkpoint.
 			absent := global
 			absent.Kind = "Gateway"
-			if _, err := service.queryEvidence(t.Context(), absent); !errors.Is(err, ErrNotFound) {
-				t.Fatal("explicit absent request scope did not fail closed")
+			if page, err := service.queryEvidence(t.Context(), absent); err != nil {
+				t.Fatal(err)
+			} else {
+				for _, record := range page.Items {
+					if record.Type != "coverage_gap" {
+						t.Fatal("absent source exposed protected data")
+					}
+				}
 			}
 			denySecret.Store(true)
-			if _, err := service.queryEvidence(t.Context(), global); !errors.Is(err, ErrForbidden) {
-				t.Fatal("actual returned-source denial was converted into a gap")
+			collectAuthority()
+			if page, err := service.queryEvidence(t.Context(), global); err != nil {
+				t.Fatal(err)
+			} else {
+				for _, record := range page.Items {
+					if record.Type != "coverage_gap" && record.AuthorizationKind == "Secret" {
+						t.Fatal("actual source denial exposed retained Secret data")
+					}
+				}
 			}
 			denySecret.Store(false)
+			// Let the bounded metadata-denial memo expire before the next
+			// collection proves the recovered permission.
+			service.client.now = func() time.Time { return time.Now().Add(2 * metadataDenyTTL) }
+			collectAuthority()
 			denyPod.Store(true)
-			if _, err := service.queryEvidence(t.Context(), global); !errors.Is(err, ErrForbidden) {
-				t.Fatal("requested base scope denial was bypassed")
+			collectAuthority()
+			if page, err := service.queryEvidence(t.Context(), global); err != nil {
+				t.Fatal(err)
+			} else {
+				for _, record := range page.Items {
+					if record.Type != "coverage_gap" && record.AuthorizationKind == "Pod" {
+						t.Fatal("actual Pod denial exposed retained derived evidence")
+					}
+				}
 			}
 			denyPod.Store(false)
 			wrongCluster.Store(true)
+			reviewHistoryCycle(t, service)
 			if selected, err := service.Issues(t.Context(), contextOptions); err != nil || selected.SelectedOccurrence != nil || selected.RootContext != nil || selected.SelectionStatus != "not_found" {
 				t.Fatal("selected occurrence bypassed physical cluster identity")
 			}
@@ -763,17 +1040,23 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 							t.Fatal(err)
 						}
 						defer provider.Close()
-						var secretCalls, gatewayCalls atomic.Int32
+						var secretCalls, gatewayCalls, upstreamCalls atomic.Int32
+						var revoked atomic.Bool
 						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+							upstreamCalls.Add(1)
 							if r.URL.Path == "/api/v1/namespaces/kube-system" {
 								writeJSON(w, map[string]any{"metadata": map[string]any{"uid": "priority-physical"}})
 								return
 							}
+							if r.URL.Path == "/api/v1/namespaces" {
+								writeJSON(w, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": "priority-physical"}}}})
+								return
+							}
 							switch {
-							case strings.HasSuffix(r.URL.Path, "/secrets"):
+							case revoked.Load() && strings.HasSuffix(r.URL.Path, "/secrets"):
 								secretCalls.Add(1)
 								http.Error(w, "denied", status)
-							case strings.HasSuffix(r.URL.Path, "/gateways"):
+							case revoked.Load() && strings.HasSuffix(r.URL.Path, "/gateways"):
 								gatewayCalls.Add(1)
 								if failure == "timeout" {
 									<-r.Context().Done()
@@ -781,7 +1064,7 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 									http.Error(w, "unavailable", http.StatusInternalServerError)
 								}
 							default:
-								writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "synthetic-version"}, "items": nil})
+								writeJSON(w, map[string]any{"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": map[string]any{"resourceVersion": "synthetic-version"}, "items": []any{}})
 							}
 						}))
 						defer server.Close()
@@ -813,18 +1096,42 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 						unrelated.Payload, _ = json.Marshal(change)
 						batch.Records = append(batch.Records, unrelated)
 						scope := storage.EvidenceScope{OrgID: "synthetic-history", ClusterID: cluster, ClusterUID: "priority-physical"}
-						if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, batch); err != nil {
+						store := reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service}
+						if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+							t.Fatal(err)
+						}
+						checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+						if err != nil {
+							t.Fatal(err)
+						}
+						revoked.Store(true)
+						// Persist only proofs obtained from guarded material reads,
+						// exactly as a collector does before any history GET.
+						index := kubeindex.NewUnbounded()
+						ctx := context.WithValue(captureReadContext(t.Context(), "fixture"), credentialEpochContextKey{}, service)
+						ctx = context.WithValue(ctx, indexDefinitionContextKey{}, map[string]ResourceDefinition{
+							"Secret":  {ID: indexedResourceIDs["Secret"], Kind: "Secret", Version: "v1", Resource: "secrets", Namespaced: true, Available: true},
+							"Gateway": {ID: indexedResourceIDs["Gateway"], Kind: "Gateway", Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gateways", Namespaced: true, Available: true},
+						})
+						for _, kind := range []string{first, second} {
+							_ = index.RefreshGuarded(ctx, kind, 0, time.Now().UTC(), func(ctx context.Context) ([]kubeindex.Record, bool, error) {
+								return service.loadIndexKind(ctx, kind)
+							}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+						}
+						proofs := historyProofs(inventoryGeneration{View: index.Snapshot()})
+						if proofs["Secret"].State != "denied" {
+							t.Fatal("material collection did not prove the actual source denial")
+						}
+						if err := provider.(storage.EvidenceAuthorityStore).SetEvidenceAuthority(t.Context(), scope, checkpoint.Principal, proofs); err != nil {
 							t.Fatal(err)
 						}
 						query := storage.EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Minute), Namespace: "sample", RootUID: "synthetic-root", Type: "change", Limit: 1}
+						before := upstreamCalls.Load()
 						page, err := service.queryEvidence(t.Context(), query)
 						detail := DiagnoseError(err)
-						expected := ErrForbidden
-						if status == http.StatusUnauthorized {
-							expected = ErrUnauthorized
-						}
-						if !errors.Is(err, expected) || detail.Code != DiagnoseError(expected).Code || detail.Retryable || len(page.Items) != 0 || secretCalls.Load() != 1 || gatewayCalls.Load() > 1 || status == http.StatusForbidden && gatewayCalls.Load() != 1 {
-							t.Fatalf("denial lost to transient/cache traversal: code=%s secretProofs=%d gatewayProofs=%d", detail.Code, secretCalls.Load(), gatewayCalls.Load())
+						expected := errHistoryAuthority
+						if status == http.StatusUnauthorized && (!errors.Is(err, expected) || detail.Code != DiagnoseError(expected).Code || detail.Retryable || len(page.Items) != 0) || status == http.StatusForbidden && (err != nil || page.Counts["change"] != 2 || page.Counts["coverage_gap"] != 2 || len(page.Items) != 1 || page.Items[0].Type != "coverage_gap" && page.Items[0].AuthorizationKind != "Gateway") || secretCalls.Load() != 1 || status == http.StatusForbidden && gatewayCalls.Load() == 0 || upstreamCalls.Load() != before {
+							t.Fatalf("denial lost to transient/cache traversal: code=%s err=%v counts=%v items=%+v secretProofs=%d gatewayProofs=%d", detail.Code, err, page.Counts, page.Items, secretCalls.Load(), gatewayCalls.Load())
 						}
 						if status == http.StatusUnauthorized {
 							return // The transport invalidates a rejected credential epoch.
@@ -833,7 +1140,7 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 						// blanket denial of an independently authorized good row.
 						query.RootUID = "unrelated-root"
 						page, err = service.queryEvidence(t.Context(), query)
-						if err != nil || len(page.Items) != 1 || page.Items[0].Type != "change" || page.Counts["change"] != 1 || secretCalls.Load() != 1 || gatewayCalls.Load() != 1 {
+						if err != nil || len(page.Items) != 1 || page.Items[0].Type != "change" || page.Counts["change"] != 1 || secretCalls.Load() != 1 || gatewayCalls.Load() == 0 || upstreamCalls.Load() != before {
 							t.Fatal("unrelated denied checkpoint source poisoned authorized scoped evidence")
 						}
 					})
@@ -846,11 +1153,11 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 func TestHistoricalIssuesSinceOnlyContinuationUsesPinnedWindow(t *testing.T) {
 	service, store, scope := reviewHistoryService(t)
 	at := time.Now().UTC().Add(-time.Hour)
-	batch := storage.EvidenceBatch{ID: "initial", At: at, Epoch: "synthetic"}
+	batch := storage.EvidenceBatch{ID: "capture:initial", At: at, Epoch: "synthetic"}
 	for i := 0; i < 13; i++ {
 		uid := fmt.Sprintf("pod-%02d", i)
 		payload, _ := json.Marshal(Issue{Root: ObjectRef{Kind: "Pod", Namespace: "shop", Name: uid, UID: uid}, Rule: "pod.crash_loop", Severity: "warning", Count: 1, Broken: true})
-		batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: uid, Namespace: "shop", Kind: "Pod", UID: uid, Rule: "pod.crash_loop", LastSeen: at, Payload: payload})
+		batch.Issues = append(batch.Issues, storage.EvidenceIssue{AuthorizationKind: "Pod", Key: uid, Namespace: "shop", Kind: "Pod", UID: uid, Rule: "pod.crash_loop", LastSeen: at, Payload: payload})
 	}
 	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 		t.Fatal(err)
@@ -939,8 +1246,12 @@ func TestHistoryWithoutKubernetesClientFailsClosed(t *testing.T) {
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
-			if err := call(); !errors.Is(err, ErrCredentialUnavailable) {
-				t.Fatal("history read without authority succeeded")
+			want := ErrCredentialUnavailable
+			if name == "changes" || name == "timeline" || name == "issues" {
+				want = errHistoryNotEstablished
+			}
+			if err := call(); !errors.Is(err, want) {
+				t.Fatalf("read without established authority: got %v want %v", err, want)
 			}
 		})
 	}
@@ -996,7 +1307,7 @@ func TestLiveIssueCarriesPinnedOccurrenceThroughConditionTimeDrift(t *testing.T)
 	commit := func(id, expected string, generation uint64, brokeAt, at time.Time) {
 		t.Helper()
 		raw, _ := json.Marshal(Issue{Root: root, Rule: "pod.crash_loop", Severity: "warning", Broken: true, BrokeAt: &brokeAt})
-		batch := storage.EvidenceBatch{ID: id, Expected: expected, Generation: generation, At: at, Epoch: "synthetic", Issues: []storage.EvidenceIssue{{Key: "api", Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: "pod.crash_loop", LastSeen: at, Broken: true, Payload: raw}}}
+		batch := storage.EvidenceBatch{ID: id, Expected: expected, Generation: generation, At: at, Epoch: "synthetic", Issues: []storage.EvidenceIssue{{AuthorizationKind: "Pod", Key: "api", Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: "pod.crash_loop", LastSeen: at, Broken: true, Payload: raw}}}
 		if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 			t.Fatal(err)
 		}
@@ -1057,6 +1368,7 @@ func (store occurrenceLookupFailureStore) QueryEvidence(context.Context, storage
 
 func TestLiveIssueIncompleteOccurrenceHistoryWithholdsCenter(t *testing.T) {
 	service, store, _ := reviewHistoryService(t)
+	reviewHistoryCycle(t, service)
 	service.SetChangeStorage(occurrenceLookupFailureStore{Provider: service.usageProvider(), EvidenceStore: store, page: storage.EvidencePage{Items: []storage.EvidenceRecord{{Type: "coverage_gap", Payload: json.RawMessage(`{}`)}}}})
 	drifted := time.Now().UTC().Add(-time.Minute)
 	page := IssuePage{Items: []Issue{{Root: ObjectRef{Kind: "Pod", Namespace: "shop", UID: "pod"}, Rule: "pod.crash_loop", Broken: true, BrokeAt: &drifted, BrokeAtSource: "condition"}}}
@@ -1068,10 +1380,30 @@ func TestLiveIssueIncompleteOccurrenceHistoryWithholdsCenter(t *testing.T) {
 	}
 }
 
+func TestHistoricalIssuesReportStoreStageWhileReadModelsConvert(t *testing.T) {
+	service, store, _ := reviewHistoryService(t)
+	reviewHistoryCycle(t, service)
+	service.SetChangeStorage(occurrenceLookupFailureStore{Provider: service.usageProvider(), EvidenceStore: store, cause: storage.ErrEvidenceNotReady})
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	now := time.Now().UTC()
+	_, err := service.historicalIssues(t.Context(), IssueOptions{Since: now.Add(-time.Hour), Until: now})
+	detail := DiagnoseError(err)
+	if !errors.Is(err, storage.ErrEvidenceNotReady) || detail.Code != "history_upgrading" || !detail.Retryable {
+		t.Fatalf("converting history surfaced %q retryable=%t: %v", detail.Code, detail.Retryable, err)
+	}
+	if !strings.Contains(output.String(), "stage=store_query") || strings.Contains(output.String(), "stage=payload_decode") {
+		t.Fatalf("store failure logged under the wrong stage: %s", output.String())
+	}
+}
+
 func TestLiveIssuesFailClosedWhenOccurrenceLookupFails(t *testing.T) {
 	for _, cause := range []error{storage.ErrUnsupported, context.DeadlineExceeded, ErrForbidden, ErrUnauthorized} {
 		t.Run(errorClass(cause), func(t *testing.T) {
 			service, store, _ := reviewHistoryService(t)
+			reviewHistoryCycle(t, service)
 			service.SetChangeStorage(occurrenceLookupFailureStore{Provider: service.usageProvider(), EvidenceStore: store, cause: cause})
 			at := time.Now().UTC()
 			kinds := map[string]kubeindex.KindStatus{}
@@ -1088,8 +1420,9 @@ func TestLiveIssuesFailClosedWhenOccurrenceLookupFails(t *testing.T) {
 				t.Fatalf("fixture has no live broken issue: %+v %v", before, err)
 			}
 			page, err := service.Issues(ctx, IssueOptions{})
-			if !errors.Is(err, cause) || len(page.Items) != 0 || DiagnoseError(err).Code != DiagnoseError(cause).Code {
-				t.Fatalf("lookup failure served drifting live items or lost its cause: %+v %v", page, err)
+			expected := DiagnoseError(historyStoreError(cause)).Code
+			if !errors.Is(err, cause) || len(page.Items) != 0 || DiagnoseError(err).Code != expected {
+				t.Fatalf("lookup failure served drifting live items or lost its cause: items=%d wraps_cause=%t code=%s want=%s err=%v", len(page.Items), errors.Is(err, cause), DiagnoseError(err).Code, expected, err)
 			}
 		})
 	}

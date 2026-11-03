@@ -9,14 +9,19 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const maxCredentialFileBytes = int64(1 << 20)
+
+var errSelfSubjectReviewUnsupported = errors.New("kubernetes: self subject review unsupported")
 
 // CredentialSource supplies request and TLS credentials without exposing them
 // through connector configuration or status DTOs.
@@ -31,30 +36,43 @@ type credentialSource struct {
 }
 
 type expiringBearerSource struct {
-	lockOnce  sync.Once
-	lock      chan struct{}
-	refresh   func(context.Context) (string, time.Time, error)
-	now       func() time.Time
-	skew      time.Duration
-	header    string
-	expires   time.Time
-	principal string
-	retryAt   time.Time
-	failures  int
+	lockOnce          sync.Once
+	lock              chan struct{}
+	refresh           func(context.Context) (string, time.Time, error)
+	now               func() time.Time
+	skew              time.Duration
+	header            string
+	expires           time.Time
+	principal         string
+	principalVerified bool
+	retryAt           time.Time
+	failures          int
 }
 
-func (source *expiringBearerSource) credentialPrincipal() string { return source.principal }
+func (source *expiringBearerSource) credentialPrincipal() string {
+	if !source.principalVerified {
+		return ""
+	}
+	return source.principal
+}
 
 type credentialEpoch struct {
-	mu          sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	initialized bool
-	fingerprint [32]byte
-	principal   [32]byte
-	known       bool
-	retired     bool
-	renewal     bool
+	certificate            *tls.Certificate
+	requestGeneration      atomic.Uint64
+	history                atomic.Value
+	reviewPrincipal        string
+	reviewFingerprint      [32]byte
+	reviewUnsupported      bool
+	unsupportedFingerprint [32]byte
+	mu                     sync.Mutex
+	ctx                    context.Context
+	cancel                 context.CancelFunc
+	initialized            bool
+	fingerprint            [32]byte
+	principal              [32]byte
+	known                  bool
+	retired                bool
+	renewal                bool
 }
 
 type credentialEpochContextKey struct{}
@@ -122,18 +140,28 @@ func (service *Service) validateCredential(ctx context.Context) error {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
-		epoch.retired = true
-		epoch.cancel()
+		if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) {
+			epoch.retired = true
+			epoch.cancel()
+		}
 		return ErrCredentialUnavailable
 	}
 	return service.acceptCredentialLocked(ctx, header)
 }
 
 func (service *Service) acceptCredential(ctx context.Context, header string) error {
+	_, _, err := service.acceptCredentialForRequest(ctx, header)
+	return err
+}
+
+func (service *Service) acceptCredentialForRequest(ctx context.Context, header string) (uint64, *tls.Certificate, error) {
 	epoch := service.identity
 	epoch.mu.Lock()
 	defer epoch.mu.Unlock()
-	return service.acceptCredentialLocked(ctx, header)
+	if err := service.acceptCredentialLocked(ctx, header); err != nil {
+		return 0, nil, err
+	}
+	return epoch.requestGeneration.Load(), epoch.certificate, nil
 }
 
 // commitConflictError reports that a listing could not be committed because the
@@ -217,6 +245,38 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 	} else if source, ok := service.client.credentials.(interface{ credentialPrincipal() string }); ok {
 		principal = source.credentialPrincipal()
 	}
+	// A Kubernetes-authenticated UserInfo includes groups, UID and extras.
+	// A same subject or provider display name alone cannot prove equivalence.
+	if epoch.reviewPrincipal != "" && subtle.ConstantTimeCompare(fingerprint[:], epoch.reviewFingerprint[:]) == 1 {
+		principal = epoch.reviewPrincipal
+	} else if !epoch.reviewUnsupported || subtle.ConstantTimeCompare(fingerprint[:], epoch.unsupportedFingerprint[:]) != 1 {
+		reviewed, reviewErr := service.client.selfSubjectPrincipal(ctx, header, certificate)
+		if reviewErr != nil {
+			if errors.Is(reviewErr, errSelfSubjectReviewUnsupported) {
+				epoch.reviewUnsupported, epoch.unsupportedFingerprint = true, fingerprint
+			}
+			if errors.Is(reviewErr, ErrUnauthorized) {
+				epoch.retired = true
+				epoch.cancel()
+				return reviewErr
+			}
+			if epoch.reviewPrincipal != "" || ctx.Err() != nil {
+				return reviewErr
+			}
+			// A server without identity-review support can still collect under
+			// a byte-bound epoch. It cannot coalesce an unproved bearer change.
+		}
+		if reviewed != "" {
+			principal = reviewed
+			epoch.reviewPrincipal, epoch.reviewFingerprint = reviewed, fingerprint
+		} else if epoch.reviewPrincipal != "" {
+			// A previously authenticated principal must not be silently replaced
+			// by a weaker provider hint when review becomes unavailable.
+			return ErrCredentialUnavailable
+		}
+	} else if epoch.reviewPrincipal != "" {
+		return ErrCredentialUnavailable
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -234,10 +294,123 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 		epoch.cancel()
 		return ErrCredentialUnavailable
 	}
+	if !epoch.initialized || !sameFingerprint {
+		epoch.requestGeneration.Add(1)
+	}
 	epoch.initialized, epoch.fingerprint, epoch.principal, epoch.known = true, fingerprint, principalHash, known
+	epoch.certificate = certificate
+	history := fingerprint
+	if known {
+		history = principalHash
+	}
+	epoch.history.Store(hex.EncodeToString(history[:]))
 	return ctx.Err()
 }
 
+func (client *Client) certificateHTTP(certificate *tls.Certificate, bases ...*http.Client) (*http.Client, func(), error) {
+	if client == nil {
+		return nil, nil, ErrCredentialUnavailable
+	}
+	base := client.http
+	if len(bases) > 0 {
+		base = bases[0]
+	}
+	if base == nil {
+		return nil, nil, ErrCredentialUnavailable
+	}
+	if certificate == nil || len(certificate.Certificate) == 0 {
+		return base, func() {}, nil
+	}
+	transport, ok := base.Transport.(*http.Transport)
+	if !ok {
+		return nil, nil, ErrCredentialUnavailable
+	}
+	pinned := transport.Clone()
+	if pinned.TLSClientConfig == nil {
+		pinned.TLSClientConfig = &tls.Config{}
+	} else {
+		pinned.TLSClientConfig = pinned.TLSClientConfig.Clone()
+	}
+	pinned.TLSClientConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return certificate, nil }
+	pinned.TLSClientConfig.Certificates = nil
+	pinned.DisableKeepAlives = true
+	httpClient := *base
+	httpClient.Transport = pinned
+	return &httpClient, pinned.CloseIdleConnections, nil
+}
+
+func (client *Client) selfSubjectPrincipal(ctx context.Context, header string, certificate *tls.Certificate) (string, error) {
+	if client == nil || client.http == nil {
+		return "", nil
+	}
+	target, err := client.requestURL("/apis/authentication.k8s.io/v1/selfsubjectreviews")
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, min(client.timeout, 5*time.Second))
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, strings.NewReader(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`))
+	if err != nil {
+		return "", ErrCredentialUnavailable
+	}
+	request.Header.Set("Authorization", header)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	reviewer, closeTransport, err := client.certificateHTTP(certificate)
+	if err != nil {
+		return "", err
+	}
+	defer closeTransport()
+	response, err := reviewer.Do(request)
+	if err != nil {
+		return "", ErrCredentialUnavailable
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusForbidden:
+		return "", errSelfSubjectReviewUnsupported
+	case http.StatusUnauthorized:
+		return "", ErrUnauthorized
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", ErrCredentialUnavailable
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 64<<10+1))
+	if err != nil || len(raw) > 64<<10 {
+		return "", ErrCredentialUnavailable
+	}
+	var result struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Status     struct {
+			UserInfo struct {
+				Username string              `json:"username"`
+				UID      string              `json:"uid"`
+				Groups   []string            `json:"groups"`
+				Extra    map[string][]string `json:"extra"`
+			} `json:"userInfo"`
+		} `json:"status"`
+	}
+	if json.Unmarshal(raw, &result) != nil || result.APIVersion != "authentication.k8s.io/v1" || result.Kind != "SelfSubjectReview" || result.Status.UserInfo.Username == "" {
+		return "", ErrCredentialUnavailable
+	}
+	user := result.Status.UserInfo
+	if user.Username == "system:anonymous" {
+		return "", ErrUnauthorized
+	}
+	// This standard field identifies the token, not its authenticated
+	// principal; retaining it would rebuild on every projected-token renewal.
+	delete(user.Extra, "authentication.kubernetes.io/credential-id")
+	sort.Strings(user.Groups)
+	for key := range user.Extra {
+		sort.Strings(user.Extra[key])
+	}
+	identity, err := json.Marshal(user)
+	if err != nil {
+		return "", ErrCredentialUnavailable
+	}
+	return "self-subject-review:" + string(identity), nil
+}
 func (source *expiringBearerSource) Authorization(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err

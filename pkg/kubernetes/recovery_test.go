@@ -87,6 +87,66 @@ func TestRegistryRenewsTwentyEpochsWithoutBrowserOrResolveRequests(t *testing.T)
 	}
 }
 
+func TestRecoveryGateNeverSwallowsAnAnsweredDenial(t *testing.T) {
+	recovery := &clusterRecovery{}
+	recovery.failed(ErrCredentialUnavailable, nil, "org")
+	if !recovery.requestGate("org") {
+		t.Fatal("a provider failure did not gate request traffic")
+	}
+	// The same cooldown deduplicates the failure streak. An answered denial that
+	// arrives inside it must still be recorded, because a reader has to see the
+	// refusal rather than an unavailable answer.
+	recovery.failed(unverifiedInventoryAuthority(ErrForbidden), nil, "org")
+	if recovery.requestGate("org") {
+		t.Fatal("an active cooldown swallowed an answered denial")
+	}
+	if recovery.failures != 1 {
+		t.Fatalf("the deduplicated streak changed: %d", recovery.failures)
+	}
+	// A denial is a positive answer: a later outage does not make the identity
+	// able to read again.
+	recovery.failed(ErrCredentialUnavailable, nil, "org")
+	if recovery.requestGate("org") {
+		t.Fatal("a later outage withdrew a recorded denial")
+	}
+	recovery.committed("revision")
+	if recovery.requestGate("org") {
+		t.Fatal("a committed publication left the request gate closed")
+	}
+	// The provider is shared per cluster, but the authority is per read scope: one
+	// scope's cooldown never answers for another, and one scope's denial never
+	// withdraws another scope's protection against probing the provider.
+	shared := &clusterRecovery{}
+	shared.failed(ErrCredentialUnavailable, nil, "org-b")
+	if shared.requestGate("org-a") {
+		t.Fatal("one scope's cooldown gated another scope")
+	}
+	shared.failed(ErrForbidden, nil, "org-a")
+	if !shared.requestGate("org-b") {
+		t.Fatal("one scope's denial withdrew another scope's gate")
+	}
+	if shared.requestGate("org-a") {
+		t.Fatal("a scope's own denial was replaced by unavailability")
+	}
+	// A rejected bearer is answered for the credential every scope shares.
+	credential := &clusterRecovery{}
+	credential.failed(ErrCredentialUnavailable, nil, "org-b")
+	credential.failed(ErrUnauthorized, nil, "")
+	if credential.requestGate("org-b") || credential.requestGate("org-c") {
+		t.Fatal("a credential-wide denial left a scope gated")
+	}
+	for _, err := range []error{ErrForbidden, ErrUnauthorized, unverifiedInventoryAuthority(ErrForbidden), &evidenceReadError{stage: evidenceStoreQuery, cause: ErrForbidden}, &permissionDeniedError{}} {
+		if !answerDenied(err) {
+			t.Fatalf("%T was not classified as an answered denial", err)
+		}
+	}
+	for _, err := range []error{nil, ErrCredentialUnavailable, ErrInventoryNotReady, unverifiedInventoryAuthority(ErrCredentialUnavailable), &evidenceReadError{stage: evidenceStoreQuery, cause: context.DeadlineExceeded}} {
+		if answerDenied(err) {
+			t.Fatalf("%T was classified as an answered denial", err)
+		}
+	}
+}
+
 func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *testing.T) {
 	fixture := newFakeCluster(t, "synthetic-a", "api")
 	var fail atomic.Bool
@@ -121,7 +181,20 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 	})
 	fail.Store(true)
 	waitUntil(t, 5*time.Second, "outage cooldown", func() bool { return time.Now().Before(service.recovery.deadline()) })
-	waitUntil(t, 5*time.Second, "provider outage retires the credential epoch", func() bool { return service.identity.ctx.Err() != nil })
+	if service.identity.ctx.Err() != nil {
+		t.Fatal("transient provider outage retired accepted credential material")
+	}
+	waitUntil(t, 5*time.Second, "failed collection recorded", func() bool {
+		service.changes.mu.Lock()
+		cache := service.changes.inventories[service.indexScope()]
+		service.changes.mu.Unlock()
+		if cache == nil {
+			return false
+		}
+		cache.mu.RLock()
+		defer cache.mu.RUnlock()
+		return cache.failed
+	})
 	before := calls.Load()
 	deadline := service.recovery.deadline()
 	for i := 0; i < 100; i++ {
@@ -137,7 +210,8 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 		registry.mu.Lock()
 		fresh := registry.entries[0].Service
 		registry.mu.Unlock()
-		if fresh.identity == service.identity {
+		// Recovery keeps the accepted credential epoch; nothing restarts or rebuilds.
+		if fresh.identity != service.identity || fresh.identity.ctx.Err() != nil {
 			return false
 		}
 		fresh.changes.mu.Lock()
@@ -148,8 +222,11 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 		}
 		cache.mu.RLock()
 		defer cache.mu.RUnlock()
-		return cache.generation.Revision != ""
+		return !cache.failed && cache.generation.Revision != ""
 	})
+	if calls.Load() <= before {
+		t.Fatal("recovery never retried the credential source")
+	}
 }
 
 func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *testing.T) {

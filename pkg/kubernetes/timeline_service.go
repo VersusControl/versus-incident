@@ -47,17 +47,19 @@ type TimelineItem struct {
 }
 
 type TimelinePage struct {
-	Items      []TimelineItem    `json:"items"`
-	Next       string            `json:"next,omitempty"`
-	Sync       SyncStatus        `json:"sync"`
-	Partial    []PartialFailure  `json:"partial_failures,omitempty"`
-	Gaps       []kubechanges.Gap `json:"gaps"`
-	CrashCount int               `json:"crash_count"`
-	Total      int               `json:"total"`
-	Counts     map[string]int    `json:"counts"`
-	Since      time.Time         `json:"since"`
-	Until      time.Time         `json:"until"`
-	BreaksOnly bool              `json:"breaks_only,omitempty"`
+	Authority   string            `json:"authority,omitempty"`
+	CountCapped bool              `json:"count_capped,omitempty"`
+	Items       []TimelineItem    `json:"items"`
+	Next        string            `json:"next,omitempty"`
+	Sync        SyncStatus        `json:"sync"`
+	Partial     []PartialFailure  `json:"partial_failures,omitempty"`
+	Gaps        []kubechanges.Gap `json:"gaps"`
+	CrashCount  int               `json:"crash_count"`
+	Total       int               `json:"total"`
+	Counts      map[string]int    `json:"counts"`
+	Since       time.Time         `json:"since"`
+	Until       time.Time         `json:"until"`
+	BreaksOnly  bool              `json:"breaks_only,omitempty"`
 }
 
 type timelineSnapshot struct {
@@ -99,9 +101,6 @@ func (service *Service) timelineKey(slot int) string {
 }
 
 func (service *Service) Timeline(ctx context.Context, query TimelineQuery) (TimelinePage, error) {
-	if err := service.validateCredential(ctx); err != nil {
-		return TimelinePage{}, err
-	}
 	for _, value := range []string{query.Namespace, query.Kind, query.RootUID, query.PodUID, query.ResourceUID} {
 		if value != "" && (!safeSegment(value) || len(value) > 256) {
 			return TimelinePage{}, ErrInvalidArguments
@@ -123,6 +122,9 @@ func (service *Service) Timeline(ctx context.Context, query TimelineQuery) (Time
 			return TimelinePage{}, ErrInvalidArguments
 		}
 		return service.evidenceTimeline(ctx, query)
+	}
+	if err := service.validateCredential(ctx); err != nil {
+		return TimelinePage{}, err
 	}
 	binding := timelineBinding(service, query)
 	var snapshot *timelineSnapshot

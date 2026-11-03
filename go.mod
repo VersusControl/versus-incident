@@ -23,9 +23,17 @@ require (
 	golang.org/x/image v0.47.0
 	golang.org/x/time v0.15.0
 	google.golang.org/genai v1.63.0
+	modernc.org/sqlite v1.61.1
 )
 
-require go.uber.org/mock v0.6.0 // indirect
+require (
+	github.com/ncruces/go-strftime v1.1.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	go.uber.org/mock v0.6.0 // indirect
+	modernc.org/libc v1.79.0 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
+)
 
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
@@ -104,7 +112,7 @@ require (
 	github.com/bytedance/sonic/loader v0.5.3 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17
-	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/goph/emperror v0.17.2 // indirect

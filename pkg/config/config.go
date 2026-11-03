@@ -43,10 +43,19 @@ type Config struct {
 
 	Redis RedisConfig `mapstructure:"redis"`
 
-	Storage StorageConfig `mapstructure:"storage"`
+	Storage    StorageConfig           `mapstructure:"storage"`
+	Kubernetes KubernetesHistoryConfig `mapstructure:"kubernetes"`
 
 	Agent      AgentConfig      `mapstructure:"agent"`
 	Connectors ConnectorsConfig `mapstructure:"connectors"`
+}
+
+type KubernetesHistoryConfig struct {
+	Evidence KubernetesEvidenceConfig `mapstructure:"evidence"`
+}
+type KubernetesEvidenceConfig struct {
+	ObservationHeartbeat string `mapstructure:"observation_heartbeat"`
+	Retention            string `mapstructure:"retention"`
 }
 
 // StorageConfig is the durable-storage block. It is the single source of
@@ -65,7 +74,9 @@ type StorageConfig struct {
 // Activated when storage.type == "postgres". A single Postgres backend
 // stores incidents, analyses, and blobs — no separate object store needed.
 type StoragePostgresConfig struct {
-	DSN string `mapstructure:"dsn"` // env: POSTGRES_DSN
+	DSN                    string `mapstructure:"dsn"` // env: POSTGRES_DSN
+	MaxOpenConns           int    `mapstructure:"max_open_conns"`
+	HistoryReadConcurrency int    `mapstructure:"history_read_concurrency"`
 }
 
 // StorageFileConfig is the file backend's options. Only consulted when
@@ -421,6 +432,9 @@ func loadConfigFromPath(path string) (*Config, error) {
 	}
 	if val := os.Getenv("POSTGRES_DSN"); val != "" {
 		loaded.Storage.Postgres.DSN = val
+	}
+	if val := os.Getenv("KUBERNETES_EVIDENCE_OBSERVATION_HEARTBEAT"); val != "" {
+		loaded.Kubernetes.Evidence.ObservationHeartbeat = val
 	}
 
 	// Agent mode env overrides

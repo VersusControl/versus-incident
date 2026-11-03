@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { KubernetesIssue } from "@/lib/api";
-import { counted, crashDetail, evidencePills, terminationKey, warningSummary } from "./kubernetesEvidence";
+import { counted, crashDetail, evidencePills, historyCount, terminationKey, warningSummary } from "./kubernetesEvidence";
 
 const evidence: NonNullable<KubernetesIssue["evidence"]> = { warning_events: 0, from: "", to: "" };
 const termination = { reason: "Error", exit_code: 137, count: 1, last: "2026-10-16T12:00:00Z" };
 
 describe("Kubernetes evidence", () => {
+  it("labels sampled counts as lower bounds, never exact sentinel totals", () => {
+    expect(counted(1001, "event", true)).toBe("1000+ events");
+    expect(historyCount(17, true)).toBe("17+");
+    expect(historyCount(0, true)).toBe("0+");
+    expect(counted(17, "crash")).toBe("17 crashes");
+  });
   it("orders all evidence kinds with distinct Pod counts and init identity", () => {
     expect(evidencePills({ ...evidence,
       terminations: [{ ...termination, reason: "OOMKilled", count: 6 }, { ...termination, exit_code: 1, init: true }],

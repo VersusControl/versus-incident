@@ -161,6 +161,8 @@ func crashAncestryPartial(record kubeindex.Record, byUID map[string]kubeindex.Re
 }
 
 type CrashPage struct {
+	Authority   string `json:"authority,omitempty"`
+	CountCapped bool   `json:"count_capped,omitempty"`
 	kubechanges.CrashPage
 	Capture CaptureStatus `json:"capture"`
 	Sync    SyncStatus    `json:"sync"`

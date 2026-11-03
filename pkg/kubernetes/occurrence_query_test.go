@@ -21,7 +21,7 @@ func TestHistoricalOccurrenceFreshnessAndPinnedRootTimelineLookup(t *testing.T) 
 					t.Fatal(err)
 				}
 				service.SetChangeStorage(provider)
-				store = provider.(storage.EvidenceStore)
+				store = reviewProvedHistoryStore{EvidenceStore: provider.(storage.EvidenceStore), t: t, service: service}
 			}
 			now := time.Now().UTC()
 			opened := now.Add(-2 * time.Hour)
@@ -31,11 +31,11 @@ func TestHistoricalOccurrenceFreshnessAndPinnedRootTimelineLookup(t *testing.T) 
 				if err != nil {
 					t.Fatal(err)
 				}
-				batch := storage.EvidenceBatch{ID: id, Expected: cp.ID, Generation: cp.Generation, At: at, Epoch: "synthetic"}
+				batch := storage.EvidenceBatch{ID: "capture:" + id, Expected: cp.ID, Generation: cp.Generation, At: at, Epoch: "synthetic"}
 				for i := 0; i < 13; i++ {
 					uid := fmt.Sprintf("pod-%02d", i)
 					raw, _ := json.Marshal(Issue{Root: ObjectRef{Kind: "Pod", Namespace: "shop", Name: uid, UID: uid}, Rule: "pod.crash_loop", Severity: severity, Broken: true, FirstSeen: opened, LastSeen: at})
-					batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: uid, Kind: "Pod", Namespace: "shop", UID: uid, Rule: "pod.crash_loop", Broken: true, FirstSeen: opened, LastSeen: at, Payload: raw})
+					batch.Issues = append(batch.Issues, storage.EvidenceIssue{AuthorizationKind: "Pod", Key: uid, Kind: "Pod", Namespace: "shop", UID: uid, Rule: "pod.crash_loop", Broken: true, FirstSeen: opened, LastSeen: at, Payload: raw})
 				}
 				if err = store.CommitEvidence(t.Context(), scope, batch); err != nil {
 					t.Fatal(err)
@@ -106,7 +106,7 @@ func TestJournalReadsRequireCurrentCaptureBatches(t *testing.T) {
 	}
 	options := IssueOptions{Since: at.Add(-time.Minute), Until: at.Add(time.Hour), Namespace: "shop"}
 	empty, err := service.Issues(t.Context(), options)
-	if err != nil || len(empty.Items) != 0 {
+	if !errors.Is(err, errHistoryNotEstablished) || len(empty.Items) != 0 {
 		t.Fatalf("unmarked persisted batch became history: %+v %v", empty.Items, err)
 	}
 	checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
@@ -115,10 +115,11 @@ func TestJournalReadsRequireCurrentCaptureBatches(t *testing.T) {
 	}
 	batch.ID = "capture:current"
 	batch.At = at.Add(time.Minute)
-	if err = service.commitEvidence(t.Context(), inventoryGeneration{EvidenceScope: scope, EvidenceBatch: &batch}); err != nil {
+	batch.Issues[0].AuthorizationKind = "Pod"
+	if err = store.CommitEvidence(t.Context(), scope, batch); err != nil {
 		t.Fatal(err)
 	}
-	if err = service.commitEvidence(t.Context(), inventoryGeneration{EvidenceScope: scope, EvidenceBatch: &batch}); err != nil {
+	if err = store.CommitEvidence(t.Context(), scope, batch); err != nil {
 		t.Fatal(err)
 	}
 	fresh, err := service.Issues(t.Context(), options)

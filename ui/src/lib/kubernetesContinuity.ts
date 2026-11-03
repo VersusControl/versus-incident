@@ -22,7 +22,7 @@ export function kubernetesInventoryNotReady(error: unknown): boolean {
 /** These failures cannot authorize replay of a previously successful response. */
 export function kubernetesAccessLost(error: unknown): boolean {
   return error instanceof ApiError && ([401, 403, 404].includes(error.status)
-    || ["credential_unavailable", "forbidden", "unauthorized", "namespace_scope", "cluster_identity_mismatch"].includes(kubernetesFailureCode(error) ?? ""));
+    || ["credential_unavailable", "forbidden", "unauthorized", "namespace_scope", "cluster_identity_mismatch", "authority_mismatch", "root_context_mismatch", "authority_denied", "authority_unknown"].includes(kubernetesFailureCode(error) ?? ""));
 }
 
 export function kubernetesReportAuthorityLost(report: KubernetesSyncHealthReport | undefined): boolean {
@@ -67,6 +67,10 @@ export function incompleteKubernetesSnapshot(value: unknown): boolean {
 export function retainKubernetesPublication<T>(previous: T | undefined, incoming: T): T {
   const nextRecord = object(incoming);
   const next = nextRecord as Snapshot | undefined;
+  if (nextRecord?.authority === "denied" || nextRecord?.authority === "unknown") return incoming;
+  // Persisted history is already an authorized publication. Sync freshness must
+  // not replace committed rows with a previous version.
+  if (nextRecord?.authority === "current" || nextRecord?.authority === "stale") return incoming;
   // A successful permission-reduced response is just as authoritative as a denial.
   if (next?.partial_failures?.some((failure) => ["forbidden", "unauthorized", "namespace_scope", "credential_unavailable"].includes(failure.class ?? ""))) return incoming;
   const priorRecord = object(previous);
@@ -94,6 +98,9 @@ function hasProjectedObservation(value: unknown): boolean {
 }
 
 export function hasKubernetesPublication(value: unknown, firstReadyAt?: string): boolean {
+  const authority = object(value)?.authority;
+  if (authority === "current" || authority === "stale") return true;
+  if (authority === "unknown" || authority === "denied") return false;
   const snapshot = value as Snapshot | undefined;
   if (snapshot?.[published]) return true;
   if (snapshot?.sync && (!snapshot.sync.state || snapshot.sync.state === "syncing")) return hasProjectedObservation(value);

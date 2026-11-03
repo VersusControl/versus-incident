@@ -9,7 +9,7 @@ import { KubernetesPage } from "./KubernetesPage";
 import { ToastProvider } from "@/components/Toast";
 
 vi.mock("@/components/TopBar", () => ({ TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => <header><span>{title}</span>{actions}</header> }));
-vi.mock("@/lib/api", async (importActual) => { const actual = await importActual<typeof import("@/lib/api")>(); return { ...actual, api: { ...actual.api, listAgentToolsets: vi.fn(), proposeAgentAction: vi.fn(), approveAgentApproval: vi.fn(), rejectAgentApproval: vi.fn(), kubernetesOverview: vi.fn(), kubernetesSyncHealth: vi.fn(), kubernetesClusterSyncHealth: vi.fn(), kubernetesOverviewGraph: vi.fn(), kubernetesIssues: vi.fn(), kubernetesChanges: vi.fn(), kubernetesGraph: vi.fn(), kubernetesNamespaces: vi.fn(), kubernetesNeighborhood: vi.fn(), kubernetesStream: vi.fn(), kubernetesTop: vi.fn(), kubernetesReleases: vi.fn(), kubernetesGitOpsApps: vi.fn(), kubernetesRollout: vi.fn(), kubernetesRollouts: vi.fn(), kubernetesTraffic: vi.fn(), kubernetesDiagnose: vi.fn(), kubernetesWorkloadLogs: vi.fn(), kubernetesPodLogs: vi.fn(), kubernetesUsage: vi.fn(), kubernetesWorkloads: vi.fn(), kubernetesWorkload: vi.fn(), kubernetesNodes: vi.fn(), kubernetesNodePods: vi.fn(), kubernetesSearch: vi.fn(), kubernetesEvents: vi.fn(), kubernetesDescribe: vi.fn() } }; });
+vi.mock("@/lib/api", async (importActual) => { const actual = await importActual<typeof import("@/lib/api")>(); return { ...actual, api: { ...actual.api, listAgentToolsets: vi.fn(), proposeAgentAction: vi.fn(), approveAgentApproval: vi.fn(), rejectAgentApproval: vi.fn(), kubernetesOverview: vi.fn(), kubernetesSyncHealth: vi.fn(), kubernetesClusterSyncHealth: vi.fn(), kubernetesOverviewGraph: vi.fn(), kubernetesIssues: vi.fn(), kubernetesChanges: vi.fn(), kubernetesGraph: vi.fn(), kubernetesNamespaces: vi.fn(), kubernetesNeighborhood: vi.fn(), kubernetesCommitStream: vi.fn(), kubernetesTop: vi.fn(), kubernetesReleases: vi.fn(), kubernetesGitOpsApps: vi.fn(), kubernetesRollout: vi.fn(), kubernetesRollouts: vi.fn(), kubernetesTraffic: vi.fn(), kubernetesDiagnose: vi.fn(), kubernetesWorkloadLogs: vi.fn(), kubernetesPodLogs: vi.fn(), kubernetesUsage: vi.fn(), kubernetesWorkloads: vi.fn(), kubernetesWorkload: vi.fn(), kubernetesNodes: vi.fn(), kubernetesNodePods: vi.fn(), kubernetesSearch: vi.fn(), kubernetesEvents: vi.fn(), kubernetesDescribe: vi.fn() } }; });
 
 function LocationProbe() { const location = useLocation(); return <output aria-label="Current location">{location.pathname}{location.search}</output>; }
 function renderPage(client = new QueryClient({ defaultOptions: { queries: { retry: false } } }), seedCatalog = true) {
@@ -84,7 +84,7 @@ beforeEach(() => {
 	vi.mocked(api.kubernetesOverviewGraph).mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync: { state: "ready", age_s: 0, partial: false } });
 	vi.mocked(api.kubernetesNamespaces).mockResolvedValue({ items: ["shop", "payments"], sync: { state: "ready", age_s: 0, partial: false } });
 	vi.mocked(api.kubernetesNeighborhood).mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync: { state: "ready", age_s: 0, partial: false } });
-	vi.mocked(api.kubernetesStream).mockImplementation((_onEvent, signal) => new Promise<void>((resolve) => {
+	vi.mocked(api.kubernetesCommitStream).mockImplementation((_onEvent, signal) => new Promise<void>((resolve) => {
 		if (signal?.aborted) resolve();
 		else signal?.addEventListener("abort", () => resolve(), { once: true });
 	}));
@@ -479,7 +479,7 @@ describe("KubernetesPage", () => {
 		expect(within(alert).getByText("Check RBAC")).toBeTruthy();
 		expect(screen.queryByText("Couldn't load clusters")).toBeNull();
 		expect(api.kubernetesOverview).not.toHaveBeenCalled();
-		expect(api.kubernetesStream).not.toHaveBeenCalled();
+		expect(api.kubernetesCommitStream).not.toHaveBeenCalled();
 		vi.mocked(api.kubernetesClusters).mockResolvedValue({ multiple: false, clusters: [] });
 		fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
@@ -559,7 +559,7 @@ describe("KubernetesPage", () => {
 		renderPage(client);
 		expect(await screen.findByRole("article", { name: "Cluster one" })).toBeTruthy();
 		expect(api.kubernetesOverview).not.toHaveBeenCalled();
-		expect(api.kubernetesStream).not.toHaveBeenCalled();
+		expect(api.kubernetesCommitStream).not.toHaveBeenCalled();
 	});
 
 	it("opens a cluster that is still preparing its first data", async () => {
@@ -587,8 +587,8 @@ describe("KubernetesPage", () => {
 		client.setQueryData(["kubernetes-clusters"], catalog);
 		window.history.replaceState(null, "", "/agent/kubernetes?cluster=one&view=nodes");
 		renderPage(client);
-		await waitFor(() => expect(api.kubernetesStream).toHaveBeenCalledOnce());
-		const signal = vi.mocked(api.kubernetesStream).mock.calls[0][1];
+		await waitFor(() => expect(api.kubernetesCommitStream).toHaveBeenCalledOnce());
+		const signal = vi.mocked(api.kubernetesCommitStream).mock.calls[0][1];
 		fireEvent.change(screen.getByRole("combobox", { name: "Cluster", exact: true }), { target: { value: "two" } });
 		await waitFor(() => expect(apiModule.createKubernetesApi).toHaveBeenCalledWith("two"));
 		expect(signal?.aborted).toBe(true);
@@ -606,7 +606,7 @@ describe("KubernetesPage", () => {
 		renderPage(client);
 		expect(await screen.findByText("This cluster is no longer available.")).toBeTruthy();
 		expect(api.kubernetesOverview).not.toHaveBeenCalled();
-		expect(api.kubernetesStream).not.toHaveBeenCalled();
+		expect(api.kubernetesCommitStream).not.toHaveBeenCalled();
 	});
 
 	it("moves workload and node inventories out of Overview into their own tabs", async () => {
@@ -653,7 +653,7 @@ describe("KubernetesPage", () => {
 		expect(docs.getAttribute("rel")).toBe("noopener noreferrer");
 		expect(screen.queryByRole("tablist")).toBeNull();
 		expect(screen.queryByRole("alert")).toBeNull();
-		for (const query of [api.kubernetesUsage, api.kubernetesWorkloads, api.kubernetesNodes, api.kubernetesStream, api.kubernetesOverviewGraph, api.kubernetesNamespaces, api.kubernetesIssues, api.kubernetesChanges, api.kubernetesDescribe, api.kubernetesWorkload, api.kubernetesDiagnose, api.kubernetesPodLogStream, api.listAgentToolsets]) expect(query).not.toHaveBeenCalled();
+		for (const query of [api.kubernetesUsage, api.kubernetesWorkloads, api.kubernetesNodes, api.kubernetesCommitStream, api.kubernetesOverviewGraph, api.kubernetesNamespaces, api.kubernetesIssues, api.kubernetesChanges, api.kubernetesDescribe, api.kubernetesWorkload, api.kubernetesDiagnose, api.kubernetesPodLogStream, api.listAgentToolsets]) expect(query).not.toHaveBeenCalled();
 	});
 
 	it.each([
@@ -694,8 +694,8 @@ describe("KubernetesPage", () => {
 	it("hides cached cluster evidence and stops dependent reads when a refresh confirms missing setup", async () => {
 		renderPage();
 		await screen.findByRole("region", { name: "Cluster health" });
-		await waitFor(() => expect(api.kubernetesStream).toHaveBeenCalledOnce());
-		const signal = vi.mocked(api.kubernetesStream).mock.calls[0][1];
+		await waitFor(() => expect(api.kubernetesCommitStream).toHaveBeenCalledOnce());
+		const signal = vi.mocked(api.kubernetesCommitStream).mock.calls[0][1];
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(503, "Kubernetes connector is not configured", { error: "Kubernetes connector is not configured" }));
 		vi.mocked(api.kubernetesOverview).mockRejectedValueOnce(new ApiError(503, "Kubernetes connector is not configured"));
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
@@ -741,17 +741,17 @@ describe("KubernetesPage", () => {
 			expect(client.isFetching()).toBe(0);
 			queries.forEach((query) => expect(query).toHaveBeenCalledTimes(1));
 		});
-		const onEvent = vi.mocked(api.kubernetesStream).mock.calls[0][0];
+		const onEvent = vi.mocked(api.kubernetesCommitStream).mock.calls[0][0];
 		vi.useFakeTimers();
-		for (const [index, event] of ["records", "resync"].entries()) {
+		for (const index of [0, 1]) {
 			invalidate.mockClear();
-			act(() => onEvent({ event, data: "{}" }));
-			await act(async () => { await vi.advanceTimersByTimeAsync(749); });
+			act(() => onEvent({ event: "committed", id: String(index), data: JSON.stringify({ revision: index, kinds: ["Pod"], cluster_id: "east" }) }));
+			await act(async () => { await vi.advanceTimersByTimeAsync(99); });
 			expect(invalidate).not.toHaveBeenCalled();
 			await act(async () => { await vi.advanceTimersByTimeAsync(1); });
 			expect(invalidate.mock.calls.map(([options]) => options?.queryKey)).toEqual([
-				["kubernetes-overview"], ["kubernetes-sync-health"], ["kubernetes-graph"], ["kubernetes-namespaces"], ["kubernetes-workloads"], ["kubernetes-nodes"], ["kubernetes-issues"], ["kubernetes-top"], ["kubernetes-diagnosis"], ["kubernetes-drawer-changes"], ["kubernetes-changes"],
-			].map((parts) => ["kubernetes", "_", ...parts]));
+				["kubernetes", "_"],
+			]);
 			queries.forEach((query) => expect(query).toHaveBeenCalledTimes(index + 2));
 			expect(api.kubernetesOverviewGraph).not.toHaveBeenCalled();
 		}
@@ -765,7 +765,7 @@ describe("KubernetesPage", () => {
 	it("uses per-kind index records without inventing absent counts or materializing resources", async () => {
 		renderPage();
 		const topology = await screen.findByRole("region", { name: "Overview topology" });
-		await waitFor(() => expect(api.kubernetesStream).toHaveBeenCalledOnce());
+		await waitFor(() => expect(api.kubernetesCommitStream).toHaveBeenCalledOnce());
 		const kinds = {
 			Pod: { state: "ready", records: 50000, partial: false },
 			Service: { state: "ready", records: 0, partial: false },
@@ -774,7 +774,10 @@ describe("KubernetesPage", () => {
 			Secret: { state: "error", records: 0, partial: true, error: "forbidden" },
 			CustomResource: { state: "ready", records: 23, partial: false },
 		};
-		act(() => vi.mocked(api.kubernetesStream).mock.calls[0][0]({ event: "sync", data: JSON.stringify({ state: "partial", age_s: 0, partial: true, kinds }) }));
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...(await api.kubernetesSyncHealth()), kinds, state: "partial", partial: true,
+			first_ready_at: "2026-08-30T12:00:00Z", unreadable: [{ kind: "Secret", class: "forbidden" }] });
+		act(() => vi.mocked(api.kubernetesCommitStream).mock.calls[0][0]({ event: "sync", data: JSON.stringify({ state: "partial", age: 0, cluster_id: "east" }) }));
+		await waitFor(() => expect(within(topology).queryByText("CustomResource", { exact: true })).not.toBeNull());
 		const count = (kind: string) => within(topology).queryByText(kind, { exact: true })?.closest("dt")?.parentElement?.querySelector("dd")?.textContent;
 		expect(count("Pod")).toBe((50000).toLocaleString());
 		expect(count("Service")).toBe("0");
@@ -1080,7 +1083,7 @@ describe("KubernetesPage", () => {
 		expect(screen.queryByText("Issue evidence is partial; the server returned bounded results.")).toBeNull();
 		fireEvent.click(screen.getByRole("button", { name: "Next page" }));
 		expect(await screen.findByRole("button", { name: "Open resource checkout-b" })).toBeTruthy();
-		expect(api.kubernetesIssues).toHaveBeenCalledWith({ namespace: "", severity: "", limit: 20, cursor: "issues-next" });
+		expect(api.kubernetesIssues).toHaveBeenCalledWith(expect.objectContaining({ namespace: "", severity: "", limit: 20, cursor: "issues-next" }), expect.any(AbortSignal));
 		expect(view.container.textContent).not.toContain("·");
 	});
 
@@ -2498,8 +2501,8 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesWorkloads).mockReturnValueOnce(new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 		if (cached) client.setQueryData(workloadKey, committed);
-		let emit!: Parameters<typeof api.kubernetesStream>[0];
-		vi.mocked(api.kubernetesStream).mockImplementation((onEvent, signal) => {
+		let emit!: Parameters<typeof api.kubernetesCommitStream>[0];
+		vi.mocked(api.kubernetesCommitStream).mockImplementation((onEvent, signal) => {
 			emit = onEvent;
 			return new Promise(resolve => signal?.addEventListener("abort", () => resolve(), { once: true }));
 		});
@@ -2527,7 +2530,7 @@ describe("KubernetesPage sync gate", () => {
 			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(2);
 			// A real complete-empty publication from the existing stream replaces rows.
 			vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ ...malformed, counts: { Deployment: 0, StatefulSet: 0, DaemonSet: 0, Job: 0, CronJob: 0, Pod: 0 }, sync: committed.sync });
-			await act(async () => { emit({ event: "records", data: "{}" }); await vi.advanceTimersByTimeAsync(800); });
+			await act(async () => { emit({ event: "committed", data: JSON.stringify({ revision: 1, cluster_id: "east", kinds: ["Pod"] }) }); await vi.advanceTimersByTimeAsync(800); });
 			expect(screen.queryByText("recovered-api")).toBeNull();
 			expect(screen.getByText("No workloads in this scope.")).toBeTruthy();
 			expect(screen.getByText("0 total")).toBeTruthy();
@@ -2560,7 +2563,7 @@ describe("KubernetesPage sync gate", () => {
 		const logSignal = vi.mocked(api.kubernetesWorkloadLogStream).mock.calls.at(-1)?.[6];
 		await act(async () => { emitLog({ event: "line", container: "app", text: "authorized synthetic output" }); });
 		await screen.findByText("authorized synthetic output");
-		const oldStream = vi.mocked(api.kubernetesStream).mock.calls.at(-1)!;
+		const oldStream = vi.mocked(api.kubernetesCommitStream).mock.calls.at(-1)!;
 		const graphKey = ["kubernetes", "_", "kubernetes-graph", "cached"];
 		const namespaceKey = ["kubernetes", "_", "kubernetes-issues", "platform"];
 		const otherClusterKey = ["kubernetes", "other", "kubernetes-workloads"];
@@ -2990,7 +2993,7 @@ describe("KubernetesPage sync gate", () => {
 	it("re-checks the report so a later failure re-blocks the views and a recovery opens them again", async () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
 		let emit: (event: { event: string; data: string }) => void = () => {};
-		vi.mocked(api.kubernetesStream).mockImplementation(async (onEvent, signal) => {
+		vi.mocked(api.kubernetesCommitStream).mockImplementation(async (onEvent, signal) => {
 			emit = onEvent as typeof emit;
 			await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
 		});
@@ -3011,13 +3014,13 @@ describe("KubernetesPage sync gate", () => {
 
 		// A kind starts failing while the page is open: the next report blocks every view.
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(failing);
-		act(() => emit({ event: "records", data: "{}" }));
+		act(() => emit({ event: "committed", data: JSON.stringify({ revision: 1, cluster_id: "east", kinds: ["Pod"] }) }));
 		await waitFor(() => expect(container.querySelector('[data-sync-health="failed"]')).toBeTruthy(), { timeout: 5000 });
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
 
 		// And it recovers, again with no user action.
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(ready);
-		act(() => emit({ event: "resync", data: "{}" }));
+		act(() => emit({ event: "committed", data: JSON.stringify({ revision: 2, cluster_id: "east", kinds: ["Pod"] }) }));
 		await waitFor(() => expect(container.querySelector("[data-sync-health]")).toBeNull(), { timeout: 5000 });
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
 	}, 15_000);
@@ -3064,10 +3067,28 @@ describe("KubernetesPage sync gate", () => {
 		expect(await screen.findByText("Resource inventory is unavailable.")).toBeTruthy();
 	});
 
+	it("shows the live sync timeout over stale stream progress while preserving the last-good observation time", async () => {
+		const observed = "2026-11-02T09:00:00Z";
+		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, observed_at: observed });
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("ready", { Pod: readyKind }), first_ready_at: published });
+		const { container } = renderPage();
+		const loaded = await screen.findByRole("region", { name: "Cluster health" });
+		await waitFor(() => expect(api.kubernetesCommitStream).toHaveBeenCalledOnce());
+		const emit = vi.mocked(api.kubernetesCommitStream).mock.calls[0][0];
+		const progress = { event: "sync", data: JSON.stringify({ state: "refreshing", age: 0, reason: "collector_refresh", cluster_id: "production" }) };
+		act(() => emit(progress));
+		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Syncing"));
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(504, "Kubernetes read timed out", { error: { code: "request_timeout" } }));
+		act(() => emit(progress));
+		const expected = `Cluster unreachable — showing data from ${new Date(observed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe(expected));
+		expect(screen.getByRole("region", { name: "Cluster health" })).toBe(loaded);
+	});
+
 	it("never keeps the last good report saying ready when the next read fails", async () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
 		let emit: (event: { event: string; data: string }) => void = () => {};
-		vi.mocked(api.kubernetesStream).mockImplementation(async (onEvent, signal) => {
+		vi.mocked(api.kubernetesCommitStream).mockImplementation(async (onEvent, signal) => {
 			emit = onEvent as typeof emit;
 			await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
 		});
@@ -3080,7 +3101,7 @@ describe("KubernetesPage sync gate", () => {
 		// The credential is revoked while the page is open: the cached report keeps
 		// saying ready, and it must not be believed over the failure.
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(502, "credential revoked", { error: "credential revoked", first_ready_at: published, age_s: 120 }));
-		act(() => emit({ event: "resync", data: "{}" }));
+		act(() => emit({ event: "committed", data: JSON.stringify({ revision: 1, cluster_id: "east", kinds: ["Pod"] }) }));
 		await waitFor(() => expect(container.querySelector('[data-sync-strip="failed"]')).toBeTruthy(), { timeout: 6000 });
 		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
 		expect(screen.queryByRole("heading", { name: "Cluster sync failed" })).toBeNull();

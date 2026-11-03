@@ -156,6 +156,14 @@ storage:
   type: file
   file:
     max_incidents: 1000
+  postgres:
+    max_open_conns: 20
+    history_read_concurrency: 8
+
+kubernetes:
+  evidence:
+    observation_heartbeat: 5m
+    retention: "0"
 
 agent:
   enable: false

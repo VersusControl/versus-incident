@@ -440,6 +440,116 @@ describe("Break timeline", () => {
     coverage: { state: "complete", gaps: [], reason: "", tip: false },
   };
 
+  it("keeps capped first-page summary counts on continuation without presenting sampled subtotals as exact", async () => {
+    vi.spyOn(api, "kubernetesTimeline")
+      .mockResolvedValueOnce(timelinePage([changeEntry()], { total: 1001, crash_count: 17, counts: { change: 900, crash: 17, break: 84 }, count_capped: true, next: "saved-chain" }))
+      .mockResolvedValueOnce(timelinePage([changeEntry({ ...change, id: "older", name: "older-workload" })], { total: 0, crash_count: 0, counts: { change: 0, crash: 0, break: 0 } }));
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    expect(await screen.findByText("1000+ events and 17+ crashes")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await screen.findByText("older-workload");
+    expect(screen.getByText("1000+ events and 17+ crashes")).toBeTruthy();
+    expect(screen.getByText("Counts are lower bounds from a bounded sample.")).toBeTruthy();
+  });
+
+  it("does not claim healthy recovery from a sampled zero or replace last-good tile values on refresh failure", async () => {
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockResolvedValue({
+      items: [], totals: {}, broken: { total: 0, by_severity: {} }, count_capped: true,
+      truncated: false, sync: coveredJournalPage.sync,
+    });
+    const { client } = mount(<TimelineCard changes={{ items: [], total: 1001, count_capped: true, sync: coveredJournalPage.sync }} windowEnd={Date.now()} clusterId="east" onSelectView={vi.fn()} onSelectResource={vi.fn()} resourceFor={() => null} />);
+    await screen.findByText("1000+");
+    expect(screen.queryByText("No broken workloads")).toBeNull();
+    expect(screen.getAllByText("0+")).toHaveLength(2);
+    lookup.mockRejectedValue(new ApiError(503, "store unavailable"));
+    await act(async () => { await client.invalidateQueries({ queryKey: kubernetesKey("east", "kubernetes-issues") }); });
+    expect(screen.getByText("1000+")).toBeTruthy();
+    expect(screen.getAllByText("0+")).toHaveLength(2);
+    expect(screen.queryByText("Unknown")).toBeNull();
+    expect(await screen.findByText(/Couldn't refresh — showing data as of/)).toBeTruthy();
+  });
+
+  it.each([401, 403, 502])("opens seeded detail during a hung confirmation, preserves timeout, then clears on authority failure %s", async status => {
+    let rejectContext!: (error: Error) => void;
+    const contextFailure: { current?: Error } = {};
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(options => {
+      if (options?.context === "persisted") {
+        if (contextFailure.current) return Promise.reject(contextFailure.current);
+        return new Promise<KubernetesIssuePage>((_resolve, reject) => { rejectContext = reject; });
+      }
+      return Promise.resolve({ items: [issue], totals: {}, truncated: false, sync: coveredJournalPage.sync });
+    });
+    const changes = vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], sync: coveredJournalPage.sync });
+    const crashes = vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
+    const logs = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(emptyLogs);
+    const { client } = mount(<ClickedBreak value={issue} />);
+    fireEvent.click(screen.getByRole("button", { name: "Timeline for checkout" }));
+    expect(screen.queryByLabelText("Loading related root change history")).toBeNull();
+    expect(screen.getByRole("region", { name: "Resource timeline chart" })).toBeTruthy();
+    await waitFor(() => expect(logs).toHaveBeenCalled());
+    expect(changes).toHaveBeenCalled();
+    expect(crashes).toHaveBeenCalled();
+    await act(async () => rejectContext(new ApiError(503, "stored lookup timed out", { code: "history_store_timeout" })));
+    await screen.findByText(/Couldn't refresh — showing stored break evidence/);
+    expect(screen.queryByText("Retained root context is unavailable.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Retry root context" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Resource timeline chart" })).toBeTruthy();
+    contextFailure.current = new ApiError(status, "authority failed", { code: status === 502 ? "root_context_mismatch" : "forbidden" });
+    await act(async () => { await client.invalidateQueries({ queryKey: kubernetesKey("east", "kubernetes-issues", "timeline-root-context") }); });
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Resource timeline chart" })).toBeNull());
+    expect(client.getQueriesData({ queryKey: kubernetesKey("east", "break-seed") })).toHaveLength(0);
+    expect(lookup).toHaveBeenCalled();
+  });
+
+  it("starts unseeded deep-link window reads before the retained root lookup completes", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&occurrence_id=saved");
+    let finish!: (value: KubernetesIssuePage) => void;
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(options => options?.context === "persisted"
+      ? new Promise<KubernetesIssuePage>(resolve => { finish = resolve; })
+      : Promise.resolve({ items: [issue], totals: {}, truncated: false, sync: coveredJournalPage.sync }));
+    const changes = vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], sync: coveredJournalPage.sync });
+    const crashes = vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
+    vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(emptyLogs);
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await waitFor(() => expect(changes).toHaveBeenCalled());
+    expect(crashes).toHaveBeenCalled();
+    expect(screen.queryByRole("region", { name: "Resource timeline chart" })).toBeNull();
+    await act(async () => finish(persistedRootPage({ ...issue, occurrence_id: "saved" })));
+    expect(await screen.findByRole("region", { name: "Resource timeline chart" })).toBeTruthy();
+  });
+
+  it("seeds a Timeline row immediately and retains stable history keys across failed clock refreshes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-14T12:06:00Z"));
+    const read = vi.spyOn(api, "kubernetesTimeline").mockResolvedValueOnce(timelinePage([
+      { type: "break", id: "saved-break", at: "2026-10-14T12:06:00Z", issue },
+    ])).mockRejectedValue(new ApiError(503, "store unavailable"));
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(options => options?.context === "persisted"
+      ? new Promise<KubernetesIssuePage>(() => undefined)
+      : Promise.resolve({ items: [issue], totals: {}, truncated: false, sync: coveredJournalPage.sync }));
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [], sync: coveredJournalPage.sync });
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
+    vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(emptyLogs);
+    const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const list = screen.getByRole("list", { name: "Breaks and changes" });
+    const keys = client.getQueryCache().findAll({ queryKey: kubernetesKey("east", "kubernetes-timeline") }).map(query => query.queryHash);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("list", { name: "Breaks and changes" })).toBe(list);
+    expect(client.getQueryCache().findAll({ queryKey: kubernetesKey("east", "kubernetes-timeline") }).map(query => query.queryHash)).toEqual(keys);
+    fireEvent.click(screen.getByRole("link", { name: "Open break details" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(screen.getByRole("region", { name: "Resource timeline chart" })).toBeTruthy();
+    expect(screen.queryByLabelText("Loading related root change history")).toBeNull();
+    const location = screen.getByLabelText("Location").textContent!;
+    expect(new URLSearchParams(location.slice(location.indexOf("?"))).get("center")).toBe(issue.broke_at);
+    const ranges = screen.getByRole("group", { name: "Timeline window" });
+    expect(ranges.classList.contains("flex-wrap")).toBe(true);
+    expect(ranges.classList.contains("max-w-full")).toBe(true);
+    expect(within(ranges).getByRole("button", { name: "All retained" })).toBeTruthy();
+  });
+
   it("keeps complete crash coverage neutral and capture details limited to the window and start", async () => {
     vi.spyOn(api, "kubernetesCrashes").mockResolvedValue(coveredJournalPage);
     mount(<JournalScenario />);
@@ -630,10 +740,10 @@ describe("Break timeline", () => {
     await waitFor(() => expect(changes).toHaveBeenCalled());
     expect(lookup.mock.calls[0][0]?.until).toBe(new Date(now).toISOString());
     expect(changes.mock.calls[0][0]?.until).toBe("2026-10-16T12:25:00.000Z");
-    expect(screen.getByRole("region", { name: "Resource timeline chart" }).getAttribute("data-until")).toBe("2026-10-16T12:25:00.000Z");
+    expect((await screen.findByRole("region", { name: "Resource timeline chart" })).getAttribute("data-until")).toBe("2026-10-16T12:25:00.000Z");
   });
 
-  it.each(["resolved", "not_found"] as const)("preserves a clicked nanosecond break center and only enables logs after server resolution: %s", async (status) => {
+  it.each(["resolved", "not_found"] as const)("preserves a seeded nanosecond break center while confirming server selection: %s", async (status) => {
     const precise = { ...issue, broke_at: "2026-10-14T12:04:00.123456789Z" };
     const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(async options => {
       if (options?.context !== "persisted") return { items: [precise], totals: {}, truncated: false, sync: journalPage.sync };
@@ -649,14 +759,9 @@ describe("Break timeline", () => {
     await waitFor(() => expect(lookup.mock.calls.find(([options]) => options?.context === "persisted")?.[0]).toMatchObject({ center: precise.broke_at, occurrence_id: undefined }));
     const location = screen.getByLabelText("Location").textContent!;
     expect(new URLSearchParams(location.slice(location.indexOf("?"))).get("center")).toBe(precise.broke_at);
-    if (status === "resolved") {
-      await waitFor(() => expect(logs).toHaveBeenCalled());
-      expect(logs.mock.calls[0][0]).toMatchObject({ center: precise.broke_at, since: "2026-10-14T11:59:00.123456789Z", until: "2026-10-14T12:06:00.123456789Z" });
-      expect(screen.queryByText("Log time range is unavailable.")).toBeNull();
-    } else {
-      await screen.findByText(/Log time range is unavailable/);
-      expect(logs).not.toHaveBeenCalled();
-    }
+    await waitFor(() => expect(logs).toHaveBeenCalled());
+    expect(logs.mock.calls[0][0]).toMatchObject({ center: precise.broke_at, since: "2026-10-14T11:59:00.123456789Z", until: "2026-10-14T12:06:00.123456789Z" });
+    expect(screen.queryByText("Log time range is unavailable.")).toBeNull();
   });
 
   it.each(["2026-10-14T12:04:00.123456789+00:00", "2026-10-14T14:04:00.123456789+02:00"])("accepts an equivalent nanosecond fallback instant while preserving the clicked raw center: %s", async retainedAt => {
@@ -693,7 +798,8 @@ describe("Break timeline", () => {
     await waitFor(() => expect(lookup.mock.calls.find(([options]) => options?.context === "persisted")?.[0]?.center).toBe(precise.broke_at));
     await waitFor(() => expect(client.getQueryCache().findAll().find(query => query.queryKey.includes("timeline-root-context"))?.state.fetchStatus).toBe("idle"));
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-    expect(logs).not.toHaveBeenCalled();
+    expect(logs).toHaveBeenCalledTimes(1);
+    expect(client.getQueriesData({ queryKey: kubernetesKey("east", "break-seed") })).toHaveLength(0);
     expect(screen.queryByRole("log", { name: "Break log lines" })).toBeNull();
   });
 
@@ -1180,7 +1286,8 @@ describe("Break timeline", () => {
     const changes = vi.spyOn(api, "kubernetesChanges").mockImplementation(() => pendingChanges);
     const { client, unmount } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
     const lookup = stage === "context" ? issues : changes;
-    await waitFor(() => expect(lookup).toHaveBeenCalledOnce());
+    const calls = () => lookup.mock.calls.filter(([options]) => stage !== "context" || options && "context" in options && options.context === "persisted");
+    await waitFor(() => expect(calls()).toHaveLength(1));
     const query = client.getQueryCache().find({ queryKey: kubernetesKey("east", stage === "context" ? "kubernetes-issues" : "kubernetes-changes", stage === "context" ? "timeline-root-context" : "timeline-root"), exact: false })!;
     unmount();
     await act(async () => {
@@ -1188,9 +1295,9 @@ describe("Break timeline", () => {
       else finishChanges({ items: [change], next: "next", sync });
       await (stage === "context" ? pendingContext : pendingChanges);
     });
-    expect(lookup).toHaveBeenCalledOnce();
+    expect(calls()).toHaveLength(1);
     expect(query.state.data).toBeUndefined();
-    expect(lookup.mock.calls[0][1]?.aborted).toBe(true);
+    expect(calls()[0][1]?.aborted).toBe(true);
     expect(query.state.fetchStatus).toBe("idle");
     expect(query.state.error).toBeNull();
   });

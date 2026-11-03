@@ -18,7 +18,7 @@ import (
 // each replica, exactly as a rotated projected token would. The credential
 // identity is the principal, so both replicas contend for the same scopes.
 func principalCredential(principal, token string) CredentialSource {
-	return &expiringBearerSource{principal: principal, now: time.Now, refresh: func(context.Context) (string, time.Time, error) {
+	return &expiringBearerSource{principal: principal, principalVerified: true, now: time.Now, refresh: func(context.Context) (string, time.Time, error) {
 		return token, time.Now().Add(time.Hour), nil
 	}}
 }

@@ -122,6 +122,68 @@ func RunSQLMigrations(db *sql.DB, fsys fs.FS, dir, ledgerTable string) error {
 		if err != nil {
 			return fmt.Errorf("storage: RunSQLMigrations: read %q: %w", name, err)
 		}
+		if strings.HasPrefix(string(data), "-- versus:nontransactional\n") {
+			// Online index files contain only independently idempotent index
+			// statements. A failed concurrent build can leave an invalid index;
+			// fail closed instead of ledgering a silently unusable index.
+			for _, statement := range strings.Split(strings.TrimPrefix(string(data), "-- versus:nontransactional\n"), ";") {
+				statement = strings.TrimSpace(statement)
+				optionalTable := strings.HasPrefix(statement, "-- versus:optional-table\n")
+				if optionalTable {
+					statement = strings.TrimSpace(strings.TrimPrefix(statement, "-- versus:optional-table\n"))
+				}
+				if statement == "" {
+					continue
+				}
+				if !strings.HasPrefix(statement, "CREATE INDEX CONCURRENTLY IF NOT EXISTS ") {
+					return fmt.Errorf("storage: online migration %q contains unsupported statement", name)
+				}
+				fields := strings.Fields(statement)
+				if len(fields) < 9 {
+					return fmt.Errorf("storage: malformed online index statement in %q", name)
+				}
+				index := fields[6]
+				if !isSafeSQLIdentifier(index) {
+					return fmt.Errorf("storage: online migration %q has invalid index", name)
+				}
+				table := strings.Split(fields[8], "(")[0]
+				if optionalTable {
+					var exists bool
+					if err := db.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil {
+						return err
+					}
+					if !exists {
+						continue
+					}
+				}
+				var partitioned bool
+				if err := db.QueryRowContext(ctx, `SELECT COALESCE((SELECT relkind='p' FROM pg_class WHERE oid=to_regclass($1)),FALSE)`, table).Scan(&partitioned); err != nil {
+					return err
+				}
+				if partitioned {
+					if err := runPartitionedOnlineIndex(ctx, db, statement, index, table); err != nil {
+						return err
+					}
+					continue
+				}
+				var valid bool
+				checkErr := db.QueryRowContext(ctx, `SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass($1)`, index).Scan(&valid)
+				if checkErr == nil && !valid {
+					if _, err := db.ExecContext(ctx, "DROP INDEX CONCURRENTLY "+index); err != nil {
+						return fmt.Errorf("storage: repair online index %q: %w", index, err)
+					}
+				} else if checkErr != nil && checkErr != sql.ErrNoRows {
+					return checkErr
+				}
+				if _, err := db.ExecContext(ctx, statement); err != nil {
+					return fmt.Errorf("storage: online migration %q: %w", name, err)
+				}
+			}
+			if _, err := db.ExecContext(ctx, recordApplied, name); err != nil {
+				return fmt.Errorf("storage: record online migration %q: %w", name, err)
+			}
+			continue
+		}
 
 		// tx-per-file: the DDL and the ledger row commit together, so a
 		// crash mid-apply leaves the file NEITHER applied nor recorded.

@@ -57,7 +57,9 @@ func assertDetectionNotificationOutcomeSchema(t *testing.T, db *sql.DB, wantMigr
 		t.Fatalf("inspect outcome column: %v", err)
 	}
 	var migrationCount int
-	if err := db.QueryRow(`SELECT count(*) FROM versus_schema_migrations`).Scan(&migrationCount); err != nil {
+	// Count only the ledger prefix this migration belongs to, so later
+	// migrations do not change the expectation.
+	if err := db.QueryRow(`SELECT count(*) FROM versus_schema_migrations WHERE filename <= '015_detection_notification_outcome.sql'`).Scan(&migrationCount); err != nil {
 		t.Fatalf("inspect migration ledger: %v", err)
 	}
 	if columnExists != (wantMigrations == 15) || migrationCount != wantMigrations {
