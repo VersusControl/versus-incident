@@ -18,6 +18,7 @@ func cloneConfig(src *Config) *Config {
 		Proxy:         cloneProxyConfig(src.Proxy),
 		Redis:         cloneRedisConfig(src.Redis),
 		Storage:       cloneStorageConfig(src.Storage),
+		Kubernetes:    cloneKubernetesHistoryConfig(src.Kubernetes),
 		Agent:         cloneAgentConfig(src.Agent),
 		Connectors:    cloneConnectorsConfig(src.Connectors),
 	}
@@ -25,10 +26,15 @@ func cloneConfig(src *Config) *Config {
 	return cloned
 }
 
+func cloneKubernetesHistoryConfig(src KubernetesHistoryConfig) KubernetesHistoryConfig {
+	return src
+}
+
 // Helper function to deep clone the StorageConfig struct
 func cloneStorageConfig(src StorageConfig) StorageConfig {
 	return StorageConfig{
-		Type: src.Type,
+		Type:     src.Type,
+		Postgres: StoragePostgresConfig{DSN: src.Postgres.DSN, MaxOpenConns: src.Postgres.MaxOpenConns, HistoryReadConcurrency: src.Postgres.HistoryReadConcurrency},
 		File: StorageFileConfig{
 			MaxIncidents: src.File.MaxIncidents,
 		},

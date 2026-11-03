@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,11 +15,21 @@ func TestIdlePodCredentialRotationCancelsWithoutAnotherRequest(t *testing.T) {
 	opened := make(chan struct{}, 1)
 	closed := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/log") {
+			writeJSON(writer, map[string]any{"items": []any{}})
+			return
+		}
 		writer.WriteHeader(200)
 		writer.(http.Flusher).Flush()
-		opened <- struct{}{}
+		select {
+		case opened <- struct{}{}:
+		default:
+		}
 		<-request.Context().Done()
-		closed <- struct{}{}
+		select {
+		case closed <- struct{}{}:
+		default:
+		}
 	}))
 	defer server.Close()
 	var header atomic.Value

@@ -62,11 +62,7 @@ func newAKSCredentialSource(options AuthOptions) (CredentialSource, error) {
 	default:
 		return nil, errors.New("kubernetes: unsupported AKS credential mode")
 	}
-	principal := ""
-	if options.AKSClientID != "" {
-		principal = authority + "\x00" + options.AKSTenantID + "\x00" + options.AKSClientID + "\x00" + options.AKSServerID + "\x00" + options.AKSCredentialMode
-	}
-	return &expiringBearerSource{refresh: refresh, now: time.Now, skew: 2 * time.Minute, principal: principal}, nil
+	return &expiringBearerSource{refresh: refresh, now: time.Now, skew: 2 * time.Minute}, nil
 }
 
 func fixedCredentialHTTPClient() *http.Client {

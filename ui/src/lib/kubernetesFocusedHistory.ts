@@ -1,11 +1,12 @@
 import type { KubernetesChange, KubernetesChangesPage, KubernetesCrashEvent, KubernetesCrashPage, KubernetesSync } from "./api";
+import { ApiError } from "./api";
 import { kubernetesAccessLost } from "./kubernetesContinuity";
 
 // Match the existing bounded history scan: five requests, never unlimited history.
 export const focusedHistoryRequests = 5;
 export type FocusedCoverage = { incomplete_range: boolean; continuation_failed?: boolean };
 
-type Page<T> = { items: T[]; next?: string; sync: KubernetesSync };
+type Page<T> = { items: T[]; next?: string; sync: KubernetesSync; authority?: string };
 function unique<T>(values: T[]): T[] {
   return [...new Map(values.map(value => [JSON.stringify(value), value])).values()];
 }
@@ -30,6 +31,7 @@ async function collect<T extends { id: string; at: string }, P extends Page<T>>(
       break;
     }
     signal.throwIfAborted();
+    if (page.authority === "denied" || page.authority === "unknown") throw new ApiError(403, "Stored evidence authority is unavailable.", { code: `authority_${page.authority}` });
     pages.push(page);
     for (const item of page.items) {
       if (items.has(item.id)) continue;
@@ -80,7 +82,7 @@ export async function focusedCrashes(fetch: (cursor?: string) => Promise<Kuberne
   }
   return { ...first, ...result, sync: syncOf(pages), coverage,
     incomplete_range: result.incomplete_range || Boolean(captureFailure),
-    crash_count: result.items.filter(item => item.type === "termination").length,
+    crash_count: first.crash_count ?? result.items.filter(item => item.type === "termination").length,
     gaps: unique(pages.flatMap(page => page.gaps ?? [])),
     capture_gaps: unique(pages.flatMap(page => page.capture_gaps ?? [])),
     limitations: unique(pages.flatMap(page => page.limitations ?? [])),

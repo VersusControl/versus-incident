@@ -18,9 +18,9 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
-func TestTimelineRealCursorExpiresAndCanRestart(t *testing.T) {
-	service, provider, query := timelineAdmissionFixture(t)
-	first, err := service.Timeline(t.Context(), query)
+func TestTimelineReservationRealCursorExpiresAndCanRestart(t *testing.T) {
+	service, provider, query := timelineReservationFixture(t)
+	first, err := service.reservationFixturePage(t.Context(), query)
 	if err != nil || first.Next == "" {
 		t.Fatalf("first=%+v %v", first, err)
 	}
@@ -48,11 +48,11 @@ func TestTimelineRealCursorExpiresAndCanRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	query.Cursor = first.Next
-	if _, err := service.Timeline(t.Context(), query); !errors.Is(err, ErrInvalidArguments) {
+	if _, err := service.reservationFixturePage(t.Context(), query); !errors.Is(err, ErrInvalidArguments) {
 		t.Fatalf("expired cursor accepted: %v", err)
 	}
 	query.Cursor = ""
-	restarted, err := service.Timeline(t.Context(), query)
+	restarted, err := service.reservationFixturePage(t.Context(), query)
 	if err != nil || restarted.Next == "" || restarted.Next == first.Next {
 		t.Fatalf("restart=%+v %v", restarted, err)
 	}
@@ -247,8 +247,12 @@ func TestNamespaceCandidateFloodHasOneSharedProbeBudgetAndValidScopesSurvive(t *
 	var reads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reads.Add(1)
+		if r.URL.Path == "/apis/authentication.k8s.io/v1/selfsubjectreviews" {
+			http.NotFound(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/namespaces/shop/pods") {
-			writeJSON(w, map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "pod", "namespace": "shop"}}}})
+			writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{map[string]any{"metadata": map[string]any{"uid": "pod", "name": "pod", "namespace": "shop"}}}})
 			return
 		}
 		http.NotFound(w, r)

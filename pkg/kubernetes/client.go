@@ -117,23 +117,25 @@ func (client *Client) rejectCredential() {
 }
 
 // rejectRequestCredential fences delayed failures from a previous client epoch.
-func (client *Client) rejectRequestCredential(header string, generation uint64, recoveries ...*clusterRecovery) {
+func (client *Client) rejectRequestCredential(header string, generation uint64, recoveries ...*clusterRecovery) bool {
 	client.authMu.Lock()
 	defer client.authMu.Unlock()
 	if client.authGeneration.Load() != generation {
-		return
+		return false
 	}
 	if source, ok := client.credentials.(interface{ rejectBearer(string) bool }); ok && !source.rejectBearer(header) {
-		return
+		return false
 	}
 	if len(recoveries) > 0 {
-		recoveries[0].failed(ErrUnauthorized, client)
+		// A rejected bearer belongs to the credential every read scope shares.
+		recoveries[0].failed(ErrUnauthorized, client, "")
 	}
 	client.authGeneration.Add(1)
 	if client.authCancel != nil {
 		client.authCancel()
 	}
 	client.authContext, client.authCancel = nil, nil
+	return true
 }
 
 type captureReadContextKey struct{}
@@ -317,21 +319,41 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 	}
 	request.Header.Set("Accept", accept)
 	authGeneration := client.authGeneration.Load()
+	var requestService *Service
+	var requestCredentialGeneration uint64
+	var requestCertificate *tls.Certificate
+	if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
+		requestService = service
+		requestCredentialGeneration = service.identity.requestGeneration.Load()
+	}
 	if client.credentials != nil {
 		authorization, credentialErr := client.credentials.Authorization(requestCtx)
 		if credentialErr != nil {
 			return nil, false, credentialErr
 		}
 		if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
-			if err := service.acceptCredential(ctx, authorization); err != nil {
+			accepted, certificate, err := service.acceptCredentialForRequest(ctx, authorization)
+			if err != nil {
 				return nil, false, err
+			}
+			requestService, requestCredentialGeneration = service, accepted
+			requestCertificate = certificate
+		} else {
+			requestCertificate, err = client.credentials.ClientCertificate(&tls.CertificateRequestInfo{})
+			if err != nil {
+				return nil, false, ErrCredentialUnavailable
 			}
 		}
 		if authorization != "" {
 			request.Header.Set("Authorization", authorization)
 		}
 	}
-	response, err := client.http.Do(request)
+	requestClient, closeTransport, err := client.certificateHTTP(requestCertificate)
+	if err != nil {
+		return nil, false, err
+	}
+	defer closeTransport()
+	response, err := requestClient.Do(request)
 	if err != nil {
 		if errors.Is(err, ErrRedirect) {
 			return nil, false, ErrRedirect
@@ -349,8 +371,14 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 			client.backoffUntil = maxTime(client.backoffUntil, time.Now().Add(delay))
 			client.backoffMu.Unlock()
 		}
-		if response.StatusCode == http.StatusUnauthorized {
-			client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx))
+		currentRequest := requestService == nil || requestService.identity.requestGeneration.Load() == requestCredentialGeneration
+		if response.StatusCode == http.StatusUnauthorized && currentRequest {
+			if client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx)) && requestService != nil {
+				requestService.denyHistoryAuthority(ctx, apiPath, true)
+			}
+		}
+		if response.StatusCode == http.StatusForbidden && currentRequest && requestService != nil {
+			requestService.denyHistoryAuthority(ctx, apiPath, false)
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
 			delay := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())

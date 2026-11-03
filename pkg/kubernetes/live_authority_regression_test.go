@@ -150,9 +150,10 @@ func TestLiveAuthorityCannotAuthorizeHistoricalCaptureOrColdReplay(t *testing.T)
 	if err = service.authorizeInventoryRestore(context.Background(), generation); !errors.Is(err, ErrForbidden) || service.inventoryRestore.validated.Load() {
 		t.Fatalf("live list authorized persisted replay: %v", err)
 	}
+	before := identityReads.Load()
 	page, err := service.Issues(t.Context(), IssueOptions{Since: at.Add(-time.Hour), Until: at})
-	if !errors.Is(err, ErrForbidden) || len(page.Items) != 0 || identityReads.Load() < 2 {
-		t.Fatalf("history bypassed current physical proof: %v", err)
+	if !errors.Is(err, errHistoryAuthority) || len(page.Items) != 0 || identityReads.Load() != before {
+		t.Fatalf("unestablished history was authorized or attempted a live physical proof: %v", err)
 	}
 }
 

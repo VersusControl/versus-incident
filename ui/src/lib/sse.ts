@@ -1,6 +1,7 @@
 export interface ServerSentEvent {
   event: string;
   data: string;
+  id?: string;
 }
 
 export interface SSELimits {
@@ -9,6 +10,7 @@ export interface SSELimits {
   maxTotalBytes: number;
   maxEvents: number;
   maxDurationMs: number;
+  maxIdleMs?: number;
 }
 
 export const CHAT_SSE_LIMITS: SSELimits = {
@@ -38,6 +40,7 @@ export class SSEParser {
   private buffer = "";
   private event = "message";
   private data: string[] = [];
+  private id: string | undefined;
   private frameBytes = 0;
   private eventCount = 0;
   private readonly encoder = new TextEncoder();
@@ -92,6 +95,7 @@ export class SSEParser {
 
     if (field === "event") this.event = value || "message";
     if (field === "data") this.data.push(value);
+    if (field === "id" && !value.includes("\0")) this.id = value;
   }
 
   private dispatch() {
@@ -100,7 +104,7 @@ export class SSEParser {
         this.eventCount += 1;
         if (this.eventCount > this.limits.maxEvents) throw new SSELimitError("events");
       }
-      this.onEvent({ event: this.event, data: this.data.join("\n") });
+      this.onEvent({ event: this.event, data: this.data.join("\n"), ...(this.id !== undefined ? { id: this.id } : {}) });
     }
     this.event = "message";
     this.data = [];
@@ -124,7 +128,7 @@ export async function readEventStream(
       if (remaining <= 0) throw new SSELimitError("duration");
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new SSELimitError("duration")), remaining);
+        timer = setTimeout(() => reject(new SSELimitError("duration")), Math.min(remaining, limits.maxIdleMs ?? remaining));
       });
       const { done, value } = await Promise.race([reader.read(), timeout]).finally(() => clearTimeout(timer));
       if (done) break;

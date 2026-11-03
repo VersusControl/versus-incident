@@ -323,7 +323,9 @@ type Query struct {
 const AllContainers = "*"
 
 func (query Query) Validate() error {
-	if len(query.OccurrenceID) > 256 || strings.ContainsAny(query.OccurrenceID, "\x00\r\n") || !query.Center.IsZero() && (query.Center.Before(query.From) || query.Center.After(query.To)) {
+	// Center selects a retained occurrence; From/To select the independent log
+	// window. A user may inspect a window before or after that occurrence.
+	if len(query.OccurrenceID) > 256 || strings.ContainsAny(query.OccurrenceID, "\x00\r\n") {
 		return ErrInvalid
 	}
 	if query.Namespace == "" || query.RootUID == "" || len(query.Namespace) > 253 || len(query.RootUID) > 256 || strings.ContainsAny(query.Namespace+query.RootUID, "\x00\r\n\t /\\") || query.From.IsZero() || !query.To.After(query.From) || query.To.Sub(query.From) > 2*time.Hour || query.Limit < 0 || query.Limit > 500 || len(query.Search) > 256 || len(query.Cursor) > 2048 || len(query.Pods) > 100 || len(query.Container) > 63 || strings.ContainsAny(query.Container, "\x00\r\n\t /\\") {

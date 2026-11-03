@@ -279,7 +279,13 @@ func (provider *blockingUsageCASProvider) CompareAndSwapBlob(key string, expecte
 }
 
 func TestHistoryCacheWriteDoesNotHoldCredentialReadLock(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("history GET reached Kubernetes") }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/apis/authentication.k8s.io/v1/selfsubjectreviews" {
+			http.NotFound(w, r)
+			return
+		}
+		t.Error("history GET reached Kubernetes")
+	}))
 	defer server.Close()
 	credentials := &credentialSource{authorization: func(ctx context.Context) (string, error) { return "Bearer unit-cache-token", ctx.Err() }}
 	client, err := NewClient(Config{Endpoint: server.URL, AllowLoopbackHTTP: true, Credentials: credentials})

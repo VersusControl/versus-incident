@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 	"log"
 	"os"
 	"os/signal"
@@ -72,7 +73,11 @@ func main() {
 			DSN:    cfg.Storage.Database.DSN,
 		},
 		Postgres: storage.PostgresOptions{
-			DSN: cfg.Storage.Postgres.DSN,
+			DSN:                    cfg.Storage.Postgres.DSN,
+			MaxOpenConns:           cfg.Storage.Postgres.MaxOpenConns,
+			HistoryReadConcurrency: cfg.Storage.Postgres.HistoryReadConcurrency,
+			ObservationHeartbeat:   cfg.Kubernetes.Evidence.ObservationHeartbeat,
+			EvidenceRetention:      cfg.Kubernetes.Evidence.Retention,
 		},
 	})
 	if err != nil {
@@ -213,6 +218,9 @@ func main() {
 	var agentDone <-chan struct{}
 	toolAvailability := agent.NewToolAvailabilityService(cfg.Agent, store, cfg.Connectors)
 	kubernetesService, kubernetesErrors := agent.NewKubernetesRegistry(cfg.Connectors.Kubernetes, tenancy.DefaultOrgScope())
+	if err := kubernetesService.SetEvidenceHeartbeat(cfg.Kubernetes.Evidence.ObservationHeartbeat); err != nil {
+		log.Fatalf("kubernetes: invalid observation heartbeat")
+	}
 	for _, kubernetesErr := range kubernetesErrors {
 		log.Printf("kubernetes: connector unavailable: %v", kubernetesErr)
 	}

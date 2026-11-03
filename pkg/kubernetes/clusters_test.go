@@ -242,6 +242,9 @@ func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
 	var denyIssues atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
+		case "/apis/authentication.k8s.io/v1/selfsubjectreviews":
+			http.NotFound(writer, request)
+			return
 		case "/version":
 			writeJSON(writer, map[string]any{"gitVersion": version.Load(), "platform": "private-platform", "gitCommit": "private-commit"})
 		case "/api":

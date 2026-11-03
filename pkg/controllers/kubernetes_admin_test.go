@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 	"io"
 	"log"
 	"net"
@@ -31,6 +32,39 @@ import (
 	"github.com/VersusControl/versus-incident/tests/fakekube"
 	"github.com/gofiber/fiber/v2"
 )
+
+func TestKubernetesCommitStreamUsesCallerGuardAndLocalResolution(t *testing.T) {
+	for _, allowed := range []bool{false, true} {
+		app := fiber.New(fiber.Config{Immutable: true})
+		app.Use(func(ctx *fiber.Ctx) error {
+			middleware.MarkAuthorized(ctx)
+			middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), allowed)
+			return ctx.Next()
+		})
+		service := kubernetes.NewService(nil, kubernetes.Scope{OrgID: "default", ClusterID: "saved"}, 0)
+		controller := NewKubernetesAdminController(service)
+		calls := 0
+		controller.resolve = func(string, string) (*kubernetes.Service, error) {
+			calls++
+			return nil, kubernetes.ErrCredentialUnavailable
+		}
+		controller.Register(app.Group("/api"))
+		response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/commits/stream?cluster=saved", nil), -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if !allowed && response.StatusCode != fiber.StatusForbidden {
+			t.Fatalf("unguarded stream status=%d", response.StatusCode)
+		}
+		if allowed && response.StatusCode != fiber.StatusBadGateway {
+			t.Fatalf("expected unconfigured store, got %d", response.StatusCode)
+		}
+		if calls != 0 {
+			t.Fatal("commit stream resolved or validated live credentials")
+		}
+	}
+}
 
 func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 	gatewayAuth := middleware.GatewayAuthEnabled()
@@ -138,7 +172,7 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 		{http.MethodGet, base + "&occurrence_id=", "", "", "", 400},
 		{http.MethodGet, base + "&occurrence_id=unknown", "", "", "", 400},
 		{http.MethodGet, base + "&occurrence_id=" + manifest.ID, "", "", "", 200},
-		{http.MethodGet, base + "&occurrence_id=" + manifest.ID + "&center=" + center.Add(time.Nanosecond).Format(time.RFC3339Nano), "", "", "", 400},
+		{http.MethodGet, base + "&occurrence_id=" + manifest.ID + "&center=" + center.Add(time.Nanosecond).Format(time.RFC3339Nano), "", "", "", 200},
 		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1", "", "", "", 200},
 		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=yes", "", "", "", 400},
 		{http.MethodGet, "/api/admin/kubernetes/timeline?cluster=cluster&breaks=1&breaks=0", "", "", "", 400},
@@ -1039,19 +1073,74 @@ func TestKubernetesStreamRequiresInfrastructureView(t *testing.T) {
 	}
 }
 
-func TestKubernetesCrashJournalRoute(t *testing.T) {
-	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
+func capturedRouteHistory(t *testing.T) (*kubernetes.Service, storage.EvidenceStore, storage.EvidenceScope) {
+	t.Helper()
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "bad-rollout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := httptest.NewRecorder()
+	fixture.ServeHTTP(seed, httptest.NewRequest(http.MethodPost, "/_fake/mutate", strings.NewReader(`{"operation":"upsert","resource":"namespaces","name":"kube-system","object":{"kind":"Namespace","metadata":{"uid":"route-physical"}}}`)))
+	if seed.Code != http.StatusOK {
+		t.Fatal("physical identity fixture failed")
+	}
+	var persisted atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if persisted.Load() {
+			t.Error("persisted route contacted Kubernetes")
+			http.Error(w, "unexpected upstream read", http.StatusInternalServerError)
+			return
+		}
+		fixture.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster-a"}, time.Hour)
 	provider := storage.NewMemory()
+	t.Cleanup(func() { provider.Close() })
 	service.SetChangeStorage(provider)
-	store := kubechanges.NewStore(provider, kubeindex.Scope{ClusterID: "cluster-a"})
+	registry := kubernetes.NewServiceRegistry(service)
+	t.Cleanup(registry.Close)
+	registry.StartCapture(t.Context())
+	store := provider.(storage.EvidenceStore)
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "cluster-a", ClusterUID: "route-physical"}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpoint.ID != "" && checkpoint.Principal != "" && checkpoint.Authority["Pod"].State == "allowed" && checkpoint.Authority["Deployment"].State == "allowed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("route fixture did not establish history authority")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	service.StopCapture()
+	persisted.Store(true)
+	return service, store, scope
+}
+
+func TestKubernetesCrashJournalRoute(t *testing.T) {
+	service, store, scope := capturedRouteHistory(t)
 	now := time.Now().UTC().Add(-time.Second)
-	var events []kubechanges.CrashEvent
+	checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := storage.EvidenceBatch{ID: "capture:route-crashes", Expected: checkpoint.ID, Generation: checkpoint.Generation, Principal: checkpoint.Principal, Epoch: "synthetic", At: time.Now().UTC()}
 	for _, name := range []string{"first", "second", "third"} {
 		event := kubechanges.CrashEvent{Cluster: "cluster-a", Namespace: "shop", Pod: name, PodUID: name, RootUID: "root", RootKind: "Deployment", RootName: "api", Container: "app", Type: "status", WaitingReason: "CrashLoopBackOff", At: now, ObservedAt: now, TimeSource: "observed_at"}
 		event.ID = kubechanges.CrashID(event)
-		events = append(events, event)
+		raw, _ := json.Marshal(event)
+		batch.Records = append(batch.Records, storage.EvidenceRecord{AuthorizationKind: "Pod", ID: "crash:" + event.ID, Type: "crash", Namespace: event.Namespace, Kind: event.RootKind, UID: event.PodUID, PodUID: event.PodUID, RootUID: event.RootUID, At: now, ObservedAt: now, Epoch: batch.Epoch, Payload: raw})
 	}
-	if err := store.CommitCapture(nil, nil, nil, "", now, events, nil, true); err != nil {
+	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 		t.Fatal(err)
 	}
 	allowed := true
@@ -1067,7 +1156,7 @@ func TestKubernetesCrashJournalRoute(t *testing.T) {
 		t.Fatalf("crashes response: %+v %v", response, err)
 	}
 	var page kubernetes.CrashPage
-	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || len(page.Items) != 1 || page.Next == "" || page.Gaps == nil || len(page.Limitations) == 0 {
+	if err := json.NewDecoder(response.Body).Decode(&page); err != nil || len(page.Items) != 1 || page.CrashCount != 3 || page.Next == "" || page.Gaps == nil {
 		t.Fatalf("crash contract: %+v %v", page, err)
 	}
 	response.Body.Close()
@@ -1087,15 +1176,21 @@ func TestKubernetesCrashJournalRoute(t *testing.T) {
 }
 
 func TestKubernetesChangesRouteReturnsBoundedDTOAndRejectsInvalidTime(t *testing.T) {
-	service := kubernetes.NewService(nil, kubernetes.Scope{ClusterID: "cluster-a"}, 0)
-	provider := storage.NewMemory()
-	service.SetChangeStorage(provider)
-	store := kubechanges.NewStore(provider, kubeindex.Scope{ClusterID: "cluster-a"})
+	service, store, scope := capturedRouteHistory(t)
 	now := time.Now().UTC()
-	if err := store.Append([]kubechanges.Change{
-		{ID: "change-a", Cluster: "cluster-a", Kind: "Deployment", Namespace: "shop", Name: "api-a", UID: "uid-a", Type: kubechanges.Created, At: now.Add(-time.Minute)},
-		{ID: "change-b", Cluster: "cluster-a", Kind: "Deployment", Namespace: "shop", Name: "api-b", UID: "uid-b", Type: kubechanges.Created, At: now},
-	}, now); err != nil {
+	checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := storage.EvidenceBatch{ID: "capture:route-changes", Expected: checkpoint.ID, Generation: checkpoint.Generation, Principal: checkpoint.Principal, Epoch: "synthetic", At: now}
+	for _, change := range []kubechanges.Change{
+		{ID: "change-a", Cluster: "cluster-a", Kind: "Deployment", Namespace: "route-history", Name: "api-a", UID: "uid-a", Type: kubechanges.Created, At: now.Add(-time.Minute)},
+		{ID: "change-b", Cluster: "cluster-a", Kind: "Deployment", Namespace: "route-history", Name: "api-b", UID: "uid-b", Type: kubechanges.Created, At: now},
+	} {
+		raw, _ := json.Marshal(change)
+		batch.Records = append(batch.Records, storage.EvidenceRecord{AuthorizationKind: "Deployment", ID: "change:" + change.ID, Type: "change", Kind: change.Kind, Name: change.Name, Namespace: change.Namespace, UID: change.UID, Rule: string(change.Type), At: change.At, ObservedAt: now, Epoch: batch.Epoch, Payload: raw})
+	}
+	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
 		t.Fatal(err)
 	}
 	app := fiber.New()
@@ -1105,7 +1200,7 @@ func TestKubernetesChangesRouteReturnsBoundedDTOAndRejectsInvalidTime(t *testing
 		return ctx.Next()
 	})
 	NewKubernetesAdminController(service).Register(app.Group("/api"))
-	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?limit=1", nil), -1)
+	response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?namespace=route-history&limit=1", nil), -1)
 	if err != nil || response.StatusCode != fiber.StatusOK {
 		t.Fatalf("changes status=%d err=%v", response.StatusCode, err)
 	}
@@ -1119,7 +1214,7 @@ func TestKubernetesChangesRouteReturnsBoundedDTOAndRejectsInvalidTime(t *testing
 		t.Fatalf("changes DTO=%#v decode err=%v", body, err)
 	}
 	response.Body.Close()
-	second, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?limit=1&cursor="+body.Next, nil), -1)
+	second, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/changes?namespace=route-history&limit=1&cursor="+body.Next, nil), -1)
 	if err != nil || second.StatusCode != fiber.StatusOK {
 		t.Fatalf("changes cursor status=%d err=%v", second.StatusCode, err)
 	}

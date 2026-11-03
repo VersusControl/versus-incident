@@ -113,3 +113,45 @@ startup.
 > **Heads up:** the agent admin endpoints are admin-level. Host the UI behind
 > your usual operator auth (VPN, SSO proxy, etc.) rather than exposing it
 > publicly.
+
+### Persisted Kubernetes history
+
+Timeline keys contain filters, range minutes and cursors, not sliding clock
+bounds. A page chain pins its bounds; background first-page refreshes advance
+them without replacing loaded rows with a skeleton. Failed refreshes retain
+last-good rows and tile values with a timestamp. Permission denial, unknown
+authority or an identity mismatch clears protected data instead.
+
+Overview, Issues and Timeline pass their stored break into the focused view.
+Context confirmation runs in the background independently of window history
+reads; transient store failures do not disable seeded detail or break logs.
+Unseeded deep links resolve the date-free persisted context.
+
+The explorer consumes `/api/admin/kubernetes/commits/stream` using the existing
+authenticated fetch transport. Commit bursts are coalesced, duplicate revisions
+are ignored within a connection, and reconnect snapshots invalidate missed
+updates even after a server restart. Disconnected streams retry with backoff and
+refresh queries every 30 seconds; sync status belongs in the top bar. Existing
+Playwright explorer scenarios and `tests/e2e/support/capture.ts` remain the
+shared browser/capture fixtures.
+
+History counts may be bounded samples. A capped aggregate displays `1000+`;
+sampled subtotals are lower bounds, including an unestablished zero. Continuation
+pages retain metadata only from their exact cursor chain, never from an unrelated
+first-page refresh.
+
+Focused break links and log selectors use the occurrence's break time, not a
+later journal observation. Equivalent URL timestamps retain their raw
+nanosecond precision. Compact range controls wrap on narrow screens, and a
+failed context refresh with retained evidence shows one refresh note and Retry.
+
+An unestablished persisted proof returns retryable `503 history_not_established`;
+the commit feed reconnects without marking independently authorized Overview or
+sync-health reads denied. A positive `403 history_authority_denied` clears
+protected history and seeds while keeping that live recovery lane reachable.
+Only fresh authorized reads restore rows; pre-denial last-good data is fenced.
+Application/session denials remain fail-closed.
+
+The current sync-health failure takes precedence over older stream progress.
+Cluster timeouts show an unreachable caption anchored to the last-good
+observation timestamp, not a stale zero-age value or the current clock.

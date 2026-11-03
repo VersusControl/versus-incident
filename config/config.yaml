@@ -162,6 +162,9 @@ storage:
   type: file                     # file | redis | database (env: STORAGE_TYPE)
   file:
     max_incidents: 1000          # rolling cap; older records dropped on save
+  postgres:
+    max_open_conns: 20
+    history_read_concurrency: 8
   # redis:                       # not yet implemented
   #   host: ${REDIS_HOST}
   #   port: 6379
@@ -187,6 +190,11 @@ storage:
 #   3: mode=detect    (AI emission ships in a follow-up milestone)
 #
 # -----------------------------------------------------------------------------
+kubernetes:
+  evidence:
+    observation_heartbeat: 5m
+    retention: "0"
+
 agent:
   enable: false                   # master switch (env: AGENT_ENABLE)
   mode: training                  # training | shadow | detect (env: AGENT_MODE)

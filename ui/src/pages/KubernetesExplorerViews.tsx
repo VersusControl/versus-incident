@@ -6,7 +6,7 @@ import { ResourceLogsButton } from "@/components/ResourceLogsButton";
 import { KubernetesFilterField, filterFieldControlClass, filterRowClass } from "@/components/KubernetesFilterField";
 import { isZeroTime } from "@/lib/kubernetesSyncHealth";
 import { kubernetesTimelineWindow } from "@/lib/kubernetesTime";
-import { counted } from "@/lib/kubernetesEvidence";
+import { counted, historyCount } from "@/lib/kubernetesEvidence";
 import { Activity, AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Boxes, Cpu, Eye, EyeOff, GitBranch, History, Layers3, Loader2, Maximize2, Minus, Network, Plus, RotateCcw, Waypoints, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQueryClient, type Query } from "@tanstack/react-query";
@@ -287,9 +287,9 @@ export function KubernetesOverviewTimeline({ overview, onSelectResource, onSelec
   const [windowEnd, setWindowEnd] = useState(() => Date.now());
   const changes = useQuery({
     queryKey: ["kubernetes-changes", "overview", overview.cluster_id],
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const until = Date.now();
-      return api.kubernetesChanges({ since: new Date(until - 60 * 60_000).toISOString(), until: new Date(until).toISOString(), limit: 100 });
+      return api.kubernetesChanges({ since: new Date(until - 60 * 60_000).toISOString(), until: new Date(until).toISOString(), limit: 100 }, signal);
     },
     retry: false,
   });
@@ -303,7 +303,7 @@ export function KubernetesOverviewTimeline({ overview, onSelectResource, onSelec
   }, [refetchChanges]);
 
   const denied = changes.error instanceof ApiError && [401, 403].includes(changes.error.status);
-  return <><TimelineCard changes={denied ? undefined : changes.data} windowEnd={windowEnd} clusterId={overview.cluster_id} onSelectResource={onSelectResource} onSelectView={onSelectView} resourceFor={issueResource} warningsOwned />{changes.isError && <p role="status" className="text-xs text-sev-warning">Recent change history unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void changes.refetch()}>Retry</button></p>}</>;
+  return <><TimelineCard changes={denied ? undefined : changes.data} changesAsOf={changes.isError && changes.data ? changes.dataUpdatedAt : undefined} windowEnd={windowEnd} clusterId={overview.cluster_id} onSelectResource={onSelectResource} onSelectView={onSelectView} resourceFor={issueResource} warningsOwned />{changes.isError && <p role="status" className="text-xs text-sev-warning">Recent change history unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void changes.refetch()}>Retry</button></p>}</>;
 }
 
 export function KubernetesOverviewInsights({ overview, indexStatus, unavailable, onSelectView }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; unavailable: boolean; onSelectView: (tab: KubernetesExplorerTab) => void }) {
@@ -757,7 +757,13 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
   const until = params.get("until") || undefined;
   const historical = Boolean(since || until);
   const paging = useCursorPagination(JSON.stringify(["issues", namespace, severity, since, until]));
-  const issues = useQuery({ queryKey: ["kubernetes-issues", namespace, severity, since, until, paging.cursor], queryFn: () => api.kubernetesIssues({ namespace, severity, since, until, limit: 20, cursor: paging.cursor }), retry: false });
+  const { key } = useKubernetesCluster();
+  const issues = useQuery({
+    queryKey: ["kubernetes-issues", namespace, severity, since, until, paging.cursor],
+    queryFn: ({ signal }) => api.kubernetesIssues({ namespace, severity, since, until, limit: 20, cursor: paging.cursor }, signal),
+    placeholderData: (previous, query) => JSON.stringify(query?.queryKey.slice(0, 5)) === JSON.stringify(key("kubernetes-issues", namespace, severity)) ? previous : undefined,
+    retry: false,
+  });
   const active = useQuery({ queryKey: ["kubernetes-issues", "current-counts", namespace, severity], queryFn: () => api.kubernetesIssues({ namespace, severity, limit: 1 }), enabled: historical, retry: false });
   const denied = issues.error instanceof ApiError && [401, 403].includes(issues.error.status);
   const current = historical ? active.data : issues.data;
@@ -777,7 +783,8 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
       {/* A resync after the first publication keeps the grouped issues on
           screen; only a cluster that has never published has nothing to keep. */}
       {!denied && issues.data && (Boolean(firstReadyAt) || issues.data.sync.state !== "syncing") && <>
-        <div className="flex flex-wrap gap-2 border-b border-ink-700 px-4 py-3">{["critical", "warning", "info"].map((key) => <span className={`pill inline-flex gap-1.5 ${severityTone(key)}`} key={key}><span>{key}</span><span aria-label={`${key} count`}>{totals[key] ?? "Unknown"}</span></span>)}</div>
+        <div className="flex flex-wrap gap-2 border-b border-ink-700 px-4 py-3">{["critical", "warning", "info"].map((key) => <span className={`pill inline-flex gap-1.5 ${severityTone(key)}`} key={key}><span>{key}</span><span aria-label={`${key} count`}>{totals[key] === undefined ? "Unknown" : historyCount(totals[key], current?.count_capped)}</span></span>)}</div>
+        {current?.count_capped && <p className="px-4 py-2 text-xs text-ink-400">Counts are lower bounds from a bounded sample.</p>}
         <div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{issues.data.items.map((issue, index) => <BreakRow key={`${issue.rule}:${issue.root.uid ?? issue.root.name}:${index}`} issue={issue} resource={issueResource(issue)} onSelectResource={onSelectResource} clusterId={clusterId} warningScope={JSON.stringify([namespace, severity, paging.cursor])} sourceSync={issues.isError ? undefined : issues.data?.sync} sourceFailures={issues.data?.partial_failures} collapsed />)}</div>
         {issues.data.items.length === 0 && !issues.data.next && !incompleteKubernetesSnapshot(issues.data) && !issues.isError && <p className="p-6 text-center text-sm text-ink-400">No issues match these filters.</p>}
         <PartialFailuresDisclosure failures={issues.data.partial_failures} />
@@ -853,8 +860,8 @@ type TimelineMinutes = 0 | 15 | 60 | 360 | 1440 | 10080 | 43200 | 129600;
 const timelineRanges: ReadonlyArray<readonly [TimelineMinutes, string]> = [[15, "15m"], [60, "1h"], [360, "6h"], [1440, "24h"], [10080, "7d"], [43200, "30d"], [129600, "90d"], [0, "All retained"]];
 
 function TimelineRangeControl({ minutes, onChange, loading, compact = false }: { minutes: TimelineMinutes; onChange: (minutes: TimelineMinutes) => void; loading: boolean; compact?: boolean }) {
-  return <div role="group" aria-label="Timeline window" aria-busy={loading} className={`flex items-center ${compact ? "rounded-control border border-ink-500 bg-surface" : "flex-wrap gap-1"}`}>
-    {timelineRanges.map(([value, label]) => <button type="button" aria-pressed={minutes === value} onClick={() => onChange(value)} className={`rounded-control px-3 text-xs transition-colors duration-150 motion-reduce:transition-none ${compact ? "py-1" : "py-1.5"} ${minutes === value ? "bg-accent-subtle text-ink-50" : "text-ink-300 hover:bg-ink-800"}`} key={value}>{label}</button>)}
+  return <div role="group" aria-label="Timeline window" aria-busy={loading} className={`flex min-w-0 max-w-full flex-wrap items-center ${compact ? "rounded-control border border-ink-500 bg-surface" : "gap-1"}`}>
+    {timelineRanges.map(([value, label]) => <button type="button" aria-pressed={minutes === value} onClick={() => onChange(value)} className={`shrink-0 whitespace-nowrap rounded-control px-3 text-xs transition-colors duration-150 motion-reduce:transition-none ${compact ? "py-1" : "py-1.5"} ${minutes === value ? "bg-accent-subtle text-ink-50" : "text-ink-300 hover:bg-ink-800"}`} key={value}>{label}</button>)}
     <span data-range-spinner className="inline-flex size-6 shrink-0 items-center justify-center text-ink-300">{loading && <Loader2 size={13} role="status" aria-label="Loading timeline range" className="animate-spin motion-reduce:animate-none" />}</span>
   </div>;
 }
@@ -881,6 +888,8 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
   const [journalCeiling] = useState(Date.now);
   const { since, until } = kubernetesTimelineWindow(windowEnd, minutes, centered);
   const cache = useQueryClient();
+  const seedKey = key("break-seed", rootUID, namespace, occurrenceID, center || undefined);
+  const seed = cache.getQueryData<KubernetesIssue>(seedKey);
   const [authorityHeld, setAuthorityHeld] = useState(false);
   const [checkingContext, setCheckingContext] = useState(false);
   const [awaitingWindowProof, setAwaitingWindowProof] = useState(false);
@@ -908,21 +917,24 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
       // separately to their journal observation.
       if (selected && !occurrenceID && !crashID && centered
         && (timestampNanos(center!) === undefined || timestampNanos(selected.broke_at ?? "") !== timestampNanos(center!))) {
+        if (seed) throw new ApiError(403, "Stored break time does not match this selection", { code: "root_context_mismatch" });
         return { ...page, selected_occurrence: undefined, selection_status: "not_found" as const };
       }
       return page;
     },
     retry: false,
-    refetchInterval: (query) => query.state.data && incompleteKubernetesSnapshot(query.state.data) ? 5000 : false,
+    refetchInterval: false,
   });
   const contextBlocked = kubernetesAccessLost(rootContext.error) || kubernetesFailureCode(rootContext.error) === "root_context_mismatch";
-  const context = !contextBlocked ? rootContext.data?.root_context : undefined;
+  const context = useMemo(() => !contextBlocked ? rootContext.data?.root_context
+    ?? (seed && !authorityHeld ? { root: seed.root, occurrence: seed, retained: true } : undefined) : undefined,
+  [contextBlocked, rootContext.data?.root_context, seed, authorityHeld]);
   // Preserve query/cursor scope while identity data is scrubbed; this never
   // enables a protected read without a newly authorized context.
   const knownNamespace = useRef<string | undefined>(undefined);
   if (context) knownNamespace.current = context.root.namespace;
   const rootNamespace = context ? context.root.namespace : namespace || knownNamespace.current;
-  const windowReadsEnabled = Boolean(context) && (!authorityHeld || awaitingWindowProof);
+  const windowReadsEnabled = !contextBlocked && (!authorityHeld || awaitingWindowProof);
   const breaks = useQuery({
     queryKey: ["kubernetes-issues", "timeline-root", rootUID, rootNamespace ?? "", since, until],
     enabled: windowReadsEnabled,
@@ -934,7 +946,7 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
       return JSON.stringify(query?.queryKey.slice(0, scope.length)) === JSON.stringify(scope) ? previous : undefined;
     },
     retry: false,
-    refetchInterval: (query) => query.state.data?.sync.pending?.length ? 5000 : false,
+    refetchInterval: false,
   });
   const crashes = useKubernetesCrashes({ root_uid: rootUID, namespace: rootNamespace, since, until: new Date(Math.min(journalCeiling, Date.parse(until))).toISOString() }, windowReadsEnabled && !kubernetesAccessLost(breaks.error), true, true);
   const historicalIssue = breaks.data?.items.find(item => item.root.uid === rootUID && item.root.namespace === context?.root.namespace);
@@ -957,6 +969,7 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
     if (!rootAuthorityLost) { fenced.current = []; return; }
     const errors = [rootContext.error, breaks.error, changes.error, crashes.error, logAuthorityError];
     if (errors.every((error, index) => error === fenced.current[index])) return;
+    cache.removeQueries({ queryKey: key("break-seed", rootUID) });
     fenced.current = errors;
     setAuthorityHeld(true);
     setAwaitingWindowProof(false);
@@ -1005,7 +1018,7 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
       setAwaitingWindowProof(true);
     } finally { setCheckingContext(false); }
   };
-  const selectedOccurrence = rootContext.data?.selection_status === "resolved" ? rootContext.data.selected_occurrence : undefined;
+  const selectedOccurrence = rootContext.data?.selection_status === "resolved" ? rootContext.data.selected_occurrence : seed;
   const pinnedCrash = useRef<KubernetesCrashEvent | undefined>(undefined);
   if (rootAuthorityLost || authorityHeld || !context) pinnedCrash.current = undefined;
   else if (crashID && !pinnedCrash.current) pinnedCrash.current = crashes.data?.items.find(event => event.id === crashID
@@ -1030,7 +1043,7 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
   if (kind) unfocusedQuery.set("kind", kind);
   for (const name of ["logs_from", "logs_to", "logs_mode", "logs_pod", "logs_container"]) unfocusedQuery.delete(name);
   const rangeLoading = Boolean(data && (breaks.isPlaceholderData || changes.isPlaceholderData || crashes.isPlaceholderData));
-  const loadingHistory = rootContext.isPending || Boolean(issue) && (breaks.isPending || changes.isPending || crashes.isPending);
+  const loadingHistory = !issue && rootContext.isPending;
   const noMarkers = issue && data && !data.items.length && !data.next && crashes.data && !crashes.data.items.length && !crashes.data.next
     && !breaks.isError && !changes.isError && !crashes.isError && !changes.isFetching && !crashes.isFetching && !rangeLoading
     && !incompleteKubernetesSnapshot(data) && !incompleteKubernetesSnapshot(crashes.data);
@@ -1043,7 +1056,8 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
     {!rootAuthorityLost && !breaks.isError && evidenceLoading(historicalIssue?.pending, breaks.data?.sync.pending) && <div className="border-b border-ink-700 px-2"><KubernetesPendingNote label="Evidence loading" /></div>}
     <div data-timeline-chart-area aria-busy={loadingHistory || rangeLoading} className={`min-h-60 transition-opacity duration-150 motion-reduce:transition-none ${rangeLoading ? "opacity-60" : ""}`}>
     {loadingHistory && <CardSkeleton label="Loading related root change history" rows={5} />}
-    {(rootContext.isError || rootAuthorityLost || authorityHeld) && <p role="status" className="p-4 text-sm text-sev-warning">Retained root context is unavailable.<button type="button" className="ml-2 text-link" disabled={checkingContext || awaitingWindowProof || rootContext.isFetching} onClick={() => void retryRootContext()}>Retry root context</button></p>}
+    {issue && rootContext.isError && <p role="status" className="p-4 text-sm text-sev-warning">Couldn't refresh — showing stored break evidence{rootContext.dataUpdatedAt ? ` from ${new Date(rootContext.dataUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}.<button type="button" className="ml-2 text-link" disabled={checkingContext || awaitingWindowProof || rootContext.isFetching} onClick={() => void retryRootContext()}>Retry root context</button></p>}
+    {(!issue && rootContext.isError || rootAuthorityLost || authorityHeld) && <p role="status" className="p-4 text-sm text-sev-warning">Retained root context is unavailable.<button type="button" className="ml-2 text-link" disabled={checkingContext || awaitingWindowProof || rootContext.isFetching} onClick={() => void retryRootContext()}>Retry root context</button></p>}
     {rootContext.data && !rootContext.isError && !context && <p role="status" className="p-4 text-sm text-ink-400">{incompleteKubernetesSnapshot(rootContext.data) ? "Retained root context is incomplete." : "No retained root context for this selection."}{incompleteKubernetesSnapshot(rootContext.data) && <button type="button" className="ml-2 text-link" disabled={checkingContext || rootContext.isFetching} onClick={() => void retryRootContext()}>Retry root context</button>}</p>}
     {(breaks.isError || breaks.unpublished) && <p role="status" className="p-4 text-sm text-sev-warning">Root history unavailable.</p>}
     {changes.isError && <p role="status" className="p-4 text-sm text-sev-warning">Related change history is unavailable.<button type="button" className="ml-2 text-link" disabled={checkingContext || awaitingWindowProof} onClick={() => void (rootAuthorityLost || authorityHeld ? retryRootContext() : changes.refetch())}>Retry</button></p>}
@@ -1054,13 +1068,15 @@ function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: strin
       {noMarkers && <p role="status" className="p-4 text-sm text-ink-400">No captured markers in this range.</p>}
     </>}
     </div>
-    <KubernetesBreakLogs mounted={Boolean(context) && !rootAuthorityLost && !authorityHeld} pending={rootContext.isPending || Boolean(crashID && !pinnedCrash.current && crashes.isPending)} />
+    <KubernetesBreakLogs mounted={Boolean(context) && !rootAuthorityLost && !authorityHeld} pending={!context && rootContext.isPending || Boolean(crashID && !pinnedCrash.current && crashes.isPending)} />
     {issue && <CrashJournal journal={crashes} reasons={warnings.map((warning) => warning.content)} />}
   </section></KubernetesBreakLogsProvider>;
 }
 
 function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: ResourceSelection }) {
   const { client: api, cluster, key } = useKubernetesCluster();
+  const cache = useQueryClient();
+  const cacheSeed = (issue: KubernetesIssue, at: string) => cache.setQueryData(key("break-seed", issue.root.uid, issue.root.namespace ?? "", issue.occurrence_id, at), issue);
   const firstReadyAt = useKubernetesFirstReady();
   const focus = new URLSearchParams(window.location.search);
   const center = focus.get("center");
@@ -1074,29 +1090,37 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
   const [windowEnd, setWindowEnd] = useState(() => centered ? centerTime : Date.now());
   const [historyCeiling] = useState(Date.now);
   const [generation, setGeneration] = useState(0);
-  const { since, until } = kubernetesTimelineWindow(windowEnd, minutes, centered, historyCeiling);
-  const paging = useCursorPagination(`timeline:${since}:${namespace}:${kind}:${breaksOnly}:${generation}`);
+  const paging = useCursorPagination(`timeline:${minutes}:${namespace}:${kind}:${breaksOnly}:${generation}`);
+  // Every cursor in a page chain uses the same bounds; only a first-page
+  // background refresh advances the window.
+  const pageWindow = useRef(kubernetesTimelineWindow(windowEnd, minutes, centered, historyCeiling));
   const timeline = useQuery({
-    queryKey: ["kubernetes-timeline", "list", namespace, kind, breaksOnly, generation, minutes, since, until, paging.cursor],
-    queryFn: ({ signal }) => api.kubernetesTimeline({ since, until, namespace, kind, breaks: breaksOnly ? 1 : undefined, limit: 100, cursor: paging.cursor }, signal),
+    queryKey: ["kubernetes-timeline", "list", namespace, kind, breaksOnly, generation, minutes, center, paging.cursor],
+    queryFn: ({ signal }) => {
+      if (!paging.cursor) pageWindow.current = kubernetesTimelineWindow(centered ? centerTime : Date.now(), minutes, centered, centered ? historyCeiling : Date.now());
+      return api.kubernetesTimeline({ ...pageWindow.current, namespace, kind, breaks: breaksOnly ? 1 : undefined, limit: 100, cursor: paging.cursor }, signal);
+    },
     // A new range or page keeps the current rows on screen, dimmed, until the
     // next page lands; a different filter starts from a clean list.
-    placeholderData: (previous, query) => JSON.stringify(query?.queryKey.slice(0, -4)) === JSON.stringify(key("kubernetes-timeline", "list", namespace, kind, breaksOnly, generation)) ? previous : undefined,
+    placeholderData: (previous, query) => JSON.stringify(query?.queryKey.slice(0, 7)) === JSON.stringify(key("kubernetes-timeline", "list", namespace, kind, breaksOnly)) ? previous : undefined,
     retry: false,
-    refetchInterval: (query) => query.state.data?.sync.state === "syncing" ? 1000 : false,
+    refetchInterval: false,
   });
+  const { refetch: refetchTimeline } = timeline;
   useEffect(() => {
     if (centered || paging.page > 1) return;
-    const timer = window.setInterval(() => setWindowEnd(Date.now()), 30_000);
+    const timer = window.setInterval(() => { setWindowEnd(Date.now()); void refetchTimeline({ cancelRefetch: false }); }, 30_000);
     return () => window.clearInterval(timer);
-  }, [centered, paging.page]);
+  }, [centered, paging.page, refetchTimeline]);
   const data = timeline.data;
+  const { since, until } = data ?? pageWindow.current;
   // The window slides forward every 30 s on its own; only a range the user
   // picked dims the list and spins the range control.
   const [shownMinutes, setShownMinutes] = useState(minutes);
   if (data && !timeline.isPlaceholderData && shownMinutes !== minutes) setShownMinutes(minutes);
   const rangeLoading = Boolean(data) && timeline.isPlaceholderData && shownMinutes !== minutes;
   const warnings = failureWarnings(data?.partial_failures);
+  if (timeline.isError && data) warnings.push({ id: "refresh-failed", content: `Couldn't refresh — showing data from ${new Date(timeline.dataUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` });
   if (data?.sync.state === "stale") warnings.push({ id: "timeline-stale", content: "Timeline evidence includes stale snapshots." });
   if (data?.gaps?.length) warnings.push({ id: "history-gaps", content: "History capture does not cover the whole range" });
   if (timeline.isError || ["error", "partial"].includes(data?.sync.state ?? "")) warnings.push({ id: "history-unavailable", content: "Some history could not be read" });
@@ -1125,15 +1149,17 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     }
     if (entry.type === "break") {
       const issue = entry.issue;
+      const center = issue.broke_at && !isZeroTime(issue.broke_at) ? issue.broke_at : entry.at;
       return { ...entry, kind: issue.root.kind, name: issue.root.name, namespace: issue.root.namespace, summary: issue.rule.replaceAll(/[._]/g, " "),
-        content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(issue.root.uid ?? "", entry.at, issue.root.namespace, issue.occurrence_id)}>Open break details</Link> };
+        content: <Link aria-describedby={description} className="block h-full w-full" onClick={() => cacheSeed(issue, center)} to={focusedLink(issue.root.uid ?? "", center, issue.root.namespace, issue.occurrence_id)}>Open break details</Link> };
     }
     const crash = entry.crash;
     return { ...entry, kind: crash.root_kind || "Pod", name: crash.root_name || crash.pod, namespace: crash.namespace, summary: `${crash.container}: ${crash.reason || "Terminated"}, exit ${crash.exit_code}`,
       content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(crash.root_uid || crash.pod_uid, entry.at, crash.namespace, undefined, crash.id)}>Open crash details</Link> };
   });
   return <section className="card overflow-clip transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
-    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && (data.items.length > 0 || !timeline.isError && !incompleteKubernetesSnapshot(data)) && <span className="text-2xs text-ink-400">{breaksOnly ? `${data.counts?.break ?? data.total} ${(data.counts?.break ?? data.total) === 1 ? "break" : "breaks"} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event")} and ${counted(data.crash_count, "crash")}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
+    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && (data.items.length > 0 || !timeline.isError && !incompleteKubernetesSnapshot(data)) && <span className="text-2xs text-ink-400">{breaksOnly ? `${counted(data.counts?.break ?? data.total, "break", data.count_capped)} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event", data.count_capped)} and ${counted(data.crash_count, "crash", data.count_capped)}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
+    {data?.count_capped && <p className="px-4 py-2 text-xs text-ink-400">Counts are lower bounds from a bounded sample.</p>}
     <div className="flex flex-wrap items-end justify-between gap-3 border-b border-ink-700 p-3">
       <TimelineRangeControl minutes={minutes} onChange={setMinutes} loading={rangeLoading} />
       <div className={filterRowClass}><KubernetesFilterField label="Namespace"><NamespaceSelect label="Timeline namespace" value={namespace} onChange={setNamespace} className={filterFieldControlClass} /></KubernetesFilterField><KubernetesFilterField label="Kind"><select aria-label="Timeline kind" className={filterFieldControlClass} value={kind} onChange={(event) => setKind(event.target.value)}><option value="">All kinds</option>{["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node"].map((value) => <option key={value}>{value}</option>)}</select></KubernetesFilterField></div>

@@ -129,12 +129,17 @@ func TestSelectedRepeatedOccurrenceKeepsNanosecondWindowAndRejectsGuess(t *testi
 	}
 	for _, query := range []breaklogs.Query{
 		{Namespace: first.Namespace, RootUID: first.RootUID, OccurrenceID: "guessed", Center: first.BreakAt, From: first.From, To: first.To},
-		{Namespace: first.Namespace, RootUID: first.RootUID, OccurrenceID: first.ID, Center: next.BreakAt, From: first.From, To: first.To},
 		{Namespace: first.Namespace, RootUID: first.RootUID, Center: first.BreakAt.Add(2 * time.Nanosecond), From: first.From, To: first.To},
 	} {
 		if _, err := service.resolveBreakLogSelection(t.Context(), query, state); !errors.Is(err, ErrInvalidArguments) {
 			t.Fatal("unknown/mismatched occurrence guessed", query, err)
 		}
+	}
+	windowFrom, windowTo := first.From.Add(-20*time.Minute), first.To.Add(20*time.Minute)
+	resolved, err := service.resolveBreakLogSelection(t.Context(), breaklogs.Query{Namespace: first.Namespace, RootUID: first.RootUID, OccurrenceID: first.ID, Center: next.BreakAt, From: windowFrom, To: windowTo}, state)
+	pods := manifestQueryPods(state, resolved)
+	if err != nil || !resolved.Center.Equal(first.BreakAt) || !resolved.From.Equal(windowFrom) || !resolved.To.Equal(windowTo) || len(pods) != 1 || pods[0].UID != first.Pods[0].UID {
+		t.Fatalf("ID did not pin the occurrence independently of the user's log window: %+v %+v %v", resolved, pods, err)
 	}
 	ambiguous := next
 	ambiguous.BreakAt = first.BreakAt

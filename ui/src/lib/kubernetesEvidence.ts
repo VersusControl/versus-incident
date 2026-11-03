@@ -9,7 +9,8 @@ function pluralSuffix(noun: string): string {
   return /(?:s|x|z|ch|sh)$/i.test(noun) ? "es" : "s";
 }
 
-export const counted = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : pluralSuffix(noun)}`;
+export const historyCount = (count: number, capped = false) => capped ? `${Math.min(count, 1000)}+` : String(count);
+export const counted = (count: number, noun: string, capped = false) => `${historyCount(count, capped)} ${noun}${count === 1 ? "" : pluralSuffix(noun)}`;
 const pods = (count: number) => `on ${counted(count, "pod")}`;
 const hintLabels: Record<string, string> = { not_executable: "not executable", not_found: "command not found" };
 

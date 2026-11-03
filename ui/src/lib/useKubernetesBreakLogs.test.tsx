@@ -38,7 +38,7 @@ function PanelActivity({ active, set }: { active: boolean; set: (value: boolean)
   useLayoutEffect(() => { set(active); return () => set(false); }, [active, set]);
   return null;
 }
-function mount(initialIssue = issue) {
+function mount(initialIssue = issue, search = `center=${at}&logs_from=${page.window.from}&logs_to=${page.window.to}`) {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
   function App() {
     const [value, setValue] = useState(initialIssue), [cluster, setCluster] = useState("east"), [active, setActive] = useState(true), [, rerender] = useState(0);
@@ -51,7 +51,7 @@ function mount(initialIssue = issue) {
       <Probe value={value} active={active} />
     </KubernetesClusterContext.Provider>;
   }
-  return { cache, ...render(<QueryClientProvider client={cache}><MemoryRouter initialEntries={[`/?center=${at}&logs_from=${page.window.from}&logs_to=${page.window.to}`]}><App /></MemoryRouter></QueryClientProvider>) };
+  return { cache, ...render(<QueryClientProvider client={cache}><MemoryRouter initialEntries={[`/?${search}`]}><App /></MemoryRouter></QueryClientProvider>) };
 }
 async function advance(ms = 0) {
   await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
@@ -80,6 +80,33 @@ afterEach(() => {
 });
 
 describe("Pending linked break logs", () => {
+  it("uses the retained occurrence time when an old deep link carries a later observation outside the log window", async () => {
+    const read = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(async options => {
+      if (!options.center || Date.parse(options.center) < Date.parse(options.since) || Date.parse(options.center) > Date.parse(options.until)) {
+        throw new ApiError(400, "Center outside log window", { code: "invalid_arguments" });
+      }
+      return page;
+    });
+    mount(issue, new URLSearchParams({ center: "2026-11-02T06:40:40Z", occurrence_id: issue.occurrence_id! }).toString());
+    await advance();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read.mock.calls[0][0]).toMatchObject({
+      occurrence_id: "occurrence", center: at,
+      since: "2026-10-31T11:55:00.123456789Z", until: "2026-10-31T12:02:00.123456789Z",
+    });
+    expect(screen.getByLabelText("Error").textContent).toBe("");
+    expect(screen.getByLabelText("Lines").textContent).toBe("failure");
+  });
+
+  it("does not replace a confirmed occurrence with an unrelated URL center or abort its read", async () => {
+    const read = vi.spyOn(api, "kubernetesBreakLogs").mockImplementation(() => new Promise<KubernetesBreakLogPage>(() => undefined));
+    mount(); await advance();
+    fireEvent.click(screen.getByText("Center")); await advance();
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read.mock.calls[0][0].center).toBe(at);
+    expect(read.mock.calls[0][1]?.aborted).toBe(false);
+  });
+
   it("pins raw nanoseconds and retries at 15/30/60 seconds, ending within five minutes", async () => {
     const read = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(page);
     mount(); await advance();
@@ -128,7 +155,7 @@ describe("Pending linked break logs", () => {
     await advance(300_000); expect(read).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["Cluster", "Namespace", "Occurrence", "Center", "Window", "Search", "Container"])("cancels old reads without placeholders when %s changes", async action => {
+  it.each(["Cluster", "Namespace", "Occurrence", "Window", "Search", "Container"])("cancels old reads without placeholders when %s changes", async action => {
     let finish: (value: KubernetesBreakLogPage) => void = () => undefined;
     const read = vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValueOnce(page).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
     mount(); await advance(); await advance(15_000);

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 	"net/http"
 	"net/http/httptest"
 	"os"

@@ -365,6 +365,18 @@ func DiagnoseError(err error) ErrorDetail {
 	var notReady *inventoryNotReadyError
 	var denied *permissionDeniedError
 	switch {
+	case errors.Is(err, errHistoryNotEstablished):
+		return ErrorDetail{Code: "history_not_established", Message: "Saved history authority has not been established yet.", Action: "Wait for the first authorized collection and retry.", Retryable: true}
+	case errors.Is(err, errHistoryMismatch):
+		return ErrorDetail{Code: "authority_mismatch", Message: "The saved occurrence does not match the requested resource.", Action: "Select the occurrence from the current authorized history.", Retryable: false}
+	case errors.Is(err, errHistoryAuthority):
+		return ErrorDetail{Code: "history_authority_denied", Message: "Authority for this saved evidence is denied or has not been established.", Action: "Wait for a successful authorized collection or restore the connector's read permissions.", Retryable: false}
+	case errors.Is(err, errHistoryUpgrading):
+		return ErrorDetail{Code: "history_upgrading", Message: "Saved history is being converted to the current storage format.", Action: "Retry shortly; history becomes available when the conversion finishes.", Retryable: true}
+	case errors.Is(err, errHistoryTimeout):
+		return ErrorDetail{Code: "history_store_timeout", Message: "The history database read timed out.", Action: "Retry the saved history read.", Retryable: true}
+	case errors.Is(err, errHistoryUnavailable):
+		return ErrorDetail{Code: "history_store_unavailable", Message: "The history database is temporarily unavailable.", Action: "Restore the history store and retry.", Retryable: true}
 	// The two connector states are answered before any credential or network
 	// class, because a configured connector whose credential is gone still
 	// unwraps to a credential fault and must not be named as one: a surface has

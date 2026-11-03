@@ -199,13 +199,23 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 				t.Fatalf("initial history missing: %v", err)
 			}
 			scope := service.ActiveScope()
+			evidenceScope := storage.EvidenceScope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, ClusterUID: "list-physical"}
+			store := provider.(storage.EvidenceStore)
+			// A fully ready inventory can publish just before its journal
+			// receipt. Fence the baseline on the same captured generation.
+			waitUntil(t, 8*time.Second, "complete inventory journal publication", func() bool {
+				stored, _, err := readInventoryGeneration(provider, scope, "")
+				if err != nil || stored.EvidenceBatch == nil {
+					return false
+				}
+				checkpoint, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
+				return err == nil && checkpoint.ID == stored.EvidenceBatch.ID && health().PendingKinds == 0
+			})
 			stored, record, err := readInventoryGeneration(provider, scope, "")
 			if err != nil {
 				t.Fatal(err)
 			}
 			before, _ := json.Marshal(stored)
-			evidenceScope := storage.EvidenceScope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, ClusterUID: "list-physical"}
-			store := provider.(storage.EvidenceStore)
 			checkpoint, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
 			if err != nil {
 				t.Fatal(err)
@@ -248,7 +258,11 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 			malformed.Store(false)
 			waitUntil(t, 15*time.Second, "valid current LIST recovery", func() bool {
 				current, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
-				return err == nil && current.ID != checkpoint.ID && health().State == "ready"
+				if err != nil || current.ID == checkpoint.ID || health().State != "ready" {
+					return false
+				}
+				page, err := service.Workloads(t.Context(), WorkloadListOptions{})
+				return err == nil && len(page.Items) > 0
 			})
 			recovered, err := service.Workloads(t.Context(), WorkloadListOptions{})
 			if err != nil || len(recovered.Items) == 0 {

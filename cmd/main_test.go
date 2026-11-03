@@ -16,6 +16,14 @@ import (
 // TestHandlerRedisOptionsTLS covers the plaintext-Redis case: with TLS disabled the Redis
 // client must not set TLSConfig (so a plaintext Redis can connect), while
 // the existing default-on / insecure_skip_verify TLS behaviour is preserved.
+func TestExecutableRegistersIndexedEvidenceDriver(t *testing.T) {
+	provider := storage.NewMemory()
+	defer provider.Close()
+	if _, err := provider.(storage.EvidenceStore).EvidenceCheckpoint(t.Context(), storage.EvidenceScope{OrgID: "default", ClusterID: "boot", ClusterUID: "physical"}); err != nil {
+		t.Fatalf("executable omitted local driver registration: %v", err)
+	}
+}
+
 func TestHandlerRedisOptionsTLS(t *testing.T) {
 	tru := true
 	fls := false

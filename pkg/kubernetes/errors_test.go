@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
+
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 func TestDiagnoseErrorReturnsSafeActionableClasses(t *testing.T) {
@@ -16,6 +19,11 @@ func TestDiagnoseErrorReturnsSafeActionableClasses(t *testing.T) {
 		retryable bool
 	}{
 		{name: "invalid arguments", err: ErrInvalidArguments, code: "invalid_arguments"},
+		{name: "history deadline", err: historyStoreError(context.DeadlineExceeded), code: "history_store_timeout", retryable: true},
+		{name: "history store", err: historyStoreError(errors.New("private database response")), code: "history_store_unavailable", retryable: true},
+		{name: "history converting", err: historyStoreError(fmt.Errorf("read: %w", storage.ErrEvidenceNotReady)), code: "history_upgrading", retryable: true},
+		{name: "history authority", err: errHistoryAuthority, code: "history_authority_denied"},
+		{name: "history mismatch", err: errHistoryMismatch, code: "authority_mismatch"},
 		{name: "invalid endpoint", err: ErrInvalidEndpoint, code: "connector_configuration_invalid"},
 		{name: "credentials", err: ErrCredentialUnavailable, code: "credential_unavailable"},
 		{name: "authentication", err: ErrUnauthorized, code: "cluster_authentication_failed"},

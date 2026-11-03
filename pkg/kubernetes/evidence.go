@@ -160,7 +160,7 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 	}
 	viewIdentity, _ := json.Marshal(generation.View)
 	batchID := "capture:" + logIdentity(identity+"\x00"+string(viewIdentity)+"\x00"+generation.PodSampledAt.UTC().Format(time.RFC3339Nano))
-	batch := storage.EvidenceBatch{ID: batchID, Expected: checkpoint.ID, Generation: checkpoint.Generation, At: latest, Epoch: service.scope.CredentialID}
+	batch := storage.EvidenceBatch{ObservationHeartbeat: service.evidenceHeartbeat, ScopeBinding: service.historyScopeKey(), ID: batchID, Expected: checkpoint.ID, Generation: checkpoint.Generation, At: latest, Epoch: service.scope.CredentialID, Principal: service.historyPrincipal(), Authority: historyProofs(*generation)}
 	batch.Coverage = map[string]storage.EvidenceInterval{}
 	for kind, state := range generation.View.Kinds {
 		if state.State != "ready" || state.Partial || state.Absent || state.ObservedAt.IsZero() {
@@ -313,8 +313,22 @@ func (service *Service) commitEvidence(ctx context.Context, generation inventory
 	if store == nil {
 		return storage.ErrUnsupported
 	}
-	return service.commitCredential(ctx, func() error {
+	err := service.commitCredential(ctx, func() error {
 		batch := *generation.EvidenceBatch
+		batch.Records = append([]storage.EvidenceRecord(nil), batch.Records...)
+		for i, record := range batch.Records {
+			if !json.Valid(record.Payload) {
+				return storage.ErrInvalidEvidence
+			}
+			// Publish semantic validity with the indexed type/source metadata.
+			// A count must not classify a malformed payload as application data
+			// and discover the mismatch only after page hydration.
+			record = service.projectEvidence(record)
+			if record.Type != "coverage_gap" {
+				record.AuthorizationKind, _ = service.evidenceRecordAuthorizationKind(record)
+			}
+			batch.Records[i] = record
+		}
 		err := store.CommitEvidence(ctx, generation.EvidenceScope, batch)
 		if !errors.Is(err, storage.ErrEvidenceConflict) {
 			return err
@@ -337,6 +351,11 @@ func (service *Service) commitEvidence(ctx context.Context, generation inventory
 		}
 		return store.CommitEvidence(ctx, generation.EvidenceScope, batch)
 	})
+	if err == nil {
+		err = service.rememberHistoryScope(generation.EvidenceScope)
+		service.notifyEvidenceCommit()
+	}
+	return err
 }
 
 func (service *Service) evidenceClusterUID(ctx context.Context) (string, error) {
@@ -417,6 +436,15 @@ func (service *Service) authorizeEvidenceKind(ctx context.Context, namespace, id
 // A retained display owner is not a permission source. Unknown or malformed
 // observations remain visible as gaps, never as authorized application data.
 func (service *Service) projectEvidence(record storage.EvidenceRecord) storage.EvidenceRecord {
+	if record.Type == "coverage_gap" {
+		var gap kubechanges.Gap
+		if json.Unmarshal(record.Payload, &gap) == nil {
+			// A gap is already unavailable evidence, not an object requiring a
+			// source grant. Preserve its actual interval through publication.
+			return record
+		}
+		return unavailableEvidence(record)
+	}
 	sourceKind, err := service.evidenceRecordAuthorizationKind(record)
 	if err == nil && (sourceKind == "Node" || sourceKind == "Namespace") && record.Namespace != "" {
 		err = ErrIncompleteInventory
@@ -551,64 +579,7 @@ func (service *Service) queryEvidence(ctx context.Context, query storage.Evidenc
 	if !query.Since.IsZero() && !query.Until.IsZero() && query.Since.After(query.Until) {
 		return storage.EvidencePage{}, ErrInvalidArguments
 	}
-	ctx, cancel := ensureOperationBudgetRequests(ctx, 64)
-	defer cancel()
-
-	scope, err := service.authorizeEvidence(ctx, query.Namespace)
-	if err != nil {
-		return storage.EvidencePage{}, err
-	}
-	scope.ReadOrgs = append([]string(nil), service.readOrgs...)
-	// Bind the projection to opaque cursors so unavailable rows occupy stable
-	// slots while counts include only decodable, supported evidence.
-	proofs := map[string]error{}
-	var proofErr error
-	query.ProjectionID = "source-authorized-v2"
-	query.Projection = func(record storage.EvidenceRecord) storage.EvidenceRecord {
-		record = service.projectEvidence(record)
-		if record.Type == "coverage_gap" {
-			return record
-		}
-		kind, kindErr := service.evidenceRecordAuthorizationKind(record)
-		if kindErr != nil {
-			return unavailableEvidence(record)
-		}
-		authorityErr, found := proofs[kind]
-		if !found {
-			authorityErr = service.authorizeEvidenceKind(ctx, query.Namespace, indexedResourceIDs[kind])
-			proofs[kind] = authorityErr
-		}
-		if authorityErr == nil {
-			return record
-		}
-		if !errors.Is(authorityErr, ErrNotFound) {
-			proofErr = mergeEvidenceProofError(proofErr, authorityErr)
-		}
-		return unavailableEvidence(record)
-	}
-	if query.Kind != "" {
-		id := indexedResourceIDs[query.Kind]
-		if id == "" {
-			return storage.EvidencePage{}, storage.ErrUnsupported
-		}
-		if err := service.authorizeEvidenceKind(ctx, query.Namespace, id); err != nil {
-			return storage.EvidencePage{}, evidenceReadFailure(evidenceCheckpointKindProof, err)
-		}
-	}
-	page, err := store.QueryEvidence(ctx, scope, query)
-	if proofErr != nil {
-		return storage.EvidencePage{}, evidenceReadFailure(evidenceCheckpointKindProof, proofErr)
-	}
-	if errors.Is(err, storage.ErrInvalidEvidence) || errors.Is(err, storage.ErrEvidenceConflict) {
-		return storage.EvidencePage{}, evidenceReadFailure(evidenceStoreQuery, errors.Join(ErrInvalidArguments, err))
-	}
-	if err != nil {
-		return page, evidenceReadFailure(evidenceStoreQuery, err)
-	}
-	if err = service.validateCredential(ctx); err != nil {
-		return storage.EvidencePage{}, evidenceReadFailure(evidenceFinalCredential, err)
-	}
-	return page, nil
+	return service.persistedHistoryQuery(ctx, query)
 }
 
 func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuery) (TimelinePage, error) {
@@ -620,7 +591,7 @@ func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuer
 	if err != nil {
 		return TimelinePage{}, err
 	}
-	page := TimelinePage{Items: []TimelineItem{}, Gaps: []kubechanges.Gap{}, Counts: map[string]int{"change": 0, "crash": 0, "break": 0}, Next: source.Next, Since: source.Since, Until: source.Until, BreaksOnly: query.BreaksOnly, Sync: SyncStatus{State: "ready"}}
+	page := TimelinePage{Authority: source.Authority, CountCapped: source.CountCapped, Items: []TimelineItem{}, Gaps: []kubechanges.Gap{}, Counts: map[string]int{"change": 0, "crash": 0, "break": 0}, Next: source.Next, Since: source.Since, Until: source.Until, BreaksOnly: query.BreaksOnly, Sync: SyncStatus{State: "ready"}}
 	if !source.Checkpoint.PrunedThrough.IsZero() {
 		page.Gaps = append(page.Gaps, kubechanges.Gap{From: query.Since, To: source.Checkpoint.PrunedThrough})
 	}
@@ -685,12 +656,20 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 	if options.Broken {
 		variant += ":broken"
 	}
-	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Variant: variant, Since: options.Since, Until: options.Until, Namespace: options.Namespace, Kind: options.Kind, RootUID: options.RootUID, Type: "occurrence", Limit: normalizePageLimit(options.Limit), Cursor: options.Cursor})
-	if err != nil {
-		return page, evidenceReadFailure(evidencePayloadDecode, err)
+	root, namespace := options.RootUID, options.Namespace
+	if options.OccurrenceID != "" {
+		root, namespace = "", ""
 	}
+	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Lookup: options.Context == "persisted", AuthorityNamespace: options.Namespace, OccurrenceID: options.OccurrenceID, Center: options.Center, Variant: variant, Since: options.Since, Until: options.Until, Namespace: namespace, Kind: options.Kind, RootUID: root, Type: "occurrence", Limit: normalizePageLimit(options.Limit), Cursor: options.Cursor})
+	if err != nil {
+		return page, evidenceReadFailure(evidenceStoreQuery, err)
+	}
+	page.Authority, page.CountCapped = source.Authority, source.CountCapped
 	for _, record := range source.Items {
 		if record.Type == "coverage_gap" {
+			if options.Context == "persisted" || options.OccurrenceID != "" || !options.Center.IsZero() {
+				return IssuePage{}, errHistoryAuthority
+			}
 			page.Sync.Partial = true
 			page.Partial = append(page.Partial, PartialFailure{Class: "historical_evidence_unavailable"})
 			continue
@@ -702,6 +681,9 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 		var issue Issue
 		if err = json.Unmarshal(observation.Payload, &issue); err != nil {
 			return page, evidenceReadFailure(evidencePayloadDecode, err)
+		}
+		if options.RootUID != "" && issue.Root.UID != options.RootUID || options.Namespace != "" && issue.Root.Namespace != options.Namespace {
+			return IssuePage{}, errHistoryMismatch
 		}
 		if options.Broken && !issue.Broken || options.Severity != "" && issue.Severity != options.Severity {
 			continue
@@ -722,26 +704,49 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 		}
 	}
 	page.Next = source.Next
-	sort.SliceStable(page.Items, func(i, j int) bool { return page.Items[i].LastSeen.After(page.Items[j].LastSeen) })
+	if !source.CountCapped && source.Total == 0 && options.Cursor != "" {
+		page.Totals = map[string]int{}
+		page.Broken = BrokenTotals{BySeverity: map[string]int{}}
+	} else if !source.CountCapped || source.Total > 0 {
+		totals := map[string]int{}
+		broken := BrokenTotals{BySeverity: map[string]int{}}
+		for key, count := range source.Counts {
+			if severity, ok := strings.CutPrefix(key, "severity:"); ok {
+				totals[severity] = count
+			}
+			if severity, ok := strings.CutPrefix(key, "broken:"); ok {
+				broken.BySeverity[severity] = count
+				broken.Total += count
+			}
+		}
+		if len(totals) > 0 {
+			page.Totals, page.Broken = totals, broken
+		}
+	}
+	sort.SliceStable(page.Items, func(i, j int) bool { return page.Items[i].FirstSeen.After(page.Items[j].FirstSeen) })
 	return page, nil
 }
 
 func (service *Service) persistedRootContext(ctx context.Context, options IssueOptions) (IssuePage, error) {
+	options.Context = "persisted"
 	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: "ready"}, SelectionStatus: "not_requested"}
 	selecting := options.OccurrenceID != "" || !options.Center.IsZero()
 	if selecting {
 		page.SelectionStatus = "not_found"
 	}
-	// Search retained occurrences, not the selected evidence interval. A missing
-	// live object, recovered issue, or empty selected interval cannot erase this
-	// identity. Each candidate still passes the normal current authority gate.
-	options.Since, options.Until, options.Limit = time.Unix(1, 0).UTC(), time.Now().UTC(), 100
-	for scanned := 0; scanned < 1000; scanned += 100 {
+	// Point selectors are pushed into the occurrence index, not searched in
+	// pages of journal revisions. Two rows suffice to prove center ambiguity.
+	options.Since, options.Until, options.Limit = time.Unix(1, 0).UTC(), time.Now().UTC(), 2
+	if !selecting {
+		options.Limit = 1
+	}
+	{
 		history, err := service.historicalIssues(ctx, options)
 		if err != nil {
 			return page, err
 		}
 		page.Sync.Partial = page.Sync.Partial || history.Sync.Partial
+		page.Authority = history.Authority
 		page.Partial = append(page.Partial, history.Partial...)
 		for _, issue := range history.Items {
 			if issue.Root.UID != options.RootUID || options.Namespace != "" && issue.Root.Namespace != options.Namespace {
@@ -767,22 +772,14 @@ func (service *Service) persistedRootContext(ctx context.Context, options IssueO
 				}
 			}
 		}
-		if history.Next == "" {
+		if history.Next == "" || options.OccurrenceID != "" || !selecting || page.SelectionStatus == "ambiguous" {
 			if selecting && page.Sync.Partial && page.SelectionStatus != "ambiguous" {
 				page.SelectedOccurrence, page.SelectionStatus = nil, "partial"
 			}
 			return page, nil
 		}
-		options.Cursor = history.Next
 	}
-	if selecting {
-		// A bounded scan cannot prove absence or uniqueness beyond its horizon.
-		page.SelectedOccurrence, page.SelectionStatus = nil, "partial"
-		page.Sync.Partial = true
-		page.Partial = append(page.Partial, PartialFailure{Class: "selection_scan_limit"})
-		return page, nil
-	}
-	return page, storage.ErrEvidenceLimit
+	return page, nil
 }
 
 func (service *Service) evidenceChanges(ctx context.Context, query ChangeQuery) (ChangePage, error) {
@@ -796,9 +793,9 @@ func (service *Service) evidenceChanges(ctx context.Context, query ChangeQuery) 
 		}
 	}
 	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, Kind: query.Kind, RootUID: query.RootUID, Name: query.Name, Rule: string(query.Type), Type: "change", WithGaps: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
-	page := ChangePage{Items: []Change{}, Gaps: []kubechanges.Gap{}, Next: source.Next, Sync: SyncStatus{State: "ready"}}
+	page := ChangePage{Authority: source.Authority, CountCapped: source.CountCapped, Items: []Change{}, Gaps: []kubechanges.Gap{}, Next: source.Next, Sync: SyncStatus{State: "ready"}}
 	if err != nil {
-		return page, evidenceReadFailure(evidencePayloadDecode, err)
+		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
 	for _, record := range source.Items {
 		if record.Type == "coverage_gap" {
@@ -833,9 +830,9 @@ func (service *Service) evidenceCrashes(ctx context.Context, query kubechanges.C
 		}
 	}
 	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, RootUID: query.RootUID, PodUID: query.PodUID, ByObservation: true, Type: "crash", WithGaps: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
-	page := CrashPage{CrashPage: kubechanges.CrashPage{Items: []kubechanges.CrashEvent{}, Gaps: []kubechanges.Gap{}, CaptureGaps: []kubechanges.Gap{}, Coverage: map[string]kubechanges.Gap{}, Since: query.Since, Until: query.Until, Next: source.Next, RetentionBasis: source.Policy.Mode}, Sync: SyncStatus{State: "ready"}, Capture: service.CaptureStatus()}
+	page := CrashPage{Authority: source.Authority, CountCapped: source.CountCapped, CrashPage: kubechanges.CrashPage{Items: []kubechanges.CrashEvent{}, Gaps: []kubechanges.Gap{}, CaptureGaps: []kubechanges.Gap{}, Coverage: map[string]kubechanges.Gap{}, Since: query.Since, Until: query.Until, Next: source.Next, RetentionBasis: source.Policy.Mode}, Sync: SyncStatus{State: "ready"}, Capture: service.CaptureStatus()}
 	if err != nil {
-		return page, evidenceReadFailure(evidencePayloadDecode, err)
+		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
 	for _, record := range source.Items {
 		if record.Type == "coverage_gap" {
@@ -868,7 +865,7 @@ func (service *Service) evidenceChangeWindow(ctx context.Context, since, until t
 	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: since, Until: until, Namespace: namespace, Type: "change", WithGaps: true, Limit: 500})
 	page := kubechanges.Page{Items: []Change{}, Next: source.Next, Coverage: map[string]kubechanges.Gap{}}
 	if err != nil {
-		return page, evidenceReadFailure(evidencePayloadDecode, err)
+		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
 	for _, record := range source.Items {
 		if record.Type == "coverage_gap" {

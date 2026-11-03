@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 	"net/http"
 	"net/http/httptest"
 	"strconv"

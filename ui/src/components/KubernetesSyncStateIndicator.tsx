@@ -1,15 +1,8 @@
 import { Loader2 } from "lucide-react";
-import type { KubernetesSyncHealthState } from "@/lib/kubernetesSyncHealth";
+import { isZeroTime, type KubernetesSyncHealthState } from "@/lib/kubernetesSyncHealth";
 
 /** How the index record feed is doing, which only matters once the sync is ready. */
 export type KubernetesStreamState = "connecting" | "live" | "reconnecting" | "resyncing";
-
-const syncing: Record<KubernetesStreamState, string> = {
-  connecting: "Connecting",
-  live: "Live",
-  reconnecting: "Reconnecting",
-  resyncing: "Resyncing",
-};
 
 /**
  * The cluster sync state in the top bar.
@@ -18,16 +11,29 @@ const syncing: Record<KubernetesStreamState, string> = {
  * so a narrow viewport never leaves an operator with a coloured dot alone. The
  * dot only repeats what the words already say.
  */
-export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, title, firstReadyAt }: {
+export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, title, firstReadyAt, syncReason, syncState, lastSyncedAt }: {
+  lastSyncedAt?: string;
+  syncReason?: string;
+  syncState?: string;
   firstReadyAt?: string;
   state: KubernetesSyncHealthState | "loading";
   streamState: KubernetesStreamState;
   ageSeconds?: number;
   title?: string;
 }) {
-  const label = state === "loading" ? "Loading" : state === "ready"
-    ? `${syncing[streamState]}${streamState === "live" && ageSeconds !== undefined ? ` (${Math.round(ageSeconds)}s)` : ""}`
-    : state === "preparing" ? firstReadyAt ? "Syncing" : "Preparing" : state === "degraded" ? "Degraded" : "Failed";
+  const unreachable = firstReadyAt && !/credential|forbidden|unauthorized/i.test(syncReason ?? "")
+    && (/unreachable|timeout|unavailable/i.test(syncReason ?? "") || /unreachable|timeout/i.test(title ?? ""));
+  const renewing = (syncState === "refreshing" || syncState === "syncing") && syncReason?.includes("credential");
+  const dataTime = !isZeroTime(lastSyncedAt) ? new Date(lastSyncedAt!).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : ageSeconds !== undefined && Number.isFinite(ageSeconds) && ageSeconds >= 0 ? new Date(Date.now() - ageSeconds * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : undefined;
+  const failureLabel = unreachable ? dataTime ? `Cluster unreachable — showing data from ${dataTime}` : "Cluster unreachable — showing last committed data" : state === "degraded" ? "Degraded" : "Failed";
+  // The current health read outranks progress cached from an older stream.
+  const label = state === "failed" || state === "degraded" ? failureLabel
+    : state === "loading" ? "Loading" : renewing ? "Refreshing credentials…"
+    : syncState === "refreshing" || syncState === "syncing" && firstReadyAt ? "Syncing"
+    : state === "ready"
+    ? streamState === "live" ? ageSeconds !== undefined ? `Last synced ${Math.round(ageSeconds)}s ago` : "Last sync time unavailable" : "Updates disconnected — refreshing every 30s"
+    : firstReadyAt ? "Syncing" : "Preparing";
   const ink = state === "failed" ? "text-sev-critical"
     : state === "degraded" ? "text-sev-warning"
       : state === "preparing" ? "text-ink-300"

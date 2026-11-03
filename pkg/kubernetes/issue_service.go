@@ -42,6 +42,15 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 	if err != nil {
 		return IssuePage{}, err
 	}
+	if !options.captureOnly && len(snapshot.Records) > 0 {
+		// Share the established scoped control-read lane with Workloads. It
+		// distinguishes partial authority from total revocation without
+		// requiring unsupported or still-loading correlation kinds. Positive
+		// per-kind collection denials remain enforced below.
+		if err := service.authorizeWorkloadRead(ctx, options.Namespace); err != nil {
+			return IssuePage{}, err
+		}
+	}
 	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}}
 	// failed tracks real coverage failures; kinds still loading keep the page
 	// partial (so nothing is resolved or claimed complete) but are not failures.
@@ -53,6 +62,15 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 	page.Sync.Partial = page.Sync.Partial || len(status.Pending) > 0
 	for _, kind := range kinds {
 		state, exists := status.Kinds[kind]
+		if !options.captureOnly {
+			optional := kind == "Secret" || kind == "ServiceAccount" || kind == "ConfigMap" || kind == "PersistentVolumeClaim" || kind == "ControllerRevision" || kind == "Node" && (options.Namespace != "" || service.client.namespace != "")
+			if !optional && state.Error == "forbidden" {
+				return IssuePage{}, ErrForbidden
+			}
+			if !optional && state.Error == "unauthorized" {
+				return IssuePage{}, ErrUnauthorized
+			}
+		}
 		if !exists && status.State == "syncing" || state.State == "pending" {
 			// A kind still loading after the core generation is reported in
 			// sync.pending, never as a failure.

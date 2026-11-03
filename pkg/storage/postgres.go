@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,7 +29,11 @@ var migrationFiles embed.FS
 // empty in code when the factory will fall back to the POSTGRES_DSN
 // environment variable.
 type PostgresOptions struct {
-	DSN string // postgres connection string or DSN URL
+	DSN                    string // postgres connection string or DSN URL
+	MaxOpenConns           int
+	HistoryReadConcurrency int
+	ObservationHeartbeat   string
+	EvidenceRetention      string
 }
 
 type postgresProvider struct {
@@ -37,6 +42,11 @@ type postgresProvider struct {
 	evidenceQueryGeneration uint64
 	evidenceDeleting        int
 	db                      *sql.DB
+	historyDB               *sql.DB
+	maintenanceCancel       context.CancelFunc
+	maintenanceDone         chan struct{}
+	observationHeartbeat    time.Duration
+	evidenceRetention       time.Duration
 }
 
 var (
@@ -225,11 +235,37 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 	if opts.DSN == "" {
 		return nil, fmt.Errorf("storage: postgres DSN is required (set POSTGRES_DSN)")
 	}
+	heartbeat := 5 * time.Minute
+	rawHeartbeat := opts.ObservationHeartbeat
+	if env := os.Getenv("KUBERNETES_EVIDENCE_OBSERVATION_HEARTBEAT"); env != "" {
+		rawHeartbeat = env
+	}
+	if rawHeartbeat != "" {
+		parsed, parseErr := time.ParseDuration(rawHeartbeat)
+		if parseErr != nil || parsed < time.Second || parsed > 24*time.Hour {
+			return nil, fmt.Errorf("storage: evidence observation heartbeat must be between 1s and 24h")
+		}
+		heartbeat = parsed
+	}
+	retention := time.Duration(0)
+	rawRetention := opts.EvidenceRetention
+	if raw := os.Getenv("KUBERNETES_EVIDENCE_RETENTION"); raw != "" {
+		rawRetention = raw
+	}
+	if rawRetention != "" {
+		parsed, parseErr := time.ParseDuration(rawRetention)
+		if parseErr != nil || parsed < 0 {
+			return nil, fmt.Errorf("storage: invalid evidence retention duration")
+		}
+		retention = parsed
+	}
 	db, err := sql.Open("pgx", opts.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open postgres: %w", err)
 	}
-	db.SetMaxOpenConns(defaultPostgresMaxOpenConns)
+	maxOpen := postgresPositiveOption(opts.MaxOpenConns, "POSTGRES_MAX_OPEN_CONNS", defaultPostgresMaxOpenConns)
+	readConcurrency := postgresPositiveOption(opts.HistoryReadConcurrency, "POSTGRES_HISTORY_READ_CONCURRENCY", 8)
+	db.SetMaxOpenConns(maxOpen)
 	db.SetMaxIdleConns(defaultPostgresMaxIdleConns)
 
 	redacted := redactDSN(opts.DSN)
@@ -265,7 +301,7 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 		time.Sleep(backoff)
 	}
 
-	p := &postgresProvider{db: db}
+	p := &postgresProvider{db: db, observationHeartbeat: heartbeat, evidenceRetention: retention}
 	if err := p.migrate(); err != nil {
 		if hint := pgSetupHint(err, dbName); hint != "" {
 			log.Printf("%s", hint)
@@ -273,7 +309,46 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: postgres migrate: %w", err)
 	}
+	p.historyDB, err = sql.Open("pgx", opts.DSN)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	p.historyDB.SetMaxOpenConns(readConcurrency)
+	p.historyDB.SetMaxIdleConns(min(readConcurrency, defaultPostgresMaxIdleConns))
+	if err := p.completeEvidenceBackfill(context.Background(), evidenceStartupBudget); err != nil {
+		log.Printf("storage: evidence read-model conversion continues in background")
+	}
+	p.startEvidenceMaintenance()
 	return p, nil
+}
+
+func postgresPositiveOption(value int, env string, fallback int) int {
+	if raw := os.Getenv(env); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 1024 {
+			return parsed
+		}
+	}
+	if value > 0 && value <= 1024 {
+		return value
+	}
+	return fallback
+}
+
+func (p *postgresProvider) beginEvidenceRead(ctx context.Context) (*sql.Tx, error) {
+	db := p.historyDB
+	if db == nil {
+		db = p.db
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'`); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
 }
 
 // migrationAdvisoryLockKey is the fixed 64-bit key dedicated to serializing
@@ -285,12 +360,22 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 // migrators run concurrently again.
 const migrationAdvisoryLockKey int64 = 0x5645525355534D31
 
+var migrationPools = struct {
+	sync.Mutex
+	locks map[*sql.DB]*migrationPoolLock
+}{locks: map[*sql.DB]*migrationPoolLock{}}
+
+type migrationPoolLock struct {
+	sync.Mutex
+	users int
+}
+
 // WithMigrationLock serializes a schema-migration run across every process
 // that shares db's Postgres. It pins one pooled connection, takes a
 // session-level pg_advisory_lock on the dedicated migrationAdvisoryLockKey,
 // runs fn, then releases the lock — even if fn errors. When N replicas boot
 // at once against a fresh database, exactly one acquires the lock and runs
-// the DDL while the rest block on the lock; once it releases, the losers
+// the DDL while the rest poll for the lock; once it releases, the losers
 // proceed and find every table already present (the migrations are
 // idempotent), so concurrent first-boot is deterministic and never hits the
 // pg_type / pg_class catalog races that bare `CREATE TABLE IF NOT EXISTS`
@@ -305,6 +390,34 @@ const migrationAdvisoryLockKey int64 = 0x5645525355534D31
 // the same pool can wrap its own run in the same WithMigrationLock(db, …) call
 // and serialize against the OSS run on this one key.
 func WithMigrationLock(db *sql.DB, fn func() error) error {
+	if db == nil {
+		return fmt.Errorf("storage: migration lock: nil pool")
+	}
+	migrationPools.Lock()
+	entry := migrationPools.locks[db]
+	if entry == nil {
+		entry = &migrationPoolLock{}
+		migrationPools.locks[db] = entry
+	}
+	entry.users++
+	migrationPools.Unlock()
+	entry.Lock()
+	defer func() {
+		entry.Unlock()
+		migrationPools.Lock()
+		entry.users--
+		if entry.users == 0 {
+			delete(migrationPools.locks, db)
+		}
+		migrationPools.Unlock()
+	}()
+	// The advisory session is additional migration headroom, not the runtime
+	// writer budget. Serialize reservation/restoration for this pool.
+	limit := db.Stats().MaxOpenConnections
+	if limit == 1 {
+		db.SetMaxOpenConns(2)
+		defer db.SetMaxOpenConns(1)
+	}
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -314,12 +427,29 @@ func WithMigrationLock(db *sql.DB, fn func() error) error {
 	// still holds, so the lock can never leak past this function.
 	defer func() { _ = conn.Close() }()
 
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", migrationAdvisoryLockKey); err != nil {
-		return fmt.Errorf("storage: migration lock: acquire: %w", err)
+	// Poll instead of blocking inside pg_advisory_lock: a waiting statement
+	// holds a snapshot, and the holder's CREATE INDEX CONCURRENTLY waits for
+	// every such snapshot, so blocked waiters would stall the holder forever.
+	for {
+		var acquired bool
+		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", migrationAdvisoryLockKey).Scan(&acquired); err != nil {
+			return fmt.Errorf("storage: migration lock: acquire: %w", err)
+		}
+		if acquired {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	defer func() {
 		_, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrationAdvisoryLockKey)
 	}()
+	// Online indexes may cover both the active parent and its copy target.
+	// Freeze layout names across those statements without blocking writers,
+	// which acquire the same shared layout lock.
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock_shared(6216456209771226)"); err != nil {
+		return err
+	}
+	defer func() { _, _ = conn.ExecContext(ctx, "SELECT pg_advisory_unlock_shared(6216456209771226)") }()
 
 	return fn()
 }
@@ -1724,7 +1854,15 @@ func (p *postgresProvider) SearchAnalysesForScope(scope tenancy.OrgScope, query 
 }
 
 func (p *postgresProvider) Close() error {
-	return p.db.Close()
+	if p.maintenanceCancel != nil {
+		p.maintenanceCancel()
+		<-p.maintenanceDone
+	}
+	var readErr error
+	if p.historyDB != nil {
+		readErr = p.historyDB.Close()
+	}
+	return errors.Join(readErr, p.db.Close())
 }
 
 // ---------------------------------------------------------------------------

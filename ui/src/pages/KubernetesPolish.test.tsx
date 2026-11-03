@@ -153,7 +153,7 @@ describe("Kubernetes presentation", () => {
     const retained: KubernetesIssue = { root: deployment, broke_at: "2026-10-23T07:55:00Z", rule: "pod.crash_loop", severity: "critical", count: 1 };
     vi.mocked(api.kubernetesIssues).mockImplementation(async options => ({ items: options?.context === "persisted" ? [] : [retained], totals: {}, truncated: false, sync, ...(options?.context === "persisted" ? { root_context: { root: retained.root, occurrence: retained, retained: true as const } } : {}) }));
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />, "/agent/kubernetes?view=timeline&root_uid=deployment&namespace=shop");
-    await waitFor(() => expect(api.kubernetesChanges).toHaveBeenCalledWith(expect.objectContaining({ root_uid: "deployment", namespace: "shop" }), expect.any(AbortSignal)));
+    await waitFor(() => expect(api.kubernetesChanges).toHaveBeenCalledWith(expect.objectContaining({ root_uid: "deployment", namespace: "shop" }), expect.any(AbortSignal), "single"));
     expect(screen.getByRole("link", { name: "Clear root filter" })).toBeTruthy();
     expect(screen.queryByRole("list", { name: "Breaks and changes" })).toBeNull();
   });

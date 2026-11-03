@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestCloneHistoryStorageOptions(t *testing.T) {
+	source := Config{Storage: StorageConfig{Postgres: StoragePostgresConfig{DSN: "configured", MaxOpenConns: 24, HistoryReadConcurrency: 8}}, Kubernetes: KubernetesHistoryConfig{Evidence: KubernetesEvidenceConfig{ObservationHeartbeat: "5m", Retention: "720h"}}}
+	copy := cloneConfig(&source)
+	if !reflect.DeepEqual(copy.Storage, source.Storage) || !reflect.DeepEqual(copy.Kubernetes, source.Kubernetes) {
+		t.Fatal("clone dropped persisted-history configuration")
+	}
+	copy.Kubernetes.Evidence.Retention = "0"
+	if source.Kubernetes.Evidence.Retention != "720h" {
+		t.Fatal("history retention aliases global config")
+	}
+}
+
 func TestCloneKubernetesIssueTemplateOverrides(t *testing.T) {
 	src := Config{Alert: AlertConfig{
 		Slack:    SlackConfig{KubernetesIssueTemplatePath: "slack"},

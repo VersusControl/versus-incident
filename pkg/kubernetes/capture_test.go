@@ -662,7 +662,7 @@ func TestCaptureScopeIsolationAndProviderRenewal(t *testing.T) {
 		t.Fatal("configured credential alias lost credential binding")
 	}
 	known := func(principal, token string) *Service {
-		source := &expiringBearerSource{principal: principal, now: time.Now, refresh: func(context.Context) (string, time.Time, error) { return token, now.Add(time.Hour), nil }}
+		source := &expiringBearerSource{principal: principal, principalVerified: true, now: time.Now, refresh: func(context.Context) (string, time.Time, error) { return token, now.Add(time.Hour), nil }}
 		client, err := NewClient(Config{Endpoint: "http://127.0.0.1:12345", Credentials: source, AllowLoopbackHTTP: true})
 		if err != nil {
 			t.Fatal(err)
@@ -1030,7 +1030,7 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 		}
 	}
 	page, err := replacement.Changes(t.Context(), ChangeQuery{})
-	if !errors.Is(err, ErrForbidden) || len(page.Items) != 0 {
+	if !errors.Is(err, errHistoryNotEstablished) || len(page.Items) != 0 {
 		t.Fatal("replacement did not fail closed for independently unauthorized history")
 	}
 	encoded, _ := json.Marshal(page)
@@ -1218,7 +1218,7 @@ func TestRegistryRebuildDrainIsolationAndCloseRace(t *testing.T) {
 func TestKnownPrincipalRenewalPreservesEpoch(t *testing.T) {
 	now := time.Now().UTC()
 	var refreshes int
-	source := &expiringBearerSource{principal: "provider-bound-principal", now: func() time.Time { return now }, refresh: func(context.Context) (string, time.Time, error) {
+	source := &expiringBearerSource{principal: "provider-bound-principal", principalVerified: true, now: func() time.Time { return now }, refresh: func(context.Context) (string, time.Time, error) {
 		refreshes++
 		return "token-" + strconv.Itoa(refreshes), now.Add(time.Minute), nil
 	}}

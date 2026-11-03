@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,10 +13,254 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
+
+func TestRetainedBreakLogSelectionKeepsIndependentUserWindow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("retained logs called Kubernetes")
+		http.Error(w, "offline", 503)
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "window"})
+	provider := storage.NewMemory()
+	defer provider.Close()
+	service.SetChangeStorage(provider)
+	service.SetScrubber(breakLogScrubber{})
+	service.changes.evidenceEnabled = true
+	center := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "window", ClusterUID: "physical"}
+	issue := Issue{Root: ObjectRef{UID: "root", Kind: "Pod", Namespace: "shop", Name: "app"}, Rule: "pod.crash_loop", Severity: "warning", Broken: true, BrokeAt: &center}
+	raw, _ := json.Marshal(issue)
+	batch := storage.EvidenceBatch{ID: "stored", At: center, Epoch: "stable", Principal: service.historyPrincipal(), Authority: map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: center}},
+		Issues: []storage.EvidenceIssue{{Key: "root", UID: "root", Kind: "Pod", Namespace: "shop", AuthorizationKind: "Pod", Rule: issue.Rule, Broken: true, Payload: raw}}}
+	if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.rememberHistoryScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	root, err := service.persistedRootContext(t.Context(), IssueOptions{Namespace: "shop", RootUID: "root"})
+	if err != nil || root.RootContext == nil {
+		t.Fatalf("missing retained occurrence: %+v %v", root, err)
+	}
+	id := root.RootContext.Occurrence.OccurrenceID
+	for _, selector := range []struct {
+		id     string
+		center time.Time
+	}{{id, center.Add(30 * time.Minute)}, {id, time.Time{}}, {"", center}} {
+		query := breaklogs.Query{Namespace: "shop", RootUID: "root", OccurrenceID: selector.id, Center: selector.center, From: center.Add(10 * time.Minute), To: center.Add(15 * time.Minute)}
+		selected, err := service.resolveBreakLogSelection(t.Context(), query, breaklogs.State{})
+		if err != nil || !selected.Center.Equal(center) || !selected.From.Equal(query.From) || !selected.To.Equal(query.To) {
+			t.Fatalf("selection changed window: %+v %v", selected, err)
+		}
+		page, err := service.BreakLogs(t.Context(), query)
+		if err != nil || !page.Window.From.Equal(query.From) || !page.Window.To.Equal(query.To) {
+			t.Fatalf("retained log window rejected: %+v %v", page, err)
+		}
+	}
+}
+
+func TestHistoryDenialsRequireCollectionAndRespectNamespace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("denial metadata called Kubernetes")
+		http.Error(w, "offline", 503)
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "denials"})
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.changes.evidenceEnabled = true
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "denials", ClusterUID: "physical"}
+	at := time.Now().UTC().Add(-time.Minute)
+	if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, storage.EvidenceBatch{ID: "proof", At: at, Epoch: "stable", Principal: service.historyPrincipal(), Authority: map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: at}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.rememberHistoryScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/api/v1/namespaces/shop/pods/pod/log", "/api/v1/namespaces/shop/pods/pod", "/apis/unrelated/v1/pods"} {
+		service.denyHistoryAuthority(t.Context(), path, false)
+		if err := service.persistedPodAuthority(t.Context(), "shop"); err != nil {
+			t.Fatalf("non-LIST denial revoked history: %s %v", path, err)
+		}
+	}
+	service.denyHistoryAuthority(t.Context(), "/api/v1/namespaces/shop/pods?limit=1", false)
+	if err := service.persistedPodAuthority(t.Context(), "shop"); !errors.Is(err, errHistoryAuthority) {
+		t.Fatalf("namespace revoke not enforced: %v", err)
+	}
+	if err := service.persistedPodAuthority(t.Context(), "ops"); err != nil {
+		t.Fatalf("namespace revoke became global: %v", err)
+	}
+	cp, err := provider.(storage.EvidenceStore).EvidenceCheckpoint(t.Context(), scope)
+	if err != nil || cp.Authority["Pod"].State != "allowed" || cp.Authority["Pod@shop"].State != "denied" {
+		t.Fatalf("wrong persisted namespace proof: %+v %v", cp, err)
+	}
+}
+
+func TestEvidenceHeartbeatConfigurationSurvivesScopedCopies(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "heartbeat"}, 0)
+	registry := NewServiceRegistry(service)
+	for _, invalid := range []string{"-1s", "0", "500ms", "25h", "invalid"} {
+		if err := registry.SetEvidenceHeartbeat(invalid); !errors.Is(err, ErrInvalidArguments) {
+			t.Fatalf("invalid heartbeat accepted: %q %v", invalid, err)
+		}
+	}
+	if err := registry.SetEvidenceHeartbeat("30s"); err != nil {
+		t.Fatal(err)
+	}
+	if service.evidenceHeartbeat != 30*time.Second || service.Scoped(service.Scope()).evidenceHeartbeat != 30*time.Second {
+		t.Fatal("heartbeat dropped by scoped clone")
+	}
+}
+
+func TestHistoricalIssueCountersAreFirstPageAggregates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("history called Kubernetes")
+		http.Error(w, "offline", 503)
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "counts"})
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.changes.evidenceEnabled = true
+	at := time.Now().UTC().Add(-time.Minute)
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "counts", ClusterUID: "physical"}
+	batch := storage.EvidenceBatch{ID: "counts", At: at, Epoch: "stable", Principal: service.historyPrincipal(), Authority: map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: at}}}
+	for i := 0; i < 7; i++ {
+		uid := fmt.Sprintf("root-%d", i)
+		issue := Issue{Root: ObjectRef{UID: uid, Kind: "Pod", Namespace: "shop"}, Rule: "pod.crash_loop", Severity: "warning", Broken: i%2 == 0}
+		raw, _ := json.Marshal(issue)
+		batch.Issues = append(batch.Issues, storage.EvidenceIssue{Key: uid, UID: uid, Kind: "Pod", Namespace: "shop", Rule: issue.Rule, AuthorizationKind: "Pod", Broken: issue.Broken, Payload: raw})
+	}
+	if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.rememberHistoryScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	query := IssueOptions{Since: at.Add(-time.Minute), Until: time.Now().UTC(), Limit: 2}
+	page, err := service.Issues(t.Context(), query)
+	if err != nil || len(page.Items) != 2 || page.Totals["warning"] != 7 || page.Broken.Total != 4 || page.Next == "" {
+		t.Fatalf("first-page aggregates=%+v %v", page, err)
+	}
+	query.Cursor = page.Next
+	next, err := service.Issues(t.Context(), query)
+	if err != nil || len(next.Items) != 2 || len(next.Totals) != 0 || next.Broken.Total != 0 {
+		t.Fatalf("continuation re-counted=%+v %v", next, err)
+	}
+}
+
+func TestCommitNotificationsAreBoundedAndFollowDurableCommit(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "events"}, 0)
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.changes.evidenceEnabled = true
+	wakeup, stop, err := service.SubscribeCommitNotifications()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "events", ClusterUID: "physical"}
+	at := time.Now().UTC()
+	batch := storage.EvidenceBatch{ID: "capture:committed", At: at, Epoch: "stable", Records: []storage.EvidenceRecord{{ID: "event", Type: "change", At: at, ObservedAt: at, Epoch: "stable", Payload: json.RawMessage(`{}`)}}}
+	if err = service.commitEvidence(t.Context(), inventoryGeneration{EvidenceScope: scope, EvidenceBatch: &batch}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-wakeup:
+		cp, err := provider.(storage.EvidenceStore).EvidenceCheckpoint(t.Context(), scope)
+		if err != nil || cp.ID != batch.ID || cp.CommitRevision == 0 {
+			t.Fatal("notification preceded durable checkpoint")
+		}
+	default:
+		t.Fatal("committed evidence did not wake subscribers")
+	}
+	batch.ID, batch.Expected, batch.Records[0].Payload = "capture:invalid", batch.ID, json.RawMessage(`invalid`)
+	if err = service.commitEvidence(t.Context(), inventoryGeneration{EvidenceScope: scope, EvidenceBatch: &batch}); err == nil {
+		t.Fatal("invalid commit accepted")
+	}
+	select {
+	case <-wakeup:
+		t.Fatal("failed commit notified subscribers")
+	default:
+	}
+	cleanups := []func(){}
+	for i := 1; i < 32; i++ {
+		_, cleanup, err := service.SubscribeCommitNotifications()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleanups = append(cleanups, cleanup)
+	}
+	if _, _, err = service.SubscribeCommitNotifications(); !errors.Is(err, ErrIndexStreamBusy) {
+		t.Fatalf("unbounded subscribers: %v", err)
+	}
+	for _, cleanup := range cleanups {
+		cleanup()
+	}
+}
+
+func TestPersistedHistorySurvivesAPIBlackholeAndRejectsAuthorityChanges(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "offline", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "saved"})
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
+	service.changes.evidenceEnabled = true
+	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "saved", ClusterUID: "physical"}
+	at := time.Now().UTC().Add(-time.Hour)
+	issue := Issue{Root: ObjectRef{UID: "root", Kind: "Deployment", Namespace: "shop", Name: "api"}, Rule: "pod.crash_loop", Severity: "warning", Broken: true, BrokeAt: &at}
+	raw, _ := json.Marshal(issue)
+	batch := storage.EvidenceBatch{ID: "saved", At: at, Epoch: "stable", Principal: service.historyPrincipal(), Authority: map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: at}}, Issues: []storage.EvidenceIssue{{Key: "root-rule", AuthorizationKind: "Pod", Kind: "Deployment", Namespace: "shop", UID: "root", Rule: issue.Rule, Broken: true, Payload: raw}}}
+	store := provider.(storage.EvidenceStore)
+	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.rememberHistoryScope(scope); err != nil {
+		t.Fatal(err)
+	}
+	before := calls.Load()
+	timeline, err := service.Timeline(t.Context(), TimelineQuery{Since: at.Add(-time.Minute), Until: time.Now().UTC()})
+	if err != nil || len(timeline.Items) != 1 {
+		t.Fatalf("saved timeline=%+v err=%v", timeline, err)
+	}
+	page, err := service.Issues(t.Context(), IssueOptions{Context: "persisted", Namespace: "shop", RootUID: "root"})
+	if err != nil || page.RootContext == nil {
+		t.Fatalf("indexed root=%+v err=%v", page, err)
+	}
+	id := page.RootContext.Occurrence.OccurrenceID
+	page, err = service.Issues(t.Context(), IssueOptions{Context: "persisted", Namespace: "shop", RootUID: "root", OccurrenceID: id})
+	if err != nil || page.SelectionStatus != "resolved" {
+		t.Fatalf("point occurrence=%+v %v", page, err)
+	}
+	if _, err = service.Issues(t.Context(), IssueOptions{Context: "persisted", Namespace: "shop", RootUID: "another-root", OccurrenceID: id}); !errors.Is(err, errHistoryMismatch) {
+		t.Fatalf("identity mismatch accepted: %v", err)
+	}
+	if calls.Load() != before {
+		t.Fatalf("history made %d Kubernetes requests", calls.Load()-before)
+	}
+	service.rememberHistoryDenials(scope, service.historyPrincipal(), map[string]storage.EvidenceAuthority{"Pod": {State: "denied", ProvedAt: time.Now().UTC()}})
+	if _, err = service.Issues(t.Context(), IssueOptions{Context: "persisted", Namespace: "shop", RootUID: "root", OccurrenceID: id}); !errors.Is(err, errHistoryAuthority) {
+		t.Fatalf("unpersisted positive denial replayed: %v", err)
+	}
+	if err := provider.(storage.EvidenceAuthorityStore).SetEvidenceAuthority(t.Context(), scope, service.historyPrincipal(), map[string]storage.EvidenceAuthority{"Pod": {State: "denied", ProvedAt: time.Now().UTC()}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.Issues(t.Context(), IssueOptions{Context: "persisted", Namespace: "shop", RootUID: "root", OccurrenceID: id}); !errors.Is(err, errHistoryAuthority) {
+		t.Fatalf("positive denial replayed: %v", err)
+	}
+	if calls.Load() != before {
+		t.Fatal("denied history made a Kubernetes request")
+	}
+}
 
 func TestEvidenceAdmissionWithInFlightChangesAndUIDLessNodeWarning(t *testing.T) {
 	for _, scenario := range []string{"in-flight-change", "node-warning-without-uid", "both"} {
@@ -33,6 +279,7 @@ func TestEvidenceAdmissionWithInFlightChangesAndUIDLessNodeWarning(t *testing.T)
 			for kind := range indexedResourceIDs {
 				kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: started, CompletedAt: completed}
 			}
+
 			records := []kubeindex.Record{
 				{Kind: "Namespace", Name: "kube-system", UID: "physical"},
 				{Kind: "Deployment", Namespace: "shop", Name: "api", UID: "root", CreatedAt: started.Add(-time.Hour)},
@@ -103,6 +350,14 @@ func TestCaptureEvidenceLifecycleSurvivesRestartAndDeletedInventory(t *testing.T
 				uid = "different-cluster"
 			}
 			writeJSON(w, map[string]any{"metadata": map[string]any{"uid": uid}})
+			return
+		}
+		if r.URL.Path == "/api/v1/namespaces" {
+			uid := "physical-cluster"
+			if replaced.Load() {
+				uid = "different-cluster"
+			}
+			writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{map[string]any{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]string{"uid": uid, "name": "kube-system"}}}})
 			return
 		}
 		writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{}})
@@ -199,11 +454,20 @@ func TestCaptureEvidenceLifecycleSurvivesRestartAndDeletedInventory(t *testing.T
 		t.Fatalf("issue observations unavailable after restart: %v", err)
 	}
 	forbidden.Store(true)
-	if page, err := restarted.Timeline(t.Context(), TimelineQuery{Since: origin.Add(-time.Minute), Until: time.Now().UTC(), Namespace: "shop"}); err == nil || len(page.Items) != 0 {
+	proofCtx, proofCancel := restarted.credentialContext(t.Context())
+	var deniedList struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := restarted.client.GetMetadataJSON(proofCtx, "/api/v1/pods", &deniedList); !errors.Is(err, ErrForbidden) {
+		t.Fatal("collection did not witness revocation", err)
+	}
+	proofCancel()
+	if page, err := restarted.Timeline(t.Context(), TimelineQuery{Since: origin.Add(-time.Minute), Until: time.Now().UTC(), Namespace: "shop"}); len(page.Items) != 0 || err != nil && !errors.Is(err, errHistoryAuthority) {
 		t.Fatal("reduced permission exposed history")
 	}
 	forbidden.Store(false)
 	replaced.Store(true)
+	reviewHistoryCycle(t, restarted)
 	if page, err := restarted.Timeline(t.Context(), TimelineQuery{Since: origin.Add(-time.Minute), Until: time.Now().UTC(), Namespace: "shop"}); err != nil || len(page.Items) != 0 {
 		t.Fatal("reused configured cluster identity merged physical clusters")
 	}
@@ -213,6 +477,7 @@ func TestCaptureEvidenceLifecycleSurvivesRestartAndDeletedInventory(t *testing.T
 		t.Fatal(err)
 	}
 	replaced.Store(false)
+	reviewHistoryCycle(t, restarted)
 	afterLegacy, err := restarted.Timeline(t.Context(), TimelineQuery{Since: origin.Add(-time.Minute), Until: time.Now().UTC(), Namespace: "shop", Limit: 500})
 	if err != nil {
 		t.Fatal(err)

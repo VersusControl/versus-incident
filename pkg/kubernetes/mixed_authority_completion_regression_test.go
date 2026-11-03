@@ -249,6 +249,18 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					after, currentHead, err := readInventoryGeneration(observed, scope, "")
 					afterRaw, _ := json.Marshal(after)
 					cp, cpErr := observed.EvidenceCheckpoint(t.Context(), evidenceScope)
+					for kind, proof := range cp.Authority {
+						if proof != checkpoint.Authority[kind] && proof.State != "denied" {
+							t.Fatalf("unfinished candidate promoted source authority: %s %+v", kind, proof)
+						}
+					}
+					// Revocation is persisted immediately, not held until this
+					// incomplete collection can publish its protected payload.
+					cp.Authority = checkpoint.Authority
+					if cp.CommitRevision < checkpoint.CommitRevision {
+						t.Fatal("authority publication moved revision backwards")
+					}
+					cp.CommitRevision = checkpoint.CommitRevision
 					cpRaw, _ := json.Marshal(cp)
 					checkpointRaw, _ := json.Marshal(checkpoint)
 					if err != nil || cpErr != nil || currentHead.Revision != head.Revision || !bytes.Equal(beforeRaw, afterRaw) || !bytes.Equal(cpRaw, checkpointRaw) {
@@ -299,7 +311,16 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				// cache invalidation, wake send or protected recovery read occurs here.
 				waitUntil(t, 80*time.Second, "finite tail and natural fresh global completion", func() bool {
 					r := health()
-					return r.State == "ready" && r.PendingKinds == 0 && r.FailingKinds == 0 && freshGlobal.Load() > 0
+					if r.State != "ready" || r.PendingKinds != 0 || r.FailingKinds != 0 || freshGlobal.Load() == 0 {
+						return false
+					}
+					for _, kind := range []string{"Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Event", "Node"} {
+						state := r.Kinds[kind]
+						if !state.Absent && (state.State != "ready" || state.Error != "") {
+							return false
+						}
+					}
+					return true
 				})
 				waitUntil(t, 12*time.Second, "new current capture journal", func() bool {
 					cp, err := observed.EvidenceCheckpoint(t.Context(), evidenceScope)

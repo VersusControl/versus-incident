@@ -16,15 +16,19 @@ type ChangeType = kubechanges.Type
 type ChangeQuery = kubechanges.Query
 
 type ChangePage struct {
-	Items     []Change          `json:"items"`
-	Next      string            `json:"next,omitempty"`
-	Truncated bool              `json:"truncated"`
-	Partial   []PartialFailure  `json:"partial_failures,omitempty"`
-	Gaps      []kubechanges.Gap `json:"gaps"`
-	Sync      SyncStatus        `json:"sync"`
+	Authority   string            `json:"authority,omitempty"`
+	CountCapped bool              `json:"count_capped,omitempty"`
+	Items       []Change          `json:"items"`
+	Next        string            `json:"next,omitempty"`
+	Truncated   bool              `json:"truncated"`
+	Partial     []PartialFailure  `json:"partial_failures,omitempty"`
+	Gaps        []kubechanges.Gap `json:"gaps"`
+	Sync        SyncStatus        `json:"sync"`
 }
 
 type changeStoreState struct {
+	historyDenials    map[string]map[string]storage.EvidenceAuthority
+	commitSubscribers map[string]map[chan struct{}]struct{}
 	timelines         map[string]*timelineSnapshot
 	timelineManifests map[string]timelineManifest
 	inventories       map[kubeindex.Scope]*inventoryCache

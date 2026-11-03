@@ -11,7 +11,7 @@ import {
 } from "react";
 import { notifyManager, useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
+import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesQuery, useKubernetesCommitEvents } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
 import { KubernetesFleet } from "./KubernetesFleet";
 import {
@@ -51,8 +51,8 @@ import { SkCard } from "@/components/Skeleton";
 import { KubernetesSyncHealthSurface } from "@/components/KubernetesSyncHealth";
 import { KubernetesUnreadableNote } from "@/components/KubernetesUnreadableNote";
 import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
-import { KubernetesSyncStateIndicator, type KubernetesStreamState } from "@/components/KubernetesSyncStateIndicator";
-import { kubernetesAccessLost, incompleteKubernetesSnapshot, kubernetesReadNeedsRecovery, kubernetesReportAuthorityLost, kubernetesQueryUsesKinds, kubernetesInventoryNotReady } from "@/lib/kubernetesContinuity";
+import { KubernetesSyncStateIndicator } from "@/components/KubernetesSyncStateIndicator";
+import { kubernetesAccessLost, incompleteKubernetesSnapshot, kubernetesReadNeedsRecovery, kubernetesReportAuthorityLost, kubernetesQueryUsesKinds, kubernetesInventoryNotReady, kubernetesFailureCode } from "@/lib/kubernetesContinuity";
 import { clusterSyncEnvelope, firstReadyAt, isZeroTime, reportSyncHealth, syncFailureReport, syncHealth, syncPollIntervalMs, syncReportPollIntervalMs } from "@/lib/kubernetesSyncHealth";
 import { isNotConfiguredAnswer, reportProvesConfigured } from "@/lib/kubernetesConnector";
 import { TopBar } from "@/components/TopBar";
@@ -71,6 +71,7 @@ import {
 import { kubernetesExplorerTabs, type KubernetesExplorerTab } from "./kubernetesExplorerTabs";
 import { StateBadge, ToolIcon } from "./AgentToolsPage";
 import { failureWarnings, timelineWarnings } from "./kubernetesWarningItems";
+import { historyCount } from "@/lib/kubernetesEvidence";
 
 type KubernetesDrawerTab = ResourceDetailTab;
 
@@ -363,8 +364,6 @@ function KubernetesDashboard() {
       return [];
     }
   });
-  const [streamState, setStreamState] = useState<KubernetesStreamState>("connecting");
-  const [indexStatus, setIndexStatus] = useState<KubernetesIndexStatus | null>(null);
   const resourceFilterRef = useRef<HTMLInputElement>(null);
   const paletteInputRef = useRef<HTMLInputElement>(null);
   const gShortcutPending = useRef(false);
@@ -498,7 +497,6 @@ function KubernetesDashboard() {
       authorityFenced.current = true;
       setResourceCache(null);
       setSelectedNode(null);
-      setIndexStatus(null);
       setUsageHistory({ namespace: "", snapshots: [] });
       setRecentResources([]);
       setPaletteOpen(false);
@@ -761,71 +759,16 @@ function KubernetesDashboard() {
     return () => window.removeEventListener("keydown", dismiss, true);
   }, [paletteOpen]);
 
-  useEffect(() => {
-    if (!clusterReachable || authorityLost) return;
-    const controller = new AbortController();
-    let disposed = false;
-    let reconnectTimer: number | undefined;
-    let invalidateTimer: number | undefined;
-    let backoffMilliseconds = 1000;
-    const invalidateSnapshots = () => {
-      if (invalidateTimer) return;
-      invalidateTimer = window.setTimeout(() => {
-        invalidateTimer = undefined;
-        for (const queryKey of [["kubernetes-overview"], ["kubernetes-sync-health"], ["kubernetes-graph"], ["kubernetes-namespaces"], ["kubernetes-workloads"], ["kubernetes-nodes"], ["kubernetes-issues"], ["kubernetes-top"], ["kubernetes-diagnosis"], ["kubernetes-drawer-changes"], ["kubernetes-changes"]]) {
-          void queryClient.invalidateQueries({ queryKey: key(...queryKey) });
-        }
-      }, 750);
-    };
-    const run = async () => {
-      while (!disposed) {
-        try {
-          setStreamState("connecting");
-          await api.kubernetesStream(({ event, data }) => {
-            if (disposed || controller.signal.aborted) return;
-            if (event === "sync") {
-              try {
-                setIndexStatus(JSON.parse(data) as KubernetesIndexStatus);
-                setStreamState("live");
-                backoffMilliseconds = 1000;
-              } catch {
-                setStreamState("resyncing");
-              }
-            } else if (event === "records") {
-              setStreamState("live");
-              invalidateSnapshots();
-            } else if (event === "resync") {
-              setStreamState("resyncing");
-              invalidateSnapshots();
-            }
-          }, controller.signal);
-          if (!disposed) setStreamState("reconnecting");
-        } catch (failure) {
-          if (disposed) return;
-          if (multiple && failure instanceof ApiError && failure.status === 404) {
-            void queryClient.cancelQueries({ queryKey: key() });
-            queryClient.removeQueries({ queryKey: key() });
-            void queryClient.invalidateQueries({ queryKey: ["kubernetes-clusters"] });
-            navigate("/agent/kubernetes?notice=unavailable", { replace: true });
-            return;
-          }
-          setStreamState("reconnecting");
-        }
-        if (disposed) return;
-        await new Promise<void>((resolve) => {
-          reconnectTimer = window.setTimeout(resolve, backoffMilliseconds);
-        });
-        backoffMilliseconds = Math.min(backoffMilliseconds * 2, 30_000);
-      }
-    };
-    void run();
-    return () => {
-      disposed = true;
-      controller.abort();
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      if (invalidateTimer) window.clearTimeout(invalidateTimer);
-    };
-  }, [queryClient, clusterReachable, authorityLost, api, key, multiple, navigate]);
+  const { streamState, sync: commitSync } = useKubernetesCommitEvents(clusterReachable && !authorityLost);
+  const reportedSyncReason = syncReport.isError ? kubernetesFailureCode(syncReport.error) ?? reportFailure.class
+    ?? (syncReport.error instanceof ApiError && syncReport.error.status === 504 ? "request_timeout" : undefined)
+    : health.state === "failed" || health.state === "degraded" ? health.problems.map(problem => problem.error).join(" ") || syncReport.data?.class
+      : commitSync?.reason;
+  const indexStatus: KubernetesIndexStatus | null = syncReport.data ? {
+    state: syncReport.data.state, age_s: syncReport.data.age_s,
+    partial: syncReport.data.partial,
+    kinds: syncReport.data.kinds,
+  } : null;
 
   const selectResource = (resource: KubernetesResource, initialTab?: "timeline" | "logs") => {
     setPreviousLogRequest(undefined);
@@ -1004,7 +947,10 @@ function KubernetesDashboard() {
               state={syncReport.isPending ? "loading" : health.state}
               firstReadyAt={health.firstReadyAt}
               streamState={streamState}
-              ageSeconds={indexStatus?.age_s}
+              syncReason={reportedSyncReason}
+              syncState={commitSync?.state}
+              ageSeconds={syncReport.isError ? reportFailure.ageSeconds : indexStatus?.age_s}
+              lastSyncedAt={overview.data?.observed_at}
               title={syncReport.data && !syncReport.isError ? `Cluster sync ${health.state} across ${syncReport.data.total_kinds} resource types` : "Kubernetes index status unavailable"}
             />
             <CoverageMarker reasons={overviewWarningMessages} />
@@ -1083,6 +1029,7 @@ function KubernetesDashboard() {
               <ClusterHealthHeader
                 overview={overview.data}
                 broken={brokenIssues.data && !incompleteKubernetesSnapshot(brokenIssues.data) ? brokenIssues.data.broken?.total : brokenIssues.data?.items.length ? brokenIssues.data.broken?.total : undefined}
+                countCapped={brokenIssues.data?.count_capped}
                 sync={{ state: health.state, age_s: health.ageSeconds ?? NaN, partial: health.state !== "ready" }}
                 onOpenIssues={() => selectView("issues")}
               />
@@ -1678,6 +1625,7 @@ function CapacityMeter({ meter }: { meter: CapacityMeterValue }) {
 function ClusterHealthHeader({
   overview,
   broken,
+  countCapped,
   sync,
   onOpenIssues,
 }: {
@@ -1692,6 +1640,7 @@ function ClusterHealthHeader({
   };
   onOpenIssues: () => void;
   broken?: number;
+  countCapped?: boolean;
   sync?: { state: string; age_s: number; partial: boolean };
 }) {
   const partial = Boolean(failureWarnings(overview.partial_failures).length) || Boolean(sync?.partial);
@@ -1718,7 +1667,7 @@ function ClusterHealthHeader({
         </div>
       </div>
       <div className="grid grid-cols-[auto_auto] items-center gap-x-2 gap-y-1 sm:flex sm:flex-wrap sm:gap-2">
-      <button type="button" className={`pill ${broken ? "pill-bad" : ""}`} onClick={onOpenIssues}>{broken === undefined ? "Broken unknown" : `${broken} broken`}</button>
+      <button type="button" className={`pill ${broken ? "pill-bad" : ""}`} onClick={onOpenIssues}>{broken === undefined ? "Broken unknown" : `${historyCount(broken, countCapped)} broken`}</button>
       <button type="button" className="pill pill-warn col-start-1 row-start-2" onClick={onOpenIssues}>{overview.warnings} warnings</button>
       <button type="button" className="col-start-2 row-span-2 row-start-1 inline-flex size-8 items-center justify-center rounded-control hover:bg-ink-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent sm:btn sm:w-auto" aria-label="Review issues" title="Review issues" onClick={onOpenIssues}>
         <AlertTriangle size={13} aria-hidden="true" className="text-sev-warning" />

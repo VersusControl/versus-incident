@@ -13,21 +13,22 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // The reviewer's compressed 30-second re-windowing probe, strengthened to eight
 // concurrent viewers and assertions on every refresh rather than a logged 429.
-func TestTimelineRollingViewersReclaimPreviewAndPreservePinnedCursor(t *testing.T) {
-	service, provider, base := timelineAdmissionFixture(t)
+func TestTimelineReservationRollingViewersReclaimPreviewAndPreservePinnedCursor(t *testing.T) {
+	service, provider, base := timelineReservationFixture(t)
 	pinnedActor := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "viewer-0"})
-	first, err := service.Timeline(pinnedActor, base)
+	first, err := service.reservationFixturePage(pinnedActor, base)
 	if err != nil || first.Next == "" {
 		t.Fatalf("first=%+v %v", first, err)
 	}
 	pinnedQuery := base
 	pinnedQuery.Cursor = first.Next
-	pinnedPage, err := service.Timeline(pinnedActor, pinnedQuery)
+	pinnedPage, err := service.reservationFixturePage(pinnedActor, pinnedQuery)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestTimelineRollingViewersReclaimPreviewAndPreservePinnedCursor(t *testing.
 			for tick := 0; tick < 20; tick++ {
 				query := base
 				query.Until = base.Until.Add(time.Duration(user*20+tick+1) * time.Millisecond)
-				page, err := service.Timeline(ctx, query)
+				page, err := service.reservationFixturePage(ctx, query)
 				if err != nil || page.Next == "" {
 					failures <- fmt.Errorf("viewer%d tick%d lost pagination: next=%q err=%v", user, tick, page.Next, err)
 					return
@@ -57,7 +58,7 @@ func TestTimelineRollingViewersReclaimPreviewAndPreservePinnedCursor(t *testing.
 	for err := range failures {
 		t.Error(err)
 	}
-	again, err := service.Timeline(pinnedActor, pinnedQuery)
+	again, err := service.reservationFixturePage(pinnedActor, pinnedQuery)
 	if err != nil || len(again.Items) != len(pinnedPage.Items) || again.Items[0].ID != pinnedPage.Items[0].ID {
 		t.Fatalf("refresh reclaimed pinned data: %+v %v", again, err)
 	}
@@ -80,58 +81,58 @@ func TestTimelineRollingViewersReclaimPreviewAndPreservePinnedCursor(t *testing.
 	}
 }
 
-func TestTimelineReplacedUnconsumedCursorRequiresExplicitRestart(t *testing.T) {
-	service, _, query := timelineAdmissionFixture(t)
+func TestTimelineReservationReplacedUnconsumedCursorRequiresExplicitRestart(t *testing.T) {
+	service, _, query := timelineReservationFixture(t)
 	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "same-viewer"})
-	first, err := service.Timeline(ctx, query)
+	first, err := service.reservationFixturePage(ctx, query)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	refresh := query
 	refresh.Until = refresh.Until.Add(time.Millisecond)
-	next, err := service.Timeline(ctx, refresh)
+	next, err := service.reservationFixturePage(ctx, refresh)
 	if err != nil || next.Next == "" {
 		t.Fatalf("refresh=%+v %v", next, err)
 	}
 	query.Cursor = first.Next
-	if _, err := service.Timeline(ctx, query); !errors.Is(err, ErrInvalidArguments) {
+	if _, err := service.reservationFixturePage(ctx, query); !errors.Is(err, ErrInvalidArguments) {
 		t.Fatalf("obsolete preview did not require restart: %v", err)
 	}
 }
 
-func TestTimelineAnonymousTabsSharePreviewButNotPinnedInvalidation(t *testing.T) {
-	service, provider, query := timelineAdmissionFixture(t)
-	old, err := service.Timeline(t.Context(), query)
+func TestTimelineReservationAnonymousTabsSharePreviewButNotPinnedInvalidation(t *testing.T) {
+	service, provider, query := timelineReservationFixture(t)
+	old, err := service.reservationFixturePage(t.Context(), query)
 	if err != nil {
 		t.Fatal(err)
 	}
 	refresh := query
 	refresh.Until = refresh.Until.Add(time.Millisecond)
-	current, err := service.Timeline(t.Context(), refresh)
+	current, err := service.reservationFixturePage(t.Context(), refresh)
 	if err != nil || current.Next == "" {
 		t.Fatalf("refresh=%+v %v", current, err)
 	}
 	oldQuery := query
 	oldQuery.Cursor = old.Next
-	if _, err := service.Timeline(t.Context(), oldQuery); !errors.Is(err, ErrInvalidArguments) {
+	if _, err := service.reservationFixturePage(t.Context(), oldQuery); !errors.Is(err, ErrInvalidArguments) {
 		t.Fatalf("other tab's obsolete preview accepted: %v", err)
 	}
 	pinned := refresh
 	pinned.Cursor = current.Next
-	expected, err := service.Timeline(t.Context(), pinned)
+	expected, err := service.reservationFixturePage(t.Context(), pinned)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 40; i++ {
 		refresh.Until = refresh.Until.Add(time.Millisecond)
 		untrusted := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Actor: fmt.Sprintf("not-authenticated-%d", i)})
-		page, err := service.Timeline(untrusted, refresh)
+		page, err := service.reservationFixturePage(untrusted, refresh)
 		if err != nil || page.Next == "" {
 			t.Fatalf("anonymous rolling refresh=%+v %v", page, err)
 		}
 	}
-	got, err := service.Timeline(t.Context(), pinned)
+	got, err := service.reservationFixturePage(t.Context(), pinned)
 	if err != nil || got.Items[0].ID != expected.Items[0].ID {
 		t.Fatalf("anonymous refresh invalidated active pagination: %+v %v", got, err)
 	}
@@ -173,12 +174,12 @@ func (barrier *timelineCASBarrier) CompareAndSwapBlob(key string, old, replaceme
 	return barrier.Provider.(storage.BlobCAS).CompareAndSwapBlob(key, old, replacement)
 }
 
-func TestTimelinePinAndRefreshRaceUsesOnePublicationFence(t *testing.T) {
+func TestTimelineReservationPinAndRefreshRaceUsesOnePublicationFence(t *testing.T) {
 	for _, pinWins := range []bool{true, false} {
 		t.Run(fmt.Sprint(pinWins), func(t *testing.T) {
-			service, base, query := timelineAdmissionFixture(t)
+			service, base, query := timelineReservationFixture(t)
 			ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "viewer"})
-			first, err := service.Timeline(ctx, query)
+			first, err := service.reservationFixturePage(ctx, query)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -192,7 +193,6 @@ func TestTimelinePinAndRefreshRaceUsesOnePublicationFence(t *testing.T) {
 			service.SetChangeStorage(barrier)
 			replica := NewService(nil, service.Scope(), 0)
 			replica.SetChangeStorage(base)
-			seedInventory(t, replica, nil)
 			pagination := query
 			pagination.Cursor = first.Next
 			refresh := query
@@ -200,10 +200,10 @@ func TestTimelinePinAndRefreshRaceUsesOnePublicationFence(t *testing.T) {
 			result := make(chan error, 1)
 			go func() {
 				if pinWins {
-					_, err := service.Timeline(ctx, refresh)
+					_, err := service.reservationFixturePage(ctx, refresh)
 					result <- err
 				} else {
-					_, err := service.Timeline(ctx, pagination)
+					_, err := service.reservationFixturePage(ctx, pagination)
 					result <- err
 				}
 			}()
@@ -213,10 +213,10 @@ func TestTimelinePinAndRefreshRaceUsesOnePublicationFence(t *testing.T) {
 				t.Fatal("CAS race barrier not reached")
 			}
 			if pinWins {
-				if _, err := replica.Timeline(ctx, pagination); err != nil {
+				if _, err := replica.reservationFixturePage(ctx, pagination); err != nil {
 					t.Fatal(err)
 				}
-			} else if page, err := replica.Timeline(ctx, refresh); err != nil || page.Next == "" {
+			} else if page, err := replica.reservationFixturePage(ctx, refresh); err != nil || page.Next == "" {
 				t.Fatalf("refresh=%+v %v", page, err)
 			}
 			close(barrier.release)
@@ -231,7 +231,7 @@ func TestTimelinePinAndRefreshRaceUsesOnePublicationFence(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("CAS race did not finish")
 			}
-			_, err = replica.Timeline(ctx, pagination)
+			_, err = replica.reservationFixturePage(ctx, pagination)
 			if pinWins && err != nil {
 				t.Fatalf("pinned cursor reclaimed: %v", err)
 			}
@@ -242,39 +242,61 @@ func TestTimelinePinAndRefreshRaceUsesOnePublicationFence(t *testing.T) {
 	}
 }
 
-func TestTimelinePinnedAdmissionIsExplicitAndNeverDropsNext(t *testing.T) {
-	service, _, query := timelineAdmissionFixture(t)
+func TestTimelineReservationPinnedAdmissionIsExplicitAndNeverDropsNext(t *testing.T) {
+	service, _, query := timelineReservationFixture(t)
 	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "viewer"})
 	var pinned TimelineQuery
 	for i := 0; i < timelineRequesterSnapshots; i++ {
 		query.Until = query.Until.Add(time.Millisecond)
-		page, err := service.Timeline(ctx, query)
+		page, err := service.reservationFixturePage(ctx, query)
 		if err != nil || page.Next == "" {
 			t.Fatalf("pin %d: %+v %v", i, page, err)
 		}
 		pinned = query
 		pinned.Cursor = page.Next
-		if _, err := service.Timeline(ctx, pinned); err != nil {
+		if _, err := service.reservationFixturePage(ctx, pinned); err != nil {
 			t.Fatal(err)
 		}
 	}
 	query.Until = query.Until.Add(time.Millisecond)
-	if _, err := service.Timeline(ctx, query); !errors.Is(err, ErrIndexStreamBusy) {
+	if _, err := service.reservationFixturePage(ctx, query); !errors.Is(err, ErrIndexStreamBusy) {
 		t.Fatalf("pinned overload silently returned truncated first page: %v", err)
 	}
-	if _, err := service.Timeline(ctx, pinned); err != nil {
+	if _, err := service.reservationFixturePage(ctx, pinned); err != nil {
 		t.Fatalf("admission blocked existing pagination: %v", err)
 	}
 }
 
 func TestTimelineSyncingHistoryStillHasContinuationWhenNeeded(t *testing.T) {
-	service, _, query := timelineAdmissionFixture(t)
+	service, _, store, scope, reads := timelineHistoryFixture(t)
+	now := time.Now().UTC()
+	commitTimelineHistory(t, store, scope, storage.EvidenceBatch{ID: "syncing-history", At: now, Epoch: "fixture", Records: []storage.EvidenceRecord{
+		timelineChangeRecord(Change{ID: "one", UID: "one", Kind: "Pod", Type: kubechanges.Created, At: now.Add(-time.Minute)}),
+		timelineChangeRecord(Change{ID: "two", UID: "two", Kind: "Pod", Type: kubechanges.Created, At: now.Add(-2 * time.Minute)}),
+	}})
+	seedInventory(t, service, nil)
 	service.changes.inventories[service.indexScope()].generation.View.Kinds = nil
+	query := TimelineQuery{Since: now.Add(-time.Hour), Until: now, Limit: 1}
+	before := reads.Load()
 	page, err := service.Timeline(context.Background(), query)
-	if err != nil || page.Total <= len(page.Items) || page.Next == "" {
+	if err != nil || page.Total != 2 || len(page.Items) != 1 || page.Counts["change"] != 2 || page.CountCapped || page.Total <= len(page.Items) || page.Next == "" || len(page.Gaps) != 0 {
 		t.Fatalf("syncing silently truncated retained history: %+v %v", page, err)
 	}
-
+	// Committed history reports checkpoint authority, not inventory loading.
+	if page.Authority != "current" || page.Sync.State != "ready" || page.Sync.Partial || len(page.Sync.Pending) != 0 || page.Sync.PendingKinds != 0 {
+		t.Fatalf("inventory loading changed committed history freshness: %+v", page)
+	}
+	query.Cursor = page.Next
+	next, err := service.Timeline(context.Background(), query)
+	if err != nil || len(next.Items) != 1 || next.Items[0].ID == page.Items[0].ID || next.Next != "" || next.Total != 0 || next.Counts["change"] != 0 || next.CountCapped || len(next.Gaps) != 0 {
+		t.Fatalf("syncing continuation lost retained membership: %+v %v", next, err)
+	}
+	if next.Authority != "current" || next.Sync.State != "ready" || next.Sync.Partial || len(next.Sync.Pending) != 0 || next.Sync.PendingKinds != 0 {
+		t.Fatalf("inventory loading changed continuation freshness: %+v", next)
+	}
+	if reads.Load() != before {
+		t.Fatal("syncing history called the cluster")
+	}
 }
 
 type timelinePublicationBarrier struct {
@@ -304,29 +326,26 @@ func (barrier *timelinePublicationBarrier) CompareAndSwapBlob(key string, old, r
 	return barrier.Provider.(storage.BlobCAS).CompareAndSwapBlob(key, old, replacement)
 }
 
-func TestTimelineIdenticalTabsWaitForReservedPayloadPublication(t *testing.T) {
-	first, base, query := timelineAdmissionFixture(t)
+func TestTimelineReservationIdenticalTabsWaitForReservedPayloadPublication(t *testing.T) {
+	first, base, query := timelineReservationFixture(t)
 	barrier := &timelinePublicationBarrier{Provider: base, started: make(chan struct{}), release: make(chan struct{}), pending: make(chan struct{}, 1)}
 	barrier.armed.Store(true)
 	first.SetChangeStorage(barrier)
 	second := NewService(nil, first.Scope(), 0)
 	second.SetChangeStorage(barrier)
-	seedInventory(t, second, nil)
-	first.changes.inventories[first.indexScope()].generation.Revision = "one-generation"
-	second.changes.inventories[second.indexScope()].generation.Revision = "one-generation"
 	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "same-viewer"})
 	type result struct {
 		page TimelinePage
 		err  error
 	}
 	a, b := make(chan result, 1), make(chan result, 1)
-	go func() { page, err := first.Timeline(ctx, query); a <- result{page, err} }()
+	go func() { page, err := first.reservationFixturePage(ctx, query); a <- result{page, err} }()
 	select {
 	case <-barrier.started:
 	case <-time.After(time.Second):
 		t.Fatal("publisher did not reserve before payload")
 	}
-	go func() { page, err := second.Timeline(ctx, query); b <- result{page, err} }()
+	go func() { page, err := second.reservationFixturePage(ctx, query); b <- result{page, err} }()
 	select {
 	case <-barrier.pending:
 	case <-time.After(time.Second):
@@ -359,12 +378,12 @@ type timelineAlwaysContended struct{ storage.Provider }
 func (timelineAlwaysContended) CompareAndSwapBlob(string, []byte, []byte) (bool, error) {
 	return false, nil
 }
-func TestTimelineWriteContentionIsCancellableAndNotCapacity(t *testing.T) {
-	service, base, query := timelineAdmissionFixture(t)
+func TestTimelineReservationWriteContentionIsCancellableAndNotCapacity(t *testing.T) {
+	service, base, query := timelineReservationFixture(t)
 	service.SetChangeStorage(timelineAlwaysContended{base})
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := service.Timeline(ctx, query); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := service.reservationFixturePage(ctx, query); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("contention ignored cancellation: %v", err)
 	}
 	detail := DiagnoseError(ErrTimelineContention)

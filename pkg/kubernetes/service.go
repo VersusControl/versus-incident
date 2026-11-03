@@ -245,6 +245,7 @@ type Scrubber interface{ Scrub(string) string }
 
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
+	evidenceHeartbeat      time.Duration
 	workloadAuthority      inventoryAuthorityProofState
 	observationClock       func() time.Time
 	inventoryRestore       *inventoryRestoreAuthority
@@ -358,6 +359,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 	scoped.recovery = service.recovery
 	scoped.issueAlertSink = service.issueAlertSink
 	scoped.usageHistory = service.usageHistory
+	scoped.evidenceHeartbeat = service.evidenceHeartbeat
 	if configured != service.configuredCredentialID && service.client != nil {
 		scoped.scope.CredentialID = scoped.captureCredentialID()
 		scoped.persistentCredentialID = scoped.captureCredentialIDAtGeneration(0)
@@ -580,7 +582,15 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 	if closed || previous == nil {
 		return nil, ErrClusterUnavailable
 	}
-	if previous.identity.ctx.Err() != nil && time.Now().Before(previous.recovery.deadline()) {
+	// An active provider-failure cooldown gates request traffic for this cluster
+	// whether or not the accepted credential epoch was retired. Accepted credential
+	// material deliberately survives a transient provider failure, so a request must
+	// not become the probe that discovers recovery: only the supervised retry after
+	// the cooldown expires, or a committed publication, may clear it.
+	if previous.recovery.requestGate(orgID) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		return nil, ErrCredentialUnavailable
 	}
 	fresh := previous
@@ -604,10 +614,11 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		previous.client.authGeneration.Add(1)
 		fresh = newService(ctx, previous.client, scope, previous.ttl)
 		fresh.observationClock = previous.observationClock
+		fresh.evidenceHeartbeat = previous.evidenceHeartbeat
 		fresh.recovery = previous.recovery
 		if err := fresh.validateCredential(ctx); err != nil {
 			fresh.identity.cancel()
-			previous.recovery.failed(err, previous.client)
+			previous.recovery.failed(err, previous.client, orgID)
 			return nil, err
 		}
 		if fresh.client.http != nil && !renewal {
@@ -624,7 +635,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 			cancelProbe()
 			if probeErr != nil {
 				fresh.identity.cancel()
-				previous.recovery.failed(probeErr, previous.client)
+				previous.recovery.failed(probeErr, previous.client, orgID)
 				return nil, probeErr
 			}
 		}

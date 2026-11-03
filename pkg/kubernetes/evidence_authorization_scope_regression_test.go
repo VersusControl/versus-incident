@@ -71,12 +71,45 @@ func TestEvidenceAuthorizationQueryScopeMatrix(t *testing.T) {
 			service.changes.evidenceEnabled = true
 			scope := storage.EvidenceScope{OrgID: "org", ClusterID: "scope-matrix", ClusterUID: "scope-physical"}
 			now := time.Now().UTC()
-			batch := storage.EvidenceBatch{ID: "capture:scope-matrix", At: now, Epoch: "synthetic", Coverage: map[string]storage.EvidenceInterval{
+			proofCtx, proofCancel := service.credentialContext(t.Context())
+			uid, err := service.evidenceClusterUID(proofCtx)
+			if err != nil || uid != scope.ClusterUID {
+				t.Fatal("physical identity proof failed", err)
+			}
+			start := time.Now().UTC()
+			if err = service.authorizeEvidenceKind(proofCtx, "", "core~v1~pods"); err != nil {
+				t.Fatal("global collection proof failed", err)
+			}
+			selectedErr := service.authorizeEvidenceKind(proofCtx, "sample", "core~v1~pods")
+			var controlWant error
+			switch shape {
+			case "null-items-unproven", "wrong-negotiated-kind":
+				controlWant = ErrIncompleteInventory
+			case "forbidden":
+				controlWant = ErrForbidden
+			case "unserved":
+				controlWant = ErrNotFound
+			}
+			if controlWant == nil && selectedErr != nil || controlWant != nil && !errors.Is(selectedErr, controlWant) {
+				t.Fatalf("collection envelope shape=%s err=%v want=%v", shape, selectedErr, controlWant)
+			}
+			proofCancel()
+			proofs := map[string]storage.EvidenceAuthority{"Pod": {State: "allowed", ProvedAt: start}}
+			if errors.Is(selectedErr, ErrForbidden) {
+				proofs["Pod@sample"] = storage.EvidenceAuthority{State: "denied", Namespace: "sample", ProvedAt: time.Now().UTC()}
+			}
+			batch := storage.EvidenceBatch{ID: "capture:scope-matrix", At: now, Epoch: "synthetic", Principal: service.historyPrincipal(), Authority: proofs, Coverage: map[string]storage.EvidenceInterval{
 				"Pod": {From: now.Add(-time.Minute), To: now}, "Namespace": {From: now.Add(-time.Minute), To: now}, "Node": {From: now.Add(-time.Minute), To: now},
 			}}
 			if err := provider.(storage.EvidenceStore).CommitEvidence(t.Context(), scope, batch); err != nil {
 				t.Fatal(err)
 			}
+			if err := service.rememberHistoryScope(scope); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			beforeReads := len(requests)
+			mu.Unlock()
 			for _, namespace := range []string{"", "sample"} {
 				for _, kind := range []string{"timeline", "change", "crash", "occurrence"} {
 					ctx, cancel := context.WithCancel(t.Context())
@@ -85,12 +118,8 @@ func TestEvidenceAuthorizationQueryScopeMatrix(t *testing.T) {
 					var want error
 					if namespace != "" {
 						switch shape {
-						case "null-items-unproven", "wrong-negotiated-kind":
-							want = ErrIncompleteInventory
 						case "forbidden":
 							want = ErrForbidden
-						case "unserved":
-							want = ErrNotFound
 						}
 					}
 					if (want == nil && err != nil) || (want != nil && !errors.Is(err, want)) || len(page.Items) != 0 {
@@ -103,6 +132,9 @@ func TestEvidenceAuthorizationQueryScopeMatrix(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
+			if len(requests) != beforeReads {
+				t.Fatal("persisted query reproved authority upstream")
+			}
 			for _, path := range requests {
 				if path == "/api/v1/namespaces/sample/nodes" || path == "/api/v1/namespaces/sample/namespaces" {
 					t.Fatalf("cluster-scoped checkpoint kind escaped into a namespaced proof: %s", path)

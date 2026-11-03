@@ -67,7 +67,13 @@ export function useBreakLogsState(issue: KubernetesIssue | undefined, onSelectRe
   }
   const validIssue = Boolean(issue?.root.uid && issue.root.namespace && Number.isFinite(Date.parse(issue.broke_at ?? "")));
   const window = validIssue ? breakLogWindow(params, issue!.broke_at!) : undefined;
-  const options: KubernetesBreakLogQuery = { namespace: issue?.root.namespace ?? "", root_uid: issue?.root.uid ?? "", occurrence_id: issue?.occurrence_id || params.get("occurrence_id") || undefined, center: params.get("center") || issue?.broke_at || undefined, since: window?.from ?? "", until: window?.to ?? "", pods, mode, level, q: search, limit: 500, container };
+  const requestedCenter = params.get("center") || undefined;
+  const occurrenceTime = timestampNanos(issue?.broke_at ?? "");
+  // A journal row can carry a later observation time. Resolve the log selector
+  // from the selected occurrence, preserving raw precision only for the same instant.
+  const center = occurrenceTime !== undefined && requestedCenter && timestampNanos(requestedCenter) === occurrenceTime
+    ? requestedCenter : issue?.broke_at || undefined;
+  const options: KubernetesBreakLogQuery = { namespace: issue?.root.namespace ?? "", root_uid: issue?.root.uid ?? "", occurrence_id: issue?.occurrence_id || params.get("occurrence_id") || undefined, center, since: window?.from ?? "", until: window?.to ?? "", pods, mode, level, q: search, limit: 500, container };
   const queryKey = key("kubernetes-break-logs", options, sourceScope, cacheFence);
   const protectedKey = JSON.stringify(queryKey);
   // Parent credential/authority fences remove protected cache entries.

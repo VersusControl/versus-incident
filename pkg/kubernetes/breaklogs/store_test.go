@@ -335,6 +335,22 @@ func TestMergeSuccessfulRetryOnlySupersedesMatchingBudgetInterval(t *testing.T) 
 	}
 }
 
+func TestOccurrenceSelectorIsIndependentOfLogWindow(t *testing.T) {
+	at := time.Now().UTC()
+	for _, id := range []string{"", "occurrence"} {
+		for _, center := range []time.Time{at.Add(-3 * time.Hour), at.Add(time.Hour)} {
+			query := Query{Namespace: "shop", RootUID: "root", OccurrenceID: id, Center: center, From: at.Add(-time.Hour), To: at}
+			if err := query.Validate(); err != nil {
+				t.Fatalf("valid independent selector rejected: %v", err)
+			}
+			query.To = query.From.Add(2*time.Hour + time.Second)
+			if err := query.Validate(); err == nil {
+				t.Fatal("relaxing selector widened log window budget")
+			}
+		}
+	}
+}
+
 func TestCursorScopeFiltersAndObservationBound(t *testing.T) {
 	now := time.Now().UTC()
 	query := Query{Namespace: "shop", RootUID: "root", From: now.Add(-time.Hour), To: now, Limit: 10}

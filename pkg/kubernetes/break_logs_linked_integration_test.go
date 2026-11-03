@@ -199,7 +199,7 @@ func TestRetainedBreakExcerptReopensAfterAuthorizationRecovery(t *testing.T) {
 			scope := Scope{OrgID: "default", ClusterID: cluster, CredentialID: "configured"}
 			now := time.Now().UTC()
 			open := func(generation uint64, principal string) *Service {
-				source := &expiringBearerSource{principal: principal, now: time.Now, refresh: func(context.Context) (string, time.Time, error) {
+				source := &expiringBearerSource{principal: principal, principalVerified: true, now: time.Now, refresh: func(context.Context) (string, time.Time, error) {
 					return "reopen-token-canary", now.Add(time.Hour), nil
 				}}
 				client, err := NewClient(Config{Endpoint: kube, Credentials: source, AllowLoopbackHTTP: true})
@@ -216,6 +216,7 @@ func TestRetainedBreakExcerptReopensAfterAuthorizationRecovery(t *testing.T) {
 			}
 			// The live process recovered three times; a new process starts at zero.
 			first := open(3, "verified-reader")
+			reviewHistoryCycle(t, first)
 			at := now.Add(-4 * time.Minute).Truncate(time.Second)
 			manifest := breaklogs.Manifest{ID: breaklogs.ManifestIdentity("0e1031b7-e2cc-4642-a0c9-84c5235d506e", at), Namespace: "retained-reopen", RootUID: "0e1031b7-e2cc-4642-a0c9-84c5235d506e", BreakAt: at, From: at.Add(-5 * time.Minute), To: at.Add(2 * time.Minute), CapturedAt: now, Attempts: 1}
 			manifest.OccurrenceID = manifest.ID
@@ -311,6 +312,11 @@ func linkedKube(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	recorder := httptest.NewRecorder()
+	fixture.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/_fake/mutate", strings.NewReader(`{"operation":"upsert","resource":"namespaces","name":"kube-system","object":{"kind":"Namespace","metadata":{"uid":"linked-physical"}}}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatal("physical identity fixture failed")
+	}
 	server := httptest.NewServer(fixture)
 	t.Cleanup(server.Close)
 	return server.URL
@@ -347,7 +353,7 @@ func statefulSetSnapshot(namespace, root string, pods ...kubeindex.Record) kubei
 	return kubeindex.Snapshot{Records: records, Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}, "StatefulSet": {State: "ready"}}}
 }
 
-func manifestFor(t *testing.T, store *kubechanges.Store, id, namespace, root string, breakAt, now time.Time, settleAt time.Time, pods ...breaklogs.ManifestPod) breaklogs.Manifest {
+func manifestFor(t *testing.T, id, namespace, root string, breakAt, now, settleAt time.Time, pods ...breaklogs.ManifestPod) breaklogs.Manifest {
 	t.Helper()
 	manifest := breaklogs.Manifest{ID: id, Namespace: namespace, RootUID: root, BreakAt: breakAt, From: breakAt.Add(-5 * time.Minute), To: breakAt.Add(2 * time.Minute), CapturedAt: now, SettleAt: settleAt, Pods: pods}
 	if manifest.Pods == nil {
@@ -594,7 +600,7 @@ func TestLinkedBreakSameNameReplacementAndUnknownLifetime(t *testing.T) {
 				{Namespace: ambiguousNamespace, RootUID: "root-amb", Name: "db-0", UID: "uid-a", CreatedAt: t0.Add(-time.Hour), LastSeen: t0.Add(-3 * time.Minute), DeletedAt: t0.Add(-3 * time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-time.Hour)}}},
 				{Namespace: ambiguousNamespace, RootUID: "root-amb", Name: "db-0", UID: "uid-b", CreatedAt: t0.Add(-5 * time.Minute), LastSeen: t0.Add(-90 * time.Second), DeletedAt: t0.Add(-90 * time.Second), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-5 * time.Minute)}}},
 			}
-			ambiguous := manifestFor(t, store, breaklogs.ManifestIdentity("root-amb", t0.Add(-4*time.Minute)), ambiguousNamespace, "root-amb", t0.Add(-4*time.Minute), t0, time.Time{}, overlap...)
+			ambiguous := manifestFor(t, breaklogs.ManifestIdentity("root-amb", t0.Add(-4*time.Minute)), ambiguousNamespace, "root-amb", t0.Add(-4*time.Minute), t0, time.Time{}, overlap...)
 			if err := store.CommitBreakLogs(nil, nil, "", "owner", t0, ambiguous); err != nil {
 				t.Fatal(err)
 			}
@@ -638,8 +644,8 @@ func TestLinkedBreakRepeatedOccurrencesStayPinned(t *testing.T) {
 			pod := breaklogs.ManifestPod{Namespace: namespace, RootUID: "root-r", Name: "api-0", UID: "uid-r", CreatedAt: t0.Add(-time.Hour), LastSeen: t0.Add(-time.Minute), DeletedAt: t0.Add(-time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-time.Hour)}}}
 			firstAt := t0.Add(-40*time.Minute + 7*time.Nanosecond)
 			secondAt := t0.Add(-15*time.Minute + 11*time.Nanosecond)
-			first := manifestFor(t, store, breaklogs.ManifestIdentity("root-r", firstAt), namespace, "root-r", firstAt, t0, t0.Add(-time.Second), pod)
-			second := manifestFor(t, store, breaklogs.ManifestIdentity("root-r", secondAt), namespace, "root-r", secondAt, t0, t0.Add(-time.Second), pod)
+			first := manifestFor(t, breaklogs.ManifestIdentity("root-r", firstAt), namespace, "root-r", firstAt, t0, t0.Add(-time.Second), pod)
+			second := manifestFor(t, breaklogs.ManifestIdentity("root-r", secondAt), namespace, "root-r", secondAt, t0, t0.Add(-time.Second), pod)
 			if err := store.CommitBreakLogs(nil, nil, "", "owner", t0, first, second); err != nil {
 				t.Fatal(err)
 			}
@@ -664,9 +670,9 @@ func TestLinkedBreakRepeatedOccurrencesStayPinned(t *testing.T) {
 				}
 			}
 			sameAt := t0.Add(-25 * time.Minute)
-			dupA := manifestFor(t, store, "occurrence-a", namespace, "root-r", sameAt, t0, time.Time{}, pod)
+			dupA := manifestFor(t, "occurrence-a", namespace, "root-r", sameAt, t0, time.Time{}, pod)
 			dupA.OccurrenceID = "occurrence-a"
-			dupB := manifestFor(t, store, "occurrence-b", namespace, "root-r", sameAt, t0, time.Time{}, pod)
+			dupB := manifestFor(t, "occurrence-b", namespace, "root-r", sameAt, t0, time.Time{}, pod)
 			dupB.OccurrenceID = "occurrence-b"
 			if err := store.CommitBreakLogs(nil, nil, "", "owner", time.Now().UTC(), dupA, dupB); err != nil {
 				t.Fatal(err)
@@ -674,8 +680,8 @@ func TestLinkedBreakRepeatedOccurrencesStayPinned(t *testing.T) {
 			if _, err := reopened.BreakLogs(context.Background(), breaklogs.Query{Namespace: namespace, RootUID: "root-r", Center: sameAt, From: dupA.From, To: dupA.To}); !errors.Is(err, ErrInvalidArguments) {
 				t.Fatalf("ambiguous center accepted: %v", err)
 			}
-			if _, err := reopened.BreakLogs(context.Background(), breaklogs.Query{Namespace: namespace, RootUID: "root-r", OccurrenceID: "occurrence-a", Center: secondAt, From: second.From, To: second.To}); !errors.Is(err, ErrInvalidArguments) {
-				t.Fatalf("mismatched occurrence and center accepted: %v", err)
+			if page, err := reopened.BreakLogs(context.Background(), breaklogs.Query{Namespace: namespace, RootUID: "root-r", OccurrenceID: "occurrence-a", Center: secondAt, From: second.From, To: second.To}); err != nil || page.OccurrenceID != "occurrence-a" || !page.Window.From.Equal(second.From) || !page.Window.To.Equal(second.To) {
+				t.Fatalf("ID did not preserve canonical selection and requested window: %v", err)
 			}
 		})
 	}
@@ -704,7 +710,7 @@ func TestLinkedSettleTakeoverFencesStaleOwnerAwaitingResponse(t *testing.T) {
 			namespace := "takeover"
 			breakAt := t0.Add(-11 * time.Minute)
 			pod := breaklogs.ManifestPod{Namespace: namespace, RootUID: "root-t", Name: "api-0", UID: "uid-t", CreatedAt: t0.Add(-time.Hour), LastSeen: t0.Add(-8 * time.Minute), DeletedAt: t0.Add(-8 * time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-time.Hour)}}}
-			manifest := manifestFor(t, storeA, breaklogs.ManifestIdentity("root-t", breakAt), namespace, "root-t", breakAt, t0, t0.Add(-time.Second), pod)
+			manifest := manifestFor(t, breaklogs.ManifestIdentity("root-t", breakAt), namespace, "root-t", breakAt, t0, t0.Add(-time.Second), pod)
 			if err := storeA.CommitBreakLogs(nil, nil, "", "replica-a", t0, manifest); err != nil {
 				t.Fatal(err)
 			}
@@ -810,7 +816,7 @@ func TestLinkedSettlePostgresOutageKeepsAttemptsBounded(t *testing.T) {
 	pod := breaklogs.ManifestPod{Namespace: namespace, RootUID: "root-o", Name: "api-0", UID: "uid-o", CreatedAt: t0.Add(-time.Hour), LastSeen: t0.Add(-8 * time.Minute), DeletedAt: t0.Add(-8 * time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-time.Hour)}}}
 	keep := breaklogs.Snapshot{Cluster: cluster, Namespace: namespace, RootUID: "root-o", Pod: "api-0", PodUID: "uid-o", PodCreatedAt: pod.CreatedAt, Container: "app", Slot: "current", CapturedAt: t0, From: breakAt.Add(-5 * time.Minute), To: breakAt.Add(-4 * time.Minute), Lines: []breaklogs.Line{{At: breakAt.Add(-270 * time.Second), Text: "captured before outage"}}}
 	keep.ID = breaklogs.Identity(keep)
-	manifest := manifestFor(t, store, breaklogs.ManifestIdentity("root-o", breakAt), namespace, "root-o", breakAt, t0, t0.Add(-time.Second), pod)
+	manifest := manifestFor(t, breaklogs.ManifestIdentity("root-o", breakAt), namespace, "root-o", breakAt, t0, t0.Add(-time.Second), pod)
 	if err := store.CommitBreakLogs([]breaklogs.Snapshot{keep}, nil, "", "owner", t0, manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +900,7 @@ func TestLinkedSettleDeploymentAdmissionAcrossReplicaProcesses(t *testing.T) {
 			namespace := fmt.Sprintf("adm-%d-%d", len(ids), position)
 			breakAt := t0.Add(-11*time.Minute - time.Duration(position)*time.Second)
 			pod := breaklogs.ManifestPod{Namespace: namespace, RootUID: "root", Name: "api-0", UID: "uid-" + namespace, CreatedAt: t0.Add(-time.Hour), LastSeen: t0.Add(-8 * time.Minute), DeletedAt: t0.Add(-8 * time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-time.Hour)}}}
-			manifest := manifestFor(t, store, breaklogs.ManifestIdentity("root", breakAt), namespace, "root", breakAt, t0, t0.Add(-time.Second), pod)
+			manifest := manifestFor(t, breaklogs.ManifestIdentity("root", breakAt), namespace, "root", breakAt, t0, t0.Add(-time.Second), pod)
 			if err := store.CommitBreakLogs(nil, nil, "", "", t0, manifest); err != nil {
 				t.Fatal(err)
 			}
@@ -1117,7 +1123,7 @@ func TestLinkedBreakCacheSourceSwitchAndCrossReplicaSettle(t *testing.T) {
 			namespace := "cache"
 			breakAt := t0.Add(-30 * time.Minute)
 			pod := breaklogs.ManifestPod{Namespace: namespace, RootUID: "root-c", Name: "api-0", UID: "uid-c", CreatedAt: t0.Add(-2 * time.Hour), LastSeen: t0.Add(-time.Minute), DeletedAt: t0.Add(-time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-2 * time.Hour)}}}
-			manifest := manifestFor(t, store, breaklogs.ManifestIdentity("root-c", breakAt), namespace, "root-c", breakAt, t0, t0.Add(-time.Second), pod)
+			manifest := manifestFor(t, breaklogs.ManifestIdentity("root-c", breakAt), namespace, "root-c", breakAt, t0, t0.Add(-time.Second), pod)
 			if err := store.CommitBreakLogs(nil, nil, "", "writer", t0, manifest); err != nil {
 				t.Fatal(err)
 			}
@@ -1216,7 +1222,7 @@ func linkedSingleReplicaConcurrency(t *testing.T, provider storage.Provider) {
 		namespace := fmt.Sprintf("single-%d", position)
 		breakAt := t0.Add(-11*time.Minute - time.Duration(position)*time.Second)
 		pod := breaklogs.ManifestPod{Namespace: namespace, RootUID: "root", Name: "api-0", UID: "uid-" + namespace, CreatedAt: t0.Add(-time.Hour), LastSeen: t0.Add(-8 * time.Minute), DeletedAt: t0.Add(-8 * time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: t0.Add(-time.Hour)}}}
-		if err := store.CommitBreakLogs(nil, nil, "", "owner", t0, manifestFor(t, store, breaklogs.ManifestIdentity("root", breakAt), namespace, "root", breakAt, t0, t0.Add(-time.Second), pod)); err != nil {
+		if err := store.CommitBreakLogs(nil, nil, "", "owner", t0, manifestFor(t, breaklogs.ManifestIdentity("root", breakAt), namespace, "root", breakAt, t0, t0.Add(-time.Second), pod)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1650,7 +1656,7 @@ func TestLinkedBreakIdleTicksBoundedWrites(t *testing.T) {
 			now := time.Now().UTC()
 			breakAt := now.Add(-11 * time.Minute)
 			pod := breaklogs.ManifestPod{Namespace: "idle-break", RootUID: "root-i", Name: "api-0", UID: "uid-i", CreatedAt: now.Add(-time.Hour), LastSeen: now.Add(-8 * time.Minute), DeletedAt: now.Add(-8 * time.Minute), Containers: []breaklogs.ManifestContainer{{Name: "app", StartedAt: now.Add(-time.Hour)}}}
-			manifest := manifestFor(t, store, breaklogs.ManifestIdentity("root-i", breakAt), "idle-break", "root-i", breakAt, now, now.Add(-time.Second), pod)
+			manifest := manifestFor(t, breaklogs.ManifestIdentity("root-i", breakAt), "idle-break", "root-i", breakAt, now, now.Add(-time.Second), pod)
 			if err := store.CommitBreakLogs(nil, nil, "", "", now, manifest); err != nil {
 				t.Fatal(err)
 			}
