@@ -11,7 +11,8 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { ApiError } from "@/lib/api";
-import { Sidebar, SidebarContent } from "./Sidebar";
+import { Sidebar, SidebarContent, SideLink } from "./Sidebar";
+import { Boxes } from "lucide-react";
 
 // This runner exposes node's experimental global localStorage, whose methods
 // aren't callable without a backing file. Install a tiny in-memory Storage so
@@ -108,19 +109,22 @@ async function renderSettled() {
   await screen.findByText("Enterprise");
 }
 
-// The primary nav is a flat list: each Zone renders a header <div> followed by
-// its <a> links as siblings. Walk it into { sectionTitle -> [hrefs] } so we can
-// assert grouping by what actually renders, independent of the source arrays.
+// The primary nav is a list of zone headers (marked data-nav-zone) followed by
+// their links, with nested destinations inside a disclosure group. Walk it in
+// document order so we can assert grouping by what actually renders,
+// independent of the source arrays.
 function navSections(): Record<string, string[]> {
   const nav = screen.getByRole("navigation", { name: "Primary" });
   const sections: Record<string, string[]> = {};
   let current = "";
-  for (const child of Array.from(nav.children)) {
-    if (child.tagName === "A") {
-      (sections[current] ??= []).push(child.getAttribute("href") ?? "");
-    } else {
-      current = child.textContent?.trim() ?? "";
+  for (const node of Array.from(
+    nav.querySelectorAll<HTMLElement>("[data-nav-zone], a"),
+  )) {
+    if (node.hasAttribute("data-nav-zone")) {
+      current = node.getAttribute("data-nav-zone") ?? "";
       sections[current] ??= [];
+    } else {
+      (sections[current] ??= []).push(node.getAttribute("href") ?? "");
     }
   }
   return sections;
@@ -446,3 +450,66 @@ describe("Sidebar desktop rail — collapse / expand toggle", () => {
 });
 
 
+
+// Connectors owns more than one destination: the zone keeps a plain link for
+// Kubernetes and a disclosure for the AWS connector, whose Settings page is
+// the only child until the rest of that surface lands.
+describe("Sidebar — AWS connector submenu", () => {
+  function awsGroup() {
+    return screen.getByRole("button", { name: /AWS/ }).closest("[data-nav-group]") as HTMLElement;
+  }
+
+  it("keeps AWS closed by default and reveals Settings when expanded", async () => {
+    await renderSettled();
+    const toggle = screen.getByRole("button", { name: /AWS/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(within(awsGroup()).queryByRole("link", { name: "Settings" })).toBeNull();
+
+    fireEvent.click(toggle);
+
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const settings = within(awsGroup()).getByRole("link", { name: "Settings" });
+    expect(settings.getAttribute("href")).toBe("/aws/settings");
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(within(awsGroup()).queryByRole("link", { name: "Settings" })).toBeNull();
+  });
+
+  it("keeps the zone's other destinations unchanged", async () => {
+    await renderSettled();
+    expect(navSections().Connectors).toEqual(["/agent/kubernetes"]);
+    fireEvent.click(screen.getByRole("button", { name: /AWS/ }));
+    expect(navSections().Connectors).toEqual(["/agent/kubernetes", "/aws/settings"]);
+  });
+
+  it("lists the AWS child in the collapsed rail's flyout", async () => {
+    window.localStorage.setItem("versus.sidebar.collapsed", "1");
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <Sidebar />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const connectors = await screen.findByRole("link", { name: "Connectors" });
+    fireEvent.mouseEnter(connectors.parentElement as HTMLElement);
+    const flyout = screen.getByTestId("nav-flyout-connectors");
+    expect(within(flyout).getByText("AWS")).toBeTruthy();
+    expect(
+      within(flyout).getByRole("link", { name: "Settings" }).getAttribute("href"),
+    ).toBe("/aws/settings");
+  });
+
+  it("renders a badge at the end of a row when one is supplied", () => {
+    render(
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+        <SideLink to="/agent/accounts" label="Accounts" icon={Boxes} badge="3" />
+      </MemoryRouter>,
+    );
+    const link = screen.getByRole("link", { name: /Accounts/ });
+    expect(link.textContent).toBe("Accounts3");
+  });
+});

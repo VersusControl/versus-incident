@@ -207,3 +207,149 @@ func TestConnectorEndpointCIDRsNormalize(t *testing.T) {
 		}
 	}
 }
+
+func awsAccount(accountID string, fields map[string]any) map[string]any {
+	account := map[string]any{"account_id": accountID}
+	for key, value := range fields {
+		account[key] = value
+	}
+	return account
+}
+
+func TestAWSConnectorConfigShape(t *testing.T) {
+	t.Setenv("AWS_EXTERNAL_ID", "external-value")
+	loaded, err := decodeConnectors(map[string]any{"aws": map[string]any{
+		"enable": true,
+		"accounts": []any{
+			awsAccount("111122223333", map[string]any{
+				"display_name": "Production",
+				"regions":      "auto",
+				"auth": map[string]any{
+					"mode":        "assume_role",
+					"role_arn":    "arn:aws:iam::111122223333:role/versus-reader",
+					"external_id": "${AWS_EXTERNAL_ID}",
+				},
+			}),
+			awsAccount("444455556666", map[string]any{
+				"regions": []any{"us-east-1", "eu-west-1"},
+				"auth":    map[string]any{"mode": "default_chain"},
+			}),
+		},
+		"tags":    map[string]any{"value_allowlist": []any{"Name", "app", "service"}},
+		"budgets": map[string]any{"max_requests_per_second": "4"},
+		"optional_data": map[string]any{
+			"cost_explorer":   false,
+			"security_hub":    true,
+			"config":          false,
+			"trusted_advisor": false,
+		},
+		"health_check_interval": "10m",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connector := loaded.AWS
+	if !connector.Enable || len(connector.Accounts) != 2 || connector.Budgets.MaxRequestsPerSecond != 4 || connector.HealthCheckInterval != "10m" {
+		t.Fatalf("aws connector = %+v", connector)
+	}
+	first, second := connector.Accounts[0], connector.Accounts[1]
+	if first.AccountID != "111122223333" || first.DisplayName != "Production" || len(first.Regions) != 0 || first.Auth.Mode != "assume_role" || first.Auth.ExternalID != "external-value" {
+		t.Fatalf("first account = %+v", first)
+	}
+	if !reflect.DeepEqual(second.Regions, []string{"us-east-1", "eu-west-1"}) || second.Auth.Mode != "default_chain" {
+		t.Fatalf("second account = %+v", second)
+	}
+	if !connector.OptionalData.SecurityHub || connector.OptionalData.CostExplorer || len(connector.Tags.ValueAllowlist) != 3 {
+		t.Fatalf("aws options = %+v", connector)
+	}
+
+	cloned := cloneConnectorsConfig(loaded)
+	cloned.AWS.Accounts[1].Regions[0] = "changed"
+	cloned.AWS.Tags.ValueAllowlist[0] = "changed"
+	cloned.AWS.Accounts[0].Auth.ExternalID = "changed"
+	if loaded.AWS.Accounts[1].Regions[0] != "us-east-1" || loaded.AWS.Tags.ValueAllowlist[0] != "Name" || loaded.AWS.Accounts[0].Auth.ExternalID != "external-value" {
+		t.Fatal("aws clone mutated source")
+	}
+}
+
+func TestAWSConnectorDefaults(t *testing.T) {
+	loaded, err := decodeConnectors(map[string]any{"aws": map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.AWS.Budgets.MaxRequestsPerSecond != 2 || loaded.AWS.HealthCheckInterval != "5m" || loaded.AWS.Enable {
+		t.Fatalf("aws defaults = %+v", loaded.AWS)
+	}
+}
+
+func TestAWSConnectorRejections(t *testing.T) {
+	t.Setenv("AWS_EXTERNAL_ID", "external-value")
+	base := func(fields map[string]any) map[string]any {
+		account := map[string]any{
+			"account_id": "111122223333",
+			"auth": map[string]any{
+				"mode":        "assume_role",
+				"role_arn":    "arn:aws:iam::111122223333:role/versus-reader",
+				"external_id": "${AWS_EXTERNAL_ID}",
+			},
+		}
+		for key, value := range fields {
+			account[key] = value
+		}
+		return map[string]any{"aws": map[string]any{"accounts": []any{account}}}
+	}
+	cases := []map[string]any{
+		{"aws": map[string]any{"actions": map[string]any{"enable": true}, "accounts": []any{}}},
+		base(map[string]any{"account_id": "11112222333"}),
+		base(map[string]any{"account_id": "sensitive-value"}),
+		base(map[string]any{"display_name": strings.Repeat("a", 129)}),
+		base(map[string]any{"regions": []any{}}),
+		base(map[string]any{"regions": "manual"}),
+		base(map[string]any{"regions": []any{"us-east", "sensitive-value"}}),
+		base(map[string]any{"auth": map[string]any{"mode": "assume_role"}}),
+		base(map[string]any{"auth": map[string]any{"mode": "assume_role", "role_arn": "arn:aws-iso:iam::111122223333:role/reader"}}),
+		base(map[string]any{"auth": map[string]any{"mode": "assume_role", "role_arn": "arn:aws:iam::111122223333:role/reader", "external_id": "sensitive-value"}}),
+		base(map[string]any{"auth": map[string]any{"mode": "assume_role", "role_arn": "arn:aws:iam::111122223333:role/reader", "external_id": "${MISSING"}}),
+		base(map[string]any{"auth": map[string]any{"mode": "assume_role", "role_arn": "arn:aws:iam::111122223333:role/reader", "external_id": ""}}),
+		base(map[string]any{"auth": map[string]any{"mode": "default_chain", "role_arn": "arn:aws:iam::111122223333:role/reader"}}),
+		base(map[string]any{"auth": map[string]any{"mode": "web_identity", "external_id": "${AWS_EXTERNAL_ID}"}}),
+		base(map[string]any{"auth": map[string]any{"mode": "sensitive-value"}}),
+		{"aws": map[string]any{"accounts": []any{
+			awsAccount("111122223333", map[string]any{"auth": map[string]any{"mode": "default_chain"}}),
+			awsAccount("111122223333", map[string]any{"auth": map[string]any{"mode": "default_chain"}}),
+		}}},
+		{"aws": map[string]any{"budgets": map[string]any{"max_requests_per_second": -1}}},
+		{"aws": map[string]any{"budgets": map[string]any{"max_requests_per_second": 2000}}},
+		{"aws": map[string]any{"health_check_interval": "5s"}},
+		{"aws": map[string]any{"health_check_interval": "sensitive-value"}},
+		{"aws": map[string]any{"tags": map[string]any{"value_allowlist": []any{"Name", ""}}}},
+		{"aws": map[string]any{"tags": map[string]any{"value_allowlist": []any{"sensitive-value,other"}}}},
+	}
+	for index, input := range cases {
+		_, err := decodeConnectors(input)
+		if err == nil || strings.Contains(err.Error(), "sensitive-value") {
+			t.Fatalf("case %d: unsafe or missing rejection: %v", index, err)
+		}
+	}
+}
+
+func TestAWSConnectorEnableEnvironmentOverride(t *testing.T) {
+	directory := t.TempDir()
+	main := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(main, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "connectors.yaml"), []byte("connectors:\n  aws:\n    enable: false\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VERSUS_CONNECTORS_AWS_ENABLE", "true")
+	loaded, err := loadConfigFromPath(main)
+	if err != nil || !loaded.Connectors.AWS.Enable {
+		t.Fatalf("enable override: %v", err)
+	}
+	t.Setenv("VERSUS_CONNECTORS_AWS_ENABLE", "false")
+	loaded, err = loadConfigFromPath(main)
+	if err != nil || loaded.Connectors.AWS.Enable {
+		t.Fatalf("disable override: %v", err)
+	}
+}

@@ -531,6 +531,15 @@ func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
 		out.Kubernetes.Clusters[index].ChangeCapture = src.Kubernetes.Clusters[index].ChangeCapture
 		out.Kubernetes.Clusters[index].EndpointCIDRs = append([]string(nil), src.Kubernetes.Clusters[index].EndpointCIDRs...)
 	}
+	out.AWS = src.AWS
+	out.AWS.Tags.ValueAllowlist = append([]string(nil), src.AWS.Tags.ValueAllowlist...)
+	if src.AWS.Accounts != nil {
+		out.AWS.Accounts = make([]AWSAccountConfig, len(src.AWS.Accounts))
+		for index, account := range src.AWS.Accounts {
+			out.AWS.Accounts[index] = account
+			out.AWS.Accounts[index].Regions = append([]string(nil), account.Regions...)
+		}
+	}
 	return out
 }
 

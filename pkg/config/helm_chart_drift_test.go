@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -505,4 +506,40 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestHelmChartRendersAWSConnectors proves the chart's AWS connector block
+// round-trips through the real loader: account identity, explicit versus auto
+// regions, the external-ID placeholder, and the budget and optional-data
+// defaults all survive rendering.
+func TestHelmChartRendersAWSConnectors(t *testing.T) {
+	requireRenderableChart(t)
+	t.Setenv("VERSUS_AWS_EXTERNAL_ID", "external-value")
+	files := renderChartFiles(t, chartScenario{name: "aws-connectors", args: []string{"-f", coverageValues}})
+	directory := t.TempDir()
+	for name, body := range files {
+		if strings.HasSuffix(name, ".yaml") {
+			if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aws := loaded.Connectors.AWS
+	if !aws.Enable || len(aws.Accounts) != 2 {
+		t.Fatalf("aws connector = %+v", aws)
+	}
+	first, second := aws.Accounts[0], aws.Accounts[1]
+	if first.AccountID != "111122223333" || first.Auth.Mode != "assume_role" || first.Auth.ExternalID != "external-value" || !reflect.DeepEqual(first.Regions, []string{"us-east-1", "eu-west-1"}) {
+		t.Fatalf("first account = %+v", first)
+	}
+	if second.AccountID != "444455556666" || len(second.Regions) != 0 || second.Auth.Mode != "default_chain" {
+		t.Fatalf("second account = %+v", second)
+	}
+	if aws.Budgets.MaxRequestsPerSecond != 2 || aws.HealthCheckInterval != "5m" || aws.OptionalData.CostExplorer || aws.OptionalData.SecurityHub {
+		t.Fatalf("aws defaults = %+v", aws)
+	}
 }

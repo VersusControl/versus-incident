@@ -151,3 +151,30 @@ agent:
       file:
         path: /var/log/app.log
         from_beginning: false
+
+connectors:
+  aws:
+    enable: true
+    accounts:
+      - accountId: "111122223333"
+        displayName: Production
+        regions: [us-east-1, eu-west-1]
+        auth:
+          mode: assume_role
+          roleArn: arn:aws:iam::111122223333:role/versus-reader
+          externalIdEnv: VERSUS_AWS_EXTERNAL_ID
+      - accountId: "444455556666"
+        displayName: Staging
+        regions: auto
+        auth:
+          mode: default_chain
+    tags:
+      valueAllowlist: [Name, app, service, team, env]
+    budgets:
+      maxRequestsPerSecond: 2
+    optionalData:
+      costExplorer: false
+      securityHub: false
+      config: false
+      trustedAdvisor: false
+    healthCheckInterval: "5m"

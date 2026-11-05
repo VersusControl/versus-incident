@@ -1,0 +1,82 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "MetadataReads",
+      "Effect": "Allow",
+      "Resource": "*",
+      "Action": [
+        "apigateway:GET",
+        "autoscaling:Describe*",
+        "health:Describe*",
+        "cloudformation:Describe*",
+        "cloudfront:List*",
+        "cloudtrail:LookupEvents",
+        "cloudwatch:DescribeAlarms*",
+        "config:Describe*",
+        "dynamodb:DescribeTable",
+        "dynamodb:ListTables",
+        "ec2:Describe*",
+        "ecs:Describe*",
+        "ecs:List*",
+        "eks:Describe*",
+        "eks:List*",
+        "elasticache:Describe*",
+        "elasticloadbalancing:Describe*",
+        "events:Describe*",
+        "events:List*",
+        "iam:GetRole",
+        "iam:List*",
+        "kinesis:Describe*",
+        "kinesis:List*",
+        "lambda:GetFunctionConfiguration",
+        "lambda:List*",
+        "rds:Describe*",
+        "route53:GetHealthCheckStatus",
+        "route53:List*",
+        "s3:GetBucketLocation",
+        "s3:GetBucketPolicyStatus",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetEncryptionConfiguration",
+        "s3:ListAllMyBuckets",
+        "sns:GetTopicAttributes",
+        "sns:List*",
+        "sqs:GetQueueAttributes",
+        "sqs:List*",
+        "states:Describe*",
+        "states:List*",
+        "resource-explorer-2:Search",
+        "servicecatalog:ListApplications",
+        "tag:GetResources"
+      ]
+    },
+    {
+      "Sid": "DenyDataPlaneAndSecretReads",
+      "Effect": "Deny",
+      "Resource": "*",
+      "Action": [
+        "s3:GetObject",
+        "secretsmanager:GetSecretValue",
+        "ssm:GetParameter*",
+        "kms:Decrypt",
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "lambda:GetFunction",
+        "ec2:GetConsoleOutput",
+        "logs:GetLogEvents"
+      ]
+    },
+    {
+      "Sid": "DenyBillingAccountSurfaces",
+      "Effect": "Deny",
+      "Resource": "*",
+      "Action": [
+        "aws-portal:*",
+        "billing:*",
+        "invoicing:*",
+        "payments:*"
+      ]
+    }
+  ]
+}

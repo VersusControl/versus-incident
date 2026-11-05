@@ -17,6 +17,8 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/agent/act"
 	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
+	awslimit "github.com/VersusControl/versus-incident/pkg/aws/limit"
+	awssettings "github.com/VersusControl/versus-incident/pkg/aws/settings"
 	c "github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -242,6 +244,8 @@ func main() {
 	}
 	toolAvailability.BindIntegrationConstruction("kubernetes", constructed > 0, constructionHealth)
 	registerToolAvailabilityController(app, toolAvailability, kubernetesService)
+	awsSettingsService := registerAWSSettingsController(app, store, cfg)
+	awsSettingsService.Start(rootCtx)
 	if err := registerActionHistoryService(store); err != nil {
 		log.Fatalf("action history: failed to start: %v", err)
 	}
@@ -322,6 +326,20 @@ func registerActionHistoryService(store storage.Provider) error {
 		return service
 	})
 	return nil
+}
+
+// registerAWSSettingsController mounts the AWS connector's admin surface and
+// returns the service so boot can start its health and self-test loops.
+func registerAWSSettingsController(app *fiber.App, store storage.Provider, cfg *c.Config) *awssettings.Service {
+	limiter := awslimit.NewManager(cfg.Connectors.AWS.Budgets.MaxRequestsPerSecond)
+	service := awssettings.NewService(
+		awssettings.NewStore(store, tenancy.DefaultOrgScope()),
+		awssettings.WithConfig(func() c.AWSConnectorConfig { return c.GetConfig().Connectors.AWS }),
+		awssettings.WithLimiter(limiter),
+		awssettings.WithAIInfo(awssettings.AIInfo{Enabled: cfg.Agent.AI.Enable, Provider: cfg.Agent.AI.Provider, Model: cfg.Agent.AI.Model}),
+	)
+	controllers.NewAWSSettingsController(service).Register(app.Group("/api"))
+	return service
 }
 
 func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService, services ...*kubernetes.ServiceRegistry) {

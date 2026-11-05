@@ -510,6 +510,7 @@ func loadConfigFromPath(path string) (*Config, error) {
 	} else if !os.IsNotExist(statErr) {
 		return nil, fmt.Errorf("cannot access connectors file")
 	}
+	setEnableFromEnv("VERSUS_CONNECTORS_AWS_ENABLE", &loaded.Connectors.AWS.Enable)
 
 	if strings.TrimSpace(loaded.PublicHost) != "" {
 		normalized, err := weborigin.Normalize(loaded.PublicHost)

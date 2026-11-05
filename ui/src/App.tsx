@@ -55,6 +55,10 @@ const ServiceDetailPage = lazyPage(
   () => import("./pages/ServiceDetailPage"),
   "ServiceDetailPage",
 );
+const AwsSettingsPage = lazyPage(
+  () => import("./pages/aws/AwsSettingsPage"),
+  "AwsSettingsPage",
+);
 const MetricsPage = lazyPage(
   () => import("./pages/LearnedSignalsView"),
   "MetricsPage",
@@ -125,6 +129,8 @@ export default function App() {
           <Route path="/agent/chat" element={<AgentRequiredRoute title="DevOps Agent"><ChatPage /></AgentRequiredRoute>} />
           <Route path="/agent/tools" element={<AgentToolsPage />} />
           <Route path="/agent/kubernetes" element={<KubernetesPage />} />
+          <Route path="/aws/settings" element={<AwsSettingsPage />} />
+          <Route path="/aws" element={<Navigate to="/aws/settings" replace />} />
           <Route path="/agent/logs" element={<AgentRequiredRoute title="Logs"><PatternsPage /></AgentRequiredRoute>} />
           <Route path="/agent/logs/:id" element={<AgentRequiredRoute title="Log Pattern"><PatternDetailPage /></AgentRequiredRoute>} />
           <Route path="/agent/patterns/:id" element={<AgentRequiredRoute title="Log Pattern"><PatternDetailPage /></AgentRequiredRoute>} />

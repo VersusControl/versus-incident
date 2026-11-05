@@ -3321,8 +3321,510 @@ export function createKubernetesApi(cluster?: string) {
   };
 }
 
+// ---------- AWS connector (AWS Harness settings) ----------
+//
+// The settings surface is read-only by design: the only writes are the connect
+// wizard, account bookkeeping and the two option endpoints. Every payload below
+// is snake_case on the wire, matching the Go handlers one-for-one.
+
+export type AwsConnectMethod =
+  | "cloudformation"
+  | "terraform"
+  | "existing_role"
+  | "local_profile"
+  | "organizations";
+
+export type AwsAccountStatus = "connected" | "disconnected";
+
+export type AwsServiceStatus =
+  | "readable"
+  | "not_used"
+  | "denied"
+  | "not_on_plan"
+  | "not_checked";
+
+// AwsErrorCode is the CLOSED vocabulary the server reports. Anything else is
+// treated as `unknown` and described generically — AWS's own message text is
+// never surfaced, because it can carry account ids and resource names.
+export type AwsErrorCode =
+  | "no_server_identity"
+  | "role_not_found"
+  | "trust_denied"
+  | "external_id_mismatch"
+  | "session_duration_invalid"
+  | "region_disabled"
+  | "throttled"
+  | "timeout"
+  | "network";
+
+// Counts are numbers; the names behind denials and plan gaps travel beside
+// them as arrays, so the row can name the service instead of only counting it.
+export interface AwsServiceCounts {
+  total: number;
+  readable: number;
+  not_used: number;
+  not_checked: number;
+}
+
+export interface AwsAccountRegions {
+  selected: string[];
+  enabled: number;
+  not_enabled: string[];
+}
+
+export interface AwsApiUse {
+  used_rps: number;
+  budget_rps: number;
+}
+
+export interface AwsAccount {
+  account_id: string;
+  display_name: string;
+  source: "config" | "wizard";
+  status: AwsAccountStatus;
+  checked_at?: string | null;
+  disconnected_since?: string | null;
+  error_code?: AwsErrorCode | null;
+  services: AwsServiceCounts;
+  regions: AwsAccountRegions;
+  api_use: AwsApiUse;
+  role_arn: string;
+  /** Services the role could not read; the row names the first. */
+  denied_services: string[];
+  /** Services the plan does not include; never counted as denials. */
+  not_on_plan_services: string[];
+}
+
+export type AwsOptionalDataKey =
+  | "cost_explorer"
+  | "config"
+  | "security_hub"
+  | "trusted_advisor";
+
+// Where an editable setting came from: `config` is explicitly configured and
+// therefore read-only in the UI; `default` is unset (editable); `wizard` is a
+// value stored through this screen (editable).
+export type AwsValueSource = "config" | "default" | "wizard";
+
+export interface AwsOptionalDataEntry {
+  /** How many accounts have this paid read turned on. */
+  on: number;
+  /** Only `config` locks the control; `default` and `wizard` stay editable. */
+  source: AwsValueSource;
+}
+
+export type AwsOptionalData = Partial<Record<AwsOptionalDataKey, AwsOptionalDataEntry>>;
+
+export interface AwsPrivacy {
+  sent: string[];
+  never_sent: string[];
+  tag_value_allowlist: string[];
+  tag_value_allowlist_source: AwsValueSource;
+  ai: { enabled: boolean; provider: string; model: string };
+  self_test: {
+    passing: boolean;
+    last_run_at?: string | null;
+    leaks_24h: number;
+  };
+}
+
+export interface AwsCapabilities {
+  organizations: boolean;
+  can_write: boolean;
+}
+
+export interface AwsBudget {
+  /** What the limiter is using now, as reported by the server. */
+  used_rps: number;
+  /** Configured ceiling per account and region. */
+  budget_rps: number;
+  source: AwsValueSource;
+}
+
+export interface AwsSettings {
+  enabled: boolean;
+  principal_arn?: string | null;
+  accounts: AwsAccount[];
+  optional_data: AwsOptionalData;
+  privacy: AwsPrivacy;
+  capabilities: AwsCapabilities;
+  budget?: AwsBudget;
+  /** What to change when `enabled` is false. */
+  enable_hint?: { config_key: string; env_var: string };
+}
+
+export interface AwsDraftService {
+  service: string;
+  status: AwsServiceStatus;
+  items?: number;
+  /** Closed probe failure code; the reason words are derived from it. */
+  error_code?: string | null;
+  fix_actions?: string[] | null;
+  retryable?: boolean;
+}
+
+export interface AwsDraftCounts {
+  total: number;
+  readable: number;
+  not_used: number;
+  denied: number;
+  not_on_plan: number;
+  not_checked: number;
+  pending: number;
+}
+
+export interface AwsAssumeResult {
+  ok: boolean;
+  latency_ms?: number | null;
+  error_code?: AwsErrorCode | null;
+}
+
+export interface AwsConnectDraft {
+  draft_id: string;
+  method: AwsConnectMethod;
+  external_id_masked: string;
+  principal_arn?: string | null;
+  template_url?: string | null;
+  terraform_snippet?: string | null;
+  role_arn?: string | null;
+  assume?: AwsAssumeResult | null;
+  services?: AwsDraftService[];
+  counts?: Partial<AwsDraftCounts> | null;
+  fix_policy?: string | null;
+  probe_id?: string | null;
+}
+
+export interface AwsRegionOption {
+  region: string;
+  enabled: boolean;
+  opt_in_status?: string;
+  resources_found: number;
+}
+
+export interface AwsErrorInfo {
+  code: AwsErrorCode | "unknown";
+  title: string;
+  detail: string;
+  fix?: string;
+}
+
+// AWS_ERROR_TEXT is the only place an AWS-facing failure is put into words.
+// Each entry says what happened and the exact thing to change.
+export const AWS_ERROR_TEXT: Record<AwsErrorCode, AwsErrorInfo> = {
+  no_server_identity: {
+    code: "no_server_identity",
+    title: "The Versus server has no AWS identity",
+    detail:
+      "Versus signs in with the instance profile, task role or profile of the machine it runs on.",
+    fix: "Attach an instance role, task role or profile that may call sts:AssumeRole, then restart Versus.",
+  },
+  role_not_found: {
+    code: "role_not_found",
+    title: "Role not found",
+    detail: "AWS has no role at that ARN, or it lives in another account.",
+    fix: "Check the account id and role name in the ARN, then try again.",
+  },
+  trust_denied: {
+    code: "trust_denied",
+    title: "The role trust policy refused Versus",
+    detail: "The role's trust policy does not allow the Versus principal to assume it.",
+    fix: "Add the Versus principal ARN shown above to the role's trust policy.",
+  },
+  external_id_mismatch: {
+    code: "external_id_mismatch",
+    title: "Trust policy does not allow this ExternalId",
+    detail: "The role trusts a different ExternalId than the one this draft generated.",
+    fix: "Copy the ExternalId from this step into the role's trust condition (sts:ExternalId).",
+  },
+  session_duration_invalid: {
+    code: "session_duration_invalid",
+    title: "Session duration not allowed",
+    detail: "The role's maximum session duration is shorter than Versus asks for.",
+    fix: "Raise MaxSessionDuration on the role to at least 15 minutes.",
+  },
+  region_disabled: {
+    code: "region_disabled",
+    title: "Region not enabled for this account",
+    detail: "The account has not opted in to that region.",
+    fix: "Pick an enabled region, or enable the region in the AWS console.",
+  },
+  throttled: {
+    code: "throttled",
+    title: "AWS throttled the request",
+    detail: "Versus is backing off automatically and will retry.",
+    fix: "Nothing to do — the check retries on its own.",
+  },
+  timeout: {
+    code: "timeout",
+    title: "AWS did not answer in time",
+    detail: "The request timed out before AWS replied.",
+    fix: "Retry the check; if it keeps timing out, check the network path to AWS.",
+  },
+  network: {
+    code: "network",
+    title: "Could not reach AWS",
+    detail: "The connection to the AWS endpoint failed.",
+    fix: "Check egress, DNS and any proxy between Versus and AWS.",
+  },
+};
+
+const UNKNOWN_AWS_ERROR: AwsErrorInfo = {
+  code: "unknown",
+  title: "The AWS request failed",
+  detail: "Versus could not complete the request for an unlisted reason.",
+  fix: "Retry; if it persists, check the Versus server logs.",
+};
+
+const AWS_ERROR_CODES = new Set<string>(Object.keys(AWS_ERROR_TEXT));
+
+/** Maps a closed error code (or anything else) to human words. */
+export function awsErrorText(code: string | null | undefined): AwsErrorInfo {
+  if (code && AWS_ERROR_CODES.has(code)) {
+    return AWS_ERROR_TEXT[code as AwsErrorCode];
+  }
+  return UNKNOWN_AWS_ERROR;
+}
+
+/** Reads the closed error code out of an ApiError body, when present. */
+export function awsErrorFrom(error: unknown): AwsErrorInfo {
+  if (error instanceof ApiError && error.body && typeof error.body === "object") {
+    const body = error.body as { error?: unknown; code?: unknown };
+    const code =
+      typeof body.error === "string"
+        ? body.error
+        : typeof body.code === "string"
+          ? body.code
+          : undefined;
+    return awsErrorText(code);
+  }
+  return UNKNOWN_AWS_ERROR;
+}
+
+// The current contract counts readable/not_used/not_checked as numbers and
+// names denials in `denied_services` / `not_on_plan_services`. Older servers
+// put arrays (or a bare count) inside `services`, so the normalizer accepts
+// that shape and lifts the names to the account, where the view reads them.
+type LegacyServiceCounts = AwsServiceCounts & {
+  denied?: unknown;
+  not_on_plan?: unknown;
+  not_checked?: unknown;
+};
+
+type LegacyBudget = {
+  used_rps?: unknown;
+  budget_rps?: unknown;
+  max_requests_per_second?: unknown;
+  source?: unknown;
+};
+
+function asCount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, value);
+  }
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function asStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+}
+
+// A legacy count with no names keeps its size by carrying blank entries; the
+// views count the array and only name a non-empty service.
+function asServiceNames(primary: unknown, legacy: unknown): string[] {
+  const names = asStringList(primary);
+  if (names.length > 0) return names;
+  const legacyNames = asStringList(legacy);
+  if (legacyNames.length > 0) return legacyNames;
+  return Array.from({ length: asCount(primary) || asCount(legacy) }, () => "");
+}
+
+function normalizeAwsAccount(raw: AwsAccount): AwsAccount {
+  const services = (raw.services ?? {}) as LegacyServiceCounts;
+  return {
+    ...raw,
+    services: {
+      total: asCount(services.total),
+      readable: asCount(services.readable),
+      not_used: asCount(services.not_used),
+      not_checked: asCount(services.not_checked),
+    },
+    denied_services: asServiceNames(raw.denied_services, services.denied),
+    not_on_plan_services: asServiceNames(
+      raw.not_on_plan_services,
+      services.not_on_plan,
+    ),
+    regions: {
+      selected: raw.regions?.selected ?? [],
+      enabled: asCount(raw.regions?.enabled),
+      not_enabled: raw.regions?.not_enabled ?? [],
+    },
+    api_use: {
+      used_rps: asCount(raw.api_use?.used_rps),
+      budget_rps: asCount(raw.api_use?.budget_rps),
+    },
+  };
+}
+
+function asValueSource(value: unknown): AwsValueSource {
+  return value === "config" ? "config" : value === "wizard" ? "wizard" : "default";
+}
+
+function normalizeAwsBudget(raw: AwsBudget | LegacyBudget | undefined): AwsBudget | undefined {
+  if (!raw) return undefined;
+  const legacy = raw as LegacyBudget;
+  return {
+    used_rps:
+      typeof legacy.used_rps === "number" && Number.isFinite(legacy.used_rps)
+        ? legacy.used_rps
+        : 0,
+    budget_rps: asCount(legacy.budget_rps) || asCount(legacy.max_requests_per_second),
+    source: asValueSource(legacy.source),
+  };
+}
+
+function normalizeAwsOptionalData(raw: AwsOptionalData | undefined): AwsOptionalData {
+  const out: AwsOptionalData = {};
+  for (const [key, entry] of Object.entries(raw ?? {})) {
+    if (!entry) continue;
+    out[key as AwsOptionalDataKey] = {
+      on: asCount(entry.on),
+      source: asValueSource(entry.source),
+    };
+  }
+  return out;
+}
+
+// A draft probe older than the `error_code` contract carries `reason`; lift it
+// so every view only ever reads one field.
+function normalizeAwsDraft(raw: AwsConnectDraft): AwsConnectDraft {
+  return {
+    ...raw,
+    services: (raw.services ?? []).map((service) => {
+      const legacy = service as AwsDraftService & { reason?: string | null };
+      return {
+        ...service,
+        error_code: service.error_code ?? legacy.reason ?? null,
+      };
+    }),
+  };
+}
+
+// The connector-off payload is just `{enabled:false}`. Normalize every
+// collection so a page never has to branch on a missing field before it can
+// say the connector is off.
+function normalizeAwsSettings(raw: AwsSettings): AwsSettings {
+  return {
+    ...raw,
+    accounts: (raw.accounts ?? []).map(normalizeAwsAccount),
+    budget: normalizeAwsBudget(raw.budget),
+    optional_data: normalizeAwsOptionalData(raw.optional_data),
+    privacy: raw.privacy
+      ? {
+          ...raw.privacy,
+          sent: raw.privacy.sent ?? [],
+          never_sent: raw.privacy.never_sent ?? [],
+          tag_value_allowlist: raw.privacy.tag_value_allowlist ?? [],
+          tag_value_allowlist_source: asValueSource(
+            raw.privacy.tag_value_allowlist_source,
+          ),
+        }
+      : {
+          sent: [],
+          never_sent: [],
+          tag_value_allowlist: [],
+          tag_value_allowlist_source: "default",
+          ai: { enabled: false, provider: "", model: "" },
+          self_test: { passing: true, last_run_at: null, leaks_24h: 0 },
+        },
+    capabilities: raw.capabilities ?? { organizations: false, can_write: false },
+  };
+}
+
+const awsSettingsApi = {
+  awsSettings: () =>
+    request<AwsSettings>("/api/admin/aws/settings").then(normalizeAwsSettings),
+
+  createAwsDraft: (body: { method: AwsConnectMethod }) =>
+    request<AwsConnectDraft>("/api/admin/aws/connect/drafts", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // The full ExternalId is only handed out to admins through this audited
+  // endpoint; the settings payload always carries the masked form.
+  revealAwsExternalId: (draftId: string) =>
+    request<{ external_id: string }>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}/external-id`,
+    ).then((r) => r.external_id),
+
+  verifyAwsDraft: (draftId: string, body: { role_arn: string }) =>
+    request<{ probe_id: string }>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}/verify`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  awsDraft: (draftId: string) =>
+    request<AwsConnectDraft>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}`,
+    ).then(normalizeAwsDraft),
+
+  discoverAwsRegions: (draftId: string) =>
+    request<AwsRegionOption[]>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}/regions`,
+      { method: "POST" },
+    ),
+
+  createAwsAccount: (body: {
+    draft_id: string;
+    display_name: string;
+    regions: string[];
+  }) =>
+    request<AwsAccount>("/api/admin/aws/accounts", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }).then(normalizeAwsAccount),
+
+  updateAwsAccount: (
+    accountId: string,
+    body: { display_name?: string; regions?: string[] },
+  ) =>
+    request<AwsAccount>(`/api/admin/aws/accounts/${encodeURIComponent(accountId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }).then(normalizeAwsAccount),
+
+  deleteAwsAccount: (accountId: string) =>
+    request<void>(`/api/admin/aws/accounts/${encodeURIComponent(accountId)}`, {
+      method: "DELETE",
+    }),
+
+  recheckAwsAccount: (accountId: string) =>
+    request<void>(
+      `/api/admin/aws/accounts/${encodeURIComponent(accountId)}/recheck`,
+      { method: "POST" },
+    ),
+
+  updateAwsOptions: (body: {
+    optional_data?: Partial<Record<AwsOptionalDataKey, boolean>>;
+    max_requests_per_second?: number;
+  }) =>
+    request<AwsSettings>("/api/admin/aws/settings/options", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  updateAwsPrivacy: (body: { tag_value_allowlist: string[] }) =>
+    request<AwsSettings>("/api/admin/aws/settings/privacy", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+};
+
 export const api = {
   ...agentCapabilitiesApi,
+  ...awsSettingsApi,
   ...createKubernetesApi(),
   kubernetesClusters: () => request<KubernetesClusters>("/api/admin/kubernetes/clusters"),
   /**

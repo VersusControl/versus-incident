@@ -121,3 +121,4 @@
 
 - In development
   - [AWS Harness](/in-development/aws-harness)
+  - [Connect your AWS account](/in-development/aws-harness-connect)

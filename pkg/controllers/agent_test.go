@@ -625,6 +625,19 @@ redis:
 	}
 }
 
+// pinGatewaySecret loads a config carrying secret and pins that secret on the
+// process-wide config for the duration of the test. Config loading is
+// sync.Once-guarded, so whichever test runs first fixes the config object; the
+// explicit pin (restored at cleanup) keeps every caller deterministic
+// regardless of suite order.
+func pinGatewaySecret(t *testing.T, secret string) {
+	t.Helper()
+	loadGatewayConfig(t, secret)
+	previous := config.GetConfig().GatewaySecret
+	config.GetConfig().GatewaySecret = secret
+	t.Cleanup(func() { config.GetConfig().GatewaySecret = previous })
+}
+
 // TestScopedDeleteRoutes_ResolveToCorrectHandler proves Fiber's path-shape
 // routing keeps the collection-level clears (DELETE /patterns, /services)
 // distinct from the item-level deletes (DELETE /patterns/:id, /services/:name):

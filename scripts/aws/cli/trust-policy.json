@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VersusPrincipalWithExternalId",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "__VERSUS_PRINCIPAL_ARN__"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "__EXTERNAL_ID__"
+        }
+      }
+    }
+  ]
+}

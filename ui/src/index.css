@@ -30,7 +30,9 @@
      borders. Now: 400 = 3.7:1 text, 500 = visible hairline at /50-/60. */
   --ink-500: 76 86 110;
   --ink-400: 115 126 153;
-  --ink-300: 133 144 168;
+  /* Secondary text. Raised to 148,158,184 so an 11-12px label clears AA on
+     both card surfaces: 4.64:1 on --surface-raised, 5.64:1 on --surface. */
+  --ink-300: 148 158 184;
   --ink-200: 181 188 202;
   --ink-100: 221 224 232;
   --ink-50: 244 245 248;
@@ -283,8 +285,32 @@ body {
   .btn-primary {
     @apply border-accent bg-accent text-white hover:border-accent-hover hover:bg-accent-hover;
   }
+  /* Primary fill for surfaces that need AA with an 11-12px white label.
+     Dark: the global accent (59 130 246) is 3.68:1 with white; this fill
+     (37 99 235) is 5.17:1 and its hover (29 78 216) 6.70:1. The focus ring
+     keeps --accent. Light keeps the global pair (37 99 235 on white, 5.17:1). */
+  .btn-primary-strong {
+    @apply border-accent bg-accent text-white hover:border-accent-hover hover:bg-accent-hover;
+  }
+  :root:not([data-theme="light"]) .btn-primary-strong {
+    background-color: rgb(37 99 235);
+    border-color: rgb(37 99 235);
+  }
+  :root:not([data-theme="light"]) .btn-primary-strong:hover {
+    background-color: rgb(29 78 216);
+    border-color: rgb(29 78 216);
+  }
   .btn-danger {
     @apply border-sev-critical/40 bg-surface-raised text-sev-critical hover:bg-sev-critical/10;
+  }
+  /* Square, label-free icon button for row actions next to a value or a
+     toolbar control. Callers supply the accessible name with aria-label. */
+  .btn-icon {
+    @apply inline-flex h-7 w-7 shrink-0 cursor-pointer items-center
+           justify-center rounded-control border border-transparent
+           bg-transparent p-1 text-ink-300 transition-colors
+           hover:bg-ink-600/60 hover:text-ink-100
+           disabled:cursor-not-allowed disabled:opacity-50;
   }
 
   /* Stat card */
@@ -465,4 +491,20 @@ body {
   to {
     transform: translateX(0);
   }
+}
+
+/* AA-safe primary fill. Unlayered so it outranks the accent utilities on the
+   same element. Dark: the global accent (59 130 246) gives white text 3.68:1;
+   this fill (37 99 235) gives 5.17:1 and its hover (29 78 216) 6.70:1. The
+   focus ring stays --accent. Light keeps the theme's own accent pair. */
+.btn-primary-strong {
+  color: #fff;
+}
+:root:not([data-theme="light"]) .btn-primary-strong {
+  background-color: rgb(37 99 235);
+  border-color: rgb(37 99 235);
+}
+:root:not([data-theme="light"]) .btn-primary-strong:hover {
+  background-color: rgb(29 78 216);
+  border-color: rgb(29 78 216);
 }

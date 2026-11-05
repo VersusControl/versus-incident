@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Creates the versus-reader role that Versus assumes to read AWS resource
+  metadata from this account. The role can only be assumed by the Versus
+  principal named in VersusPrincipalArn and only when the caller presents the
+  matching ExternalId. Permissions are an explicit allow list of Describe, List
+  and configuration read calls, plus explicit denies for data-plane, secret and
+  log-body reads. Nothing in this template allows a write or a delete.
+
+Parameters:
+  VersusPrincipalArn:
+    Type: String
+    Description: >-
+      Exact ARN of the Versus IAM role that is allowed to assume this role,
+      copied from the Versus connect wizard, for example
+      arn:aws:iam::123456789012:role/versus-app. Do not use the account root
+      ARN: trusting an account root lets every principal in that account
+      assume this role.
+    AllowedPattern: '^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$'
+    ConstraintDescription: >-
+      Must be the exact Versus IAM role ARN in the aws, aws-cn or aws-us-gov
+      partition, for example arn:aws:iam::123456789012:role/versus-app.
+      Account root ARNs and other non-role principals are not accepted.
+
+  ExternalId:
+    Type: String
+    Description: >-
+      Secret shared with Versus to bind an assume-role call to this account.
+      It must match the ExternalId configured in Versus; a caller without it
+      cannot assume the role even with the correct principal ARN. CloudFormation
+      stores parameters, so treat this value as a credential.
+    NoEcho: true
+    MinLength: 16
+    MaxLength: 1224
+    AllowedPattern: '^[!-~]{16,1224}$'
+    ConstraintDescription: >-
+      16 to 1224 printable ASCII characters with no spaces, as required by
+      sts:ExternalId.
+
+  OptionalData:
+    Type: String
+    Description: >-
+      off keeps the role on metadata reads only. on adds Cost Explorer, Security
+      Hub findings, AWS Config advanced queries and Trusted Advisor reads, which
+      expose cost, posture and check data. Cost Explorer is billed per request.
+    Default: 'off'
+    AllowedValues:
+      - 'off'
+      - 'on'
+
+Conditions:
+  IncludeOptionalData: !Equals
+    - !Ref OptionalData
+    - 'on'
+
+Resources:
+  ReaderRole:
+    Type: AWS::IAM::Role
+    Description: >-
+      versus-reader is assumed only by the Versus principal in
+      VersusPrincipalArn, and only with the ExternalId above. It can read
+      resource metadata across the service catalog, and is explicitly denied
+      object bodies, secret values, parameter values, decrypted blobs, table
+      items, function code, instance console output and log events.
+    Properties:
+      RoleName: versus-reader
+      Description: >-
+        Versus metadata reader: Describe, List and configuration reads only,
+        with explicit denies for data-plane and secret reads.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: VersusPrincipalWithExternalId
+            Effect: Allow
+            Principal:
+              AWS: !Ref VersusPrincipalArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: versus-reader-metadata-reads
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: MetadataReads
+                Effect: Allow
+                Resource: '*'
+                Action:
+                  # API Gateway
+                  - apigateway:GET
+                  # Auto Scaling
+                  - autoscaling:Describe*
+                  # AWS Health
+                  - health:Describe*
+                  # CloudFormation
+                  - cloudformation:Describe*
+                  # CloudFront
+                  - cloudfront:List*
+                  # CloudTrail
+                  - cloudtrail:LookupEvents
+                  # CloudWatch
+                  - cloudwatch:DescribeAlarms*
+                  # AWS Config recorders
+                  - config:Describe*
+                  # DynamoDB tables, never items
+                  - dynamodb:DescribeTable
+                  - dynamodb:ListTables
+                  # EC2 metadata only
+                  - ec2:Describe*
+                  # ECS
+                  - ecs:Describe*
+                  - ecs:List*
+                  # EKS
+                  - eks:Describe*
+                  - eks:List*
+                  # ElastiCache
+                  - elasticache:Describe*
+                  # Elastic Load Balancing v2
+                  - elasticloadbalancing:Describe*
+                  # EventBridge
+                  - events:Describe*
+                  - events:List*
+                  # IAM roles, without inline or managed policy documents
+                  - iam:GetRole
+                  - iam:List*
+                  # Kinesis
+                  - kinesis:Describe*
+                  - kinesis:List*
+                  # Lambda configuration, without function code
+                  - lambda:GetFunctionConfiguration
+                  - lambda:List*
+                  # RDS
+                  - rds:Describe*
+                  # Route 53
+                  - route53:GetHealthCheckStatus
+                  - route53:List*
+                  # S3 bucket metadata and security flags, never objects
+                  - s3:GetBucketLocation
+                  - s3:GetBucketPolicyStatus
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetEncryptionConfiguration
+                  - s3:ListAllMyBuckets
+                  # SNS
+                  - sns:GetTopicAttributes
+                  - sns:List*
+                  # SQS
+                  - sqs:GetQueueAttributes
+                  - sqs:List*
+                  # Step Functions
+                  - states:Describe*
+                  - states:List*
+                  # Shared inventory helpers
+                  - resource-explorer-2:Search
+                  - servicecatalog:ListApplications
+                  - tag:GetResources
+              - !If
+                - IncludeOptionalData
+                - Sid: OptionalDataReads
+                  Effect: Allow
+                  Resource: '*'
+                  Action:
+                    # Cost Explorer, billed per request by AWS
+                    - ce:GetAnomalies
+                    - ce:GetCostAndUsage
+                    # Security Hub findings
+                    - securityhub:GetFindings
+                    # AWS Config advanced query
+                    - config:SelectResourceConfig
+                    # Trusted Advisor checks
+                    - trustedadvisor:Describe*
+                - !Ref AWS::NoValue
+              - Sid: DenyDataPlaneAndSecretReads
+                Effect: Deny
+                Resource: '*'
+                Action:
+                  - s3:GetObject
+                  - secretsmanager:GetSecretValue
+                  - ssm:GetParameter*
+                  - kms:Decrypt
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - lambda:GetFunction
+                  - ec2:GetConsoleOutput
+                  - logs:GetLogEvents
+              - Sid: DenyBillingAccountSurfaces
+                Effect: Deny
+                Resource: '*'
+                Action:
+                  - aws-portal:*
+                  - billing:*
+                  - invoicing:*
+                  - payments:*
+
+Outputs:
+  RoleArn:
+    Description: ARN of the versus-reader role; paste it into the Versus connect wizard.
+    Value: !GetAtt ReaderRole.Arn
+  RoleName:
+    Description: Name of the versus-reader role created in this account.
+    Value: !Ref ReaderRole

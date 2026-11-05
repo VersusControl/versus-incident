@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OptionalDataReads",
+      "Effect": "Allow",
+      "Resource": "*",
+      "Action": [
+        "ce:GetAnomalies",
+        "ce:GetCostAndUsage",
+        "securityhub:GetFindings",
+        "config:SelectResourceConfig",
+        "trustedadvisor:Describe*"
+      ]
+    }
+  ]
+}

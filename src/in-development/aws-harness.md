@@ -141,6 +141,9 @@ check access with one line per service, then pick regions. Access is checked
 service by service, so a missing permission shows up as one clear line with the
 exact fix — not as a broken dashboard.
 
+See [Connect your AWS account](/in-development/aws-harness-connect) for the
+methods, the External ID, what each access check means and how to fix a denial.
+
 ## Safe and simple by design
 
 - **Read-only.** AWS Harness never changes anything in your accounts. Suggested

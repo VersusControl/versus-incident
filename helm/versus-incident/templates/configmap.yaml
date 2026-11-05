@@ -418,6 +418,45 @@ data:
           auth:
             {{- include "versus-incident.connectorAuth" (dict "auth" ($actions.auth | default dict) "prefix" "KUBERNETES_ACTOR") | nindent 12 }}
           {{- end }}
+      {{- $aws := (.Values.connectors | default dict).aws | default dict }}
+      {{- $awsTags := $aws.tags | default dict }}
+      {{- $awsBudgets := $aws.budgets | default dict }}
+      {{- $awsOptional := $aws.optionalData | default dict }}
+      aws:
+        enable: {{ dig "enable" false $aws }}
+        accounts:
+        {{- if $aws.accounts }}
+        {{- range $account := $aws.accounts }}
+        {{- $accountAuth := $account.auth | default dict }}
+          - account_id: {{ $account.accountId | quote }}
+            display_name: {{ $account.displayName | default "" | quote }}
+            {{- if and $account.regions (ne (toString $account.regions) "auto") }}
+            regions: {{ $account.regions | toJson }}
+            {{- else }}
+            regions: auto
+            {{- end }}
+            auth:
+              mode: {{ $accountAuth.mode | default "default_chain" | quote }}
+              {{- if eq ($accountAuth.mode | default "default_chain") "assume_role" }}
+              role_arn: {{ $accountAuth.roleArn | default "" | quote }}
+              {{- if $accountAuth.externalIdEnv }}
+              external_id: {{ printf "${%s}" $accountAuth.externalIdEnv | quote }}
+              {{- end }}
+              {{- end }}
+        {{- end }}
+        {{- else }}
+          []
+        {{- end }}
+        tags:
+          value_allowlist: {{ $awsTags.valueAllowlist | default list | toJson }}
+        budgets:
+          max_requests_per_second: {{ $awsBudgets.maxRequestsPerSecond | default 2 }}
+        optional_data:
+          cost_explorer: {{ dig "costExplorer" false $awsOptional }}
+          security_hub: {{ dig "securityHub" false $awsOptional }}
+          config: {{ dig "config" false $awsOptional }}
+          trusted_advisor: {{ dig "trustedAdvisor" false $awsOptional }}
+        health_check_interval: {{ $aws.healthCheckInterval | default "5m" | quote }}
   {{- if .Values.agent.enable }}
   {{- $tools := .Values.agent.tools | default dict }}
   {{- $recentChanges := $tools.recentChanges | default dict }}

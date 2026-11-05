@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import {
   Activity,
   BellOff,
   Boxes,
   ChartNoAxesCombined,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleGauge,
+  Cloud,
   GitBranch,
   Flame,
   LayoutDashboard,
@@ -65,7 +67,8 @@ function SidebarBrand({ collapsed }: { collapsed?: boolean }) {
 // (UX_REDESIGN §2.1): RESPOND is the 3am zone and always comes first;
 // AGENT is calm curation; MANAGE is admin.
 interface SideItem {
-  // Absent for in-development placeholders — those aren't wired to a route yet.
+  // Absent for in-development placeholders and for disclosure rows whose
+  // children carry the routes.
   to?: string;
   label: string;
   icon: LucideIcon;
@@ -79,6 +82,11 @@ interface SideItem {
   // with an "in development" indicator instead of a NavLink. Never navigates
   // and never shows active state, independent of agent/enterprise state.
   inDev?: boolean;
+  // Short count or state marker shown at the end of the row ("3", "new").
+  badge?: string;
+  // Nested destinations. An item with children renders as a disclosure row
+  // (no route of its own); the children are the reachable links.
+  children?: SideItem[];
 }
 
 interface AgentSideItem extends SideItem {
@@ -256,7 +264,14 @@ export function SidebarContent({
     {
       title: "Connectors",
       icon: ShipWheel,
-      items: [{ to: "/agent/kubernetes", label: "Kubernetes", icon: ShipWheel }],
+      items: [
+        { to: "/agent/kubernetes", label: "Kubernetes", icon: ShipWheel },
+        {
+          label: "AWS",
+          icon: Cloud,
+          children: [{ to: "/aws/settings", label: "Settings", icon: Settings }],
+        },
+      ],
     },
     {
       title: "Agent Learning",
@@ -372,13 +387,94 @@ function Zone({
 }) {
   return (
     <>
-      <div className="mt-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-300 first:mt-0">
+      <div
+        data-nav-zone={title}
+        className="mt-2 px-2 py-2 text-2xs uppercase tracking-wider text-ink-300 first:mt-0"
+      >
         {title}
       </div>
-      {items.map((item) => (
-        <SideLink key={item.to ?? item.label} {...item} onNavigate={onNavigate} />
-      ))}
+      {items.map((item) =>
+        item.children?.length ? (
+          <SideItemGroup
+            key={item.to ?? item.label}
+            {...item}
+            onNavigate={onNavigate}
+          />
+        ) : (
+          <SideLink key={item.to ?? item.label} {...item} onNavigate={onNavigate} />
+        ),
+      )}
     </>
+  );
+}
+
+// A row that owns no route of its own: it discloses the children beneath it.
+// Opening is remembered only for the session; a child route that is already
+// active starts open so the current page is visible on first paint.
+function SideItemGroup({
+  label,
+  icon: Icon,
+  badge,
+  dimTitle,
+  children,
+  onNavigate,
+}: SideItem & { onNavigate?: () => void }) {
+  const { pathname } = useLocation();
+  const hasActiveChild = (children ?? []).some(
+    (child) =>
+      child.to &&
+      (pathname === child.to || pathname.startsWith(`${child.to}/`)),
+  );
+  const [open, setOpen] = useState(Boolean(hasActiveChild));
+
+  useEffect(() => {
+    if (hasActiveChild) setOpen(true);
+  }, [hasActiveChild]);
+
+  return (
+    <div data-nav-group={label}>
+      <button
+        type="button"
+        aria-expanded={open}
+        title={dimTitle}
+        onClick={() => setOpen((prev) => !prev)}
+        className="group flex min-h-9 w-full items-center gap-2 rounded-control px-3 py-2 text-xs text-ink-100 transition-colors hover:bg-ink-800 hover:text-ink-50"
+      >
+        <span className="h-4 w-0.5 shrink-0 rounded-full bg-transparent" />
+        <Icon size={16} className="w-4 shrink-0" aria-hidden="true" />
+        <span className="flex-1 text-left">{label}</span>
+        <NavBadge>{badge}</NavBadge>
+        <ChevronDown
+          size={14}
+          aria-hidden="true"
+          className={clsx(
+            "shrink-0 text-ink-400 transition-transform motion-reduce:transition-none",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+      {open && (
+        <div>
+          {(children ?? []).map((child) => (
+            <SideLink
+              key={child.to ?? child.label}
+              {...child}
+              nested
+              onNavigate={onNavigate}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NavBadge({ children }: { children?: string }) {
+  if (!children) return null;
+  return (
+    <span className="shrink-0 rounded-full bg-ink-700 px-1.5 py-px text-2xs font-medium tabular-nums text-ink-300">
+      {children}
+    </span>
   );
 }
 
@@ -410,7 +506,11 @@ function CollapsedZone({
     const el = wrapRef.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    const estHeight = 34 + items.length * 36;
+    const rows = items.reduce(
+      (count, item) => count + 1 + (item.children?.length ?? 0),
+      0,
+    );
+    const estHeight = 34 + rows * 36;
     const top = Math.max(8, Math.min(r.top, window.innerHeight - 8 - estHeight));
     setPos({ top, left: r.right });
   };
@@ -496,16 +596,36 @@ function CollapsedZone({
               <Icon size={13} aria-hidden />
               <span>{title}</span>
             </div>
-            {items.map((item) => (
-              <SideLink
-                key={item.to ?? item.label}
-                {...item}
-                onNavigate={() => {
-                  hideNow();
-                  onNavigate?.();
-                }}
-              />
-            ))}
+            {items.map((item) =>
+              item.children?.length ? (
+                <div key={item.to ?? item.label}>
+                  <div className="flex items-center gap-2 px-3 py-1 text-2xs text-ink-400">
+                    <item.icon size={12} aria-hidden="true" />
+                    <span>{item.label}</span>
+                  </div>
+                  {item.children.map((child) => (
+                    <SideLink
+                      key={child.to ?? child.label}
+                      {...child}
+                      nested
+                      onNavigate={() => {
+                        hideNow();
+                        onNavigate?.();
+                      }}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <SideLink
+                  key={item.to ?? item.label}
+                  {...item}
+                  onNavigate={() => {
+                    hideNow();
+                    onNavigate?.();
+                  }}
+                />
+              ),
+            )}
           </div>
         </div>
       )}
@@ -513,7 +633,7 @@ function CollapsedZone({
   );
 }
 
-function SideLink({
+export function SideLink({
   to,
   label,
   icon: Icon,
@@ -522,8 +642,10 @@ function SideLink({
   dimTitle,
   locked,
   inDev,
+  badge,
+  nested,
   onNavigate,
-}: SideItem & { onNavigate?: () => void }) {
+}: SideItem & { onNavigate?: () => void; nested?: boolean }) {
   // In-development placeholder: a greenlit capability with no route yet.
   // Render a non-navigable, dimmed row (a div, never a NavLink) so it can't
   // navigate or show an active state regardless of agent/enterprise flags.
@@ -560,7 +682,8 @@ function SideLink({
       onClick={onNavigate}
       className={({ isActive }) =>
         clsx(
-          "group flex min-h-9 items-center gap-2 rounded-control px-3 py-2 text-xs transition-colors",
+          "group flex items-center gap-2 rounded-control py-2 text-xs transition-colors",
+          nested ? "min-h-8 pl-7 pr-3" : "min-h-9 px-3",
           isActive
             ? "bg-accent-subtle text-ink-50"
             : dim
@@ -571,14 +694,17 @@ function SideLink({
     >
       {({ isActive }) => (
         <>
-          <span
-            className={clsx(
-              "h-4 w-0.5 shrink-0 rounded-full",
-              isActive ? "bg-accent" : "bg-transparent",
-            )}
-          />
+          {!nested && (
+            <span
+              className={clsx(
+                "h-4 w-0.5 shrink-0 rounded-full",
+                isActive ? "bg-accent" : "bg-transparent",
+              )}
+            />
+          )}
           <Icon size={16} className="w-4 shrink-0" aria-hidden />
           <span className="flex-1">{label}</span>
+          <NavBadge>{badge}</NavBadge>
           {locked && (
             <Lock size={12} className="text-ink-500" aria-label="Enterprise" />
           )}

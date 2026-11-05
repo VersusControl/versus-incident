@@ -444,6 +444,19 @@ connectors:
       maxReplicas: 20
       timeout: "15s"
       auth: {mode: ""}
+  aws:
+    enable: false
+    accounts: []
+    tags:
+      valueAllowlist: [Name, app, service, team, env]
+    budgets:
+      maxRequestsPerSecond: 2
+    optionalData:
+      costExplorer: false
+      securityHub: false
+      config: false
+      trustedAdvisor: false
+    healthCheckInterval: "5m"
 
 # Extra environment variables for the container, appended after everything the
 # chart wires itself. Use these to supply values referenced as ${VAR} from

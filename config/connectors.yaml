@@ -6,6 +6,19 @@ connectors:
       enable: false
       auth:
         mode: ""
+  aws:
+    enable: false
+    accounts: []
+    tags:
+      value_allowlist: [Name, app, service, team, env]
+    budgets:
+      max_requests_per_second: 2
+    optional_data:
+      cost_explorer: false
+      security_hub: false
+      config: false
+      trusted_advisor: false
+    health_check_interval: 5m
 
 # Multi-cluster form replaces the single connection block above.
 # connectors:
@@ -19,3 +32,17 @@ connectors:
 #       - cluster_id: staging
 #         endpoint: https://staging.example
 #         auth: {mode: token_file, token_file: /run/k8s/staging/token}
+
+# AWS accounts defined here are read-only in the UI. Accounts created through
+# the wizard are stored in the configured storage backend. The external ID must
+# reference an environment variable so the secret never lands in this file.
+#   aws:
+#     enable: true
+#     accounts:
+#       - account_id: "111122223333"
+#         display_name: Production
+#         regions: auto
+#         auth:
+#           mode: assume_role
+#           role_arn: arn:aws:iam::111122223333:role/versus-reader
+#           external_id: ${VERSUS_AWS_EXTERNAL_ID}
