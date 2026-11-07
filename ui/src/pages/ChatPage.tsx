@@ -32,6 +32,7 @@ import { TopBar } from "@/components/TopBar";
 import { Modal } from "@/components/Modal";
 import { RetryableError } from "@/components/RetryableError";
 import { MarkdownText } from "@/components/chat/MarkdownText";
+import { ActionCliHint } from "@/components/chat/ActionCliHint";
 import {
   api,
   createKubernetesApi,
@@ -54,7 +55,6 @@ import { capChatMessage } from "@/lib/markdownPolicy";
 import { useStickyBottom } from "@/lib/useStickyBottom";
 import { getStoredTheme, type Theme } from "@/lib/theme";
 import { kubernetesKey } from "@/lib/useKubernetesCluster";
-import { useEffectiveRole } from "@/lib/useEffectiveRole";
 
 const suggestions = [
   "What changed before the latest incident?",
@@ -206,77 +206,6 @@ function ToolPayload({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ActionApprovalCard({ event, historical = false }: { event: ChatEvent; historical?: boolean }) {
-  const approval = event.approval;
-  const access = useEffectiveRole();
-  const queryClient = useQueryClient();
-  const permission = useQuery({ queryKey: ["rbac-me"], queryFn: api.rbacMe, enabled: access.enterprise && access.hasSession, retry: false });
-  const approvals = useQuery({ queryKey: ["agent-approvals", "all"], queryFn: () => api.listAgentApprovals("all"), enabled: access.enterprise && access.hasSession && Boolean(approval), retry: false });
-  const listedApproval = approvals.data?.approvals.find((item) => item.id === approval?.id);
-  const targetCluster = approval?.cluster ?? listedApproval?.proposal.target.cluster;
-  const [readOnlyConflict, setReadOnlyConflict] = useState(false);
-  const readOnly = Boolean(approval?.read_only || listedApproval?.read_only || readOnlyConflict);
-  const scope = permission.data?.clusters;
-  const [authorizationDenied, setAuthorizationDenied] = useState(false);
-  const canDecide = !historical && !readOnly && !authorizationDenied && !access.loading && (!access.enterprise || Boolean(approvals.isSuccess && permission.isSuccess && permission.data.permissions.includes("agent:approve") && (scope === null || targetCluster && scope?.includes(targetCluster))));
-  const [state, setState] = useState(approval?.state ?? "pending");
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  if (!approval) return null;
-
-  const decide = async (decision: "approve" | "reject") => {
-    if (!event.approval_nonce || busy || !canDecide) return;
-    setBusy(true);
-    setError("");
-    try {
-      const result = decision === "approve"
-        ? await api.approveAgentApproval(approval.id, event.approval_nonce)
-        : await api.rejectAgentApproval(approval.id, reason.trim());
-      setState(result.state);
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "The approval request failed.");
-      if (failure instanceof ApiError && failure.status === 409 && typeof failure.body === "object" && failure.body !== null && "code" in failure.body && failure.body.code === "approval_read_only") {
-        setReadOnlyConflict(true);
-        void queryClient.invalidateQueries({ queryKey: ["agent-approvals"] });
-      }
-      if (failure instanceof ApiError && [401, 403, 404].includes(failure.status)) {
-        setAuthorizationDenied(true);
-        void queryClient.invalidateQueries({ queryKey: ["rbac-me"] });
-        void queryClient.invalidateQueries({ queryKey: ["agent-approvals"] });
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-  const pending = state === "pending";
-  const expiry = Date.parse(approval.expires_at);
-
-  return <section aria-label="Action approval" className="my-4 overflow-hidden rounded-card border border-sev-warning/40 bg-surface-raised">
-    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-ink-500/40 px-4 py-3">
-      <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-50"><Clock3 size={15} className="text-sev-warning" />{historical || readOnly ? "Action approval" : "Action requires approval"}</h3>
-      {readOnly && <span className="text-xs text-ink-400">Before upgrade</span>}
-      <span className="pill pill-warn">{approval.risk} risk · {state}</span>
-    </header>
-    <dl className="grid gap-x-4 gap-y-3 px-4 py-3 text-xs sm:grid-cols-[minmax(100px,140px)_1fr]">
-      <dt className="text-ink-400">Action</dt><dd className="break-words text-ink-100">{approval.type}</dd>
-      <dt className="text-ink-400">Target</dt><dd className="break-words text-ink-100">{approval.target}</dd>
-      <dt className="text-ink-400">Dry run</dt><dd className="break-words text-ink-100">{approval.effect}</dd>
-      {Number.isFinite(expiry) && <><dt className="text-ink-400">Expires</dt><dd><time dateTime={approval.expires_at} className="text-ink-200">{new Date(expiry).toLocaleString()}</time></dd></>}
-    </dl>
-    {pending && !canDecide && !readOnly && !historical && <p role="status" className="border-t border-ink-500/40 px-4 py-3 text-xs text-ink-400">Action approval permission is unavailable for this target.</p>}
-    {pending && canDecide && <div className="space-y-3 border-t border-ink-500/40 px-4 py-3">
-      <label className="block text-xs text-ink-300">Rejection reason<input aria-label="Reason for rejection" className="input mt-1 w-full" value={reason} onChange={(change) => setReason(change.target.value)} disabled={busy} maxLength={512} /></label>
-      <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn btn-primary" onClick={() => void decide("approve")} disabled={busy || !event.approval_nonce}>{busy ? "Submitting…" : "Approve action"}</button>
-        <button type="button" className="btn" onClick={() => void decide("reject")} disabled={busy || !event.approval_nonce || !reason.trim()}>Reject action</button>
-        {!event.approval_nonce && <span role="status" className="self-center text-xs text-ink-400">Approval actions are unavailable for this event.</span>}
-      </div>
-      {error && <p role="alert" className="text-xs text-sev-critical">{error}</p>}
-    </div>}
-  </section>;
-}
-
 function traceEvent(call: ChatToolCall, seq: number): ChatEvent {
   return {
     seq,
@@ -330,6 +259,14 @@ function KubernetesAttachmentLink({ resource }: { resource: ChatResourceAttachme
   return <Link to={kubernetesResourceHref(resource, catalog.data.multiple)} className="flex min-w-0 items-center gap-2 text-left text-xs text-link hover:underline"><Paperclip size={13} aria-hidden="true"/><span className="min-w-0 truncate">{resource.namespace ? `${resource.namespace}/` : ""}{resource.name}</span><span className="shrink-0 text-2xs text-ink-300">Open in topology</span></Link>;
 }
 
+function approvalIds(events: ChatEvent[] | undefined) {
+  const ids = new Set<string>();
+  for (const event of events ?? []) {
+    if (event.kind === "approval_required" && event.approval?.id) ids.add(event.approval.id);
+  }
+  return [...ids];
+}
+
 function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: EvidenceSelection) => void }) {
   if (turn.role === "compaction") {
     if (turn.content.trimStart().startsWith('{"kind":"session_discovery"')) return null;
@@ -351,6 +288,7 @@ function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: Ev
   return (
     <article className="my-6 min-w-0">
       {turn.tool_calls?.map((call, index) => <ToolActivity key={`${turn.id}-${index}`} event={traceEvent(call, index)} />)}
+      {approvalIds(turn.events).map((id) => <ActionCliHint key={`${turn.id}-approval-${id}`} approvalId={id} />)}
       <MarkdownText>{turn.content}</MarkdownText>
       <CitationList
         citations={turn.citations}
@@ -370,7 +308,7 @@ function LiveBlocks({ blocks, terminal }: { blocks: ChatStreamBlock[]; terminal:
     <div className="my-6 min-w-0">
       {blocks.map((block) => {
         if (block.kind === "tool") return <ToolActivity key={block.key} event={block.event} />;
-        if (block.kind === "approval") return <ActionApprovalCard key={block.key} event={block.event} />;
+        if (block.kind === "approval") return block.event.approval ? <ActionCliHint key={block.key} approvalId={block.event.approval.id} /> : null;
         if (block.kind === "compaction") return <div key={block.key} className="my-3 text-center text-2xs italic text-ink-400">{block.text}</div>;
         return <MarkdownText key={block.key}>{block.text}</MarkdownText>;
       })}
@@ -479,8 +417,6 @@ function Composer({ value, onChange, onSubmit, running, stopping, onStop, resour
 
 export function ChatPage() {
   const queryClient = useQueryClient();
-  const [approvalsOpen, setApprovalsOpen] = useState(false);
-  const approvalHistory = useQuery({ queryKey: ["agent-approvals", "all"], queryFn: () => api.listAgentApprovals("all"), enabled: approvalsOpen, retry: false });
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("session");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -640,11 +576,13 @@ export function ChatPage() {
       const refreshed = await queryClient.fetchQuery({ queryKey: ["chat-session", id], queryFn: () => api.getChatSession(id as string), staleTime: 0 });
       if (refreshed.status !== "running") setLiveRuns((runs) => {
         const run = runs[id as string];
-        if (run?.stream.blocks.some((block) => block.kind === "approval")) return runs;
-          const next = { ...runs };
-          delete next[id as string];
-          return next;
-        });
+        // Keep the live run while it holds an action hint the saved session does not show yet.
+        const saved = new Set(refreshed.turns.flatMap((turn) => approvalIds(turn.events)));
+        if (run?.stream.blocks.some((block) => block.kind === "approval" && block.event.approval && !saved.has(block.event.approval.id))) return runs;
+        const next = { ...runs };
+        delete next[id as string];
+        return next;
+      });
     } catch (error) {
       const nextError = error instanceof Error ? error : new Error(String(error));
       if (!(error instanceof DOMException && error.name === "AbortError")) {
@@ -759,14 +697,8 @@ export function ChatPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-surface-sunken">
-      <TopBar title="DevOps Agent" subtitle={sessionQ.data?.status === "running" ? "Running" : ""} actions={<><button type="button" onClick={() => setHistoryOpen(true)} aria-label="Open chat history" title="Open chat history" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><History size={16} /></button><button type="button" onClick={() => setApprovalsOpen(true)} aria-label="Open action approvals" title="Open action approvals" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><CheckCircle2 size={16} /></button><Link to="/agent/tools" aria-label="Open Tool catalog" title="Open Tool catalog" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Wrench size={16} /></Link></>} />
+      <TopBar title="DevOps Agent" subtitle={sessionQ.data?.status === "running" ? "Running" : ""} actions={<><button type="button" onClick={() => setHistoryOpen(true)} aria-label="Open chat history" title="Open chat history" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><History size={16} /></button><Link to="/agent/tools" aria-label="Open Tool catalog" title="Open Tool catalog" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700"><Wrench size={16} /></Link></>} />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        {approvalsOpen && <Modal title="Action approvals" size="lg" onClose={() => setApprovalsOpen(false)}>
-          {approvalHistory.isPending && <p role="status" className="text-xs text-ink-400">Loading approvals</p>}
-          {approvalHistory.isError && <RetryableError error={approvalHistory.error} onRetry={() => approvalHistory.refetch()} retrying={approvalHistory.isFetching} context="Couldn't load action approvals" />}
-          {approvalHistory.isSuccess && !approvalHistory.data.approvals.length && <p className="text-xs text-ink-400">No action approvals</p>}
-          {approvalHistory.data?.approvals.map((approval) => <ActionApprovalCard key={approval.id} historical event={{ seq: 0, at: "", kind: "approval_required", approval: { id: approval.id, read_only: approval.read_only, cluster: approval.proposal.target.cluster, proposal_id: approval.proposal.id, run_id: approval.proposal.run_id, type: approval.proposal.type, target: `${approval.proposal.target.kind}/${approval.proposal.target.namespace ? `${approval.proposal.target.namespace}/` : ""}${approval.proposal.target.name}`, effect: approval.proposal.dry_run, risk: approval.proposal.risk, state: approval.state, expires_at: approval.expires_at } }} />)}
-        </Modal>}
         {historyOpen && <Modal title="Thread history" size="lg" onClose={() => setHistoryOpen(false)} footer={<button type="button" className="btn inline-flex items-center gap-2" onClick={newThread}><Plus size={14} />New thread</button>}>{history}</Modal>}
         {resourcePickerOpen && <Modal title="Attach Kubernetes resource" size="md" onClose={() => setResourcePickerOpen(false)} footer={<button type="button" className="btn" onClick={() => setResourcePickerOpen(false)}>Close</button>}>
           {clusterCatalog.data?.multiple && <label className="mb-3 block text-xs text-ink-300">Cluster<select aria-label="Attachment cluster" className="input mt-1 w-full" value={resourceCluster} onChange={(event) => { setResourceCluster(event.target.value); setResourceQuery(""); setDebouncedResourceQuery(""); }}><option value="">Select cluster</option>{clusterCatalog.data.clusters.map((cluster) => <option key={cluster.id} value={cluster.id}>{cluster.display_name || cluster.id}</option>)}</select></label>}

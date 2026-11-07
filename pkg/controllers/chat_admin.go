@@ -107,9 +107,9 @@ func (controller *ChatAdminController) Register(router fiber.Router) {
 	apiV1.Post("/sessions/:id/turns", controller.message)
 	apiV1.Post("/sessions/:id/cancel", controller.cancel)
 	apiV1.Get("/sessions/:id/events", controller.replayEvents)
-	apiV1.Post("/proposals", controller.requireAgentApproval, controller.createProposal)
+	apiV1.Post("/proposals", controller.requireAgentApproval, requireCLICredential, controller.createProposal)
 	apiV1.Get("/approvals", controller.requireAgentApproval, controller.listApprovals)
-	apiV1.Post("/approvals/:id/approve", controller.requireAgentApproval, controller.approve)
+	apiV1.Post("/approvals/:id/approve", controller.requireAgentApproval, requireCLICredential, controller.approve)
 	apiV1.Post("/approvals/:id/reject", controller.requireAgentApproval, controller.reject)
 }
 
@@ -160,6 +160,21 @@ func (controller *ChatAdminController) requireAgentApproval(c *fiber.Ctx) error 
 	}
 	if controller.approvalService(c) == nil {
 		return c.Status(fiber.StatusServiceUnavailable).JSON(agentapi.Error{Code: "unavailable", Message: "approval service not configured"})
+	}
+	return c.Next()
+}
+
+// requireCLICredential keeps approving and directly proposing infrastructure
+// actions off the web console. The console authenticates with an HttpOnly
+// session cookie and never holds a header credential: the OSS sign-in discards
+// the gateway secret after exchanging it, and an enterprise browser session is
+// cookie-only. The versus-devops CLI sends a gateway secret or bearer token in
+// a header, so only it reaches these routes. A stolen or script-driven browser
+// session therefore cannot approve or execute a change. Listing and rejecting
+// approvals stay available to both surfaces.
+func requireCLICredential(c *fiber.Ctx) error {
+	if !middleware.RequestHeaderCredential(c) {
+		return c.Status(fiber.StatusForbidden).JSON(agentapi.Error{Code: "act_requires_cli", Message: "actions can be proposed and approved only from the versus-devops CLI with VERSUS_TOKEN or VERSUS_GATEWAY_SECRET"})
 	}
 	return c.Next()
 }
