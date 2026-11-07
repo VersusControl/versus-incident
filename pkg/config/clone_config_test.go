@@ -2,12 +2,14 @@ package config
 
 import (
 	"crypto/x509"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
 
 func TestCloneHistoryStorageOptions(t *testing.T) {
-	source := Config{Storage: StorageConfig{Postgres: StoragePostgresConfig{DSN: "configured", MaxOpenConns: 24, HistoryReadConcurrency: 8}}, Kubernetes: KubernetesHistoryConfig{Evidence: KubernetesEvidenceConfig{ObservationHeartbeat: "5m", Retention: "720h"}}}
+	source := Config{Storage: StorageConfig{Postgres: StoragePostgresConfig{DSN: "configured", MaxOpenConns: 24, HistoryReadConcurrency: 8}}, Kubernetes: KubernetesHistoryConfig{Evidence: KubernetesEvidenceConfig{ObservationHeartbeat: "5m", Retention: "720h", SaveChunk: 250}}}
 	copy := cloneConfig(&source)
 	if !reflect.DeepEqual(copy.Storage, source.Storage) || !reflect.DeepEqual(copy.Kubernetes, source.Kubernetes) {
 		t.Fatal("clone dropped persisted-history configuration")
@@ -15,6 +17,67 @@ func TestCloneHistoryStorageOptions(t *testing.T) {
 	copy.Kubernetes.Evidence.Retention = "0"
 	if source.Kubernetes.Evidence.Retention != "720h" {
 		t.Fatal("history retention aliases global config")
+	}
+}
+
+func loadKubernetesHistoryConfig(t *testing.T, yaml string) KubernetesEvidenceConfig {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfigFromPath(path)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	return loaded.Kubernetes.Evidence
+}
+
+func TestKubernetesHistoryDefaults(t *testing.T) {
+	t.Setenv("KUBERNETES_EVIDENCE_SAVE_CHUNK", "")
+	got := loadKubernetesHistoryConfig(t, "name: versus\n")
+	if got.Retention != "168h" || got.SaveChunk != 500 {
+		t.Fatalf("defaults = retention %q, save_chunk %d; want 168h and 500", got.Retention, got.SaveChunk)
+	}
+}
+
+func TestKubernetesHistoryRetentionZeroKeepsEverythingFromFile(t *testing.T) {
+	got := loadKubernetesHistoryConfig(t, "kubernetes:\n  evidence:\n    retention: \"0\"\n")
+	if got.Retention != "0" {
+		t.Fatalf("retention = %q, want the configured \"0\"", got.Retention)
+	}
+}
+
+func TestKubernetesHistorySaveChunk(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		env  string
+		want int
+	}{
+		{name: "file value is used", file: "300", want: 300},
+		{name: "environment overrides the file", file: "300", env: "64", want: 64},
+		{name: "environment alone", env: "1024", want: 1024},
+		{name: "smallest value", file: "1", want: 1},
+		{name: "zero in the file falls back", file: "0", want: 500},
+		{name: "above the range in the file falls back", file: "1025", want: 500},
+		{name: "negative in the file falls back", file: "-5", want: 500},
+		{name: "above the range in the environment falls back", file: "300", env: "2000", want: 500},
+		{name: "empty environment keeps the file value", file: "300", env: "", want: 300},
+		{name: "unreadable environment value falls back", file: "300", env: "many", want: 500},
+		{name: "unreadable file value falls back", file: "many", want: 500},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("KUBERNETES_EVIDENCE_SAVE_CHUNK", test.env)
+			yaml := "name: versus\n"
+			if test.file != "" {
+				yaml = "kubernetes:\n  evidence:\n    save_chunk: " + test.file + "\n"
+			}
+			if got := loadKubernetesHistoryConfig(t, yaml).SaveChunk; got != test.want {
+				t.Fatalf("save_chunk = %d, want %d", got, test.want)
+			}
+		})
 	}
 }
 

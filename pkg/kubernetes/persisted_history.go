@@ -275,6 +275,9 @@ func (service *Service) persistedHistoryQuery(ctx context.Context, query storage
 		return storage.EvidencePage{}, errHistoryNotEstablished
 	}
 	page, err := service.evidenceStore().QueryEvidence(ctx, scope, query)
+	if errors.Is(err, storage.ErrEvidenceCursorExpired) {
+		return page, errors.Join(ErrCursorExpired, err)
+	}
 	if errors.Is(err, storage.ErrInvalidEvidence) || errors.Is(err, storage.ErrEvidenceConflict) {
 		return page, errors.Join(ErrInvalidArguments, err)
 	}
@@ -299,6 +302,9 @@ func (service *Service) persistedHistoryQuery(ctx context.Context, query storage
 	}
 	for i, record := range page.Items {
 		page.Items[i] = service.projectEvidence(record)
+	}
+	for i, record := range page.Gaps {
+		page.Gaps[i] = service.projectEvidence(record)
 	}
 	page.Authority = authority
 	return page, nil

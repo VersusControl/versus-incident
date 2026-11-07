@@ -218,7 +218,7 @@ export function ResourceMetrics({
       </div>
       {!crashesQuery.isError && crashesQuery.data && (crashesQuery.data.crash_count ?? 0) > 0 && <nav aria-label="Captured crash pages" className="text-2xs text-ink-400">
         <p>{`${counted(crashesQuery.data.crash_count ?? 0, "captured crash")} in the last 24h`}</p>
-        {(crashesQuery.data.next || crashesQuery.paging.canPrevious) && <CursorPagination state={crashesQuery.paging} busy={crashesQuery.isFetching} next={crashesQuery.data.next} />}
+        {(crashesQuery.data.next || crashesQuery.paging.canPrevious) && <CursorPagination state={crashesQuery.paging} busy={crashesQuery.isFetching} next={crashesQuery.data.next} total={crashesQuery.data.total} limit={crashesQuery.data.limit} capped={crashesQuery.data.count_capped} count={crashesQuery.data.items?.length} />}
       </nav>}
       <section
         id="resource-usage-chart"

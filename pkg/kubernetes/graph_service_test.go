@@ -111,6 +111,7 @@ func TestGraphServiceUsesSharedIndexAndBoundsNeighborhood(t *testing.T) {
 }
 
 func TestCompleteGraphReturnsAllConnectedNamespaceRecordsWithoutPaging(t *testing.T) {
+	t.Parallel()
 	server, requestedPaths := completeGraphTestServer(t, 251, 0, "")
 	defer server.Close()
 	scope := Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "cred-a"}
@@ -133,6 +134,7 @@ func TestCompleteGraphReturnsAllConnectedNamespaceRecordsWithoutPaging(t *testin
 }
 
 func TestOverviewGraphReturnsAllConnectedNamespacesWithoutPaging(t *testing.T) {
+	t.Parallel()
 	server, requestedPaths := completeGraphTestServerMode(t, 251, 0, "", false, true)
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{OrgID: "org-a", ClusterID: "cluster-a", CredentialID: "cred-a"})
@@ -174,6 +176,7 @@ func TestOverviewGraphReturnsAllConnectedNamespacesWithoutPaging(t *testing.T) {
 }
 
 func TestOverviewGraphFailsClosed(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		pairs     int
@@ -191,6 +194,7 @@ func TestOverviewGraphFailsClosed(t *testing.T) {
 		{"above former relationship work cap", 1001, 0, "", false, false, 2002, 1001},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			server, _ := completeGraphTestServerMode(t, test.pairs, test.pods, test.forbidden, test.overlap, true)
 			defer server.Close()
 			service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
@@ -215,6 +219,7 @@ func TestOverviewGraphFailsClosed(t *testing.T) {
 }
 
 func TestCompleteTopologyValidatesEveryPageAndResponseSize(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name      string
 		namespace string
@@ -233,6 +238,7 @@ func TestCompleteTopologyValidatesEveryPageAndResponseSize(t *testing.T) {
 		{name: "overview preserves UID owners across namespaces", secondNS: "other", pages: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				switch request.URL.Path {
 				case "/api":
@@ -345,6 +351,7 @@ func TestCompleteTopologyValidatesEveryPageAndResponseSize(t *testing.T) {
 }
 
 func TestCompleteGraphUsesDiscoveredAlternateVersion(t *testing.T) {
+	t.Parallel()
 	var deploymentPath string
 	var pathMu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -387,6 +394,7 @@ func TestCompleteGraphUsesDiscoveredAlternateVersion(t *testing.T) {
 }
 
 func TestCompleteGraphResponseSizeIsCountedWithoutBuildingPayload(t *testing.T) {
+	t.Parallel()
 	small := kubegraph.Graph{
 		Nodes: []kubegraph.Node{{ID: "<pod>", Kind: "Pod", Name: "bad\x01name", Group: "shop"}},
 		Edges: []kubegraph.Edge{{From: "<pod>", To: "other", Type: kubegraph.Uses}}, Omitted: map[string]int{"Pod": 2},
@@ -411,6 +419,7 @@ func TestCompleteGraphResponseSizeIsCountedWithoutBuildingPayload(t *testing.T) 
 }
 
 func TestCompleteGraphRejectsIncompleteReadsAndSafetyLimits(t *testing.T) {
+	t.Parallel()
 	t.Run("permission denied", func(t *testing.T) {
 		server, _ := completeGraphTestServer(t, 1, 0, "/api/v1/pods")
 		defer server.Close()

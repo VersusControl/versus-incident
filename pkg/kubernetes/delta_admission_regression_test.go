@@ -86,6 +86,7 @@ func (service *Service) reservationFixturePage(ctx context.Context, query Timeli
 }
 
 func TestTimelineFirstPagePollingDoesNotReserveEmptyOrSinglePages(t *testing.T) {
+	t.Parallel()
 	for _, scenario := range []string{"single-page", "syncing", "empty"} {
 		service, provider, store, scope, reads := timelineHistoryFixture(t)
 		now := time.Now().UTC()
@@ -127,6 +128,7 @@ func TestTimelineFirstPagePollingDoesNotReserveEmptyOrSinglePages(t *testing.T) 
 }
 
 func TestTimelineReservationEquivalentReadsReuseAndRequesterFloodLeavesCapacity(t *testing.T) {
+	t.Parallel()
 	service, _, query := timelineReservationFixture(t)
 	alice := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "alice"})
 	bob := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "bob"})

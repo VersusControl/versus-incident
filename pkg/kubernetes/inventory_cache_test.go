@@ -496,7 +496,104 @@ func TestInventoryIssuesHistoryRemainsReadableUnderCaptureLease(t *testing.T) {
 	}
 }
 
+// An identity that may not list Nodes or Secrets still reads every issue it
+// can see. The cluster-wide broken list names the refused kinds as partial
+// failures instead of refusing the whole read.
+func TestBrokenIssuesOnPermissionLimitedClusterReturnReadableIssues(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/nodes", "/api/v1/secrets":
+			http.Error(w, `{"kind":"Status","code":403,"reason":"Forbidden"}`, http.StatusForbidden)
+			return
+		case "/api/v1/namespaces/kube-system":
+			writeJSON(w, map[string]any{"metadata": map[string]any{"uid": "physical"}})
+			return
+		}
+		items := []any{}
+		if r.URL.Path == "/api/v1/namespaces" {
+			items = append(items, map[string]any{"metadata": map[string]any{"name": "kube-system", "uid": "physical"}})
+		}
+		writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": items})
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "limited"})
+	service.SetChangeStorage(storage.NewMemory())
+	now := time.Now().UTC()
+	// The saved generation still holds a Node from before the denial, the Pod
+	// runs on it, and an allowed Event names it as its target.
+	seedInventory(t, service, []kubeindex.Record{
+		{UID: "pod", Kind: "Pod", Namespace: "shop", Name: "pod", NodeName: "worker-secret-1",
+			Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 3}}},
+		{UID: "node-uid", Kind: "Node", Name: "worker-secret-1", NodeReady: false},
+		{UID: "node-event", Kind: "Event", Namespace: "default", Name: "worker-secret-1.pressure", EventType: "Warning", EventCount: 5, EventFirstAt: now.Add(-time.Minute), EventLastAt: now,
+			Target: &kubeindex.OwnerRef{Kind: "Node", Name: "worker-secret-1", UID: "node-uid"}, Summary: map[string]string{"type": "Warning", "count": "5", "reason": "NodeHasDiskPressure"}},
+	})
+	change := Change{ID: "image", Cluster: "limited", Kind: "Pod", Namespace: "shop", Name: "pod", UID: "pod", RootUID: "pod", Type: kubechanges.ImageChanged, At: now}
+	raw, _ := json.Marshal(change)
+	nodeChange := Change{ID: "node-spec", Cluster: "limited", Kind: "Node", Name: "worker-secret-1", UID: "node-uid", RootUID: "node-uid", Type: kubechanges.SpecChanged, At: now}
+	nodeRaw, _ := json.Marshal(nodeChange)
+	commitInventoryFixtureHistory(t, service, storage.EvidenceBatch{ID: "capture:limited", At: now, Epoch: "fixture", Records: []storage.EvidenceRecord{
+		{ID: "change:image", Type: "change", AuthorizationKind: "Pod", Namespace: "shop", Name: "pod", Kind: "Pod", UID: "pod", RootUID: "pod", Rule: string(change.Type), At: now, ObservedAt: now, Epoch: "fixture", Payload: raw},
+		{ID: "change:node-spec", Type: "change", AuthorizationKind: "Node", Name: "worker-secret-1", Kind: "Node", UID: "node-uid", RootUID: "node-uid", Rule: string(nodeChange.Type), At: now, ObservedAt: now, Epoch: "fixture", Payload: nodeRaw},
+	}})
+	cache := service.changes.inventories[service.indexScope()]
+	denied := kubeindex.KindStatus{State: "error", Error: "forbidden", Partial: true, FailingSince: time.Now().UTC()}
+	cache.generation.View.Kinds["Node"], cache.generation.View.Kinds["Secret"] = denied, denied
+	page, err := service.Issues(t.Context(), IssueOptions{Broken: true, IncludeChanges: true, Limit: 5})
+	if err != nil {
+		t.Fatalf("a denial of Nodes and Secrets refused the whole issue read: %v", err)
+	}
+	nodes := false
+	for _, failure := range page.Partial {
+		nodes = nodes || failure.ResourceID == indexedResourceIDs["Node"] && failure.Class == "forbidden"
+	}
+	if len(page.Items) != 1 || page.Items[0].Root.UID != "pod" || !nodes || !page.Sync.Partial || page.Sync.State == "error" {
+		t.Fatalf("readable issues must come back with the refused kinds named: items=%d partial=%+v sync=%+v", len(page.Items), page.Partial, page.Sync)
+	}
+	if !page.Items[0].Partial {
+		t.Fatal("an issue read without Nodes claimed complete coverage")
+	}
+	if len(page.Items[0].Changes) != 1 || page.Items[0].Changes[0].Change.ID != "image" {
+		t.Fatalf("the saved change of a readable issue was dropped: %+v", page.Items[0].Changes)
+	}
+	all, err := service.Issues(t.Context(), IssueOptions{IncludeChanges: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nothing read from the denied Node reaches the answer: no node-level
+	// issue, no saved Node change and no Node reference on a workload issue.
+	// The one place the Node is named is the warning raised by the allowed
+	// Event, whose target is the Event's own field and is all it carries.
+	target := ObjectRef{Kind: "Node", Name: "worker-secret-1", UID: "node-uid"}
+	for _, read := range []IssuePage{page, all} {
+		for _, issue := range read.Items {
+			raw, _ := json.Marshal(issue)
+			if strings.HasPrefix(issue.Rule, "node.") {
+				t.Fatalf("a node-level issue came from a denied Node: %s", raw)
+			}
+			for _, linked := range issue.Changes {
+				if linked.Change.Kind == "Node" {
+					t.Fatalf("a saved Node change reached an issue: %s", raw)
+				}
+			}
+			if issue.Rule == "event.warning" {
+				if issue.Root != target || len(issue.Examples) != 1 || issue.Examples[0].Kind != "Event" || issue.Evidence != nil {
+					t.Fatalf("an Event warning carried more than the Event's own target: %s", raw)
+				}
+				continue
+			}
+			if issue.Root.Kind == "Node" || strings.Contains(string(raw), "worker-secret-1") {
+				t.Fatalf("a workload issue exposed the denied Node: %s", raw)
+			}
+		}
+	}
+	if len(all.Items) != 2 {
+		t.Fatalf("the full read must hold the crash and the Event warning: %+v", all.Items)
+	}
+}
+
 func TestInventoryPagesSixtyThousandRecords(t *testing.T) {
+	t.Parallel()
 	var pages atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages.Add(1)
@@ -537,6 +634,7 @@ func TestInventoryPagesSixtyThousandRecords(t *testing.T) {
 }
 
 func TestInventoryMetricsPagesEveryPodAndKeepsLastGood(t *testing.T) {
+	t.Parallel()
 	var fail atomic.Bool
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -620,6 +718,7 @@ func TestInventoryScopeUpgradeAndNamespaceDenial(t *testing.T) {
 }
 
 func TestInventoryOverviewReportsNodeAllocatableFromBackgroundCache(t *testing.T) {
+	t.Parallel()
 	labels := map[string]any{
 		"kubernetes.io/arch": "amd64", "kubernetes.io/os": "linux",
 		"node.kubernetes.io/instance-type": "m6i.4xlarge",
@@ -917,6 +1016,7 @@ func cachedGeneration(service *Service) inventoryGeneration {
 }
 
 func TestInventoryPublishesCoreKindsBeforeSlowExtrasAndFillsThemInLater(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	var extraDiscovery atomic.Int32
 	server := coreFirstServer(t, release, &extraDiscovery, nil)
@@ -1023,6 +1123,7 @@ func TestInventoryPublishesCoreKindsBeforeSlowExtrasAndFillsThemInLater(t *testi
 }
 
 func TestInventoryKeepsTheCoreGenerationWhenExtrasFail(t *testing.T) {
+	t.Parallel()
 	release := make(chan struct{})
 	close(release)
 	var extraDiscovery atomic.Int32

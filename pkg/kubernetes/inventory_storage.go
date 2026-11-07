@@ -324,11 +324,11 @@ func (service *Service) claimInventory(ctx context.Context, provider storage.Pro
 	}
 	raw, err := provider.ReadBlob(inventoryKey(service.scope))
 	if err != nil {
-		return nil, false, err
+		return nil, false, storageStageFailure("lease", err)
 	}
 	var record inventoryLeaseRecord
 	if len(raw) > 0 && json.Unmarshal(raw, &record) != nil {
-		return nil, false, ErrInvalidArguments
+		return nil, false, storageStageFailure("lease", ErrInvalidArguments)
 	}
 	if record.Owner != owner && record.Expires.After(time.Now()) {
 		return nil, false, nil
@@ -344,7 +344,7 @@ func (service *Service) claimInventory(ctx context.Context, provider storage.Pro
 		return nil, false, err
 	}
 	var won bool
-	err = service.commitCredential(ctx, func() error {
+	err = service.commitStorage(ctx, "lease", func() error {
 		var err error
 		won, err = cas.CompareAndSwapBlob(inventoryKey(service.scope), raw, replacement)
 		return err
@@ -359,6 +359,21 @@ func (lease *inventoryLease) renew(ctx context.Context, service *Service) error 
 
 	lease.mu.Lock()
 	defer lease.mu.Unlock()
+	return lease.renewHeld(ctx, service)
+}
+
+// renewHeld renews the lease under the credential epoch fence; the caller
+// holds lease.mu.
+func (lease *inventoryLease) renewHeld(ctx context.Context, service *Service) error {
+	if !lease.record.Expires.After(time.Now()) {
+		return errInventoryLeaseLost
+	}
+	return service.commitStorage(ctx, "lease", lease.renewFenced)
+}
+
+// renewFenced renews the lease; the caller holds lease.mu and is already inside
+// the credential epoch fence, as a history save is.
+func (lease *inventoryLease) renewFenced() error {
 	if !lease.record.Expires.After(time.Now()) {
 		return errInventoryLeaseLost
 	}
@@ -368,17 +383,22 @@ func (lease *inventoryLease) renew(ctx context.Context, service *Service) error 
 	if err != nil {
 		return err
 	}
-	err = service.commitCredential(ctx, func() error {
-		won, err := lease.cas.CompareAndSwapBlob(inventoryKey(lease.scope), lease.expected, replacement)
-		if err == nil && !won {
-			return errInventoryLeaseLost
-		}
-		return err
-	})
+	won, err := lease.cas.CompareAndSwapBlob(inventoryKey(lease.scope), lease.expected, replacement)
+	if err == nil && !won {
+		return errInventoryLeaseLost
+	}
 	if err == nil {
 		lease.record, lease.expected = record, replacement
 	}
 	return err
+}
+
+// commitStorage runs one storage write under the credential epoch fence. Only
+// the store's own answer is a storage failure: a credential that cannot be
+// resolved or accepted before the write keeps its meaning, so it still reaches
+// the credential recovery gate.
+func (service *Service) commitStorage(ctx context.Context, stage string, commit func() error) error {
+	return service.commitCredential(ctx, func() error { return storageStageFailure(stage, commit()) })
 }
 
 func (lease *inventoryLease) release() error {
@@ -464,13 +484,20 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	if cache != nil {
 		cache.mu.RLock()
 		previous = cache.generation
+		// A capture whose save was abandoned left saved history short of it.
+		if previous.EvidenceBatch != nil && previous.EvidenceBatch.ID == cache.abandonedSave {
+			previous.EvidenceFailure = "storage_rejected"
+		}
 		cache.mu.RUnlock()
 	}
 	generation.EvidenceBatch = nil
 	generation.EvidenceFailure = ""
+	refusal := ""
 	if evidenceErr := service.prepareEvidence(ctx, generation, previous); evidenceErr != nil {
 		generation.EvidenceFailure = errorClass(evidenceErr)
+		refusal = "reason=" + captureRefusalReason(evidenceErr) + " class=" + generation.EvidenceFailure
 	}
+	noteCaptureRefusal(cache, refusal)
 	payload, err := json.Marshal(generation)
 	if err != nil {
 		return err
@@ -478,7 +505,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	// Each owner alternates its own two slots. A stale owner cannot modify a
 	// successor's data, and the small CAS is the only publication point.
 	payloadStarted := time.Now()
-	writeErr := service.commitCredential(ctx, func() error { return lease.provider.WriteBlob(key, payload) })
+	writeErr := service.commitStorage(ctx, "payload", func() error { return lease.provider.WriteBlob(key, payload) })
 	service.recovery.stage("payload", payloadStarted, writeErr)
 	if err := writeErr; err != nil {
 		return err
@@ -494,7 +521,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 		return err
 	}
 	casStarted := time.Now()
-	err = service.commitCredential(ctx, func() error {
+	err = service.commitStorage(ctx, "cas", func() error {
 		won, err := lease.cas.CompareAndSwapBlob(inventoryKey(lease.scope), lease.expected, replacement)
 		if err == nil && !won {
 			return errInventoryLeaseLost
@@ -565,13 +592,84 @@ func (lease *inventoryLease) commitJournal(parent context.Context, service *Serv
 	if !lease.record.Expires.After(time.Now()) {
 		return kubechanges.ErrLeaseLost
 	}
+	// A large capture is saved in several transactions. Start it with at least
+	// half a lease ahead, and confirm the lease before each transaction, so
+	// every part is fenced by a lease that is still held.
+	short := func() bool { return lease.cas != nil && time.Until(lease.record.Expires) < inventoryLeaseTTL/2 }
+	if short() {
+		if err := lease.renewHeld(parent, service); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithDeadline(parent, lease.record.Expires)
 	defer cancel()
 	batch := *generation.EvidenceBatch
 	batch.GuardKey, batch.GuardExpected = inventoryKey(lease.scope), append([]byte(nil), lease.expected...)
+	// Called by the store inside the save, which already holds the fence.
+	batch.KeepLease = func(context.Context) ([]byte, error) {
+		if !lease.record.Expires.After(time.Now()) {
+			return nil, kubechanges.ErrLeaseLost
+		}
+		if short() {
+			if err := lease.renewFenced(); err != nil {
+				return nil, storageStageFailure("lease", err)
+			}
+		}
+		return append([]byte(nil), lease.expected...), nil
+	}
 	generation.EvidenceBatch = &batch
 	started := time.Now()
 	err := service.commitEvidence(ctx, generation)
 	service.recovery.stage("journal", started, err)
-	return err
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	return service.abandonRejectedHistorySave(cache, batch.ID, err)
+}
+
+// abandonRejectedHistorySave stops a capture the history store rejected for good
+// from blocking collection. Retrying the same capture cannot succeed, so it is
+// dropped: the stored rejection note keeps the outage visible, and the next
+// capture is prepared against the unchanged checkpoint as a known failure, so
+// it records the uncovered interval as a coverage gap. Every other failure is
+// returned unchanged and keeps its retry.
+func (service *Service) abandonRejectedHistorySave(cache *inventoryCache, batchID string, err error) error {
+	var saveFailure *captureStorageError
+	if !errors.As(err, &saveFailure) || !saveFailure.rejected || cache == nil {
+		return err
+	}
+	cache.mu.Lock()
+	cache.abandonedSave = batchID
+	cache.mu.Unlock()
+	log.Printf("kubernetes: history store rejected a capture; collection continues and the next capture records the gap reason=%s", captureRefusalReason(err))
+	return nil
+}
+
+// noteCaptureRefusal logs a capture refused before saving when the reason
+// differs from the last one logged for the cache's scope, and logs once when
+// captures are prepared for saving again. refusal is empty for a capture that
+// was prepared. A scope without a cache yet logs every refusal.
+func noteCaptureRefusal(cache *inventoryCache, refusal string) {
+	if cache != nil {
+		cache.refusal.mu.Lock()
+		previous := cache.refusal.logged
+		cache.refusal.logged = refusal
+		cache.refusal.mu.Unlock()
+		if refusal == previous {
+			return
+		}
+		if refusal == "" {
+			log.Printf("kubernetes: history captures are prepared for saving again")
+			return
+		}
+	}
+	if refusal != "" {
+		log.Printf("kubernetes: history capture refused before saving %s", refusal)
+	}
+}
+
+func (service *Service) historySaveAbandoned(cache *inventoryCache, batchID string) bool {
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return batchID != "" && cache.abandonedSave == batchID
 }

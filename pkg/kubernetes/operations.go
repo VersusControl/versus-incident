@@ -2,8 +2,6 @@ package kubernetes
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
 const (
@@ -57,7 +53,18 @@ type WorkloadPage struct {
 	Truncated bool                `json:"truncated"`
 	Omitted   []string            `json:"omitted_categories,omitempty"`
 	Partial   []PartialFailure    `json:"partial_failures,omitempty"`
+	// Total and Limit size the pager: Total counts every item the filters
+	// match, and a non-zero Limit marks Total as present.
+	Total int `json:"total,omitempty"`
+	Limit int `json:"limit,omitempty"`
+	// resume mints cursors inside the page for callers that show fewer rows.
+	resume snapshotResume
 }
+
+// ResumeAfter returns the cursor that continues this list after the first
+// shown rows of this page, for a caller that showed fewer rows than the page
+// holds. It is empty when the page cannot be resumed that way.
+func (page WorkloadPage) ResumeAfter(shown int) string { return page.resume.after(shown) }
 
 type WorkloadListOptions struct {
 	Namespace string
@@ -775,47 +782,32 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		if filtered[i].Namespace != filtered[j].Namespace {
 			return filtered[i].Namespace < filtered[j].Namespace
 		}
-		return filtered[i].Name < filtered[j].Name
+		if filtered[i].Name != filtered[j].Name {
+			return filtered[i].Name < filtered[j].Name
+		}
+		return filtered[i].UID < filtered[j].UID
 	})
-	// Bind the offset to the committed projection and normalized filters read
-	// above. A replacement cannot turn an old offset into duplicate-row success.
-	// Observation timestamps and unrelated kinds do not change the page, so
-	// routine polling alone must not expire a valid continuation.
-	type cursorKindState struct {
-		State, Error          string
-		Partial, CycleFailure bool
+	rows := make([]string, len(filtered))
+	for position, resource := range filtered {
+		rows[position] = projectedResourceIdentity(resource)
 	}
-	cursorKinds := make(map[string]cursorKindState, len(workloadResources))
-	for _, candidate := range workloadResources {
-		state := status.Kinds[candidate.Kind]
-		cursorKinds[candidate.Kind] = cursorKindState{state.State, state.Error, state.Partial, state.CycleFailure}
-	}
-	binding, err := json.Marshal(struct {
-		Scope                  kubeindex.Scope
-		Namespace, Kind, Query string
-		Rows                   []ProjectedResource
-		Counts                 map[string]int
-		Kinds                  map[string]cursorKindState
-	}{service.indexScope(), options.Namespace, options.Kind, query, filtered, result.Counts, cursorKinds})
+	cursor, err := bindSnapshotCursor("workloads", service.indexScope(), struct{ Namespace, Kind, Query string }{options.Namespace, options.Kind, query}, rows)
 	if err != nil {
 		return WorkloadPage{}, err
 	}
-	digest := fmt.Sprintf("%x", sha256.Sum256(binding))
-	offset, err := workloadCursorOffset(options.Cursor, digest)
-	if err != nil {
-		return WorkloadPage{}, err
-	}
-	start, end, next, err := pageWindow(offset, limit, len(filtered))
+	start, end, next, err := cursor.window(options.Cursor, limit, len(filtered))
 	if err != nil {
 		return WorkloadPage{}, err
 	}
 	result.Items = append(result.Items, filtered[start:end]...)
-	result.Next = encodeWorkloadCursor(next, digest)
+	result.Next = next
+	result.resume = cursor.resumeFrom(start)
+	result.Total, result.Limit = len(filtered), limit
 	var sizeTruncated bool
 	result.Items, result.Omitted, sizeTruncated = trimAggregateItems(result.Items, result.Omitted)
 	result.Truncated = result.Truncated || sizeTruncated
 	if sizeTruncated {
-		result.Next = encodeWorkloadCursor(strconv.Itoa(start+len(result.Items)), digest)
+		result.Next = cursor.encode(start + len(result.Items))
 	}
 	if requiresAuthority {
 		if err := service.authorizeWorkloadRead(ctx, options.Namespace); err != nil {
@@ -825,29 +817,9 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 	return result, nil
 }
 
-func workloadCursorOffset(cursor, digest string) (string, error) {
-	if cursor == "" {
-		return "", nil
-	}
-	if len(cursor) > 128 {
-		return "", ErrInvalidArguments
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil {
-		return "", ErrInvalidArguments
-	}
-	binding, offset, ok := strings.Cut(string(raw), ":")
-	if !ok || binding != digest || offset == "" {
-		return "", ErrInvalidArguments
-	}
-	return offset, nil
-}
-
-func encodeWorkloadCursor(offset, digest string) string {
-	if offset == "" {
-		return ""
-	}
-	return base64.RawURLEncoding.EncodeToString([]byte(digest + ":" + offset))
+// projectedResourceIdentity names one projected object for a list cursor.
+func projectedResourceIdentity(resource ProjectedResource) string {
+	return resource.ResourceID + "\x00" + resource.Kind + "\x00" + resource.Namespace + "\x00" + resource.Name + "\x00" + resource.UID
 }
 
 func normalizePageLimit(limit int) int {

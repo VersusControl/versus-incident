@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
+	"log"
 	"sort"
 	"strings"
+	"time"
 )
 
 // migrate.go — RunSQLMigrations: a fully FS- and table-agnostic
@@ -117,6 +119,11 @@ func RunSQLMigrations(db *sql.DB, fsys fs.FS, dir, ledgerTable string) error {
 		if err != sql.ErrNoRows {
 			return fmt.Errorf("storage: RunSQLMigrations: check ledger for %q: %w", name, err)
 		}
+		// Operators see how long each first-start migration takes.
+		started := time.Now()
+		logApplied := func() {
+			log.Printf("storage: migration %s applied in %.2fs", name, time.Since(started).Seconds())
+		}
 
 		data, err := fs.ReadFile(fsys, dir+"/"+name)
 		if err != nil {
@@ -131,6 +138,12 @@ func RunSQLMigrations(db *sql.DB, fsys fs.FS, dir, ledgerTable string) error {
 				optionalTable := strings.HasPrefix(statement, "-- versus:optional-table\n")
 				if optionalTable {
 					statement = strings.TrimSpace(strings.TrimPrefix(statement, "-- versus:optional-table\n"))
+				}
+				// A statement for a partitioned table only is skipped where the
+				// table does not exist or is not (yet) partitioned.
+				partitionedOnly := strings.HasPrefix(statement, "-- versus:partitioned-table\n")
+				if partitionedOnly {
+					statement = strings.TrimSpace(strings.TrimPrefix(statement, "-- versus:partitioned-table\n"))
 				}
 				if statement == "" {
 					continue
@@ -160,6 +173,9 @@ func RunSQLMigrations(db *sql.DB, fsys fs.FS, dir, ledgerTable string) error {
 				if err := db.QueryRowContext(ctx, `SELECT COALESCE((SELECT relkind='p' FROM pg_class WHERE oid=to_regclass($1)),FALSE)`, table).Scan(&partitioned); err != nil {
 					return err
 				}
+				if partitionedOnly && !partitioned {
+					continue
+				}
 				if partitioned {
 					if err := runPartitionedOnlineIndex(ctx, db, statement, index, table); err != nil {
 						return err
@@ -182,6 +198,7 @@ func RunSQLMigrations(db *sql.DB, fsys fs.FS, dir, ledgerTable string) error {
 			if _, err := db.ExecContext(ctx, recordApplied, name); err != nil {
 				return fmt.Errorf("storage: record online migration %q: %w", name, err)
 			}
+			logApplied()
 			continue
 		}
 
@@ -202,6 +219,7 @@ func RunSQLMigrations(db *sql.DB, fsys fs.FS, dir, ledgerTable string) error {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("storage: RunSQLMigrations: commit %q: %w", name, err)
 		}
+		logApplied()
 	}
 	return nil
 }

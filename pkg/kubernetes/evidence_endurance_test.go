@@ -90,7 +90,7 @@ func TestDurableEvidenceEndurance(t *testing.T) {
 		if dsn == "" {
 			t.Fatal("real isolated Postgres required, not a skip")
 		}
-		base, err = storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+		base, err = storage.NewPostgres(storage.PostgresOptions{DSN: dsn, EvidenceRetention: "0"})
 	default:
 		t.Fatal("unknown explicit backend")
 	}

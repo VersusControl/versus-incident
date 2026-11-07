@@ -669,3 +669,88 @@ func contains(values []string, target string) bool {
 	}
 	return false
 }
+
+// The assistant's Changes view shows at most a dozen changes of a page. When it
+// shows fewer than the page holds, its next cursor must be one saved history
+// accepts: the page's own continuation after the last shown change, never a
+// bare number, which history refuses.
+func TestChangesModelViewNeverInventsAnOffsetCursor(t *testing.T) {
+	items := make([]kubernetes.Change, 20)
+	for index := range items {
+		items[index] = kubernetes.Change{ID: "change-" + strconv.Itoa(index), Kind: "Deployment", Namespace: "shop", Name: "checkout", At: time.Now().UTC()}
+	}
+	for _, cursor := range []string{"", "opaque-cursor"} {
+		view := compactChanges(kubernetes.ChangePage{Items: items, Next: "page-next"}, kubernetes.Scope{ClusterID: "cluster-a"}, cursor)
+		next, _ := view["next"].(string)
+		if _, err := strconv.Atoi(next); err == nil {
+			t.Fatalf("a trimmed Changes view invented the offset cursor %q", next)
+		}
+		if next == "page-next" {
+			t.Fatal("a trimmed Changes view resumed after the whole page and skipped the changes it did not show")
+		}
+		if view["truncated"] != true {
+			t.Fatal("a trimmed Changes view did not say it was truncated")
+		}
+	}
+	whole := compactChanges(kubernetes.ChangePage{Items: items[:3], Next: "page-next"}, kubernetes.Scope{ClusterID: "cluster-a"}, "")
+	if whole["next"] != "page-next" {
+		t.Fatalf("a Changes view that showed the whole page gave next=%v, want the page's own cursor", whole["next"])
+	}
+}
+
+// When the Helm metadata read stops early the page is marked truncated, but
+// the last page of the list offers no cursor: a cursor there would point at
+// the end of the list and lead the assistant back to the same empty page.
+func TestHelmReleasesViewEndsOnTheLastPageWhenMetadataIsIncomplete(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api":
+			writeToolJSON(writer, map[string]any{"versions": []string{"v1"}})
+		case "/apis":
+			writeToolJSON(writer, map[string]any{"groups": []any{}})
+		case "/api/v1":
+			writeToolJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "secrets", "kind": "Secret", "namespaced": true, "verbs": []string{"get", "list"}}}})
+		case "/api/v1/namespaces/ops/secrets":
+			// The same continue token on every page stops the read early.
+			writeToolJSON(writer, map[string]any{"metadata": map[string]any{"continue": "same-token"}, "items": []any{
+				map[string]any{"metadata": map[string]any{"name": "sh.helm.release.v1.checkout.v1", "namespace": "ops", "labels": map[string]string{"owner": "helm", "name": "checkout", "version": "1", "status": "deployed"}}},
+				map[string]any{"metadata": map[string]any{"name": "sh.helm.release.v1.api.v1", "namespace": "ops", "labels": map[string]string{"owner": "helm", "name": "api", "version": "1", "status": "deployed"}}},
+			}})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster-a"}, time.Minute)
+	scope := kubernetes.Scope{ClusterID: "cluster-a"}
+	whole, err := service.Releases(context.Background(), kubernetes.HelmReleaseOptions{Namespace: "ops", Limit: 10})
+	if err != nil || len(whole.Items) != 2 || whole.Next != "" || !whole.Truncated {
+		t.Fatalf("incomplete release list: items=%d next=%q truncated=%v err=%v", len(whole.Items), whole.Next, whole.Truncated, err)
+	}
+	view := compactHelmReleasePage(whole, scope, "")
+	if next, exists := view["next"]; exists {
+		t.Fatalf("the last page offered next=%v", next)
+	}
+	if view["truncated"] != true {
+		t.Fatal("an incomplete release list was not reported as truncated")
+	}
+	first, err := service.Releases(context.Background(), kubernetes.HelmReleaseOptions{Namespace: "ops", Limit: 1})
+	if err != nil || first.Next == "" {
+		t.Fatalf("release page 1: next=%q err=%v", first.Next, err)
+	}
+	cursor, _ := compactHelmReleasePage(first, scope, "")["next"].(string)
+	if cursor == "" {
+		t.Fatal("page 1 of 2 offered no cursor")
+	}
+	last, err := service.Releases(context.Background(), kubernetes.HelmReleaseOptions{Namespace: "ops", Limit: 1, Cursor: cursor})
+	if err != nil || len(last.Items) != 1 || last.Items[0].Name == first.Items[0].Name {
+		t.Fatalf("release page 2: items=%v err=%v", last.Items, err)
+	}
+	if next, exists := compactHelmReleasePage(last, scope, cursor)["next"]; exists {
+		t.Fatalf("the last page offered next=%v", next)
+	}
+}

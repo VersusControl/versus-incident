@@ -13,6 +13,7 @@ import { BreakLogRateStrip, LogWindowBracket } from "./KubernetesBreakLogs";
 import { useBreakLogs } from "@/lib/useKubernetesBreakLogs";
 import { evidenceLoading, settledSync } from "@/lib/kubernetesPending";
 import { KubernetesPendingNote } from "@/components/KubernetesPendingNote";
+import { KubernetesHistorySaveNotice } from "@/components/KubernetesHistorySaveNotice";
 import { ResourceLogsButton } from "@/components/ResourceLogsButton";
 import { useQueryClient } from "@tanstack/react-query";
 import { incompleteKubernetesSnapshot } from "@/lib/kubernetesContinuity";
@@ -303,6 +304,10 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
   const warnings = issueWarnings(denied ? issue : detail ?? issue);
   if (evidence?.partial) warnings.push({ id: "crash-capture", content: "Some crash evidence could not be captured" });
   if (denied) warnings.push({ id: "root-history-unavailable", content: "Root history unavailable" });
+  // The row's own coverage caveats come from the list page itself, so they
+  // travel with the collapsed row without touching enrichment. Crash and
+  // root-read caveats stay in the expanded body, where their source is shown.
+  const rowWarnings = collapsed ? issueWarnings(issue) : warnings;
   const settledSource = settledSync(sourceSync, sourceFailures);
   const sync = settledSync(collapsed ? enrichment.data?.sync : sourceSync, collapsed ? enrichment.data?.partial_failures : undefined);
   // Evidence kinds still loading leave history incomplete; that is not a
@@ -334,7 +339,7 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
       {changes.map((item, index) => <div key={item.change.id} className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-3 sm:grid-cols-[minmax(0,1fr)_6rem_5rem] ${index > 0 ? "hidden sm:grid" : ""}`}><span className="min-w-0 break-words text-ink-200"><span className="text-ink-400">{item.change.kind} </span>{item.change.name} <span className="font-mono">{changeDescription(item.change)}</span></span><span className="col-span-2 col-start-1 row-start-2 flex flex-wrap items-center gap-x-3 text-ink-400 sm:col-span-1 sm:col-start-2 sm:row-start-1">{lead(item.lead_seconds)}{index === 0 && more > 0 && <button type="button" className="min-h-6 text-link sm:hidden" onClick={timeline}>+{more} more changes</button>}</span><time className="col-start-2 row-start-1 whitespace-nowrap text-right font-mono text-ink-400 sm:col-start-3" dateTime={item.change.at}>{clock(item.change.at)}</time></div>)}
       {(detail?.more_changes ?? 0) > 0 && <button type="button" onClick={timeline} className={`${changes.length ? "hidden sm:block" : ""} text-link`}>+{detail?.more_changes} more changes</button>}
       {loadingEvidence && <KubernetesPendingNote label="Evidence loading" />}
-      {detail && changes.length === 0 && !loadingEvidence && <p className="text-ink-400">{complete && detail.history === "complete" && !detail.gaps?.length && !detail.partial ? detail.untracked?.length ? "No recorded change in tracked resources." : "No change on it, its config or its nodes" : "No recorded change in available evidence"}</p>}
+      {detail && changes.length === 0 && !loadingEvidence && <p className="text-ink-400">{detail.history_truncated ? "Some changes before this break were not loaded" : complete && detail.history === "complete" && !detail.gaps?.length && !detail.partial ? detail.untracked?.length ? "No recorded change in tracked resources." : "No change on it, its config or its nodes" : "No recorded change in available evidence"}</p>}
       {collapsed && issue.examples?.length ? <p className="text-ink-400">Examples: {issue.examples.map((item) => item.name).join(", ")}</p> : null}
       </>}
     </div>
@@ -346,7 +351,7 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
       <span className="min-w-0 [overflow-wrap:anywhere] text-ink-400">{warningSummary(evidence)}</span>
       {expanded && <span className="ml-auto hidden whitespace-nowrap text-right font-mono text-ink-400 sm:inline">{range(evidence.from, evidence.to)}</span>}
     </div>}
-    <div className={`flex flex-wrap items-center justify-between gap-x-2 text-xs ${warnings.length || expanded && detail?.evidence ? "mt-1" : ""} ${warnings.length ? "" : "sm:hidden"} ${collapsed ? "pl-7" : "sm:pl-[4.5rem]"}`}>{!collapsed && !warningsOwned && <KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster ?? clusterId, issue.root.uid, issue.root.kind, issue.root.namespace, issue.root.name, issue.rule, warningScope, denied])} />}{expanded && detail?.evidence && <span className="ml-auto whitespace-nowrap text-right font-mono text-ink-400 sm:hidden">{range(detail.evidence.from, detail.evidence.to)}</span>}</div>
+    <div className={`flex flex-wrap items-center justify-between gap-x-2 text-xs ${rowWarnings.length || expanded && detail?.evidence ? "mt-1" : ""} ${rowWarnings.length ? "" : "sm:hidden"} ${collapsed ? "pl-7" : "sm:pl-[4.5rem]"}`}>{!warningsOwned && <KubernetesWarnings warnings={rowWarnings} scope={JSON.stringify([cluster ?? clusterId, issue.root.uid, issue.root.kind, issue.root.namespace, issue.root.name, issue.rule, warningScope, denied])} />}{expanded && detail?.evidence && <span className="ml-auto whitespace-nowrap text-right font-mono text-ink-400 sm:hidden">{range(detail.evidence.from, detail.evidence.to)}</span>}</div>
   </article>;
 }
 
@@ -373,6 +378,7 @@ export function TimelineCard({ changes, changesAsOf, windowEnd, clusterId, onSel
   const peak = Math.max(1, ...buckets);
   return <section aria-label="Break timeline" className="card min-w-0 overflow-hidden">
     {asOf && <p role="status" className="px-4 py-2 text-xs text-sev-warning">Couldn't refresh — showing data as of {new Date(asOf).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>}
+    <KubernetesHistorySaveNotice pages={[changes]} className="px-4 py-2" />
     <header className="card-header !py-2 sm:!py-3"><h2 className="card-title flex items-center gap-2"><History size={15} aria-hidden="true" />Timeline</h2><button type="button" className="flex items-center gap-2 text-xs text-link" onClick={() => onSelectView("timeline")}>Full timeline<ArrowRight size={13} aria-hidden="true" /></button></header>
     {issues.isPending && <div role="status" aria-label="Loading break timeline" className="space-y-2 p-4"><div className="sk h-14" /><div className="sk h-20" /></div>}
     {!data && !issues.isPending && !issues.isError && <p role="status" className="p-4 text-xs text-ink-400">Break timeline unavailable.</p>}

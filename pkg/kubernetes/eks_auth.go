@@ -96,7 +96,8 @@ func newEKSCredentialSourceWithSTSFactory(options AuthOptions, newSTS eksSTSFact
 		}
 		provider = assumeRoleCredentials(newSTS(region, provider), options.EKSRoleARN)
 	}
-	return newEKSSource(options.EKSClusterName, region, provider, time.Now), nil
+	source := newEKSSource(options.EKSClusterName, region, provider, time.Now).(*expiringBearerSource)
+	return &eksCredentialSource{expiringBearerSource: source, identity: newEKSIdentityVerifier(awsSTSEndpoint(region), options.EKSClusterName, fixedCredentialHTTPClient())}, nil
 }
 
 func nativeAWSCredentialProvider(region string, profile map[string]string, profileFound bool, newSTS eksSTSFactory) (aws.CredentialsProvider, error) {

@@ -227,7 +227,8 @@ storage:
 kubernetes:
   evidence:
     observationHeartbeat: 5m
-    retention: "0"
+    retention: "168h"
+    saveChunk: 500
 
 agent:
   enable: false

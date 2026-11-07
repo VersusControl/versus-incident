@@ -54,6 +54,7 @@ func (p *completionObservedStore) CommitEvidence(ctx context.Context, scope stor
 }
 
 func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file"} {
 		for _, incomplete := range []bool{false, true} {
 			name := "complete"
@@ -163,6 +164,13 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					t.Fatal(err)
 				}
 				service := NewService(client, Scope{OrgID: "default", ClusterID: "finite-authority", CredentialID: "unchanged"}, time.Hour)
+				// The incomplete-final-list case keeps production pacing: it reads
+				// Workloads as soon as SyncHealth reports the fresh completion, and
+				// at fixture pace the workload authority proof can trail that report
+				// by a fraction of a second.
+				if !incomplete {
+					useFixturePace(service)
+				}
 				service.SetChangeStorage(observed)
 				registry := NewServiceRegistry(service)
 				defer registry.Close()
@@ -292,7 +300,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				if calls != len(namespaces)*len(kinds) || freshGlobal.Load() != 0 {
 					t.Fatalf("fallback operation contract: got=%d expected=%d*%d freshGlobal=%d", calls, len(namespaces), len(kinds), freshGlobal.Load())
 				}
-				t.Logf("held finite traversal: namespaces=%d deniedKinds=%d LISTs=%d; no fresh complete global LIST exists yet; bulk limiter/cadences unchanged", len(namespaces), len(kinds), calls)
+				t.Logf("held finite traversal: namespaces=%d deniedKinds=%d LISTs=%d; no fresh complete global LIST exists yet", len(namespaces), len(kinds), calls)
 				releasedAt := time.Now().UTC()
 				releaseTail()
 				if incomplete {

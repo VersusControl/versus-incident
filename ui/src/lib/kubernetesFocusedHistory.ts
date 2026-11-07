@@ -1,4 +1,4 @@
-import type { KubernetesChange, KubernetesChangesPage, KubernetesCrashEvent, KubernetesCrashPage, KubernetesSync } from "./api";
+import type { KubernetesCaptureStatus, KubernetesChange, KubernetesChangesPage, KubernetesCrashEvent, KubernetesCrashPage, KubernetesHistorySave, KubernetesSync } from "./api";
 import { ApiError } from "./api";
 import { kubernetesAccessLost } from "./kubernetesContinuity";
 
@@ -55,9 +55,19 @@ function syncOf(pages: Array<{ sync: KubernetesSync }>): KubernetesSync {
     partial: pages.some(page => page.sync.partial) };
 }
 
+/** A save delay on any page of the scan describes the whole loaded range; a rejection outranks a delay. */
+function historySave(pages: Array<{ capture?: KubernetesCaptureStatus }>): { history_save?: KubernetesHistorySave } {
+  const saves = pages.flatMap(page => page.capture?.history_save ? [page.capture.history_save] : []);
+  const save = saves.find(entry => entry.code === "history_save_rejected" || entry.retryable === false) ?? saves[0];
+  return save ? { history_save: save } : {};
+}
+
 export async function focusedChanges(fetch: (cursor?: string) => Promise<KubernetesChangesPage>, signal: AbortSignal): Promise<KubernetesChangesPage & FocusedCoverage> {
   const { pages, ...result } = await collect<KubernetesChange, KubernetesChangesPage>(fetch, signal, 500);
+  const save = historySave(pages);
+  const capture = pages[0].capture ?? pages.find(page => page.capture)?.capture;
   return { ...pages[0], ...result, sync: syncOf(pages),
+    ...(capture ? { capture: { ...capture, ...save } } : {}),
     truncated: result.incomplete_range || pages.some(page => page.truncated),
     gaps: unique(pages.flatMap(page => page.gaps ?? [])),
     partial_failures: unique(pages.flatMap(page => page.partial_failures ?? [])) };
@@ -86,6 +96,6 @@ export async function focusedCrashes(fetch: (cursor?: string) => Promise<Kuberne
     gaps: unique(pages.flatMap(page => page.gaps ?? [])),
     capture_gaps: unique(pages.flatMap(page => page.capture_gaps ?? [])),
     limitations: unique(pages.flatMap(page => page.limitations ?? [])),
-    capture: { ...(captureFailure ?? first).capture, behind: pages.some(page => page.capture.behind),
+    capture: { ...(captureFailure ?? first).capture, ...historySave(pages), behind: pages.some(page => page.capture.behind),
       mode: pages.every(page => page.capture.mode === first.capture.mode) ? first.capture.mode : "partial" } };
 }

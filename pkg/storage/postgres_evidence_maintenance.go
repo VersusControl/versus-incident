@@ -70,6 +70,20 @@ func (p *postgresProvider) completeEvidenceBackfill(parent context.Context, budg
 	}
 }
 
+// nextEvidenceBackfillLimits halves a background conversion batch after a
+// failed one and grows it back after each success. A batch's per-event lookup
+// searches every monthly partition, so a journal with years of months may
+// need smaller batches to finish inside the statement timeout.
+func nextEvidenceBackfillLimits(limits evidenceBackfillLimits, err error) evidenceBackfillLimits {
+	if err != nil {
+		limits.events, limits.occurrences = max(16, limits.events/2), max(8, limits.occurrences/2)
+		return limits
+	}
+	limits.events = min(evidenceBackgroundBackfill.events, limits.events*2)
+	limits.occurrences = min(evidenceBackgroundBackfill.occurrences, limits.occurrences*2)
+	return limits
+}
+
 func (p *postgresProvider) pendingEvidenceScopes(ctx context.Context) (int, error) {
 	var pending int
 	err := p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kubernetes_evidence_scopes WHERE NOT read_model_ready`).Scan(&pending)
@@ -81,22 +95,38 @@ func (p *postgresProvider) startEvidenceMaintenance() {
 	p.maintenanceCancel, p.maintenanceDone = cancel, make(chan struct{})
 	go func() {
 		defer close(p.maintenanceDone)
+		// A conversion or heads batch that times out is retried at half its
+		// size, so a journal spread over many monthly partitions still
+		// converts. Each step has its own deadline and runs whatever the
+		// others did, so a busy partition swap never holds the heads pass back.
+		conversion, heads := evidenceBackgroundBackfill, evidenceBackgroundBackfill
+		var deferredLogged time.Time
+		step := func(run func(context.Context) (bool, error)) (bool, error) {
+			stepCtx, stop := context.WithTimeout(ctx, evidenceBackgroundBackfill.batchTimeout)
+			defer stop()
+			return run(stepCtx)
+		}
 		for {
-			workCtx, stop := context.WithTimeout(ctx, evidenceBackgroundBackfill.batchTimeout)
-			more, err := p.backfillEvidenceBatch(workCtx, evidenceBackgroundBackfill)
-			if err == nil {
-				partitionMore, partitionErr := p.partitionEvidenceBatch(workCtx)
-				more, err = more || partitionMore, partitionErr
-			}
+			more, err := step(func(c context.Context) (bool, error) { return p.backfillEvidenceBatch(c, conversion) })
+			conversion = nextEvidenceBackfillLimits(conversion, err)
+			partitionMore, partitionErr := step(p.partitionEvidenceBatch)
+			headsMore, headsErr := step(func(c context.Context) (bool, error) { return p.backfillEvidenceHeads(c, heads.events) })
+			heads = nextEvidenceBackfillLimits(heads, headsErr)
+			lagMore, lagErr := step(p.scanObservedLag)
+			more = more || partitionMore || headsMore || lagMore
+			err = errors.Join(err, partitionErr, headsErr, lagErr)
 			if err == nil && !more {
-				more, err = p.compactEvidenceBatch(workCtx)
+				more, err = step(p.compactEvidenceBatch)
 			}
-			stop()
 			delay := time.Minute
-			if more && err == nil {
+			switch {
+			case more && err == nil:
 				delay = 50 * time.Millisecond
+			case more:
+				delay = time.Second
 			}
-			if err != nil && ctx.Err() == nil {
+			if err != nil && ctx.Err() == nil && time.Since(deferredLogged) >= time.Minute {
+				deferredLogged = time.Now()
 				log.Printf("storage: evidence read-model backfill deferred")
 			}
 			timer := time.NewTimer(delay)
@@ -122,7 +152,7 @@ func (p *postgresProvider) backfillEvidenceBatch(ctx context.Context, limits evi
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
 		return false, err
 	}
-	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL statement_timeout='%dms'; SET LOCAL lock_timeout='100ms'`, limits.statementTimeout.Milliseconds())); err != nil {
+	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL statement_timeout='%dms'; SET LOCAL lock_timeout='100ms'; %s`, limits.statementTimeout.Milliseconds(), evidenceHeadsWriter)); err != nil {
 		return false, err
 	}
 	var key, occurrenceCursor, versionCursor string
@@ -274,4 +304,106 @@ func (p *postgresProvider) backfillEvidenceBatch(ctx context.Context, limits evi
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// backfillEvidenceHeads gives a head to every current journal row of a scope
+// that holds history from before heads existed, one bounded slice of the
+// journal at a time in sequence order. When it reaches the end of the
+// journal, every later row was written with its head, so the scope is marked
+// complete and saves and reads stop searching its journal for an event's
+// current version. A head a save wrote meanwhile is newer and is kept; a head
+// whose row is no longer a current journal row (after a restore, say) is
+// replaced by the current row the pass finds.
+func (p *postgresProvider) backfillEvidenceHeads(ctx context.Context, limit int) (bool, error) {
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='100ms'; `+evidenceHeadsWriter); err != nil {
+		return false, err
+	}
+	var key string
+	var cursor int64
+	err = tx.QueryRowContext(ctx, `SELECT scope_key,heads_backfill FROM kubernetes_evidence_scopes WHERE heads_backfill IS NOT NULL ORDER BY scope_key LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&key, &cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Every pending scope is held by a save; try again shortly rather
+		// than at the next idle pass.
+		var locked bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM kubernetes_evidence_scopes WHERE heads_backfill IS NOT NULL)`).Scan(&locked); err != nil {
+			return false, err
+		}
+		return locked, tx.Commit()
+	}
+	if err != nil {
+		return false, err
+	}
+	var next int64
+	var read int
+	if err = tx.QueryRowContext(ctx, `WITH slice AS MATERIALIZED(
+ SELECT scope_key,event_id,sequence,event_at,event_version,priority,observed_at,superseded_seq FROM kubernetes_evidence_events
+ WHERE scope_key=$1 AND sequence>$2 ORDER BY sequence LIMIT $3
+ ), heads AS(
+ INSERT INTO kubernetes_evidence_event_heads AS head(scope_key,event_id,sequence,event_at,event_version,priority,observed_at)
+ SELECT DISTINCT ON(event_id) scope_key,event_id,sequence,event_at,event_version,priority,observed_at FROM slice
+ WHERE superseded_seq IS NULL ORDER BY event_id,sequence DESC
+ ON CONFLICT(scope_key,event_id) DO UPDATE SET sequence=EXCLUDED.sequence,event_at=EXCLUDED.event_at,
+ event_version=EXCLUDED.event_version,priority=EXCLUDED.priority,observed_at=EXCLUDED.observed_at
+ WHERE head.sequence<EXCLUDED.sequence OR NOT EXISTS(SELECT 1 FROM kubernetes_evidence_events e
+ WHERE e.scope_key=head.scope_key AND e.sequence=head.sequence AND e.event_at=head.event_at AND e.superseded_seq IS NULL)
+ RETURNING 1)
+ SELECT COALESCE(MAX(sequence),$2),COUNT(*) FROM slice`, key, cursor, limit).Scan(&next, &read); err != nil {
+		return false, err
+	}
+	var done any
+	if read < limit {
+		done = nil
+	} else {
+		done = next
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET heads_backfill=$2 WHERE scope_key=$1`, key, done); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	p.noteHeadsBackfill(ctx, done == nil, next)
+	return true, nil
+}
+
+// noteHeadsBackfill logs the heads pass: each scope it completes, and its
+// progress at most every 30 seconds while scopes are pending.
+func (p *postgresProvider) noteHeadsBackfill(ctx context.Context, completed bool, sequence int64) {
+	p.maintenanceLogMu.Lock()
+	due := completed || time.Since(p.headsLoggedAt) >= 30*time.Second
+	if due {
+		p.headsLoggedAt = time.Now()
+	}
+	p.maintenanceLogMu.Unlock()
+	if !due {
+		return
+	}
+	var pending int
+	if err := p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kubernetes_evidence_scopes WHERE heads_backfill IS NOT NULL`).Scan(&pending); err != nil {
+		return
+	}
+	if completed {
+		log.Printf("storage: evidence heads complete for a scope; its saves no longer search the journal pending_scopes=%d", pending)
+		return
+	}
+	log.Printf("storage: evidence heads backfill progress sequence=%d pending_scopes=%d", sequence, pending)
+}
+
+// evidenceHeadsComplete reports whether every current journal row of the scope
+// has a head. A scope without a row has no history and is complete.
+func evidenceHeadsComplete(ctx context.Context, tx *sql.Tx, key string) (bool, error) {
+	var complete bool
+	err := tx.QueryRowContext(ctx, `SELECT heads_backfill IS NULL FROM kubernetes_evidence_scopes WHERE scope_key=$1`, key).Scan(&complete)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	return complete, err
 }

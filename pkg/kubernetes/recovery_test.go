@@ -340,6 +340,7 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 }
 
 func TestRegistryRestartsExitedProducerWithoutRetiringAuthorizedSnapshot(t *testing.T) {
+	t.Parallel()
 	fleet := newBootFleet(t, "org", storage.NewMemory(), "worker-restart")
 	fixture := newFakeCluster(t, "synthetic", "api")
 	fleet.add("cluster", fixture, staticCredential(t, "synthetic"), 0)

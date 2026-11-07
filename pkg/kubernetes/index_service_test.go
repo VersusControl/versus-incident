@@ -281,6 +281,7 @@ func TestIndexSnapshotSharesSameScopeAndIsolatesOrganizations(t *testing.T) {
 }
 
 func TestIndexLoaderPaginatesMetadataOnlyBeyondForegroundItemCap(t *testing.T) {
+	t.Parallel()
 	var listRequests atomic.Int32
 	var fullObjectRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -404,6 +405,7 @@ func TestIndexLoaderDoesNotRetryForbiddenMetadataListAsFullObjects(t *testing.T)
 }
 
 func TestIndexLoaderSupportsFiftyThousandRecords(t *testing.T) {
+	t.Parallel()
 	var listRequests atomic.Int32
 	httpServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
@@ -452,6 +454,90 @@ func TestScopedIndexReadinessRequiresEveryRequestedKind(t *testing.T) {
 	got := scopedIndexStatus(status, []string{"Pod", "Secret"})
 	if got.State != "warming" || got.Partial || len(got.Kinds) != 1 || got.Kinds["Pod"].State != "ready" {
 		t.Fatalf("scoped readiness=%+v", got)
+	}
+}
+
+// A kind the connector identity may not list is a coverage gap, not a failed
+// sync: the scoped status stays ready and partial, and the Overview names the
+// kind in its partial failures, the same answer the sync report gives. A kind
+// that failed for any other reason, and a whole cycle that was refused, are
+// still failures.
+func TestScopedIndexStatusReportsForbiddenKindAsCoverageGap(t *testing.T) {
+	readyAt := time.Now().UTC()
+	ready := kubeindex.KindStatus{State: "ready", ObservedAt: readyAt, CompletedAt: readyAt}
+	denied := kubeindex.KindStatus{State: "error", Error: "forbidden", Partial: true, FailingSince: readyAt}
+	for _, scenario := range []struct {
+		name    string
+		node    kubeindex.KindStatus
+		state   string
+		partial bool
+	}{
+		{"forbidden kind", denied, "ready", true},
+		{"unavailable kind", kubeindex.KindStatus{State: "error", Error: "unavailable", Partial: true}, "error", true},
+		{"timed out kind", kubeindex.KindStatus{State: "error", Error: "timeout", Partial: true}, "error", true},
+		{"unauthorized kind", kubeindex.KindStatus{State: "error", Error: "unauthorized", Partial: true}, "error", true},
+		{"refused cycle", kubeindex.KindStatus{State: "error", Error: "forbidden", Partial: true, CycleFailure: true}, "error", true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			got := scopedIndexStatus(kubeindex.Status{Kinds: map[string]kubeindex.KindStatus{"Pod": ready, "Node": scenario.node}}, []string{"Node", "Pod"})
+			if got.State != scenario.state || got.Partial != scenario.partial || got.Kinds["Node"] != scenario.node {
+				t.Fatalf("scoped status=%+v, want state=%s partial=%v", got, scenario.state, scenario.partial)
+			}
+		})
+	}
+	// With nothing readable around it, a denial is a connector that cannot see
+	// the view, as the sync report says: the view is failed, not ready and empty.
+	absent := kubeindex.KindStatus{State: "ready", ObservedAt: readyAt, Absent: true}
+	for name, kinds := range map[string]map[string]kubeindex.KindStatus{
+		"every kind forbidden": {"Node": denied, "Pod": denied},
+		"forbidden and absent": {"Node": denied, "Pod": absent},
+		"only the denied kind": {"Node": denied},
+	} {
+		requested := []string{"Node", "Pod"}
+		if len(kinds) == 1 {
+			requested = []string{"Node"}
+		}
+		if got := scopedIndexStatus(kubeindex.Status{Kinds: kinds}, requested); got.State != "error" || !got.Partial {
+			t.Errorf("%s: scoped status=%+v, want a failed partial view", name, got)
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "limited"})
+	kinds := map[string]kubeindex.KindStatus{}
+	for kind := range indexedResourceIDs {
+		kinds[kind] = ready
+	}
+	kinds["Node"], kinds["Secret"] = denied, denied
+	records := []kubeindex.Record{
+		{Kind: "Namespace", Name: "shop", UID: "ns-shop"},
+		{Kind: "Pod", Namespace: "shop", Name: "api-0", UID: "pod-api", Summary: map[string]string{"phase": "Running"}},
+	}
+	service.changes.mu.Lock()
+	service.changes.inventories[service.indexScope()] = &inventoryCache{generation: inventoryGeneration{Revision: "limited", View: kubeindex.Snapshot{Kinds: kinds, Records: records}}}
+	service.changes.mu.Unlock()
+	overview, err := service.Overview(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	denials := 0
+	for _, failure := range overview.Partial {
+		if failure.ResourceID == indexedResourceIDs["Node"] && failure.Class == "forbidden" {
+			denials++
+		}
+	}
+	if overview.Sync.State != "ready" || !overview.Sync.Partial || denials != 1 || overview.Pods != 1 {
+		t.Fatalf("a permission gap must read as a ready, partial overview: sync=%+v partial=%+v pods=%d", overview.Sync, overview.Partial, overview.Pods)
+	}
+	nodes, err := service.CachedResources(t.Context(), ListOptions{ResourceID: indexedResourceIDs["Node"]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes.Sync.State != "error" || !nodes.Sync.Partial || len(nodes.Items) != 0 || len(nodes.Partial) != 1 || nodes.Partial[0].Class != "forbidden" {
+		t.Errorf("a list of a denied kind must not read as ready and empty: sync=%+v partial=%+v items=%d", nodes.Sync, nodes.Partial, len(nodes.Items))
 	}
 }
 

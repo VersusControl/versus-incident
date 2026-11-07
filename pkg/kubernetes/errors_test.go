@@ -19,6 +19,7 @@ func TestDiagnoseErrorReturnsSafeActionableClasses(t *testing.T) {
 		retryable bool
 	}{
 		{name: "invalid arguments", err: ErrInvalidArguments, code: "invalid_arguments"},
+		{name: "expired list cursor", err: ErrCursorExpired, code: "cursor_expired"},
 		{name: "history deadline", err: historyStoreError(context.DeadlineExceeded), code: "history_store_timeout", retryable: true},
 		{name: "history store", err: historyStoreError(errors.New("private database response")), code: "history_store_unavailable", retryable: true},
 		{name: "history converting", err: historyStoreError(fmt.Errorf("read: %w", storage.ErrEvidenceNotReady)), code: "history_upgrading", retryable: true},

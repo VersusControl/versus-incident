@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { KubernetesChange, KubernetesCrashEvent, KubernetesResource } from "@/lib/api";
 import { CoverageMarker } from "@/components/CoverageMarker";
+import { KubernetesHistorySaveNotice } from "@/components/KubernetesHistorySaveNotice";
 import { CursorPagination } from "@/components/Pagination";
 import { useCursorPagination } from "@/lib/pagination";
 import { incompleteKubernetesSnapshot } from "@/lib/kubernetesContinuity";
@@ -84,6 +85,7 @@ export function ResourceTimeline({
           {resource.name}
         </span>
       </div>
+      <KubernetesHistorySaveNotice pages={[data]} />
       {history.length > 0 && <><div className="flex flex-wrap justify-end gap-3 text-2xs text-ink-400" aria-label="History legend"><span><span className="text-link">●</span> change</span><span><span className="text-sev-critical">│</span> break</span><span><span className="text-sev-critical">×</span> crash</span></div>
       <div
         className="relative h-[86px] rounded-control border border-ink-700 bg-surface-sunken px-4"
@@ -164,7 +166,7 @@ export function ResourceTimeline({
       {data && data.total > 0 && <p className="text-2xs text-ink-400">{counted(data.total, "event")} and {counted(data.crash_count, "crash")}</p>}
       {!data && !timeline.isPending && !syncing && <p className="py-4 text-xs text-ink-400">History unavailable.</p>}
       {timeline.isError && <button type="button" className="btn text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor ? "Restart history" : "Retry history"}</button>}
-      <CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} />
+      <CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} total={data?.total} limit={data?.limit} capped={data?.count_capped} count={data?.items.length} />
     </section>
   );
 }

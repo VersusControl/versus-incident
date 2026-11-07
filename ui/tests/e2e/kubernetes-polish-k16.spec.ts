@@ -91,19 +91,30 @@ const viewports = [
 
 const themes = ["dark", "light"] as const;
 
+// The kinds the Overview topology card always lists (OverviewTopology in
+// KubernetesExplorerViews.tsx); indexed extras may add more.
+const alwaysListedTopologyKinds = ["Namespace", "Node", "Ingress", "Gateway", "HTTPRoute", "Service", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "Event"];
+
 test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
   test.skip(mode !== "fakekube", "runs in fakekube scale mode");
   test.setTimeout(240_000);
 
-  test("first-load syncing state shows skeleton and Syncing cluster note without partial warnings", async ({ browser }) => {
+  test("first load shows the Preparing your cluster panel without partial warnings", async ({ browser }) => {
     for (const vp of viewports) {
       for (const theme of themes) {
         const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
         const page = await context.newPage();
         await applyTheme(page, theme);
         await openApp(page, "/agent/kubernetes");
-        await expect(page.getByText("Syncing cluster", { exact: true })).toBeVisible({ timeout: 15_000 });
-        await expect(page.getByLabel("Loading Kubernetes overview", { exact: true })).toBeVisible();
+        // A cluster that has never published shows the first-sync panel, not a
+        // skeleton: its steps and progress stand in for the old syncing note.
+        const preparing = page.getByRole("region", { name: "Preparing your cluster", exact: true });
+        await expect(preparing).toBeVisible({ timeout: 15_000 });
+        await expect(preparing.getByRole("heading", { name: "Preparing your cluster", exact: true })).toBeVisible();
+        await expect(preparing.getByRole("list", { name: "First sync steps", exact: true })).toBeVisible();
+        await expect(preparing.getByRole("progressbar")).toBeVisible();
+        await expect(page.getByRole("status", { name: /^Cluster sync preparing/ })).toBeVisible();
+        // Pending kinds during the first sync are not a coverage gap.
         await expect(page.getByRole("button", { name: "Resource coverage", exact: true })).toHaveCount(0);
         await saveCapture(page, "k16-first-load", vp.width, theme, "syncing");
         await context.close();
@@ -135,7 +146,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         // Reload or refresh so UI reflects ready state
         await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
         await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible({ timeout: 30_000 });
-        await expect(page.getByText("Syncing cluster", { exact: true })).toHaveCount(0);
+        await expect(page.getByRole("region", { name: "Preparing your cluster", exact: true })).toHaveCount(0);
 
         // U11: Tab order has Workloads second
         const tabs = page.getByRole("tablist", { name: "Kubernetes views", exact: true }).getByRole("tab");
@@ -156,7 +167,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(await page.getByRole("button", { name: "Resource coverage", exact: true }).count()).toBeLessThanOrEqual(1);
         await expect(page.getByRole("region", { name: "Break timeline", exact: true }).getByRole("button", { name: "Resource coverage", exact: true })).toHaveCount(0);
 
-        // U5: Overview Topology card two-column grid, 27 Namespaces, 800 ReplicaSets, 600 Pods, +N kinds not reported, no overlap
+        // U5: Overview Topology card two-column grid, 27 Namespaces, 800 ReplicaSets, 600 Pods, every kind reported, no overlap
         const overviewTopo = page.getByRole("region", { name: "Overview topology", exact: true });
         await overviewTopo.scrollIntoViewIfNeeded();
         await expect(overviewTopo).toBeVisible();
@@ -179,8 +190,12 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
           rsCursor = rsPage.continue;
         }
         expect(rsTotal).toBe(800);
-        await expect(overviewTopo.getByText(/^\+\d+ kinds not reported$/)).toBeVisible();
+        // This cluster serves every kind, so nothing is collapsed into the
+        // omission note and no row is shown as an unreported zero. The
+        // collapsed note itself is proven on the limited-RBAC instance below.
+        await expect(overviewTopo.getByText(/^\+\d+ kinds not reported$/)).toHaveCount(0);
         await expect(overviewTopo.getByText("Not reported", { exact: true })).toHaveCount(0);
+        await expect(overviewTopo.locator('dd[aria-label$="count not reported, displayed as zero"]')).toHaveCount(0);
 
         const topoLayout = await reportedList.evaluate((dl) => {
           const rows = [...dl.children] as HTMLElement[];
@@ -203,6 +218,9 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(topoLayout.overlaps).toEqual([]);
         expect(topoLayout.values["Namespace"]).toBe("27");
         expect(topoLayout.values["Pod"]).toBe("600");
+        expect(topoLayout.values["ReplicaSet"]).toBe("800");
+        const missingKinds = alwaysListedTopologyKinds.filter((kind) => topoLayout.values[kind] === undefined);
+        expect(missingKinds, "every kind must be listed as reported").toEqual([]);
         await saveCapture(page, "k16-overview", vp.width, theme, "complete-scale");
 
         // U8 & U11: Navigate to Workloads (second tab), verify NamespaceSelect keyboard/search & free-text rejection
@@ -213,7 +231,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await workloadNs.focus();
         const workloadListbox = page.getByRole("listbox", { name: "Workload namespace options", exact: true });
         await expect(workloadListbox).toBeVisible();
-        await expect(workloadListbox.getByRole("option")).toHaveCount(28); // All namespaces + 27 load-0000..load-0026
+        await expect(workloadListbox.getByRole("option")).toHaveCount(28); // All namespaces + kube-system + 26 load-0000..load-0025
         const allOptions = await workloadListbox.getByRole("option").allTextContents();
         expect(allOptions[0]).toBe("All namespaces");
         await saveCapture(page, "k16-namespace-select", vp.width, theme, "open");
@@ -378,10 +396,10 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         const nextBtn = changePager.getByRole("button", { name: "Next page", exact: true });
         await expect(nextBtn).toBeEnabled();
         await nextBtn.click();
-        await expect(changePager.getByText("Page 2", { exact: true })).toBeVisible();
+        await expect(changePager.getByText(/^Page 2( \/ \S+)?$/)).toBeVisible();
         await expect(timelineList.getByRole("listitem").first()).toBeVisible();
         await changePager.getByRole("button", { name: "Previous page", exact: true }).click();
-        await expect(changePager.getByText("Page 1", { exact: true })).toBeVisible();
+        await expect(changePager.getByText(/^Page 1( \/ \S+)?$/)).toBeVisible();
 
         // U4 detail & deep link + U10 Captured crash evidence: select break/crash for app-00000
         await timelineList.evaluate((el) => { el.scrollTop = 0; });
@@ -411,6 +429,13 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(page).toHaveURL(/view=traffic/);
         await expect(page.getByRole("combobox", { name: "Traffic namespace", exact: true })).toBeVisible();
 
+        expect(pageErrors).toEqual([]);
+        await context.close();
+      });
+
+      // The permission-limited instance is independent of the scale cluster, so
+      // its checks run on their own and a scale-cluster failure cannot hide them.
+      test(`coverage marker, omission note and alert tip on a permission-limited cluster ${vp.width} ${theme}`, async ({ browser }) => {
         // Secondary instance checks (U1, U2, V3 CoverageMarker on refused kinds + U9 missing public_host with channel enabled + U13 incomplete marker)
         const secContext = await browser.newContext({ baseURL: secondaryBaseURL, viewport: { width: vp.width, height: vp.height } });
         const secPage = await secContext.newPage();
@@ -426,15 +451,36 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await secPage.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
         await expect(secPage.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
 
+        // Refused kinds collapse into one "+N kinds not reported" note instead of
+        // being listed as zero under a "Not reported" heading.
+        const secTopo = secPage.getByRole("region", { name: "Overview topology", exact: true });
+        await secTopo.scrollIntoViewIfNeeded();
+        await expect(secTopo.getByText(/^\+\d+ kinds not reported$/)).toBeVisible({ timeout: 30_000 });
+        await expect(secTopo.getByText("Not reported", { exact: true })).toHaveCount(0);
+        const secReported = await secTopo.locator(`dl[aria-label="Reported resource counts"] dt`).allInnerTexts();
+        expect(secReported.map((label) => label.trim())).not.toContain("Node");
+        expect(secReported.map((label) => label.trim())).not.toContain("Secret");
+        await secTopo.getByText(/^\+\d+ kinds not reported$/).scrollIntoViewIfNeeded();
+        await saveCapture(secPage, "k16-limited-topology", vp.width, theme, "kinds-not-reported");
+        await secPage.evaluate(() => window.scrollTo(0, 0));
+        // The app shell scrolls an inner container; reset every scrolled element so the capture starts at the page top.
+        await secPage.evaluate(() => {
+          document.querySelectorAll<HTMLElement>("*").forEach((el) => {
+            if (el.scrollTop > 0) el.scrollTop = 0;
+          });
+        });
+        await expect(secPage.getByRole("region", { name: "Cluster health", exact: true })).toBeInViewport();
+        await saveCapture(secPage, "k16-limited-overview", vp.width, theme, "cluster-health");
+
         // V3 & U2: At most ONE CoverageMarker on Overview
         const overviewMarkers = secPage.getByRole("button", { name: "Resource coverage", exact: true });
         await expect(overviewMarkers).toHaveCount(1);
 
-        // U1: Hover/focus CoverageMarker -> popover below tab bar, max-width 320, plain copy "Some resources could not be read" + affected kinds
+        // U1: Hover/focus CoverageMarker -> popover below tab bar, max-width 320, plain copy "Some data is incomplete" + affected kinds
         await overviewMarkers.first().click();
         const coveragePopover = secPage.getByRole("region", { name: "Resource coverage details", exact: true });
         await expect(coveragePopover).toBeVisible();
-        await expect(coveragePopover).toContainText("Some resources could not be read");
+        await expect(coveragePopover).toContainText("Some data is incomplete");
         await expect(coveragePopover).toContainText(/nodes: permission denied|secrets: permission denied/);
         const popoverPlacement = await secPage.evaluate(() => {
           const tabs = document.querySelector(`[aria-label="Kubernetes views"]`)!.getBoundingClientRect();
@@ -470,9 +516,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await secSwitch.click();
         await expect(secSwitch).toHaveAttribute("aria-checked", "false");
 
-        expect(pageErrors).toEqual([]);
         await secContext.close();
-        await context.close();
       });
     }
   }

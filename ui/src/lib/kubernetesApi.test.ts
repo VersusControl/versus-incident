@@ -182,6 +182,23 @@ describe("Kubernetes resource API", () => {
     expect(Object.fromEntries(urls[1].searchParams)).toEqual({ root_uid: "root-uid", include: "changes", namespace: "shop", cluster: "prod-eu" });
   });
 
+  it.each([
+    ["a body with no catalog fields", { items: [], totals: {}, gaps: [], truncated: false }, false],
+    ["a null cluster list", { multiple: true, clusters: null }, true],
+    ["an empty body", null, false],
+  ])("reads %s as an empty cluster list instead of an undefined one", async (_, body, multiple) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(body)));
+    const catalog = await api.kubernetesClusters();
+    expect(catalog).toEqual({ multiple, clusters: [] });
+    expect(catalog.clusters.find((entry) => entry.id === "east")).toBeUndefined();
+  });
+
+  it("keeps a well-formed cluster catalog exactly as the server sent it", async () => {
+    const east = { id: "east", provider: "generic", health: "healthy", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "ready" }, observed_at: "2026-11-07T10:00:00Z" };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ multiple: true, clusters: [east] })));
+    expect(await api.kubernetesClusters()).toEqual({ multiple: true, clusters: [east] });
+  });
+
   it("preserves single URLs and encodes cluster scope without discarding filters", () => {
     expect(kubernetesClusterPath("/api/admin/kubernetes/overview")).toBe("/api/admin/kubernetes/overview");
     const url = new URL(kubernetesClusterPath("/api/admin/kubernetes/search?q=a%2Bb&cluster=old", "prod/eu+one"), "http://localhost");

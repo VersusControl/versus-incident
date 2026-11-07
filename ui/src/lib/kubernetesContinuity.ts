@@ -14,6 +14,14 @@ export function kubernetesFailureCode(error: unknown): string | undefined {
   return typeof payload?.code === "string" ? payload.code : undefined;
 }
 
+/**
+ * The server refused a page link because the list it pointed into has been
+ * replaced. Other 400s are real request faults and keep their own handling.
+ */
+export function kubernetesCursorExpired(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 400 && kubernetesFailureCode(error) === "cursor_expired";
+}
+
 /** Only the structured startup response is warming; its message alone proves nothing. */
 export function kubernetesInventoryNotReady(error: unknown): boolean {
   return error instanceof ApiError && error.status === 503 && kubernetesFailureCode(error) === "inventory_not_ready";

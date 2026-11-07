@@ -80,6 +80,8 @@ const failureReasons: Record<string, string> = {
   unauthorized: "cluster credentials are unavailable or rejected",
   credential_unavailable: "cluster credentials are unavailable or rejected",
   publication_failed: "the latest snapshot could not be published",
+  storage_unavailable: "the cluster was read, but the snapshot could not be saved",
+  storage_rejected: "the cluster was read, but the history store rejected the snapshot",
   timeout: "the cluster is slow or rate-limiting reads",
   throttled: "the cluster is slow or rate-limiting reads",
   unavailable: "the cluster read failed",
@@ -89,6 +91,11 @@ const failureReasons: Record<string, string> = {
   unsupported: "the cluster does not support this read",
   syncing: "it is still being listed",
 };
+
+/** The phrase for a known failure class, or undefined for an unknown one. */
+export function knownFailureReason(failureClass?: string): string | undefined {
+  return failureReasons[failureClass ?? ""];
+}
 
 /** One failure class as a phrase an operator can act on. */
 export function kindFailureReason(failure: { error?: string }): string {
@@ -361,4 +368,68 @@ export function syncHealthStateLabel(state: KubernetesSyncHealthState): string {
     case "failed":
       return "Failed";
   }
+}
+
+/**
+ * A history read that succeeded while the latest capture could not be saved.
+ * The data on screen is real and stays shown; it only ends at `savedThrough`.
+ */
+export interface KubernetesHistorySaveDelay {
+  code: string;
+  /**
+   * The history store refused the capture for good, so history will not catch
+   * up on its own and an operator has to act. A delay that is not rejected is
+   * expected to clear by itself.
+   */
+  rejected: boolean;
+  /** What the operator can do, as the server worded it. */
+  action?: string;
+  /** Last saved history checkpoint, when the backend knows one. */
+  savedThrough?: string;
+}
+
+function pageHistorySave(page: unknown): KubernetesHistorySaveDelay | undefined {
+  const save = record(record(record(page)?.capture)?.history_save);
+  if (!save) return undefined;
+  const code = typeof save.code === "string" && save.code ? save.code : "history_save_delayed";
+  // A save the server says will not be retried is never described as temporary.
+  const rejected = code === "history_save_rejected" || save.retryable === false;
+  const at = save.saved_through;
+  const known = typeof at === "string" && !isZeroTime(at) ? { savedThrough: at } : {};
+  const action = typeof save.action === "string" && save.action.trim() ? { action: save.action.trim() } : {};
+  return { code, rejected, ...action, ...known };
+}
+
+/**
+ * Reads the save-delay marker from one or more history pages. Several pages of
+ * one view report the same outage once: a rejection outranks a delay, and when
+ * pages disagree on how far history was saved, the earliest time is the honest
+ * one.
+ */
+export function historySaveDelay(...pages: unknown[]): KubernetesHistorySaveDelay | undefined {
+  const found = pages.map(pageHistorySave).filter((delay): delay is KubernetesHistorySaveDelay => Boolean(delay));
+  const delays = found.some((delay) => delay.rejected) ? found.filter((delay) => delay.rejected) : found;
+  if (!delays.length) return undefined;
+  const timed = delays.filter((delay) => delay.savedThrough).sort((left, right) => Date.parse(left.savedThrough!) - Date.parse(right.savedThrough!));
+  return timed[0] ?? delays[0];
+}
+
+/**
+ * The saved time in the reader's local time. A time from an earlier day
+ * carries its date, so an outage that crossed midnight is never read as
+ * today's data.
+ */
+function savedTime(savedThrough: string, now: number): string {
+  const saved = new Date(savedThrough);
+  const today = new Date(now);
+  const time = saved.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (saved.toDateString() === today.toDateString()) return time;
+  const date = saved.toLocaleDateString([], { month: "short", day: "numeric", ...(saved.getFullYear() !== today.getFullYear() ? { year: "numeric" } : {}) });
+  return `${date}, ${time}`;
+}
+
+/** The one-line notice for a delayed or rejected history save. */
+export function historySaveLabel(delay: KubernetesHistorySaveDelay, now: number = Date.now()): string {
+  const lead = delay.rejected ? "History could not save the latest data" : "History is temporarily not saving";
+  return delay.savedThrough ? `${lead} — showing data from ${savedTime(delay.savedThrough, now)}` : `${lead} — showing the last saved data`;
 }

@@ -1460,6 +1460,21 @@ describe("Break timeline", () => {
     expect(screen.getByText("CrashLoopBackOff")).toBeTruthy();
   });
 
+  it("counts only changes on the 60-minute tile and still marks capture gaps", async () => {
+    // Coverage gaps arrive beside the items, not as items, and the total
+    // counts the listed changes only.
+    const sync = { state: "ready", age_s: 0, partial: false };
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
+    const at = new Date(Date.now() - 60_000).toISOString();
+    const changes = [{ ...change, id: "change-a", at }, { ...change, id: "change-b", at }];
+    mount(<TimelineCard changes={{ items: changes, total: 2, limit: 50, gaps: [{ from: at, to: new Date().toISOString() }], sync }} windowEnd={Date.now()} clusterId="east" resourceFor={() => resource} onSelectView={vi.fn()} onSelectResource={vi.fn()} />);
+    const card = await screen.findByRole("region", { name: "Break timeline" });
+    const tile = await within(card).findByRole("button", { name: /Changes in 60 min/ });
+    expect(tile.querySelector("strong")?.textContent).toBe("2");
+    fireEvent.click(within(card).getByRole("button", { name: "Resource coverage" }));
+    expect(within(screen.getByRole("region", { name: "Resource coverage details" })).getByText("Change capture does not cover the whole range")).toBeTruthy();
+  });
+
   it("delegates Timeline coverage entirely to its parent when warnings are parent-owned", async () => {
     const sync = { state: "ready", age_s: 0, partial: true };
     vi.spyOn(api, "kubernetesIssues").mockResolvedValue({
@@ -1512,6 +1527,16 @@ describe("Break timeline", () => {
     }
     const { client } = mount(<Scenario />);
     expect(lookup).not.toHaveBeenCalled();
+    // Only the row's own page-level caveats survive a denied root read; the
+    // denied reason itself is stated in the expanded body, not the marker.
+    const coverageReasons = () => {
+      const marker = screen.queryByRole("button", { name: "Resource coverage" });
+      if (!marker) return [];
+      fireEvent.click(marker);
+      const reasons = within(screen.getByRole("region", { name: "Resource coverage details" })).getAllByRole("listitem").map((item) => item.textContent);
+      fireEvent.keyDown(marker, { key: "Escape" });
+      return reasons;
+    };
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
     expect(await screen.findByText("OOMKilled on 6 pods")).toBeTruthy();
     expect(screen.getByText(/cached-east-config/)).toBeTruthy();
@@ -1519,19 +1544,19 @@ describe("Break timeline", () => {
     await act(async () => { await client.invalidateQueries({ queryKey: kubernetesKey("east", "kubernetes-issues", "root", "shop", "checkout-uid") }); });
     expect(await screen.findByText("Root history unavailable.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Collapse checkout" }));
-    expect(screen.queryByRole("button", { name: "Resource coverage" })).toBeNull();
+    expect(coverageReasons()).toEqual(["Secret history is not tracked"]);
     expect(screen.queryByText(/cached-east-config|Private history|CachedKind/)).toBeNull();
     expect(screen.queryByText("OOMKilled on 6 pods")).toBeNull();
     expect(screen.getByText("CrashLoopBackOff")).toBeTruthy();
     expect(lookup).toHaveBeenCalledTimes(2);
     await act(async () => { client.setQueryData(kubernetesKey("west", "kubernetes-issues", "root", "shop", "checkout-uid"), { ...page, items: [{ ...cached, changes: [{ ...cached.changes[0], change: { ...change, cluster: "west", name: "cached-west-config" } }] }] }, { updatedAt: 1 }); });
     fireEvent.click(screen.getByRole("button", { name: "Switch cluster" }));
-    expect(screen.queryByRole("button", { name: "Resource coverage" })).toBeNull();
+    expect(coverageReasons()).toEqual(["Secret history is not tracked"]);
     expect(lookup).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
     expect(await screen.findByText("Root history unavailable.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Collapse checkout" }));
-    expect(screen.queryByRole("button", { name: "Resource coverage" })).toBeNull();
+    expect(coverageReasons()).toEqual(["Secret history is not tracked"]);
     expect(screen.queryByText(/cached-east-config|cached-west-config|Private history|CachedKind|OOMKilled/)).toBeNull();
     expect(lookup).toHaveBeenCalledTimes(3);
   });

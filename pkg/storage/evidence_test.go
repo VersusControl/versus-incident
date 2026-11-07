@@ -2,10 +2,10 @@ package storage
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 )
 
 func evidenceTestBatch(id, expected string, at time.Time, present, complete bool) EvidenceBatch {
@@ -28,6 +30,7 @@ func evidenceTestBatch(id, expected string, at time.Time, present, complete bool
 }
 
 func TestDriverFreeEmbeddingKeepsOrdinaryStorage(t *testing.T) {
+	t.Parallel()
 	code := `package main
 import("context";"os";"strings";"github.com/VersusControl/versus-incident/pkg/storage")
 func main(){p:=storage.NewMemory();if p.WriteBlob("ordinary",[]byte("ok"))!=nil{panic("memory KV")};f,e:=storage.NewFile(storage.FileOptions{DataDir:os.Args[1]});if e!=nil{panic(e)};defer f.Close();if f.WriteBlob("ordinary",[]byte("ok"))!=nil{panic("file KV")};for _,s:=range []storage.Provider{p,f}{_,e=s.(storage.EvidenceStore).EvidenceCheckpoint(context.Background(),storage.EvidenceScope{OrgID:"default",ClusterID:"c",ClusterUID:"u"});if e==nil||!strings.Contains(e.Error(),"storage/sqlitedriver"){panic("missing actionable driver error")}}}`
@@ -42,6 +45,7 @@ func main(){p:=storage.NewMemory();if p.WriteBlob("ordinary",[]byte("ok"))!=nil{
 }
 
 func TestClosedOccurrenceReadModelsArePrunedWithHistory(t *testing.T) {
+	t.Parallel()
 	provider, err := NewFile(FileOptions{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -143,6 +147,28 @@ func localEvidenceTestProvider(t *testing.T, backend string) (Provider, *localEv
 	return provider, index
 }
 
+func TestRelativeFileDataDirectoryCommitsAndReadsEvidence(t *testing.T) {
+	t.Chdir(t.TempDir())
+	provider, err := New(Config{Type: "file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	store := provider.(EvidenceStore)
+	scope := EvidenceScope{OrgID: "default", ClusterID: "cluster", ClusterUID: "physical"}
+	at := time.Now().UTC().Truncate(time.Second)
+	if err = store.CommitEvidence(context.Background(), scope, evidenceTestBatch("relative-dir", "", at, true, true)); err != nil {
+		t.Fatalf("commit under the relative default data directory: %v", err)
+	}
+	checkpoint, err := store.EvidenceCheckpoint(context.Background(), scope)
+	if err != nil || checkpoint.ID == "" {
+		t.Fatalf("checkpoint=%+v err=%v", checkpoint, err)
+	}
+	if _, err = os.Stat(filepath.Join(DefaultDataDir, "kubernetes-evidence.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLocalEvidencePrivateModesAndLegacyDirectoryBoundary(t *testing.T) {
 	provider, index := localEvidenceTestProvider(t, "file")
 	p := provider.(*fileProvider)
@@ -216,8 +242,10 @@ func TestLocalEvidenceRejectsLinkedDatabaseArtifacts(t *testing.T) {
 }
 
 func TestLocalEvidenceGrowingCorpusUsesBoundedIndexedReads(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file"} {
 		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
 			provider, index := localEvidenceTestProvider(t, backend)
 			store := provider.(EvidenceStore)
 			scope := EvidenceScope{OrgID: "default", ClusterID: "growth", ClusterUID: "physical"}
@@ -285,10 +313,19 @@ func TestLocalEvidenceGrowingCorpusUsesBoundedIndexedReads(t *testing.T) {
 				}
 			}
 			key, _ := evidenceScopeKey(scope)
-			rows, err := index.db.QueryContext(t.Context(), `EXPLAIN QUERY PLAN SELECT raw FROM evidence_events WHERE key=? AND root=? AND at>=? ORDER BY at DESC,id DESC LIMIT 8`, key, "absent", localEvidenceTime(origin))
+			rows, err := index.db.QueryContext(t.Context(), `
+	EXPLAIN QUERY PLAN
+	SELECT raw FROM evidence_events
+	WHERE key = ? AND root = ? AND at >= ?
+	ORDER BY at DESC, id DESC
+	LIMIT 8`,
+				key, "absent", localEvidenceTime(origin),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer rows.Close()
+
 			indexed := false
 			for rows.Next() {
 				var id, parent, unused int
@@ -301,7 +338,9 @@ func TestLocalEvidenceGrowingCorpusUsesBoundedIndexedReads(t *testing.T) {
 					t.Fatal("root query performed an all-history scan")
 				}
 			}
-			rows.Close()
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
 			if !indexed {
 				t.Fatal("root lookup did not use its native index")
 			}
@@ -705,6 +744,7 @@ func TestEvidenceSparseFreshnessAndPersistedAuthorityParity(t *testing.T) {
 }
 
 func TestEvidencePagesBoundProjectionAndCounts(t *testing.T) {
+	t.Parallel()
 	provider := NewMemory()
 	store := provider.(EvidenceStore)
 	scope := EvidenceScope{OrgID: "default", ClusterID: "bounded", ClusterUID: "physical"}
@@ -925,7 +965,7 @@ func TestPostgresEvidenceRetainsLargeHistoryWithoutApplicationPruning(t *testing
 	if dsn == "" {
 		t.Skip("isolated synthetic Postgres DSN not supplied")
 	}
-	provider, err := NewPostgres(PostgresOptions{DSN: dsn})
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "0"})
 	if err != nil {
 		t.Fatal("isolated Postgres setup failed")
 	}
@@ -1052,6 +1092,7 @@ func TestEvidenceGapOverlapsWindowAndTrustedArchivesPageWithoutDuplicates(t *tes
 }
 
 func TestFileEvidenceCountAndBytePruningInvalidatesPagingWithoutClosingIssues(t *testing.T) {
+	t.Parallel()
 	provider, err := NewFile(FileOptions{DataDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
@@ -1089,8 +1130,138 @@ func TestFileEvidenceCountAndBytePruningInvalidatesPagingWithoutClosingIssues(t 
 		t.Fatalf("unsafe file budget: bytes=%d rows=%d active=%d", len(raw), len(state.Records), len(state.Active))
 	}
 	query.Cursor = cursor
-	if _, err = store.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceConflict) {
-		t.Fatal("pruned cursor silently skipped evidence")
+	if _, err = store.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceCursorExpired) {
+		t.Fatalf("cursor issued before pruning: %v, want the list restarted from its first page", err)
+	}
+}
+
+// The file store drops issue samples older than its day of history on every
+// capture. That removes no change, so a Changes page link stays valid; an
+// issue list, whose rows depend on the samples, restarts.
+func TestFileSampleAgeLimitKeepsChangePageLinks(t *testing.T) {
+	provider, err := NewFile(FileOptions{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	store := provider.(EvidenceStore)
+	scope := EvidenceScope{OrgID: "org", ClusterID: "cluster", ClusterUID: "physical"}
+	now := time.Now().UTC()
+	capture := func(id string, at time.Time, changes int) {
+		t.Helper()
+		checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		batch := evidenceTestBatch(id, checkpoint.ID, at, true, true)
+		batch.Generation = checkpoint.Generation
+		batch.Issues[0].LastSeen = at
+		for i := 0; i < changes; i++ {
+			batch.Records = append(batch.Records, EvidenceRecord{ID: fmt.Sprintf("%s-change-%d", id, i), Type: "change", At: at, ObservedAt: at, Epoch: batch.Epoch, Payload: json.RawMessage(`{}`)})
+		}
+		if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The opening falls out of the day first; later the samples follow it.
+	capture("opened", now.Add(-26*time.Hour), 0)
+	capture("sampled", now.Add(-25*time.Hour), 0)
+	capture("day-later", now.Add(-119*time.Minute), 0)
+	capture("recent", now.Add(-90*time.Minute), 6)
+	changes := EvidenceQuery{Type: "change", Since: now.Add(-2 * time.Hour), Until: now, Limit: 2}
+	first, err := store.QueryEvidence(t.Context(), scope, changes)
+	if err != nil || first.Next == "" {
+		t.Fatalf("first change page: next=%q err=%v", first.Next, err)
+	}
+	issues := EvidenceQuery{Type: "occurrence", Since: now.Add(-27 * time.Hour), Until: now, Limit: 1}
+	issuePage, err := store.QueryEvidence(t.Context(), scope, issues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture("latest", now, 0)
+	after, err := store.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes.Cursor = first.Next
+	got := drainEvidencePages(t, store, scope, changes, evidencePageIDs(first))
+	if len(got) != 6 {
+		t.Fatalf("change rows across the sample drop = %v, want all 6 once", got)
+	}
+	if after.ThinRevision == before.ThinRevision || after.PruneRevision != before.PruneRevision {
+		t.Fatalf("capture recorded thin %d->%d prune %d->%d; want the old sample dropped and nothing pruned", before.ThinRevision, after.ThinRevision, before.PruneRevision, after.PruneRevision)
+	}
+	if issuePage.Next != "" {
+		issues.Cursor = issuePage.Next
+		if _, err = store.QueryEvidence(t.Context(), scope, issues); !errors.Is(err, ErrEvidenceCursorExpired) {
+			t.Fatalf("issue page across the sample drop: %v, want it restarted", err)
+		}
+	}
+}
+
+// A page link made stale by history changing under it restarts the list; a
+// link that was never issued for this history is rejected as invalid.
+func TestStaleHistoryCursorRestartsWhileForeignCursorIsRejected(t *testing.T) {
+	for _, backend := range []string{"memory", "file"} {
+		t.Run(backend, func(t *testing.T) {
+			provider, _ := localEvidenceTestProvider(t, backend)
+			store := provider.(EvidenceStore)
+			scope := EvidenceScope{OrgID: "org", ClusterID: "cluster", ClusterUID: "physical"}
+			now := time.Now().UTC()
+			batch := evidenceTestBatch("first", "", now.Add(-time.Hour), true, true)
+			for i := 0; i < 6; i++ {
+				batch.Records = append(batch.Records, EvidenceRecord{ID: fmt.Sprintf("change-%d", i), Type: "change", At: batch.At, ObservedAt: batch.At, Epoch: batch.Epoch, Payload: json.RawMessage(`{}`)})
+			}
+			if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+				t.Fatal(err)
+			}
+			query := EvidenceQuery{Since: now.Add(-2 * time.Hour), Until: now, Limit: 2}
+			page, err := store.QueryEvidence(t.Context(), scope, query)
+			if err != nil || page.Next == "" {
+				t.Fatalf("first page: next=%q err=%v", page.Next, err)
+			}
+
+			malformed := query
+			malformed.Cursor = "not-a-cursor"
+			if _, err = store.QueryEvidence(t.Context(), scope, malformed); !errors.Is(err, ErrInvalidEvidence) || errors.Is(err, ErrEvidenceCursorExpired) {
+				t.Fatalf("malformed cursor: %v, want invalid and not expired", err)
+			}
+
+			var cursor evidenceCursor
+			raw, err := base64.RawURLEncoding.DecodeString(page.Next)
+			if err != nil || json.Unmarshal(raw, &cursor) != nil || len(cursor.Highs) != 1 {
+				t.Fatalf("decode issued cursor: %v", err)
+			}
+			cursor.Highs[0] += 1000
+			raw, _ = json.Marshal(cursor)
+			ahead := query
+			ahead.Cursor = base64.RawURLEncoding.EncodeToString(raw)
+			if _, err = store.QueryEvidence(t.Context(), scope, ahead); err == nil || errors.Is(err, ErrEvidenceCursorExpired) {
+				t.Fatalf("cursor ahead of the stored history: %v, want rejected and not expired", err)
+			}
+
+			if err = store.DeleteEvidence(t.Context(), scope); err != nil {
+				t.Fatal(err)
+			}
+			deleted, err := store.EvidenceCheckpoint(t.Context(), scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again := evidenceTestBatch("again", deleted.ID, now.Add(-time.Minute), true, true)
+			again.Generation = deleted.Generation
+			if err = store.CommitEvidence(t.Context(), scope, again); err != nil {
+				t.Fatal(err)
+			}
+			stale := query
+			stale.Cursor = page.Next
+			if _, err = store.QueryEvidence(t.Context(), scope, stale); !errors.Is(err, ErrEvidenceCursorExpired) {
+				t.Fatalf("cursor issued before history was replaced: %v, want the list restarted from its first page", err)
+			}
+		})
 	}
 }
 
@@ -1214,5 +1385,117 @@ func TestEvidenceCountCacheBoundsQueryWorkWithoutRetainingCallerMaps(t *testing.
 	}
 	if policy := provider.EvidencePolicy(); policy.MaxRecords != 0 || policy.MaxBytes != 0 || policy.Retention != 0 {
 		t.Fatal("query cache bounds became history retention limits")
+	}
+}
+
+func TestEvidenceRepeatedObservationsAppendNoVersions(t *testing.T) {
+	// Every sync re-observes a container that is still crash-looping and may
+	// re-detect an object that already existed (for example after a credential
+	// renewal). Neither is a new fact, so no backend may append a row for it,
+	// whatever time the observation carries. A real change still appends.
+	for _, backend := range []string{"memory", "file", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			var provider Provider
+			scope := EvidenceScope{OrgID: "default", ClusterID: "repeated-observations", ClusterUID: "physical"}
+			if backend == "postgres" {
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("isolated Postgres required")
+				}
+				var err error
+				provider, err = NewPostgres(PostgresOptions{DSN: dsn})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = provider.Close() })
+				scope.ClusterID = fmt.Sprintf("repeated-observations-%d", time.Now().UnixNano())
+				// Long-running deployments use the partitioned layout, whose
+				// unique key includes the event time; prove the rule there.
+				p := provider.(*postgresProvider)
+				p.maintenanceCancel()
+				<-p.maintenanceDone
+				for i := 0; i < 4096; i++ {
+					more, err := p.backfillEvidenceBatch(t.Context(), evidenceBackgroundBackfill)
+					if err != nil {
+						t.Fatal(err)
+					}
+					copyMore, err := p.partitionEvidenceBatch(t.Context())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !more && !copyMore {
+						break
+					}
+				}
+				var partitioned string
+				if err := p.db.QueryRow(`SELECT relkind::text FROM pg_class WHERE oid='kubernetes_evidence_events'::regclass`).Scan(&partitioned); err != nil || partitioned != "p" {
+					t.Fatalf("events table not partitioned: %q %v", partitioned, err)
+				}
+			} else {
+				provider, _ = localEvidenceTestProvider(t, backend)
+			}
+			store := provider.(EvidenceStore)
+			origin := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+			commit := func(cycle int, restarts int, replicas string) EvidenceCheckpoint {
+				t.Helper()
+				cp, err := store.EvidenceCheckpoint(t.Context(), scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				at := origin.Add(time.Duration(cycle) * 30 * time.Second)
+				batch := EvidenceBatch{ID: fmt.Sprintf("cycle-%d", cycle), Expected: cp.ID, Generation: cp.Generation, At: at, Epoch: "stable"}
+				status, _ := json.Marshal(map[string]any{"cluster": "repeated", "namespace": "shop", "pod": "api", "container": "app", "type": "status", "waiting_reason": "CrashLoopBackOff", "restart_count": restarts, "at": at, "observed_at": at})
+				change, _ := json.Marshal(map[string]any{"cluster": "repeated", "kind": "Deployment", "name": "api", "type": "created", "replicas": replicas, "at": at})
+				batch.Records = []EvidenceRecord{
+					{ID: fmt.Sprintf("crash:status-%d", restarts), Type: "crash", At: at, ObservedAt: at, Namespace: "shop", Name: "api", Kind: "Deployment", AuthorizationKind: "Pod", UID: "pod-uid", RootUID: "root-uid", PodUID: "pod-uid", Epoch: batch.Epoch, Payload: status},
+					{ID: "change:created", Type: "change", At: at, ObservedAt: at, Namespace: "shop", Name: "api", Kind: "Deployment", AuthorizationKind: "Deployment", UID: "root-uid", RootUID: "root-uid", Epoch: batch.Epoch, Payload: change},
+				}
+				if err = store.CommitEvidence(t.Context(), scope, batch); err != nil {
+					t.Fatal(err)
+				}
+				cp, err = store.EvidenceCheckpoint(t.Context(), scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return cp
+			}
+			first := commit(0, 2, "1")
+			for cycle := 1; cycle <= 20; cycle++ {
+				if cp := commit(cycle, 2, "1"); cp.HighSequence != first.HighSequence {
+					t.Fatalf("cycle %d appended rows for unchanged evidence: high %d -> %d", cycle, first.HighSequence, cp.HighSequence)
+				}
+			}
+			if accessor, ok := provider.(SQLAccessor); ok {
+				key, _ := evidenceScopeKey(scope)
+				var rows int
+				if err := accessor.DB().QueryRow(`SELECT COUNT(*) FROM kubernetes_evidence_events WHERE scope_key=$1`, key).Scan(&rows); err != nil || rows != 2 {
+					t.Fatalf("20 unchanged cycles stored %d rows, want 2: %v", rows, err)
+				}
+			}
+			if cp := commit(21, 3, "1"); cp.HighSequence != first.HighSequence+1 {
+				t.Fatalf("a new restart was not recorded exactly once: high %d -> %d", first.HighSequence, cp.HighSequence)
+			}
+			if cp := commit(22, 3, "2"); cp.HighSequence != first.HighSequence+2 {
+				t.Fatalf("a changed object was not recorded exactly once: high %d -> %d", first.HighSequence, cp.HighSequence)
+			}
+		})
+	}
+}
+
+func TestEvidenceVersionIgnoresObservationTimes(t *testing.T) {
+	record := func(at time.Time, replicas string) EvidenceRecord {
+		payload, _ := json.Marshal(map[string]any{"type": "created", "replicas": replicas, "at": at, "observed_at": at})
+		return EvidenceRecord{ID: "change:x", Type: "change", At: at, ObservedAt: at, Kind: "Deployment", Name: "api", Payload: payload}
+	}
+	now := time.Now().UTC()
+	if evidenceVersion(record(now, "1")) != evidenceVersion(record(now.Add(14*time.Minute), "1")) {
+		t.Fatal("a re-detection time created a new version")
+	}
+	if evidenceVersion(record(now, "1")) == evidenceVersion(record(now, "2")) {
+		t.Fatal("a content change kept the same version")
+	}
+	malformed := EvidenceRecord{ID: "change:y", Type: "change", Payload: json.RawMessage(`[1,2]`)}
+	if evidenceVersion(malformed) == "" {
+		t.Fatal("non-object payload has no version")
 	}
 }

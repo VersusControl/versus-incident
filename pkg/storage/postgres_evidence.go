@@ -5,8 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func (p *postgresProvider) EvidencePolicy() EvidencePolicy {
@@ -18,64 +22,333 @@ func (p *postgresProvider) CommitEvidence(parent context.Context, scope Evidence
 	if err != nil {
 		return err
 	}
+	batch = normalizeEvidenceBatch(batch)
 	if err = validEvidenceBatch(batch); err != nil {
 		return err
 	}
 	if batch.ObservationHeartbeat == 0 {
 		batch.ObservationHeartbeat = p.observationHeartbeat
 	}
-	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
-	defer cancel()
-	tx, err := p.db.BeginTx(ctx, nil)
-	if err != nil {
+	return evidenceSaveError(p.saveEvidence(parent, key, scope, batch))
+}
+
+// errEvidenceAlreadySaved ends a save whose capture an earlier attempt saved.
+var errEvidenceAlreadySaved = errors.New("storage: capture already saved")
+
+// errEvidenceSaveSplit reports that a capture's journal records, lifecycle
+// records included, do not fit one save part.
+var errEvidenceSaveSplit = errors.New("storage: capture is saved in parts")
+
+// saveEvidence saves a capture in transactions that each write at most one
+// part: the save chunk in records and the part byte bound in payload.
+//
+// A capture whose journal records fit one part is saved in one transaction.
+// A larger one writes its journal records part by part, each in its own
+// transaction, and then a final transaction that holds only the read models
+// and the checkpoint. Readers pin to the checkpoint's sequence, so they never
+// see a partly saved capture. Each record write is idempotent by event and
+// content: a failed part is retried alone, a later retry of the capture
+// appends nothing twice, and a part that times out is retried at half the
+// size, never the whole capture at full size. Every transaction runs inside
+// the caller's fence and confirms the lease first, so a caller can serve
+// other work between parts.
+func (p *postgresProvider) saveEvidence(parent context.Context, key string, scope EvidenceScope, batch EvidenceBatch) error {
+	batch.Records = latestEvidenceRecords(batch.Records)
+	cutoff := p.evidenceCutoff()
+	size := max(1, p.evidenceSaveChunk)
+	stats := evidenceWriteStats{Offered: len(batch.Records)}
+	part := 0
+	written, records, err := p.commitEvidenceFinal(parent, key, scope, batch, nil, 0, size, part, cutoff)
+	if errors.Is(err, errEvidenceAlreadySaved) {
+		return nil
+	}
+	if err == nil {
+		stats.add(written)
+		p.noteEvidenceWrite(stats)
+		return nil
+	}
+	if records == nil || !errors.Is(err, errEvidenceSaveSplit) && !evidenceSaveTimedOut(err) {
 		return err
 	}
-	defer tx.Rollback()
-	if err = prepareEvidencePartitions(ctx, tx, batch); err != nil {
-		return err
+	if evidenceSaveTimedOut(err) {
+		if parent.Err() != nil || size <= minEvidenceSaveChunk {
+			return err
+		}
+		size = max(minEvidenceSaveChunk, size/2)
+		log.Printf("storage: evidence save timed out in one transaction; saving it in parts of %d records", size)
 	}
-	if batch.GuardKey != "" {
-		var actual []byte
-		err = tx.QueryRowContext(ctx, fmt.Sprintf("SELECT data FROM %s WHERE name=$1 FOR UPDATE", blobTable(batch.GuardKey)), batch.GuardKey).Scan(&actual)
-		if err == sql.ErrNoRows {
-			return ErrEvidenceConflict
+	saved := map[string]bool{}
+	for start := 0; start < len(records); {
+		end := evidencePartEnd(records, start, size)
+		part++
+		written, committed, err := p.commitEvidencePart(parent, key, scope, batch, records[start:end], part, cutoff)
+		if evidenceSaveTimedOut(err) {
+			// A save whose own deadline has passed stops; otherwise the part
+			// is retried alone at half the size.
+			if parent.Err() != nil || size <= minEvidenceSaveChunk {
+				return err
+			}
+			size = max(minEvidenceSaveChunk, size/2)
+			log.Printf("storage: evidence save part timed out; retrying it alone at %d records", size)
+			continue
 		}
 		if err != nil {
 			return err
 		}
-		if !bytes.Equal(actual, batch.GuardExpected) {
-			return ErrEvidenceConflict
+		if committed {
+			// This capture was already saved in full by an earlier attempt.
+			return nil
 		}
+		stats.add(written)
+		stats.Parts++
+		for _, record := range records[start:end] {
+			saved[record.ID+"\x00"+evidenceVersion(record)] = true
+		}
+		start = end
 	}
-
-	_, err = tx.ExecContext(ctx, `INSERT INTO kubernetes_evidence_scopes(scope_key,org_id,cluster_id,cluster_uid,read_model_ready) VALUES($1,$2,$3,$4,TRUE) ON CONFLICT DO NOTHING`, key, NormalizeOrgID(scope.OrgID), scope.ClusterID, scope.ClusterUID)
+	written, _, err = p.commitEvidenceFinal(parent, key, scope, batch, saved, stats.High, size, part+1, cutoff)
+	if errors.Is(err, errEvidenceAlreadySaved) {
+		return nil
+	}
 	if err != nil {
 		return err
+	}
+	stats.add(written)
+	p.noteEvidenceWrite(stats)
+	return nil
+}
+
+// evidenceFenced runs one save transaction inside the caller's fence.
+func evidenceFenced(ctx context.Context, batch EvidenceBatch, transaction func() error) error {
+	if batch.Fence == nil {
+		return transaction()
+	}
+	return batch.Fence(ctx, transaction)
+}
+
+// commitEvidencePart writes one part of a capture's journal records in its
+// own transaction. It reports committed when the capture is already saved.
+func (p *postgresProvider) commitEvidencePart(parent context.Context, key string, scope EvidenceScope, batch EvidenceBatch, records []EvidenceRecord, part int, cutoff time.Time) (evidenceWriteStats, bool, error) {
+	var written evidenceWriteStats
+	committed := false
+	err := evidenceFenced(parent, batch, func() error {
+		ctx, cancel, tx, err := p.beginEvidenceSave(parent, &batch)
+		if err != nil {
+			return err
+		}
+		defer cancel()
+		defer tx.Rollback()
+		if p.evidenceChunkFault != nil {
+			if err = p.evidenceChunkFault(ctx, tx, part, len(records)); err != nil {
+				return err
+			}
+		}
+		if err = prepareEvidencePartitions(ctx, tx, EvidenceBatch{At: batch.At, Records: records}, cutoff); err != nil {
+			return err
+		}
+		if err = evidenceSaveGuard(ctx, tx, batch); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO kubernetes_evidence_scopes(scope_key,org_id,cluster_id,cluster_uid,read_model_ready,heads_backfill,observed_lag_scan) VALUES($1,$2,$3,$4,TRUE,NULL,NULL) ON CONFLICT DO NOTHING`, key, NormalizeOrgID(scope.OrgID), scope.ClusterID, scope.ClusterUID); err != nil {
+			return err
+		}
+		var raw []byte
+		if err = tx.QueryRowContext(ctx, `SELECT checkpoint FROM kubernetes_evidence_scopes WHERE scope_key=$1 FOR UPDATE`, key).Scan(&raw); err != nil {
+			return err
+		}
+		var checkpoint EvidenceCheckpoint
+		if err = json.Unmarshal(raw, &checkpoint); err != nil {
+			return err
+		}
+		if checkpoint.Generation != batch.Generation {
+			return ErrEvidenceConflict
+		}
+		var exists bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM kubernetes_evidence_captures WHERE scope_key=$1 AND capture_id=$2)`, key, batch.ID).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			committed = true
+			return tx.Commit()
+		}
+		if checkpoint.ID != batch.Expected || batch.At.Before(checkpoint.At) {
+			return ErrEvidenceConflict
+		}
+		if written, err = writeRetainedEvidenceEvents(ctx, tx, key, records, batch.ObservationHeartbeat, cutoff); err != nil {
+			return err
+		}
+		// Mark the save in progress and remember the highest sequence it
+		// wrote, which a later attempt that re-offers this part cannot see.
+		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=jsonb_set(jsonb_set(checkpoint,'{saving}',to_jsonb($2::text)),'{saving_high}',to_jsonb(GREATEST(COALESCE((checkpoint->>'saving_high')::bigint,0),$3::bigint))) WHERE scope_key=$1`, key, batch.ID, int64(written.High)); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	return written, committed, err
+}
+
+// beginEvidenceSave opens one save transaction, bounded by the save timeout.
+// The lease is confirmed, and renewed when needed, before every transaction,
+// so a long capture never outlives it. Every save statement is planned for its
+// actual values: a generic plan can look new events up through an index that
+// does not lead with the event's key and read the scope's whole history.
+func (p *postgresProvider) beginEvidenceSave(parent context.Context, batch *EvidenceBatch) (context.Context, context.CancelFunc, *sql.Tx, error) {
+	if batch.KeepLease != nil {
+		guard, err := batch.KeepLease(parent)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		batch.GuardExpected = guard
+	}
+	timeout := p.evidenceSaveTimeout
+	if timeout <= 0 {
+		timeout = defaultEvidenceSaveTimeout
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		cancel()
+		return nil, nil, nil, err
+	}
+	if _, err = tx.ExecContext(ctx, `SET LOCAL plan_cache_mode = force_custom_plan; `+evidenceHeadsWriter); err != nil {
+		_ = tx.Rollback()
+		cancel()
+		return nil, nil, nil, err
+	}
+	return ctx, cancel, tx, nil
+}
+
+// evidenceSaveGuard fences a save to the lease holder named by the batch.
+func evidenceSaveGuard(ctx context.Context, tx *sql.Tx, batch EvidenceBatch) error {
+	if batch.GuardKey == "" {
+		return nil
+	}
+	var actual []byte
+	err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT data FROM %s WHERE name=$1 FOR UPDATE", blobTable(batch.GuardKey)), batch.GuardKey).Scan(&actual)
+	if err == sql.ErrNoRows {
+		return ErrEvidenceConflict
+	}
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(actual, batch.GuardExpected) {
+		return ErrEvidenceConflict
+	}
+	return nil
+}
+
+// commitEvidenceFinal is the transaction that advances the checkpoint. With
+// saved nil it also writes the capture's journal records, but only when they
+// fit one part: otherwise it writes nothing and answers errEvidenceSaveSplit
+// with the records to save in parts. With saved set, the records were written
+// by earlier parts, and only a record that is not among them (the saved state
+// cannot change while the checkpoint is held, so normally none) is written
+// here beside the read models and the checkpoint, which then covers savedHigh,
+// the highest sequence the parts wrote.
+func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key string, scope EvidenceScope, batch EvidenceBatch, saved map[string]bool, savedHigh uint64, size, part int, cutoff time.Time) (evidenceWriteStats, []EvidenceRecord, error) {
+	var written evidenceWriteStats
+	var derived []EvidenceRecord
+	err := evidenceFenced(parent, batch, func() error {
+		ctx, cancel, tx, err := p.beginEvidenceSave(parent, &batch)
+		if err != nil {
+			return err
+		}
+		defer cancel()
+		defer tx.Rollback()
+		// Partitions first: their shared lock is always taken before the
+		// guard and checkpoint rows, as retention takes its own.
+		if err = prepareEvidencePartitions(ctx, tx, batch, cutoff); err != nil {
+			return err
+		}
+		state, err := loadEvidenceSaveState(ctx, tx, key, scope, batch)
+		if err != nil {
+			return err
+		}
+		records, err := applyEvidence(&state, batch)
+		if err != nil {
+			return err
+		}
+		derived = records
+		pending := records
+		if saved == nil {
+			if len(records) > 0 && evidencePartEnd(records, 0, size) < len(records) {
+				return errEvidenceSaveSplit
+			}
+		} else {
+			pending = make([]EvidenceRecord, 0)
+			for _, record := range records {
+				if !saved[record.ID+"\x00"+evidenceVersion(record)] {
+					pending = append(pending, record)
+				}
+			}
+		}
+		if p.evidenceChunkFault != nil {
+			if err = p.evidenceChunkFault(ctx, tx, part, len(pending)); err != nil {
+				return err
+			}
+		}
+		if written, err = writeRetainedEvidenceEvents(ctx, tx, key, pending, batch.ObservationHeartbeat, cutoff); err != nil {
+			return err
+		}
+		// Readers pin to this sequence: it covers every part of the capture.
+		state.Checkpoint.HighSequence = max(state.Checkpoint.HighSequence, state.Checkpoint.SavingHigh, savedHigh, written.High)
+		state.Checkpoint.Saving, state.Checkpoint.SavingHigh = "", 0
+		if err = writeOccurrenceVersions(ctx, tx, key, state); err != nil {
+			return err
+		}
+		if err = writeOccurrenceReadModels(ctx, tx, key, state); err != nil {
+			return err
+		}
+		raw, err := json.Marshal(state.Checkpoint)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=$2,high_sequence=GREATEST(high_sequence,$3),scope_binding=COALESCE(NULLIF($4,''),scope_binding),updated_at=$5 WHERE scope_key=$1`, key, raw, int64(state.Checkpoint.HighSequence), batch.ScopeBinding, batch.At); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO kubernetes_evidence_captures(scope_key,capture_id,observed_at) VALUES($1,$2,$3)`, key, batch.ID, batch.At); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	return written, derived, err
+}
+
+// loadEvidenceSaveState locks the scope's checkpoint and loads the issue state
+// a save applies the capture to. It answers errEvidenceAlreadySaved when the
+// capture was saved by an earlier attempt.
+func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope EvidenceScope, batch EvidenceBatch) (evidenceState, error) {
+	if err := evidenceSaveGuard(ctx, tx, batch); err != nil {
+		return evidenceState{}, err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO kubernetes_evidence_scopes(scope_key,org_id,cluster_id,cluster_uid,read_model_ready,heads_backfill,observed_lag_scan) VALUES($1,$2,$3,$4,TRUE,NULL,NULL) ON CONFLICT DO NOTHING`, key, NormalizeOrgID(scope.OrgID), scope.ClusterID, scope.ClusterUID)
+	if err != nil {
+		return evidenceState{}, err
 	}
 	var raw []byte
 	var storedHigh uint64
 	err = tx.QueryRowContext(ctx, `SELECT checkpoint,high_sequence FROM kubernetes_evidence_scopes WHERE scope_key=$1 FOR UPDATE`, key).Scan(&raw, &storedHigh)
 	if err != nil {
-		return err
+		return evidenceState{}, err
 	}
 	state := evidenceState{Active: map[string]EvidenceIssue{}, Occurrences: map[string]EvidenceIssue{}, OccurrenceVersions: map[string]EvidenceIssue{}, OccurrenceHeads: map[string]string{}}
 	if err = json.Unmarshal(raw, &state.Checkpoint); err != nil {
-		return err
+		return evidenceState{}, err
 	}
 	state.Checkpoint.HighSequence = max(state.Checkpoint.HighSequence, storedHigh)
 	if state.Checkpoint.Generation != batch.Generation {
-		return ErrEvidenceConflict
+		return evidenceState{}, ErrEvidenceConflict
 	}
 	var exists bool
 	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM kubernetes_evidence_captures WHERE scope_key=$1 AND capture_id=$2)`, key, batch.ID).Scan(&exists)
 	if err != nil {
-		return err
+		return evidenceState{}, err
 	}
 	if exists {
-		return tx.Commit()
+		return evidenceState{}, errEvidenceAlreadySaved
 	}
 	if state.Checkpoint.ID != batch.Expected || batch.At.Before(state.Checkpoint.At) {
-		return ErrEvidenceConflict
+		return evidenceState{}, ErrEvidenceConflict
 	}
 	historicalIDs := []string{}
 	if batch.HistoricalOnly {
@@ -92,7 +365,7 @@ func (p *postgresProvider) CommitEvidence(parent context.Context, scope Evidence
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT payload,last_seen,payload_version,last_observed_at FROM kubernetes_evidence_issues WHERE scope_key=$1 AND ((closed_at IS NULL AND NOT observation_only) OR occurrence_id=ANY($2::text[]))`, key, historicalIDs)
 	if err != nil {
-		return err
+		return evidenceState{}, err
 	}
 	for rows.Next() {
 		var data []byte
@@ -101,12 +374,12 @@ func (p *postgresProvider) CommitEvidence(parent context.Context, scope Evidence
 		var lastObserved sql.NullTime
 		if err = rows.Scan(&data, &lastSeen, &version, &lastObserved); err != nil {
 			rows.Close()
-			return err
+			return evidenceState{}, err
 		}
 		var issue EvidenceIssue
 		if err = json.Unmarshal(data, &issue); err != nil {
 			rows.Close()
-			return err
+			return evidenceState{}, err
 		}
 		issue.LastSeen = lastSeen
 		if !issue.ObservationOnly {
@@ -124,37 +397,10 @@ func (p *postgresProvider) CommitEvidence(parent context.Context, scope Evidence
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
-		return err
+		return evidenceState{}, err
 	}
 	rows.Close()
-	records, err := applyEvidence(&state, batch)
-	if err != nil {
-		return err
-	}
-	high, err := writeEvidenceEvents(ctx, tx, key, records)
-	if err != nil {
-		return err
-	}
-	state.Checkpoint.HighSequence = max(state.Checkpoint.HighSequence, high)
-	if err = writeOccurrenceVersions(ctx, tx, key, state); err != nil {
-		return err
-	}
-	if err = writeOccurrenceReadModels(ctx, tx, key, state); err != nil {
-		return err
-	}
-	raw, err = json.Marshal(state.Checkpoint)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=$2,high_sequence=GREATEST(high_sequence,$3),scope_binding=COALESCE(NULLIF($4,''),scope_binding),updated_at=$5 WHERE scope_key=$1`, key, raw, int64(state.Checkpoint.HighSequence), batch.ScopeBinding, batch.At)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO kubernetes_evidence_captures(scope_key,capture_id,observed_at) VALUES($1,$2,$3)`, key, batch.ID, batch.At)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
+	return state, nil
 }
 
 func (p *postgresProvider) EvidenceCheckpoint(parent context.Context, scope EvidenceScope) (EvidenceCheckpoint, error) {
@@ -213,6 +459,24 @@ func (p *postgresProvider) QueryEvidence(parent context.Context, scope EvidenceS
 	}
 	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
+	page, err := p.queryEvidencePage(ctx, keys, query, cursor)
+	if evidenceMonthDropped(err) {
+		// Retention dropped a month the read had listed but not yet read:
+		// read again with the months that remain.
+		page, err = p.queryEvidencePage(ctx, keys, query, cursor)
+	}
+	return page, err
+}
+
+// evidenceMonthDropped reports a read that named a monthly partition removed
+// after the read listed the months.
+func evidenceMonthDropped(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
+}
+
+// queryEvidencePage reads one page of the scopes' journal in one transaction.
+func (p *postgresProvider) queryEvidencePage(ctx context.Context, keys []string, query EvidenceQuery, cursor evidenceCursor) (EvidencePage, error) {
 	tx, err := p.beginEvidenceRead(ctx)
 	if err != nil {
 		return EvidencePage{}, err
@@ -276,12 +540,13 @@ func (p *postgresProvider) QueryEvidence(parent context.Context, scope EvidenceS
 	} else if len(cursor.Generations) != len(keys) || len(cursor.Highs) != len(keys) {
 		return page, ErrInvalidEvidence
 	}
+	if len(cursor.PruneRevisions) != len(keys) {
+		return page, ErrEvidenceConflict
+	}
 	for i, generation := range generations {
-		if cursor.Generations[i] != generation {
-			return page, ErrEvidenceConflict
-		}
-		if len(cursor.PruneRevisions) != len(keys) || cursor.PruneRevisions[i] != pruneRevisions[i] {
-			return page, ErrEvidenceConflict
+		if cursor.Generations[i] != generation || cursor.PruneRevisions[i] != pruneRevisions[i] {
+			// History was pruned or replaced since the cursor was issued.
+			return page, ErrEvidenceCursorExpired
 		}
 	}
 	return p.queryJournalPage(ctx, tx, keys, query, cursor, page, countGeneration, summaryCounts)
@@ -302,6 +567,9 @@ func (p *postgresProvider) DeleteEvidence(parent context.Context, scope Evidence
 		return err
 	}
 	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, evidenceHeadsWriter); err != nil {
+		return err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO kubernetes_evidence_scopes(scope_key,org_id,cluster_id,cluster_uid) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, key, NormalizeOrgID(scope.OrgID), scope.ClusterID, scope.ClusterUID)
 	if err != nil {
 		return err
@@ -328,7 +596,7 @@ func (p *postgresProvider) DeleteEvidence(parent context.Context, scope Evidence
 			}
 		}
 	}
-	for _, table := range []string{"kubernetes_evidence_occurrence_observations", "kubernetes_evidence_occurrence_read_versions", "kubernetes_evidence_occurrence_versions", "kubernetes_evidence_events", "kubernetes_evidence_issues", "kubernetes_evidence_captures"} {
+	for _, table := range []string{"kubernetes_evidence_occurrence_observations", "kubernetes_evidence_occurrence_read_versions", "kubernetes_evidence_occurrence_versions", "kubernetes_evidence_event_heads", "kubernetes_evidence_events", "kubernetes_evidence_issues", "kubernetes_evidence_captures"} {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE scope_key=$1", key); err != nil {
 			return err
 		}
@@ -337,7 +605,7 @@ func (p *postgresProvider) DeleteEvidence(parent context.Context, scope Evidence
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=$2,high_sequence=0,event_counts='{}',read_model_ready=TRUE,backfill_sequence=0,backfill_occurrence='' WHERE scope_key=$1`, key, raw); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=$2,high_sequence=0,event_counts='{}',read_model_ready=TRUE,backfill_sequence=0,backfill_occurrence='',heads_backfill=NULL,gap_reach=NULL,observed_lag='0',observed_lag_scan=NULL WHERE scope_key=$1`, key, raw); err != nil {
 		return err
 	}
 	return tx.Commit()

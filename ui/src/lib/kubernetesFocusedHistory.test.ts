@@ -106,4 +106,22 @@ describe("Focused history continuation", () => {
     expect(result.capture.evidence_error).toBe("storage_unavailable");
     expect(result.items).toHaveLength(1);
   });
+
+  it("keeps a later page's history save delay on the merged crash and change results", async () => {
+    const history_save = { code: "history_save_delayed", message: "m", action: "a", retryable: true, saved_through: "2026-10-14T11:55:00Z" };
+    const crashes = vi.fn<(cursor?: string) => Promise<KubernetesCrashPage>>()
+      .mockResolvedValueOnce({ ...crashPage, next: "next" })
+      .mockResolvedValueOnce({ ...crashPage, items: [{ ...event, id: "older" }], capture: { mode: "continuous", behind: true, history_save } });
+    const crashResult = await focusedCrashes(crashes, new AbortController().signal);
+    expect(crashResult.capture.history_save).toEqual(history_save);
+    expect(crashResult.items).toHaveLength(2);
+    const changes = vi.fn<(cursor?: string) => Promise<KubernetesChangesPage>>()
+      .mockResolvedValueOnce({ items: [change], next: "next", sync, capture: { mode: "continuous", behind: false } })
+      .mockResolvedValueOnce({ items: [{ ...change, id: "older" }], sync, capture: { mode: "continuous", behind: true, history_save } });
+    const changeResult = await focusedChanges(changes, new AbortController().signal);
+    expect(changeResult.capture?.history_save).toEqual(history_save);
+    expect(changeResult.items).toHaveLength(2);
+    const healthy = await focusedChanges(vi.fn<(cursor?: string) => Promise<KubernetesChangesPage>>().mockResolvedValueOnce({ items: [change], sync }), new AbortController().signal);
+    expect(healthy.capture).toBeUndefined();
+  });
 });

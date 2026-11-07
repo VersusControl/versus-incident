@@ -113,6 +113,7 @@ func TestActualMaterialLoaderValidatesEveryListEnvelopeBeforeWitnessOrDeletion(t
 }
 
 func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file"} {
 		t.Run(backend, func(t *testing.T) {
 			t.Parallel()
@@ -174,6 +175,7 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 				t.Fatal(err)
 			}
 			service := NewService(client, Scope{OrgID: "default", ClusterID: "malformed-current", CredentialID: "unchanged"}, time.Hour)
+			useFixturePace(service)
 			var provider storage.Provider = storage.NewMemory()
 			if backend == "file" {
 				provider, err = storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})

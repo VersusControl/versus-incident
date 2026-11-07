@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -276,7 +277,7 @@ func TestEvidenceHeartbeatsKeepPinnedJournalImmutable(t *testing.T) {
 			if err = store.CommitEvidence(t.Context(), scope, fresh); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = store.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceConflict) {
+			if _, err = store.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceCursorExpired) {
 				t.Fatalf("pre-delete cursor survived fresh capture: %v", err)
 			}
 		})
@@ -311,5 +312,132 @@ func TestFileEvidenceDeleteRacesQueuedCaptureAtomically(t *testing.T) {
 		if err != nil || len(state.Records) != 0 || len(state.Active) != 0 || state.Checkpoint.Generation != uint64(i+1) {
 			t.Fatalf("atomic delete lost its fence or leaked payload: %+v %v", state.Checkpoint, err)
 		}
+	}
+}
+
+func TestEvidenceNonObjectIssuePayloadIsStoredAndCountedUnavailable(t *testing.T) {
+	for _, backend := range []string{"memory", "file", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			var provider Provider
+			var err error
+			switch backend {
+			case "memory":
+				provider = NewMemory()
+			case "file":
+				provider, err = NewFile(FileOptions{DataDir: t.TempDir()})
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("explicit isolated harness Postgres required")
+				}
+				provider, err = NewPostgres(PostgresOptions{DSN: dsn})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer provider.Close()
+			store := provider.(EvidenceStore)
+			scope := EvidenceScope{OrgID: "synthetic-review", ClusterID: fmt.Sprintf("non-object-%d", time.Now().UnixNano()), ClusterUID: "physical"}
+			at := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+			batch := reviewEvidenceCapture(t, store, scope, "capture:non-object", at, `{"severity":"warning"}`)
+			batch.Issues[0].AuthorizationKind = "Pod"
+			malformed := batch.Issues[0]
+			malformed.Key, malformed.Rule, malformed.Payload = "malformed", "pod.image_pull", json.RawMessage(`[]`)
+			batch.Issues = append(batch.Issues, malformed)
+			if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+				t.Fatalf("one non-object issue payload rejected the whole capture: %v", err)
+			}
+			page, err := store.QueryEvidence(t.Context(), scope, EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Minute), Type: "occurrence", EnforceAuthority: true, AllowedKinds: []string{"Pod"}, Limit: 10})
+			if err != nil || page.Total != 2 || len(page.Items) != 2 || page.Counts["issue_opened"] != 1 || page.Counts["coverage_gap"] != 1 || page.Counts["severity:warning"] != 1 {
+				t.Fatalf("non-object payload was not stored and counted unavailable: total=%d items=%d counts=%v err=%v", page.Total, len(page.Items), page.Counts, err)
+			}
+		})
+	}
+}
+
+func TestEvidencePointInTimeOccurrenceUsesListAvailabilityRule(t *testing.T) {
+	for _, backend := range []string{"memory", "file", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			var provider Provider
+			var err error
+			switch backend {
+			case "memory":
+				provider = NewMemory()
+			case "file":
+				provider, err = NewFile(FileOptions{DataDir: t.TempDir()})
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("explicit isolated harness Postgres required")
+				}
+				provider, err = NewPostgres(PostgresOptions{DSN: dsn})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer provider.Close()
+			store := provider.(EvidenceStore)
+			scope := EvidenceScope{OrgID: "synthetic-review", ClusterID: fmt.Sprintf("point-in-time-%d", time.Now().UnixNano()), ClusterUID: "physical"}
+			at := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Hour)
+			batch := reviewEvidenceCapture(t, store, scope, "capture:point-in-time", at, `{"severity":"warning"}`)
+			batch.Issues[0].AuthorizationKind = "Pod"
+			batch.Issues[0].Key = "valid"
+			payloads := map[string]string{"non-object": `[]`, "numeric-severity": `{"severity":5}`}
+			for key, payload := range payloads {
+				issue := batch.Issues[0]
+				issue.Key, issue.Rule, issue.Payload = key, "pod."+key, json.RawMessage(payload)
+				batch.Issues = append(batch.Issues, issue)
+			}
+			if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+				t.Fatal(err)
+			}
+			window := EvidenceQuery{Since: at.Add(-time.Minute), Until: at.Add(time.Minute), Type: "occurrence", Limit: 10}
+			all, err := store.QueryEvidence(t.Context(), scope, window)
+			if err != nil || len(all.Items) != 3 {
+				t.Fatalf("occurrences: items=%d err=%v", len(all.Items), err)
+			}
+			for _, item := range all.Items {
+				var issue EvidenceIssue
+				if err := json.Unmarshal(item.Payload, &issue); err != nil {
+					t.Fatal(err)
+				}
+				expected := "coverage_gap"
+				if issue.Key == "valid" {
+					expected = "issue_opened"
+				}
+				for _, kinds := range [][]string{{"Pod"}, {"Event"}} {
+					want := expected
+					if kinds[0] != "Pod" {
+						want = "coverage_gap"
+					}
+					query := window
+					query.PointInTime, query.OccurrenceID = true, item.ID
+					query.EnforceAuthority, query.AllowedKinds = true, kinds
+					page, err := store.QueryEvidence(t.Context(), scope, query)
+					if err != nil || page.Total != 1 || page.Counts[want] != 1 || len(page.Items) != 1 {
+						t.Fatalf("%s read with %v: want one %s, got total=%d counts=%v items=%d err=%v", issue.Key, kinds, want, page.Total, page.Counts, len(page.Items), err)
+					}
+					if kinds[0] != "Pod" && page.Items[0].Type != "coverage_gap" {
+						t.Fatalf("%s unauthorized read returned %s", issue.Key, page.Items[0].Type)
+					}
+				}
+			}
+			// Availability comes from the version read model, so a scope still
+			// converting to it answers not-ready rather than guessing.
+			if postgres, ok := provider.(*postgresProvider); ok {
+				key, _ := evidenceScopeKey(scope)
+				if _, err := postgres.db.Exec(`UPDATE kubernetes_evidence_scopes SET read_model_ready=FALSE WHERE scope_key=$1`, key); err != nil {
+					t.Fatal(err)
+				}
+				query := window
+				query.PointInTime, query.OccurrenceID = true, all.Items[0].ID
+				if _, err := store.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceNotReady) {
+					t.Fatalf("converting scope served a point-in-time read: %v", err)
+				}
+				if _, err := postgres.db.Exec(`UPDATE kubernetes_evidence_scopes SET read_model_ready=TRUE WHERE scope_key=$1`, key); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }

@@ -13,10 +13,11 @@ func (p *postgresProvider) queryOccurrenceModels(parent context.Context, scope E
 	if err != nil {
 		return EvidencePage{}, err
 	}
-	// Occurrence lists page by first_seen; any other cursor layout restarts
-	// from the first page.
+	// Occurrence lists page by first_seen. A link of this list that pages in
+	// another order, or predates links naming their order, restarts the list
+	// from its first page.
 	if query.Cursor != "" && cursor.Ordering != "first_seen" {
-		return EvidencePage{}, ErrEvidenceConflict
+		return EvidencePage{}, ErrEvidenceCursorExpired
 	}
 	cursor.Ordering = "first_seen"
 	scopes, err := evidenceReadScopes(scope)
@@ -40,6 +41,7 @@ func (p *postgresProvider) queryOccurrenceModels(parent context.Context, scope E
 	page := EvidencePage{Since: query.Since, Until: query.Until, Policy: p.EvidencePolicy(), Counts: map[string]int{}}
 	highs, generations := make([]uint64, len(keys)), make([]uint64, len(keys))
 	prunes := make([]uint64, len(keys))
+	thins, thinned := make([]uint64, len(keys)), make([]time.Time, len(keys))
 	ready := true
 	rows, err := tx.QueryContext(ctx, `SELECT scope_key,checkpoint,read_model_ready FROM kubernetes_evidence_scopes WHERE scope_key=ANY($1::text[])`, keys)
 	if err != nil {
@@ -63,6 +65,7 @@ func (p *postgresProvider) queryOccurrenceModels(parent context.Context, scope E
 			if candidate == key {
 				highs[i], generations[i] = cp.OccurrenceRevision, cp.Generation
 				prunes[i] = cp.PruneRevision
+				thins[i], thinned[i] = cp.ThinRevision, cp.ThinnedThrough
 			}
 		}
 		page.Checkpoint = mergeEvidenceCheckpoint(page.Checkpoint, cp)
@@ -81,13 +84,22 @@ func (p *postgresProvider) queryOccurrenceModels(parent context.Context, scope E
 	if query.Cursor == "" {
 		cursor.OccurrenceHighs, cursor.Generations = highs, generations
 		cursor.PruneRevisions = prunes
+		cursor.ThinRevisions = thins
 	} else {
-		if len(cursor.OccurrenceHighs) != len(keys) || len(cursor.Generations) != len(keys) {
+		if len(cursor.OccurrenceHighs) != len(keys) || len(cursor.Generations) != len(keys) || !cursorThinRevisionsFit(cursor, len(keys)) {
 			return page, ErrInvalidEvidence
 		}
 		for i := range keys {
-			if cursor.Generations[i] != generations[i] || cursor.OccurrenceHighs[i] > highs[i] || len(cursor.PruneRevisions) != len(keys) || cursor.PruneRevisions[i] != prunes[i] {
+			if len(cursor.PruneRevisions) != len(keys) || cursor.OccurrenceHighs[i] > highs[i] && cursor.Generations[i] == generations[i] && cursor.PruneRevisions[i] == prunes[i] {
 				return page, ErrEvidenceConflict
+			}
+			if cursor.Generations[i] != generations[i] || cursor.PruneRevisions[i] != prunes[i] {
+				// History was pruned or replaced since the cursor was issued.
+				return page, ErrEvidenceCursorExpired
+			}
+			if cursorSamplesThinned(cursor, i, thins[i]) && occurrenceThinningReaches(query.Until, thinned[i]) {
+				// Samples were thinned where this read looks for them.
+				return page, ErrEvidenceCursorExpired
 			}
 		}
 	}

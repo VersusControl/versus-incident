@@ -1008,6 +1008,7 @@ func TestLinkedSettleReplicaProcess(t *testing.T) {
 // Under a realistic flood of identity manifests, a newly settled excerpt must
 // not be the first thing evicted to keep metadata within the state budget.
 func TestLinkedBreakCapPressureKeepsSettledExcerpt(t *testing.T) {
+	t.Parallel()
 	for _, backend := range linkedBackends(t) {
 		t.Run(backend.name, func(t *testing.T) {
 			provider := backend.open(t)
@@ -1247,6 +1248,7 @@ func linkedSingleReplicaConcurrency(t *testing.T, provider storage.Provider) {
 // cap). Beyond the metadata byte budget, loss stays scoped to the roots whose
 // history was trimmed: only their manifests are truncated, others are not.
 func TestLinkedBreakUnrelatedPodFloodKeepsScopedIdentity(t *testing.T) {
+	t.Parallel()
 	for _, flood := range []struct {
 		name       string
 		pods       int
@@ -1407,6 +1409,7 @@ func TestLinkedBreakUnrelatedPodFloodKeepsScopedIdentity(t *testing.T) {
 }
 
 func TestLinkedBreakDurableIndependentMetadataAndLiveSamplingCaps(t *testing.T) {
+	t.Parallel()
 	for _, backend := range linkedBackends(t) {
 		t.Run(backend.name, func(t *testing.T) {
 			now := time.Now().UTC()

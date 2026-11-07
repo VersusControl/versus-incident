@@ -12,6 +12,7 @@ import (
 )
 
 func TestHistoricalOccurrenceFreshnessAndPinnedRootTimelineLookup(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file"} {
 		t.Run(backend, func(t *testing.T) {
 			service, store, scope := reviewHistoryService(t)

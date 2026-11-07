@@ -51,7 +51,13 @@ func (batch *crashCaptureBatch) add(cluster string, pod kubeindex.Record, status
 					event.TerminationSlot = "previous"
 				}
 				event.Reason, event.ExitCode, event.Signal = termination.TerminatedReason, termination.ExitCode, termination.Signal
-				if !termination.TerminatedAt.IsZero() && !termination.TerminatedAt.After(observed) {
+				switch {
+				case termination.TerminatedAt.IsZero():
+				case termination.TerminatedAt.After(observed):
+					// A finish time ahead of the observation (node clock ahead)
+					// keeps its identity; only the shown time is clamped.
+					event.FinishedAt = termination.TerminatedAt
+				default:
 					event.At, event.TimeSource = termination.TerminatedAt, "finished_at"
 				}
 				batch.append(event, pod)
@@ -163,6 +169,10 @@ func crashAncestryPartial(record kubeindex.Record, byUID map[string]kubeindex.Re
 type CrashPage struct {
 	Authority   string `json:"authority,omitempty"`
 	CountCapped bool   `json:"count_capped,omitempty"`
+	// Total is the first page's bounded count; CountCapped marks it as a lower
+	// bound. A non-zero Limit marks Total as present.
+	Total int `json:"total,omitempty"`
+	Limit int `json:"limit,omitempty"`
 	kubechanges.CrashPage
 	Capture CaptureStatus `json:"capture"`
 	Sync    SyncStatus    `json:"sync"`

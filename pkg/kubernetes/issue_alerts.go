@@ -527,7 +527,7 @@ func (service *Service) prepareIssueAlertEnrichment(ctx context.Context, items [
 		}
 	}
 	if service.evidenceStore() != nil {
-		result.history, err = service.evidenceChangeWindow(ctx, from, to, "")
+		result.history, err = service.evidenceChangeWindow(ctx, from, to, "", "")
 	} else {
 		result.history, err = service.changeStore().ReadWindow(from, to, now)
 	}
