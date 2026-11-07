@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// localEvidenceReadTimeout bounds one local evidence history read. It is the
+// production read deadline: a page read that cannot finish within it fails
+// rather than holding the embedded database open.
+var localEvidenceReadTimeout = 2 * time.Second
+
 type localEvidenceArgs []any
 
 func (args *localEvidenceArgs) add(value any) string {
@@ -117,7 +122,7 @@ func (index *localEvidence) query(parent context.Context, policy EvidencePolicy,
 			return EvidencePage{}, err
 		}
 	}
-	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	ctx, cancel := context.WithTimeout(parent, localEvidenceReadTimeout)
 	defer cancel()
 	tx, err := index.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {

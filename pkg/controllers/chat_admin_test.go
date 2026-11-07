@@ -406,6 +406,7 @@ func TestAgentAPIApprovalRoutesRequirePermissionAndUseBoundNonce(t *testing.T) {
 	missingActorApp.Use(middleware.OrgInjector())
 	missingActorApp.Use(func(c *fiber.Ctx) error {
 		middleware.MarkAuthorized(c)
+		middleware.MarkHeaderCredential(c)
 		middleware.SetRequestPermission(c, string(core.PermissionAgentApprove), true)
 		return c.Next()
 	})
@@ -422,6 +423,7 @@ func TestAgentAPIApprovalRoutesRequirePermissionAndUseBoundNonce(t *testing.T) {
 	app.Use(middleware.OrgInjector())
 	app.Use(func(c *fiber.Ctx) error {
 		middleware.MarkAuthorized(c)
+		middleware.MarkHeaderCredential(c)
 		middleware.SetRequestPermission(c, string(core.PermissionAgentApprove), true)
 		middleware.SetRequestActor(c, "operator-1")
 		return c.Next()
@@ -485,6 +487,191 @@ func TestAgentAPIApprovalRoutesRequirePermissionAndUseBoundNonce(t *testing.T) {
 	approved.Body.Close()
 	if result.State != "verified" || result.Approver != "operator-1" {
 		t.Fatalf("approval result = %+v", result)
+	}
+}
+
+type countingApprovalAdapter struct {
+	approvalRouteAdapter
+	executions atomic.Int32
+}
+
+func (adapter *countingApprovalAdapter) Execute(ctx context.Context, proposal act.Proposal) (act.Result, error) {
+	adapter.executions.Add(1)
+	return adapter.approvalRouteAdapter.Execute(ctx, proposal)
+}
+
+type recordingLedgerWriter struct {
+	ledger.Writer
+	mu    sync.Mutex
+	kinds []ledger.EntryKind
+}
+
+func (writer *recordingLedgerWriter) Append(ctx context.Context, entry ledger.Entry) (ledger.Entry, error) {
+	writer.mu.Lock()
+	writer.kinds = append(writer.kinds, entry.Kind)
+	writer.mu.Unlock()
+	return writer.Writer.Append(ctx, entry)
+}
+
+func (writer *recordingLedgerWriter) count(kind ledger.EntryKind) int {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	total := 0
+	for _, recorded := range writer.kinds {
+		if recorded == kind {
+			total++
+		}
+	}
+	return total
+}
+
+func TestAgentActionRoutesAcceptOnlyHeaderCredentials(t *testing.T) {
+	middleware.SetGatewayAuthEnabled(true)
+	t.Cleanup(func() { middleware.SetGatewayAuthEnabled(true) })
+	loadGatewayConfig(t, gatewaySessionTestSecret)
+	cfg := config.GetConfig()
+	previousSecret, previousPublicHost := cfg.GatewaySecret, cfg.PublicHost
+	cfg.GatewaySecret, cfg.PublicHost = gatewaySessionTestSecret, ""
+	t.Cleanup(func() { cfg.GatewaySecret, cfg.PublicHost = previousSecret, previousPublicHost })
+
+	provider := storage.NewMemory()
+	writer := &recordingLedgerWriter{Writer: ledger.NewBlobWriter(provider, "default")}
+	adapter := &countingApprovalAdapter{}
+	service, err := act.NewService(provider, "default", writer, nil, adapter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetAgentApprovalServiceFactory(func(tenancy.OrgScope) *act.Service { return service })
+	t.Cleanup(func() { SetAgentApprovalServiceFactory(nil) })
+
+	app := fiber.New()
+	app.Use(func(c *fiber.Ctx) error {
+		// Stands in for an upstream browser-session handler: it authorizes the
+		// request and grants approval permission but never marks a header credential.
+		if c.Get("X-Test-Upstream-Session") == "true" {
+			middleware.MarkAuthorized(c)
+			middleware.SetRequestPermission(c, string(core.PermissionAgentApprove), true)
+			middleware.SetRequestActor(c, "sso-user")
+		}
+		return c.Next()
+	})
+	app.Use(middleware.OrgInjector())
+	NewChatAdminController(nil).Register(app.Group("/api"))
+	sessionCookie := &http.Cookie{Name: gatewaySessionCookieName, Value: issueGatewaySession(gatewaySessionTestSecret, time.Now().Add(time.Hour))}
+
+	const proposalBody = `{"type":"k8s.rollout_restart","target":{"kind":"Deployment","namespace":"shop","name":"checkout"},"params":{},"reason":"restore service"}`
+	type credential string
+	const (
+		gatewayHeader   credential = "gateway secret header"
+		browserCookie   credential = "browser gateway session"
+		upstreamSession credential = "upstream browser session"
+	)
+	send := func(method, path, body string, with credential) (*http.Response, []byte) {
+		t.Helper()
+		request, err := http.NewRequest(method, "http://console.example"+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body != "" {
+			request.Header.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSON)
+		}
+		switch with {
+		case gatewayHeader:
+			request.Header.Set("X-Gateway-Secret", gatewaySessionTestSecret)
+		case browserCookie:
+			request.Header.Set("Origin", "http://console.example")
+			request.AddCookie(sessionCookie)
+		case upstreamSession:
+			request.Header.Set("X-Test-Upstream-Session", "true")
+		}
+		response, err := app.Test(request, -1)
+		if err != nil {
+			t.Fatalf("%s %s with %s: %v", method, path, with, err)
+		}
+		defer response.Body.Close()
+		raw, _ := io.ReadAll(response.Body)
+		return response, raw
+	}
+	expectCLIOnly := func(response *http.Response, raw []byte, label string) {
+		t.Helper()
+		var body agentapi.Error
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatalf("%s body=%s: %v", label, raw, err)
+		}
+		if response.StatusCode != fiber.StatusForbidden || body.Code != "act_requires_cli" {
+			t.Fatalf("%s status=%d body=%s, want 403 act_requires_cli", label, response.StatusCode, raw)
+		}
+	}
+	pendingApprovals := func() []act.Approval {
+		t.Helper()
+		approvals, err := service.Approvals(core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Actor: "auditor", Permissions: map[core.Permission]bool{core.PermissionAgentApprove: true}}), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return approvals
+	}
+
+	for _, with := range []credential{browserCookie, upstreamSession} {
+		response, raw := send(http.MethodPost, "/api/v1/agent/proposals", proposalBody, with)
+		expectCLIOnly(response, raw, "proposal with "+string(with))
+	}
+	if pending := pendingApprovals(); len(pending) != 0 || writer.count(ledger.EntryActionProposed) != 0 {
+		t.Fatalf("refused proposals persisted approvals=%d proposed entries=%d", len(pending), writer.count(ledger.EntryActionProposed))
+	}
+
+	response, raw := send(http.MethodPost, "/api/v1/agent/proposals", proposalBody, gatewayHeader)
+	if response.StatusCode != fiber.StatusCreated {
+		t.Fatalf("CLI proposal status=%d body=%s", response.StatusCode, raw)
+	}
+	var proposal act.ProposalResult
+	if err := json.Unmarshal(raw, &proposal); err != nil || proposal.Approval == nil || proposal.Nonce == "" {
+		t.Fatalf("CLI proposal body=%s err=%v", raw, err)
+	}
+	approvePath := "/api/v1/agent/approvals/" + proposal.Approval.ID + "/approve"
+	approveBody := `{"nonce":"` + proposal.Nonce + `"}`
+
+	for _, with := range []credential{browserCookie, upstreamSession} {
+		response, raw := send(http.MethodGet, "/api/v1/agent/approvals?state=pending", "", with)
+		if response.StatusCode != fiber.StatusOK || !strings.Contains(string(raw), proposal.Approval.ID) {
+			t.Fatalf("list with %s status=%d body=%s", with, response.StatusCode, raw)
+		}
+		response, raw = send(http.MethodPost, approvePath, approveBody, with)
+		expectCLIOnly(response, raw, "approve with "+string(with))
+	}
+	if writer.count(ledger.EntryApproval) != 0 || writer.count(ledger.EntryActionExecuted) != 0 || adapter.executions.Load() != 0 {
+		t.Fatalf("refused approval left side effects: approval entries=%d executed entries=%d adapter calls=%d", writer.count(ledger.EntryApproval), writer.count(ledger.EntryActionExecuted), adapter.executions.Load())
+	}
+	if pending := pendingApprovals(); len(pending) != 1 || pending[0].ID != proposal.Approval.ID {
+		t.Fatalf("refused approval changed pending state: %+v", pending)
+	}
+
+	response, raw = send(http.MethodPost, approvePath, approveBody, gatewayHeader)
+	if response.StatusCode != fiber.StatusOK {
+		t.Fatalf("CLI approve status=%d body=%s", response.StatusCode, raw)
+	}
+	var approved act.Approval
+	if err := json.Unmarshal(raw, &approved); err != nil || approved.State != "verified" {
+		t.Fatalf("CLI approve body=%s err=%v", raw, err)
+	}
+	if writer.count(ledger.EntryApproval) == 0 || adapter.executions.Load() != 1 {
+		t.Fatalf("CLI approval entries=%d adapter calls=%d", writer.count(ledger.EntryApproval), adapter.executions.Load())
+	}
+	response, raw = send(http.MethodPost, approvePath, approveBody, gatewayHeader)
+	if response.StatusCode != fiber.StatusConflict || adapter.executions.Load() != 1 {
+		t.Fatalf("replayed CLI approve status=%d body=%s adapter calls=%d", response.StatusCode, raw, adapter.executions.Load())
+	}
+
+	response, raw = send(http.MethodPost, "/api/v1/agent/proposals", proposalBody, gatewayHeader)
+	if response.StatusCode != fiber.StatusCreated {
+		t.Fatalf("second CLI proposal status=%d body=%s", response.StatusCode, raw)
+	}
+	var second act.ProposalResult
+	if err := json.Unmarshal(raw, &second); err != nil || second.Approval == nil {
+		t.Fatalf("second CLI proposal body=%s err=%v", raw, err)
+	}
+	response, raw = send(http.MethodPost, "/api/v1/agent/approvals/"+second.Approval.ID+"/reject", `{"reason":"not now"}`, browserCookie)
+	if response.StatusCode != fiber.StatusOK || adapter.executions.Load() != 1 {
+		t.Fatalf("browser reject status=%d body=%s adapter calls=%d", response.StatusCode, raw, adapter.executions.Load())
 	}
 }
 
