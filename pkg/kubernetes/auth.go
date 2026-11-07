@@ -104,6 +104,25 @@ func (service *Service) captureCredentialIDAtGeneration(generation uint64) strin
 	return hex.EncodeToString(digest[:])
 }
 
+// credentialFailure marks a failure of the credential itself: it could not be
+// resolved, refreshed, proved or accepted. It is the only kind of capture
+// failure, beside the sentinel credential answers, that may close the
+// credential recovery gate. The cause keeps its own meaning and text.
+type credentialFailure struct{ cause error }
+
+func (err *credentialFailure) Error() string { return err.cause.Error() }
+func (err *credentialFailure) Unwrap() error { return err.cause }
+
+// credentialFault types a failure raised while resolving or accepting a
+// credential, including a timeout inside that work.
+func credentialFault(err error) error {
+	var typed *credentialFailure
+	if err == nil || errors.As(err, &typed) {
+		return err
+	}
+	return &credentialFailure{cause: err}
+}
+
 func (service *Service) credentialContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	bound, cancel := context.WithCancel(context.WithValue(ctx, credentialEpochContextKey{}, service))
 	stop := context.AfterFunc(service.identity.ctx, cancel)
@@ -182,6 +201,12 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 	epoch := service.identity
 	epoch.mu.Lock()
 	defer epoch.mu.Unlock()
+	// The epoch lock is shared by every writer. A deadline spent waiting for it
+	// is contention, not a credential answer, so it is returned before the
+	// credential is consulted and stays untyped.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if epoch.retired || epoch.ctx.Err() != nil {
 		return commitConflictError{cause: ErrCredentialUnavailable}
 	}
@@ -240,7 +265,7 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 				epoch.retired = true
 				epoch.cancel()
 			}
-			return err
+			return credentialFault(err)
 		}
 	} else if source, ok := service.client.credentials.(interface{ credentialPrincipal() string }); ok {
 		principal = source.credentialPrincipal()
@@ -258,10 +283,10 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 			if errors.Is(reviewErr, ErrUnauthorized) {
 				epoch.retired = true
 				epoch.cancel()
-				return reviewErr
+				return credentialFault(reviewErr)
 			}
 			if epoch.reviewPrincipal != "" || ctx.Err() != nil {
-				return reviewErr
+				return credentialFault(reviewErr)
 			}
 			// A server without identity-review support can still collect under
 			// a byte-bound epoch. It cannot coalesce an unproved bearer change.
@@ -339,6 +364,14 @@ func (client *Client) certificateHTTP(certificate *tls.Certificate, bases ...*ht
 	return &httpClient, pinned.CloseIdleConnections, nil
 }
 
+// reviewedUserInfo is the authenticated identity a SelfSubjectReview returns.
+type reviewedUserInfo struct {
+	Username string              `json:"username"`
+	UID      string              `json:"uid"`
+	Groups   []string            `json:"groups"`
+	Extra    map[string][]string `json:"extra"`
+}
+
 func (client *Client) selfSubjectPrincipal(ctx context.Context, header string, certificate *tls.Certificate) (string, error) {
 	if client == nil || client.http == nil {
 		return "", nil
@@ -383,12 +416,7 @@ func (client *Client) selfSubjectPrincipal(ctx context.Context, header string, c
 		APIVersion string `json:"apiVersion"`
 		Kind       string `json:"kind"`
 		Status     struct {
-			UserInfo struct {
-				Username string              `json:"username"`
-				UID      string              `json:"uid"`
-				Groups   []string            `json:"groups"`
-				Extra    map[string][]string `json:"extra"`
-			} `json:"userInfo"`
+			UserInfo reviewedUserInfo `json:"userInfo"`
 		} `json:"status"`
 	}
 	if json.Unmarshal(raw, &result) != nil || result.APIVersion != "authentication.k8s.io/v1" || result.Kind != "SelfSubjectReview" || result.Status.UserInfo.Username == "" {
@@ -401,6 +429,11 @@ func (client *Client) selfSubjectPrincipal(ctx context.Context, header string, c
 	// This standard field identifies the token, not its authenticated
 	// principal; retaining it would rebuild on every projected-token renewal.
 	delete(user.Extra, "authentication.kubernetes.io/credential-id")
+	// Providers whose authenticator reports per-session fields remove them
+	// here, so a routine credential refresh keeps the same principal.
+	if normalizer, ok := client.credentials.(interface{ normalizeReviewedUser(*reviewedUserInfo) }); ok {
+		normalizer.normalizeReviewedUser(&user)
+	}
 	sort.Strings(user.Groups)
 	for key := range user.Extra {
 		sort.Strings(user.Extra[key])
@@ -427,7 +460,7 @@ func (source *expiringBearerSource) Authorization(ctx context.Context) (string, 
 	defer func() { source.lock <- struct{}{} }()
 	now := source.now()
 	if now.Before(source.retryAt) {
-		return "", ErrCredentialUnavailable
+		return "", credentialFault(ErrCredentialUnavailable)
 	}
 	if source.header != "" && now.Add(source.skew).Before(source.expires) {
 		return source.header, nil
@@ -435,15 +468,15 @@ func (source *expiringBearerSource) Authorization(ctx context.Context) (string, 
 	token, expires, err := source.refresh(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", err
+			return "", credentialFault(err)
 		}
 		source.failures++
 		source.retryAt = now.Add(time.Second * time.Duration(1<<min(source.failures-1, 6)))
-		return "", ErrCredentialUnavailable
+		return "", credentialFault(ErrCredentialUnavailable)
 	}
 	header, err := bearerHeader(token)
 	if err != nil || !expires.After(now) {
-		return "", errors.New("kubernetes: credential provider returned an invalid token")
+		return "", credentialFault(errors.New("kubernetes: credential provider returned an invalid token"))
 	}
 	source.header = header
 	source.expires = expires
@@ -472,7 +505,8 @@ func (source *credentialSource) Authorization(ctx context.Context) (string, erro
 	if source == nil || source.authorization == nil {
 		return "", nil
 	}
-	return source.authorization(ctx)
+	header, err := source.authorization(ctx)
+	return header, credentialFault(err)
 }
 
 func (source *credentialSource) ClientCertificate(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
@@ -505,9 +539,10 @@ func (source *tokenFileSource) Authorization(ctx context.Context) (string, error
 	}
 	data, err := readBoundedFile(source.path, maxTokenBytes)
 	if err != nil {
-		return "", ErrCredentialUnavailable
+		return "", credentialFault(ErrCredentialUnavailable)
 	}
-	return bearerHeader(string(data))
+	header, err := bearerHeader(string(data))
+	return header, credentialFault(err)
 }
 
 func (source *tokenFileSource) rejectBearer(rejected string) bool {
@@ -524,7 +559,8 @@ func (source *tokenFileSource) verifiedCredentialPrincipal(ctx context.Context, 
 	if source.verifier == nil {
 		return "", nil
 	}
-	return source.verifier.verify(ctx, strings.TrimPrefix(header, "Bearer "))
+	principal, err := source.verifier.verify(ctx, strings.TrimPrefix(header, "Bearer "))
+	return principal, credentialFault(err)
 }
 
 func clientCertificateCredential(certificateFile, keyFile string, certificateData, keyData []byte) (CredentialSource, error) {

@@ -1682,6 +1682,16 @@ export interface KubernetesClusters {
   clusters: KubernetesClusterSummary[];
 }
 
+/**
+ * Every consumer of the catalog reads `clusters` as a list and `multiple` as a
+ * flag. A body that leaves either out — an older server, a proxy, or a stub —
+ * reads as an empty list and a single cluster, never as a page that throws
+ * while rendering.
+ */
+export function normalizeKubernetesClusters(body: Partial<KubernetesClusters> | null | undefined): KubernetesClusters {
+  return { multiple: body?.multiple === true, clusters: Array.isArray(body?.clusters) ? body.clusters : [] };
+}
+
 export function kubernetesClusterPath(path: string, cluster?: string): string {
   if (!cluster) return path;
   const [pathname, search = ""] = path.split("?");
@@ -2207,7 +2217,7 @@ export interface KubernetesResource {
   projection_truncated?: string[] | null;
 }
 
-export interface KubernetesResourcePage {
+export interface KubernetesResourcePage extends KubernetesPageTotals {
   items: KubernetesResource[] | null;
   continue?: string;
   truncated: boolean;
@@ -2274,7 +2284,7 @@ export interface KubernetesWorkload {
   partial_failures?: Array<{ resource_id?: string; class: string }>;
 }
 
-export interface KubernetesWorkloadPage {
+export interface KubernetesWorkloadPage extends KubernetesPageTotals {
   sync?: KubernetesSync;
   items: KubernetesResource[];
   counts?: Record<string, number>;
@@ -2328,6 +2338,8 @@ export interface KubernetesIssue {
   untracked?: string[];
   /** True only for real evidence failures, never for evidence that is still loading. */
   partial?: boolean;
+  /** The changes around this break exceeded the bounded history read. */
+  history_truncated?: boolean;
   /** Evidence resource ids still loading; history and changes may be incomplete for that reason only. */
   pending?: string[];
 }
@@ -2335,6 +2347,16 @@ export interface KubernetesIssue {
 export interface KubernetesHistoryCounts {
   count_capped?: boolean;
   total?: number;
+  /** Page size; a positive limit means `total` sizes the pager. */
+  limit?: number;
+}
+
+/** Exact paging totals a snapshot-backed list reports. */
+export interface KubernetesPageTotals {
+  /** Items matching the filters across all pages. */
+  total?: number;
+  /** Page size; a positive limit means `total` is present. */
+  limit?: number;
 }
 
 /** Continuations carry rows, while the first page owns snapshot count metadata. */
@@ -2362,6 +2384,8 @@ export interface KubernetesIssuePage extends KubernetesHistoryCounts {
   next?: string;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   sync: KubernetesSync;
+  /** Present on pages served from saved history. */
+  capture?: KubernetesCaptureStatus;
 }
 
 export type KubernetesChangeType = "created" | "deleted" | "image_changed" | "replicas_changed" | "spec_changed" | "rollout_started" | "rollout_completed" | "rollout_stalled" | "config_ref_changed" | "config_changed" | "warning_burst";
@@ -2415,6 +2439,33 @@ export interface KubernetesCrashQuery {
   cursor?: string;
 }
 
+/**
+ * Present on a saved-history page only while the latest capture could not be
+ * saved: the cluster was read, but saved history ends at `saved_through`. It
+ * clears after the next successful save and is never a credential or
+ * connector fault.
+ */
+export interface KubernetesHistorySave {
+  /** `history_save_delayed` clears by itself; `history_save_rejected` needs an operator. */
+  code: "history_save_delayed" | "history_save_rejected" | (string & {});
+  message: string;
+  action: string;
+  retryable: boolean;
+  /** Time of the last saved history checkpoint, when one is known. */
+  saved_through?: string;
+}
+
+export interface KubernetesCaptureStatus {
+  mode: string;
+  evidence_mode?: string;
+  evidence_error?: string;
+  reason?: string;
+  last_cycle_at?: string;
+  behind: boolean;
+  verification?: { stage: string; http_status?: number };
+  history_save?: KubernetesHistorySave;
+}
+
 export interface KubernetesCrashPage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
   crash_count?: number;
@@ -2429,7 +2480,7 @@ export interface KubernetesCrashPage extends KubernetesHistoryCounts {
   capture_gaps: Array<{ from: string; to: string }>;
   coverage: Record<string, { from: string; to: string }>;
   limitations: string[];
-  capture: { mode: string; evidence_mode?: string; evidence_error?: string; reason?: string; last_cycle_at?: string; behind: boolean; verification?: { stage: string; http_status?: number } };
+  capture: KubernetesCaptureStatus;
   sync: KubernetesSync;
 }
 
@@ -2441,6 +2492,8 @@ export interface KubernetesChangesPage extends KubernetesHistoryCounts {
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   gaps?: Array<{ from: string; to: string }>;
   sync: KubernetesSync;
+  /** Present on pages served from saved history. */
+  capture?: KubernetesCaptureStatus;
 }
 
 export type KubernetesTimelineEntry =
@@ -2462,6 +2515,8 @@ export interface KubernetesTimelinePage extends KubernetesHistoryCounts {
   breaks_only?: boolean;
   since: string;
   until: string;
+  /** Present on pages served from saved history. */
+  capture?: KubernetesCaptureStatus;
 }
 
 export interface KubernetesTimelineQuery {
@@ -2722,7 +2777,7 @@ export interface KubernetesGitOpsApp {
   suspended: boolean;
 }
 
-export interface KubernetesGitOpsPage {
+export interface KubernetesGitOpsPage extends KubernetesPageTotals {
   items: KubernetesGitOpsApp[];
   available: boolean;
   reason?: string;
@@ -3238,7 +3293,7 @@ export function createKubernetesApi(cluster?: string) {
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> }>(`/api/admin/kubernetes/releases?${query}`);
+    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> } & KubernetesPageTotals>(`/api/admin/kubernetes/releases?${query}`);
   },
   kubernetesRelease: (namespace: string, name: string) =>
     request<KubernetesHelmRelease>(`/api/admin/kubernetes/releases/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
@@ -3324,7 +3379,7 @@ export function createKubernetesApi(cluster?: string) {
 export const api = {
   ...agentCapabilitiesApi,
   ...createKubernetesApi(),
-  kubernetesClusters: () => request<KubernetesClusters>("/api/admin/kubernetes/clusters"),
+  kubernetesClusters: async () => normalizeKubernetesClusters(await request<Partial<KubernetesClusters> | null>("/api/admin/kubernetes/clusters")),
   /**
    * The cluster-wide sync report for one named cluster, for surfaces that show
    * several clusters at once and therefore cannot use the scoped client.

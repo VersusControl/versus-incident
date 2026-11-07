@@ -212,6 +212,7 @@ func runModelStateChildren(t *testing.T, dir string) {
 }
 
 func TestFileModelStateSubprocessNamespaceIntegrity(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	provider, err := NewFile(FileOptions{DataDir: dir})
 	if err != nil {

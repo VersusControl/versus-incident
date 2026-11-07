@@ -26,6 +26,7 @@ import (
 )
 
 func TestCrashEvidenceScenarioConsumers(t *testing.T) {
+	t.Parallel()
 	server, err := NewServer(Config{Scenario: "crash-evidence"})
 	if err != nil {
 		t.Fatal(err)
@@ -89,29 +90,36 @@ func TestCrashEvidenceScenarioConsumers(t *testing.T) {
 }
 
 // Match production startup rather than relying on consumer requests to LIST.
-func warmScenarioInventory(t *testing.T, service *kubernetes.Service) {
+// warmScenarioInventory starts capture on every service before waiting for
+// any of them. Background reads are rate limited per client, so clusters warm
+// side by side in the time one of them takes.
+func warmScenarioInventory(t *testing.T, services ...*kubernetes.Service) {
 	t.Helper()
-	service.StartCapture(t.Context())
-	t.Cleanup(service.StopCapture)
+	for _, service := range services {
+		service.StartCapture(t.Context())
+		t.Cleanup(service.StopCapture)
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
-	for {
-		overview, err := service.Overview(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		capture := service.CaptureStatus()
-		// Warm means the full inventory: the core generation is ready first and
-		// the remaining kinds fill in on the next cycle.
-		if overview.Sync.State == "ready" && overview.Sync.PendingKinds == 0 && (capture.Mode != "continuous" || capture.LastCycleAt != nil) {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("background inventory did not become ready: %+v", overview.Sync)
-		case <-ticker.C:
+	for _, service := range services {
+		for {
+			overview, err := service.Overview(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			capture := service.CaptureStatus()
+			// Warm means the full inventory: the core generation is ready first and
+			// the remaining kinds fill in on the next cycle.
+			if overview.Sync.State == "ready" && overview.Sync.PendingKinds == 0 && (capture.Mode != "continuous" || capture.LastCycleAt != nil) {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatalf("background inventory did not become ready: %+v", overview.Sync)
+			case <-ticker.C:
+			}
 		}
 	}
 }
@@ -362,7 +370,9 @@ func TestVerificationFaultRecoveryAndCancellation(t *testing.T) {
 }
 
 func TestFleetSummaryVersionAndIssues(t *testing.T) {
+	t.Parallel()
 	entries := []kubernetes.ClusterEntry{}
+	services := []*kubernetes.Service{}
 	for _, id := range []string{"east", "west"} {
 		backend, err := NewServer(Config{Scenario: "fleet-" + id})
 		if err != nil {
@@ -375,9 +385,10 @@ func TestFleetSummaryVersionAndIssues(t *testing.T) {
 			t.Fatal(err)
 		}
 		service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: id}, time.Minute)
-		warmScenarioInventory(t, service)
+		services = append(services, service)
 		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, Provider: "generic"}, Service: service})
 	}
+	warmScenarioInventory(t, services...)
 	summaries := kubernetes.NewClusterRegistry(true, entries).Summaries(t.Context(), "default", nil)
 	for index, summary := range summaries {
 		if summary.Version != "v1.30.4" || summary.Issues == nil || *summary.Issues != 0 || summary.Nodes != index+1 || summary.Pods != index+2 {
@@ -934,6 +945,7 @@ func TestServerResourcePathRouting(t *testing.T) {
 }
 
 func TestAutoscalingDiscoveryAndBadRolloutIndex(t *testing.T) {
+	t.Parallel()
 	server, err := NewServer(Config{Scenario: "bad-rollout"})
 	if err != nil {
 		t.Fatal(err)

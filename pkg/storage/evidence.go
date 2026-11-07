@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"sort"
 	"strconv"
@@ -17,8 +18,21 @@ import (
 
 var ErrInvalidEvidence = errors.New("storage: invalid evidence data")
 
+// ErrEvidenceCursorExpired reports a well-formed page cursor for the same list
+// and filters that can no longer be continued: an earlier release issued it
+// before the list changed how it pages, or the stored history changed under it
+// since, because retention removed a month or thinned samples or the history
+// was deleted and captured again. The reader restarts the list from its first
+// page.
+var ErrEvidenceCursorExpired = fmt.Errorf("%w: page cursor no longer matches the stored history", ErrInvalidEvidence)
+
 var ErrEvidenceConflict = errors.New("storage: evidence checkpoint conflict")
 var ErrEvidenceLimit = errors.New("storage: evidence operation exceeds budget")
+
+// ErrEvidenceUnstorable is a save the store cannot hold as given, such as text
+// the database refuses. It is invalid evidence, and a retry of the same batch
+// cannot succeed.
+var ErrEvidenceUnstorable = fmt.Errorf("%w: the store cannot hold this content", ErrInvalidEvidence)
 
 // ErrEvidenceNotReady reports a scope whose read models are still being built.
 // History reads are served only from read models, so a scope that is still
@@ -130,6 +144,20 @@ type EvidenceCheckpoint struct {
 	CoveredThrough time.Time                   `json:"covered_through"`
 	// PrunedThrough is file-only lost history, not an invented database window.
 	PrunedThrough time.Time `json:"pruned_through,omitempty"`
+	// ThinRevision counts removals that took only issue observation samples:
+	// retention thinning in the database, and the sample age and size limits
+	// of the local stores. Journal rows and occurrences stay, so a list over
+	// them keeps its page links; PruneRevision counts every other removal.
+	ThinRevision uint64 `json:"thin_revision,omitempty"`
+	// ThinnedThrough is the newest bound before which samples were removed.
+	ThinnedThrough time.Time `json:"thinned_through,omitempty"`
+	// Saving names a capture whose save has written journal parts but not yet
+	// its final part. Readers stay pinned to this checkpoint meanwhile, and
+	// counters that the parts already moved are not used to answer them.
+	Saving string `json:"saving,omitempty"`
+	// SavingHigh is the highest sequence those parts wrote, kept across
+	// attempts, so the checkpoint that finally lands covers every part.
+	SavingHigh uint64 `json:"saving_high,omitempty"`
 }
 
 // EvidenceAuthority records a completed collection proof, not a credential claim.
@@ -141,6 +169,15 @@ type EvidenceAuthority struct {
 }
 
 type EvidenceBatch struct {
+	// KeepLease, when set, is called before each save transaction. It confirms
+	// the caller still holds its lease, renewing it when needed, and returns
+	// the current guard value for GuardKey. A capture saved in several
+	// transactions therefore never outlives the lease that fences it.
+	KeepLease func(context.Context) ([]byte, error) `json:"-"`
+	// Fence, when set, runs each save transaction. A caller that must hold a
+	// lock while it writes holds it for one transaction at a time, so work it
+	// serves elsewhere can run between the transactions of a large save.
+	Fence                func(context.Context, func() error) error `json:"-"`
 	ScopeBinding         string
 	Principal            string
 	Authority            map[string]EvidenceAuthority
@@ -174,10 +211,17 @@ type EvidenceQuery struct {
 	PointInTime        bool
 	// Projection transforms unavailable records into explicit gaps before counts
 	// and pagination. Identity and ordering fields must remain unchanged.
-	Projection                                  func(EvidenceRecord) EvidenceRecord
-	ProjectionID                                string
-	Variant                                     string
-	WithGaps                                    bool
+	Projection   func(EvidenceRecord) EvidenceRecord
+	ProjectionID string
+	Variant      string
+	WithGaps     bool
+	// GapsApart keeps coverage gaps, and rows this reader may not see, out of
+	// the item keyset: Items, Total and Counts describe only rows the reader
+	// can list, so every page but the last holds Limit items. The gaps that
+	// overlap the page's time range, including denied rows as point gaps,
+	// arrive in EvidencePage.Gaps from a separate bounded read. It implies
+	// WithGaps for the gap filters.
+	GapsApart                                   bool
 	Name, ResourceUID                           string
 	ByObservation                               bool
 	Since, Until                                time.Time
@@ -195,10 +239,16 @@ type EvidencePage struct {
 	Since, Until time.Time
 	Total        int
 	Counts       map[string]int
-	Items        []EvidenceRecord   `json:"items"`
-	Next         string             `json:"next,omitempty"`
-	Checkpoint   EvidenceCheckpoint `json:"checkpoint"`
-	Policy       EvidencePolicy     `json:"policy"`
+	Items        []EvidenceRecord `json:"items"`
+	// Gaps holds the page's coverage gaps when the query keeps them apart.
+	Gaps       []EvidenceRecord   `json:"gaps,omitempty"`
+	Next       string             `json:"next,omitempty"`
+	Checkpoint EvidenceCheckpoint `json:"checkpoint"`
+	// resume is this page's cursor state, from which ResumeAfter positions a
+	// continuation after any item on the page.
+	resume      evidenceCursor
+	resumeQuery EvidenceQuery
+	Policy      EvidencePolicy `json:"policy"`
 }
 
 type evidenceState struct {
@@ -224,6 +274,7 @@ type evidenceCursor struct {
 	OccurrenceHighs []uint64
 	Generations     []uint64
 	PruneRevisions  []uint64
+	ThinRevisions   []uint64
 	Highs           []uint64
 	Pruned          []time.Time
 	Since, Until    time.Time
@@ -275,6 +326,10 @@ func mergeEvidenceCheckpoint(current, next EvidenceCheckpoint) EvidenceCheckpoin
 		current.PrunedThrough = next.PrunedThrough
 	}
 	current.PruneRevision = max(current.PruneRevision, next.PruneRevision)
+	if next.ThinnedThrough.After(current.ThinnedThrough) {
+		current.ThinnedThrough = next.ThinnedThrough
+	}
+	current.ThinRevision = max(current.ThinRevision, next.ThinRevision)
 	kinds := map[string]bool{}
 	for _, kind := range current.Kinds {
 		kinds[kind] = true
@@ -301,7 +356,8 @@ func evidenceScopeKey(scope EvidenceScope) (string, error) {
 }
 
 // Validate bounds one operation without imposing any retained-history limit.
-func (batch EvidenceBatch) Validate() error { return validEvidenceBatch(batch) }
+// Validate checks the batch as a store will receive it, after normalization.
+func (batch EvidenceBatch) Validate() error { return validEvidenceBatch(normalizeEvidenceBatch(batch)) }
 
 func validEvidenceBatch(batch EvidenceBatch) error {
 	if batch.Principal == "" && len(batch.Authority) > 0 {
@@ -337,7 +393,7 @@ func validEvidenceBatch(batch EvidenceBatch) error {
 			return ErrInvalidEvidence
 		}
 	}
-	if len(batch.Records)+len(batch.Issues) > 10000 {
+	if len(batch.Records)+len(batch.Issues) > MaxEvidenceBatchRecords {
 		return ErrEvidenceLimit
 	}
 	size := 0
@@ -363,10 +419,28 @@ func validEvidenceBatch(batch EvidenceBatch) error {
 		keys[issue.Key] = true
 		size += len(issue.Payload)
 	}
-	if size > 8<<20 {
+	if size > MaxEvidenceBatchBytes {
 		return ErrEvidenceLimit
 	}
 	return nil
+}
+
+// A capture is held whole in memory, published with the inventory and saved in
+// bounded parts, so these limits bound memory, not the length of one save
+// transaction. They keep one capture's history within 16 MiB of the published
+// inventory blob and its validation, publication and database save within
+// 128 MiB of transient heap (measured by TestCaptureMemoryAtTheHistorySaveLimits).
+// A store refuses a batch over either limit; a producer fits its capture to
+// them before publishing it.
+const (
+	MaxEvidenceBatchRecords = 25000
+	MaxEvidenceBatchBytes   = 15 << 20
+)
+
+// EvidencePayloadSize is how much of MaxEvidenceBatchBytes one record or issue
+// payload uses once a store has made its text storable.
+func EvidencePayloadSize(payload json.RawMessage) int {
+	return len(normalizeEvidencePayload(payload))
 }
 
 func validEvidenceRecord(record EvidenceRecord) bool {
@@ -647,7 +721,7 @@ func prepareEvidenceQuery(scope EvidenceScope, query EvidenceQuery) (EvidenceQue
 	if err != nil {
 		return query, evidenceCursor{}, err
 	}
-	if query.Type == "timeline" || query.Type == "break" {
+	if query.Type == "timeline" || query.Type == "break" || query.GapsApart {
 		query.WithGaps = true
 	}
 	if len(query.Cursor) > 4096 {
@@ -688,17 +762,50 @@ func prepareEvidenceQuery(scope EvidenceScope, query EvidenceQuery) (EvidenceQue
 	for _, readScope := range readScopes {
 		orgBinding = append(orgBinding, readScope.OrgID)
 	}
-	binding := evidenceDigest(strings.Join(orgBinding, "\x00"), NormalizeOrgID(scope.OrgID), scope.ClusterID, scope.ClusterUID, query.Since.UTC().Format(time.RFC3339Nano), query.Until.UTC().Format(time.RFC3339Nano), query.Namespace, query.Kind, query.UID, query.RootUID, query.PodUID, query.Rule, query.Type, query.Name, query.ResourceUID, strconv.FormatBool(query.ByObservation), strconv.FormatBool(query.WithGaps), query.Variant)
-	if query.ProjectionID != "" {
-		binding = evidenceDigest(binding, query.ProjectionID)
-	}
-	binding = evidenceDigest(binding, query.OccurrenceID, query.Center.UTC().Format(time.RFC3339Nano), strconv.FormatBool(query.PointInTime))
+	orgs := strings.Join(orgBinding, "\x00")
+	binding := evidenceCursorBinding(orgs, scope, query, query.WithGaps, query.GapsApart)
 	if query.Cursor != "" && cursor.Binding != binding {
+		// A list that keeps gaps apart walks a different keyset than the one
+		// an earlier release bound its page links to. Such a link names this
+		// same list, so the reader is sent back to its first page.
+		if query.GapsApart && (cursor.Binding == evidenceCursorBinding(orgs, scope, query, true, false) || cursor.Binding == evidenceCursorBinding(orgs, scope, query, false, false)) {
+			return query, cursor, ErrEvidenceCursorExpired
+		}
 		return query, cursor, ErrInvalidEvidence
 	}
 	cursor.CaptureScope = captureScope
 	cursor.Binding, cursor.Since, cursor.Until = binding, query.Since, query.Until
 	return query, cursor, nil
+}
+
+// cursorThinRevisionsFit accepts a cursor with one thin revision per scope,
+// or none from a release that counted sample removals as pruning.
+func cursorThinRevisionsFit(cursor evidenceCursor, scopes int) bool {
+	return len(cursor.ThinRevisions) == 0 || len(cursor.ThinRevisions) == scopes
+}
+
+// cursorSamplesThinned reports whether issue samples of scope i were removed
+// since the cursor was issued. A cursor without thin revisions cannot tell, so
+// any recorded removal counts.
+func cursorSamplesThinned(cursor evidenceCursor, i int, revision uint64) bool {
+	if len(cursor.ThinRevisions) == 0 {
+		return revision != 0
+	}
+	return cursor.ThinRevisions[i] != revision
+}
+
+// evidenceCursorBinding is the digest a page cursor carries for one query,
+// so a cursor is honoured only by the list and filters that issued it.
+func evidenceCursorBinding(orgs string, scope EvidenceScope, query EvidenceQuery, withGaps, gapsApart bool) string {
+	binding := evidenceDigest(orgs, NormalizeOrgID(scope.OrgID), scope.ClusterID, scope.ClusterUID, query.Since.UTC().Format(time.RFC3339Nano), query.Until.UTC().Format(time.RFC3339Nano), query.Namespace, query.Kind, query.UID, query.RootUID, query.PodUID, query.Rule, query.Type, query.Name, query.ResourceUID, strconv.FormatBool(query.ByObservation), strconv.FormatBool(withGaps), query.Variant)
+	if query.ProjectionID != "" {
+		binding = evidenceDigest(binding, query.ProjectionID)
+	}
+	if gapsApart {
+		// A cursor walks a different keyset when gaps are kept apart.
+		binding = evidenceDigest(binding, "gaps_apart")
+	}
+	return evidenceDigest(binding, query.OccurrenceID, query.Center.UTC().Format(time.RFC3339Nano), strconv.FormatBool(query.PointInTime))
 }
 
 func evidenceTypeMatches(recordType, filter string, broken bool) bool {
@@ -794,7 +901,25 @@ func evidenceMatches(record EvidenceRecord, query EvidenceQuery, cursor evidence
 	return cursor.At.IsZero() || at.Before(cursor.At) || at.Equal(cursor.At) && record.ID < cursor.ID
 }
 
+// ResumeAfter returns the cursor that continues this page's list right after
+// record, one of the page's items. A caller that shows only part of a page
+// resumes there instead of skipping the rows it did not show. It is empty for
+// a page that was not read through a cursor-paged query.
+func (page EvidencePage) ResumeAfter(record EvidenceRecord) string {
+	if page.resume.Binding == "" || record.ID == "" {
+		return ""
+	}
+	cursor := page.resume
+	cursor.At, cursor.ID = evidenceTime(record, page.resumeQuery), record.ID
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
 func finishEvidencePage(page EvidencePage, query EvidenceQuery, cursor evidenceCursor) EvidencePage {
+	page.resume, page.resumeQuery = cursor, EvidenceQuery{ByObservation: query.ByObservation}
 	end, bytes := 0, 0
 	for end < len(page.Items) && end < query.Limit {
 		raw, _ := json.Marshal(page.Items[end])
@@ -818,7 +943,68 @@ func finishEvidencePage(page EvidencePage, query EvidenceQuery, cursor evidenceC
 	return page
 }
 
+// evidencePageGapLimit bounds the separate gap read of one page.
+const evidencePageGapLimit = 200
+
+// evidencePageRange is the time range a finished page covers in a newest-first
+// walk: from the previous page's last row, or the query's end on the first
+// page, down to this page's last row, or the query's start on the last page.
+// Consecutive pages share only their boundary instant, so every gap in the
+// window is shown on the page, or pages, whose range it overlaps.
+func evidencePageRange(page EvidencePage, query EvidenceQuery, cursor evidenceCursor) (time.Time, time.Time) {
+	upper := query.Until
+	if !cursor.At.IsZero() && cursor.At.Before(upper) {
+		upper = cursor.At
+	}
+	lower := query.Since
+	if page.Next != "" && len(page.Items) > 0 {
+		lower = evidenceTime(page.Items[len(page.Items)-1], query)
+	}
+	if lower.After(upper) {
+		lower = upper
+	}
+	return lower, upper
+}
+
+// boundEvidenceGaps keeps at most evidencePageGapLimit gaps, newest first. A
+// read that found more cannot name every gap, so the whole page range is
+// reported as one gap instead: coverage is never claimed where it was not read.
+func boundEvidenceGaps(gaps []EvidenceRecord, query EvidenceQuery, lower, upper time.Time) []EvidenceRecord {
+	sort.SliceStable(gaps, func(i, j int) bool {
+		a, b := gaps[i], gaps[j]
+		return evidenceTime(a, query).After(evidenceTime(b, query)) || evidenceTime(a, query).Equal(evidenceTime(b, query)) && a.ID > b.ID
+	})
+	if len(gaps) <= evidencePageGapLimit {
+		if gaps == nil {
+			return []EvidenceRecord{}
+		}
+		return gaps
+	}
+	raw, _ := json.Marshal(struct {
+		From time.Time `json:"from"`
+		To   time.Time `json:"to"`
+	}{lower, upper})
+	return []EvidenceRecord{{ID: "coverage_gap:page:" + lower.UTC().Format(time.RFC3339Nano), Type: "coverage_gap", At: upper, ObservedAt: upper, GapFrom: lower, GapTo: upper, Payload: raw}}
+}
+
+// evidenceGapInRange reports whether a gap read candidate belongs to the page
+// range: a coverage gap overlaps it, a denied row falls inside it.
+func evidenceGapInRange(record EvidenceRecord, query EvidenceQuery, lower, upper time.Time, denied bool) bool {
+	if denied {
+		at := evidenceTime(record, query)
+		return !at.Before(lower) && !at.After(upper)
+	}
+	return !record.GapTo.Before(lower) && !record.GapFrom.After(upper)
+}
+
+// blobEvidenceCommit saves a whole capture in one compare-and-swap, which is
+// one transaction for the caller's fence.
 func blobEvidenceCommit(ctx context.Context, p Provider, policy EvidencePolicy, scope EvidenceScope, batch EvidenceBatch) error {
+	return evidenceFenced(ctx, batch, func() error { return blobEvidenceCommitUnfenced(ctx, p, policy, scope, batch) })
+}
+
+func blobEvidenceCommitUnfenced(ctx context.Context, p Provider, policy EvidencePolicy, scope EvidenceScope, batch EvidenceBatch) error {
+	batch = normalizeEvidenceBatch(batch)
 	key, err := evidenceScopeKey(scope)
 	if err != nil {
 		return err
@@ -986,9 +1172,15 @@ func blobEvidenceQuery(ctx context.Context, p Provider, policy EvidencePolicy, s
 		cursor.Highs = make([]uint64, len(scopes))
 		cursor.Pruned = make([]time.Time, len(scopes))
 		cursor.PruneRevisions = make([]uint64, len(scopes))
-	} else if len(cursor.OccurrenceHighs) != len(scopes) || len(cursor.Generations) != len(scopes) || len(cursor.Highs) != len(scopes) || len(cursor.Pruned) != len(scopes) || len(cursor.PruneRevisions) != len(scopes) {
+		cursor.ThinRevisions = make([]uint64, len(scopes))
+	} else if len(cursor.OccurrenceHighs) != len(scopes) || len(cursor.Generations) != len(scopes) || len(cursor.Highs) != len(scopes) || len(cursor.Pruned) != len(scopes) || len(cursor.PruneRevisions) != len(scopes) || !cursorThinRevisionsFit(cursor, len(scopes)) {
 		return page, ErrInvalidEvidence
 	}
+	type gapCandidate struct {
+		record EvidenceRecord
+		denied bool
+	}
+	gaps := []gapCandidate{}
 	seen := map[string]bool{}
 	for i, readScope := range scopes {
 		state, err := blobEvidenceRead(ctx, p, readScope)
@@ -999,7 +1191,13 @@ func blobEvidenceQuery(ctx context.Context, p Provider, policy EvidencePolicy, s
 			cursor.OccurrenceHighs[i] = state.Checkpoint.OccurrenceRevision
 			cursor.Generations[i] = state.Checkpoint.Generation
 			cursor.Highs[i], cursor.Pruned[i], cursor.PruneRevisions[i] = state.Sequence, state.Checkpoint.PrunedThrough, state.Checkpoint.PruneRevision
-		} else if cursor.OccurrenceHighs[i] > state.Checkpoint.OccurrenceRevision && query.Type == "occurrence" || cursor.Generations[i] != state.Checkpoint.Generation || cursor.Highs[i] > state.Sequence || !cursor.Pruned[i].Equal(state.Checkpoint.PrunedThrough) || cursor.PruneRevisions[i] != state.Checkpoint.PruneRevision {
+			cursor.ThinRevisions[i] = state.Checkpoint.ThinRevision
+		} else if cursor.Generations[i] != state.Checkpoint.Generation || !cursor.Pruned[i].Equal(state.Checkpoint.PrunedThrough) || cursor.PruneRevisions[i] != state.Checkpoint.PruneRevision ||
+			query.Type == "occurrence" && cursorSamplesThinned(cursor, i, state.Checkpoint.ThinRevision) {
+			// An occurrence list reads the samples, so any removed sample can
+			// change what it shows.
+			return page, ErrEvidenceCursorExpired
+		} else if cursor.OccurrenceHighs[i] > state.Checkpoint.OccurrenceRevision && query.Type == "occurrence" || cursor.Highs[i] > state.Sequence {
 			return page, ErrEvidenceConflict
 		}
 		page.Checkpoint = mergeEvidenceCheckpoint(page.Checkpoint, state.Checkpoint)
@@ -1046,6 +1244,14 @@ func blobEvidenceQuery(ctx context.Context, p Provider, policy EvidencePolicy, s
 			}
 			matches := evidenceMatches(record, query, evidenceCursor{})
 			inPage := evidenceMatches(record, query, cursor)
+			if matches && query.GapsApart && (record.Type == "coverage_gap" || projectEvidenceAuthority(record, query).Type == "coverage_gap") {
+				gap := projectEvidenceAuthority(record, query)
+				if query.Projection != nil {
+					gap = query.Projection(gap)
+				}
+				gaps = append(gaps, gapCandidate{gap, record.Type != "coverage_gap"})
+				continue
+			}
 			if matches {
 				record = projectEvidenceAuthority(record, query)
 			}
@@ -1086,7 +1292,18 @@ func blobEvidenceQuery(ctx context.Context, p Provider, policy EvidencePolicy, s
 		return evidenceTime(a, query).After(evidenceTime(b, query)) || evidenceTime(a, query).Equal(evidenceTime(b, query)) && a.ID > b.ID
 	})
 	page.CountCapped = page.Total > 1000
-	return finishEvidencePage(page, query, cursor), nil
+	page = finishEvidencePage(page, query, cursor)
+	if query.GapsApart {
+		lower, upper := evidencePageRange(page, query, cursor)
+		page.Gaps = []EvidenceRecord{}
+		for _, candidate := range gaps {
+			if evidenceGapInRange(candidate.record, query, lower, upper, candidate.denied) {
+				page.Gaps = append(page.Gaps, candidate.record)
+			}
+		}
+		page.Gaps = boundEvidenceGaps(page.Gaps, query, lower, upper)
+	}
+	return page, nil
 }
 
 func projectEvidenceAuthority(record EvidenceRecord, query EvidenceQuery) EvidenceRecord {
@@ -1341,13 +1558,28 @@ func (p *fileProvider) compareEvidenceBlob(key string, expected, replacement []b
 
 // Changes may gain stronger observed facts after reconstruction. Immutable
 // versions preserve pinned query order while new queries see the refinement.
+// evidenceVersion identifies a record's content. Observation and detection
+// times are excluded: seeing the same change or crash again is not a new
+// version, so repeated syncs and credential renewals append no rows.
 func evidenceVersion(record EvidenceRecord) string {
 	if record.Type != "change" {
 		return "immutable"
 	}
-	raw, _ := json.Marshal([]any{record.Type, record.At, record.Namespace, record.Name, record.Kind, record.UID, record.RootUID, record.Rule, record.Priority, record.Payload})
+	raw, _ := json.Marshal([]any{record.Type, record.Namespace, record.Name, record.Kind, record.UID, record.RootUID, record.Rule, record.Priority, evidenceContentWithoutTimes(record.Payload)})
 	hash := sha256.Sum256(raw)
 	return hex.EncodeToString(hash[:])
+}
+
+// evidenceContentWithoutTimes drops the top-level detection and observation
+// times from a payload. Anything that is not a JSON object is kept as is.
+func evidenceContentWithoutTimes(payload json.RawMessage) any {
+	var content map[string]json.RawMessage
+	if json.Unmarshal(payload, &content) != nil || content == nil {
+		return payload
+	}
+	delete(content, "at")
+	delete(content, "observed_at")
+	return content
 }
 func pruneEvidenceLatest(state *evidenceState) {
 	retained := map[string]bool{}

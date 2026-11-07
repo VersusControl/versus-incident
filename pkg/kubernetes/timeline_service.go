@@ -52,6 +52,7 @@ type TimelinePage struct {
 	Items       []TimelineItem    `json:"items"`
 	Next        string            `json:"next,omitempty"`
 	Sync        SyncStatus        `json:"sync"`
+	Capture     *CaptureStatus    `json:"capture,omitempty"`
 	Partial     []PartialFailure  `json:"partial_failures,omitempty"`
 	Gaps        []kubechanges.Gap `json:"gaps"`
 	CrashCount  int               `json:"crash_count"`
@@ -60,6 +61,8 @@ type TimelinePage struct {
 	Since       time.Time         `json:"since"`
 	Until       time.Time         `json:"until"`
 	BreaksOnly  bool              `json:"breaks_only,omitempty"`
+	// Limit is the page size; with Total it sizes the pager.
+	Limit int `json:"limit,omitempty"`
 }
 
 type timelineSnapshot struct {

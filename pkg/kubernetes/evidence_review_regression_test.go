@@ -133,7 +133,8 @@ func TestPostgresAgedCheckpointMetadataDoesNotGrantUnmappedRows(t *testing.T) {
 				}
 			}
 			if optional == "SyntheticOptionalResource" {
-				page, err := service.queryEvidence(t.Context(), storage.EvidenceQuery{Since: old.Add(-time.Minute), Until: old.Add(time.Minute), Type: "change"})
+				// Gaps are opt-in on change reads, as the product's Changes read requests them.
+				page, err := service.queryEvidence(t.Context(), storage.EvidenceQuery{Since: old.Add(-time.Minute), Until: old.Add(time.Minute), Type: "change", WithGaps: true})
 				if err != nil || len(page.Items) != 1 || page.Items[0].Type != "coverage_gap" || page.Counts["change"] != 0 || page.Counts["coverage_gap"] != 1 {
 					t.Fatal("unmapped returned resource was not explicitly reported as unavailable")
 				}
@@ -149,6 +150,7 @@ func syntheticChangeEvidence(cluster, kind, namespace, id string, at time.Time) 
 }
 
 func TestPersistedTimelineTypedFiltersAcrossProviders(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file", "postgres"} {
 		for _, filter := range []string{"status-marker", "resource-uid", "pod-uid"} {
 			t.Run(backend+"/"+filter, func(t *testing.T) {
@@ -311,6 +313,7 @@ func TestLegacyCustomOwnerCrashRequiresValidPodProvenance(t *testing.T) {
 }
 
 func TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file", "postgres"} {
 		t.Run(backend, func(t *testing.T) {
 			var provider storage.Provider
@@ -688,6 +691,7 @@ func TestPersistedRootSelectionNeverSubstitutesAnotherOccurrence(t *testing.T) {
 }
 
 func TestPersistedRootPointLookupDoesNotScanUnrelatedOccurrences(t *testing.T) {
+	t.Parallel()
 	service, store, scope := reviewHistoryService(t)
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "retained", UID: "retained-root"}
@@ -711,6 +715,7 @@ func TestPersistedRootPointLookupDoesNotScanUnrelatedOccurrences(t *testing.T) {
 }
 
 func TestScopedEvidenceProjectsUnavailableRecordsBeforeCountsAndPagination(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file", "postgres"} {
 		t.Run(backend, func(t *testing.T) {
 			var provider storage.Provider
@@ -1017,6 +1022,7 @@ func TestEvidenceProofErrorPriorityIsOrderIndependent(t *testing.T) {
 }
 
 func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"memory", "file", "postgres"} {
 		for _, failure := range []string{"server-error", "timeout"} {
 			for _, status := range []int{http.StatusForbidden, http.StatusUnauthorized} {

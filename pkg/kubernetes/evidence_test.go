@@ -8,6 +8,8 @@ import (
 	_ "github.com/VersusControl/versus-incident/pkg/storage/sqlitedriver"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -535,7 +537,10 @@ func TestCandidateCloneCannotMutatePublishedRecordsOrObservationTime(t *testing.
 	}
 }
 
-func TestRegistryFileCaptureCommitsIssuesWithNoBrowserAndRestoresHistory(t *testing.T) {
+// crashLoopClusterServer serves a minimal cluster: kube-system, one namespace
+// and one crash-looping Pod, which is enough for a capture to commit history.
+func crashLoopClusterServer(t *testing.T) *httptest.Server {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metadata := func(uid, name, namespace string) map[string]any {
 			return map[string]any{"uid": uid, "name": name, "namespace": namespace}
@@ -560,7 +565,43 @@ func TestRegistryFileCaptureCommitsIssuesWithNoBrowserAndRestoresHistory(t *test
 		}
 		writeJSON(w, map[string]any{"apiVersion": version, "kind": kind, "items": items})
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
+	return server
+}
+
+// The shipped default stores files under the relative "data" directory. A
+// capture must still establish history there, not only under absolute paths.
+func TestDefaultFileStorageEstablishesHistoryAfterFirstCapture(t *testing.T) {
+	server := crashLoopClusterServer(t)
+	t.Chdir(t.TempDir())
+	provider, err := storage.New(storage.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "org", ClusterID: "cluster"})
+	seedInventoryDiscovery(service)
+	service.client.indexLimiter = nil
+	service.SetChangeStorage(provider)
+	registry := NewServiceRegistry(service)
+	registry.StartCapture(t.Context())
+	defer registry.Close()
+	since := time.Now().UTC().Add(-time.Hour)
+	var page TimelinePage
+	waitUntil(t, 8*time.Second, "history established on default file storage", func() bool {
+		page, err = service.Timeline(t.Context(), TimelineQuery{Since: since, Until: time.Now().UTC(), Namespace: "default", BreaksOnly: true})
+		return err == nil
+	})
+	if page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("default file storage history=%+v", page)
+	}
+	if _, err = os.Stat(filepath.Join(storage.DefaultDataDir, "kubernetes-evidence.sqlite")); err != nil {
+		t.Fatalf("history index is not in the default data directory: %v", err)
+	}
+}
+
+func TestRegistryFileCaptureCommitsIssuesWithNoBrowserAndRestoresHistory(t *testing.T) {
+	server := crashLoopClusterServer(t)
 	dir := t.TempDir()
 	provider, err := storage.NewFile(storage.FileOptions{DataDir: dir})
 	if err != nil {
@@ -815,5 +856,267 @@ func TestColdRestoreProofCannotMixTwoUnverifiedCredentialEpochs(t *testing.T) {
 	}
 	if reader.identity.ctx.Err() == nil {
 		t.Fatal("unverified rotation did not fence the restore")
+	}
+}
+
+// History records only what was seen to change. The first generation a cluster
+// commits is a baseline: objects that already existed are not creations, while
+// an object that appears in a later generation is. A restarted process compares
+// with the generation it restores from storage instead of starting over, so a
+// restart neither floods history with creations nor misses one made while it
+// was down. Crash evidence from the first capture is still recorded.
+func TestFirstCaptureIsBaselineAndRestartComparesWithCommittedGeneration(t *testing.T) {
+	type backend struct {
+		name string
+		open func(t *testing.T) (first, restarted storage.Provider)
+	}
+	backends := []backend{
+		{"memory", func(t *testing.T) (storage.Provider, storage.Provider) {
+			provider := storage.NewMemory()
+			t.Cleanup(func() { _ = provider.Close() })
+			return provider, provider
+		}},
+		{"file", func(t *testing.T) (storage.Provider, storage.Provider) {
+			dir := t.TempDir()
+			first, err := storage.NewFile(storage.FileOptions{DataDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := storage.NewFile(storage.FileOptions{DataDir: dir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = first.Close(); _ = restarted.Close() })
+			return first, restarted
+		}},
+		{"postgres", func(t *testing.T) (storage.Provider, storage.Provider) {
+			dsn := os.Getenv("TEST_POSTGRES_DSN")
+			if dsn == "" {
+				t.Skip("TEST_POSTGRES_DSN not set: Postgres proof did not run")
+			}
+			first, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+			if err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = first.Close(); _ = restarted.Close() })
+			return first, restarted
+		}},
+	}
+	for _, backend := range backends {
+		t.Run(backend.name, func(t *testing.T) {
+			// A shared database keeps earlier runs, so each run owns its cluster.
+			suffix := fmt.Sprintf("%s-%d", backend.name, time.Now().UnixNano())
+			physical := "physical-" + suffix
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/namespaces/kube-system" {
+					writeJSON(w, map[string]any{"metadata": map[string]any{"uid": physical}})
+					return
+				}
+				writeJSON(w, map[string]any{"apiVersion": "meta.k8s.io/v1", "kind": "PartialObjectMetadataList", "items": []any{}})
+			}))
+			defer server.Close()
+			first, restartedProvider := backend.open(t)
+			scope := Scope{OrgID: "default", ClusterID: "baseline-" + suffix}
+			evidenceScope := storage.EvidenceScope{OrgID: scope.OrgID, ClusterID: scope.ClusterID, ClusterUID: physical}
+			origin := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Microsecond)
+			existed := origin.Add(-48 * time.Hour)
+			records := []kubeindex.Record{
+				{Kind: "Namespace", Name: "kube-system", UID: physical, CreatedAt: existed},
+				{Kind: "Namespace", Name: "shop", UID: "ns-shop", CreatedAt: existed},
+				{Kind: "Deployment", Namespace: "shop", Name: "api", UID: "deploy-api", CreatedAt: existed},
+				{Kind: "ReplicaSet", Namespace: "shop", Name: "api-1", UID: "rs-api-1", Revision: "1", CreatedAt: existed, Owners: []kubeindex.OwnerRef{{Kind: "Deployment", Name: "api", UID: "deploy-api", Controller: true}}},
+				{Kind: "Pod", Namespace: "shop", Name: "api-1-a", UID: "pod-a", CreatedAt: existed, Owners: []kubeindex.OwnerRef{{Kind: "ReplicaSet", Name: "api-1", UID: "rs-api-1", Controller: true}}, Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 3}}},
+				{Kind: "ConfigMap", Namespace: "shop", Name: "api-config", UID: "cm-api", CreatedAt: existed},
+			}
+			generation := func(at time.Time, records []kubeindex.Record) inventoryGeneration {
+				kinds := map[string]kubeindex.KindStatus{}
+				for kind := range indexedResourceIDs {
+					kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: at, CompletedAt: at}
+				}
+				return inventoryGeneration{View: kubeindex.Snapshot{Kinds: kinds, Records: append([]kubeindex.Record(nil), records...)}}
+			}
+			newPod := func(name, uid string, at time.Time) kubeindex.Record {
+				return kubeindex.Record{Kind: "Pod", Namespace: "shop", Name: name, UID: uid, CreatedAt: at, Owners: []kubeindex.OwnerRef{{Kind: "ReplicaSet", Name: "api-1", UID: "rs-api-1", Controller: true}}}
+			}
+			publish := func(service *Service, lease *inventoryLease, current *inventoryGeneration) {
+				t.Helper()
+				if err := lease.publish(t.Context(), service, current); err != nil {
+					t.Fatal(err)
+				}
+				if current.EvidenceFailure != "" || current.EvidenceBatch == nil {
+					t.Fatalf("capture was not prepared for history: %q", current.EvidenceFailure)
+				}
+				if err := lease.commitJournal(t.Context(), service, *current); err != nil {
+					t.Fatal(err)
+				}
+				// The worker makes each published generation the one the next
+				// capture compares with.
+				service.changes.mu.Lock()
+				cache := service.changes.inventories[service.indexScope()]
+				if cache == nil {
+					cache = &inventoryCache{}
+					service.changes.inventories[service.indexScope()] = cache
+				}
+				service.changes.mu.Unlock()
+				cache.mu.Lock()
+				cache.generation = *current
+				cache.mu.Unlock()
+			}
+			created := func(provider storage.Provider) []string {
+				t.Helper()
+				page, err := provider.(storage.EvidenceStore).QueryEvidence(t.Context(), evidenceScope, storage.EvidenceQuery{Since: existed.Add(-time.Hour), Until: time.Now().UTC(), Limit: 500})
+				if err != nil {
+					t.Fatal(err)
+				}
+				names := []string{}
+				for _, record := range page.Items {
+					if record.Type == "change" && record.Rule == string(kubechanges.Created) {
+						names = append(names, record.Kind+"/"+record.Name)
+					}
+				}
+				return names
+			}
+
+			gapsEndingAt := func(provider storage.Provider, at time.Time) map[string]bool {
+				t.Helper()
+				page, err := provider.(storage.EvidenceStore).QueryEvidence(t.Context(), evidenceScope, storage.EvidenceQuery{Since: existed.Add(-time.Hour), Until: time.Now().UTC(), Limit: 500, WithGaps: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				kinds := map[string]bool{}
+				for _, record := range page.Items {
+					if record.Type == "coverage_gap" && record.GapTo.Equal(at) {
+						kinds[record.Kind] = true
+					}
+				}
+				return kinds
+			}
+
+			service := newTestService(t, server.URL, scope)
+			service.SetChangeStorage(first)
+			service.changes.evidenceEnabled = true
+			lease, owned, err := service.claimInventory(t.Context(), first, "first-process")
+			if err != nil || !owned {
+				t.Fatalf("claim: owned=%v err=%v", owned, err)
+			}
+			baseline := generation(origin, records)
+			publish(service, lease, &baseline)
+			if names := created(first); len(names) != 0 {
+				t.Fatalf("first capture recorded %d objects that already existed as created: %v", len(names), names)
+			}
+			if gaps := gapsEndingAt(first, origin); len(gaps) != 0 {
+				t.Fatalf("the first capture of a new cluster recorded gaps before any saved coverage: %v", gaps)
+			}
+			page, err := first.(storage.EvidenceStore).QueryEvidence(t.Context(), evidenceScope, storage.EvidenceQuery{Since: existed.Add(-time.Hour), Until: time.Now().UTC(), Limit: 500})
+			if err != nil {
+				t.Fatal(err)
+			}
+			opened := false
+			for _, record := range page.Items {
+				opened = opened || record.Type == "issue_opened" && record.Rule == "pod.crash_loop"
+			}
+			if !opened {
+				t.Fatal("the first capture no longer records the crash it observed")
+			}
+
+			records = append(records, newPod("api-1-b", "pod-b", origin.Add(5*time.Second)))
+			later := generation(origin.Add(10*time.Second), records)
+			publish(service, lease, &later)
+			if names := created(first); len(names) != 1 || names[0] != "Pod/api-1-b" {
+				t.Fatalf("an object added after the baseline must be one creation: %v", names)
+			}
+
+			// A new process restores the committed generation through its worker
+			// while the first process still holds the cluster.
+			restarted := newTestService(t, server.URL, scope)
+			restarted.SetChangeStorage(restartedProvider)
+			restarted.changes.evidenceEnabled = true
+			workerCtx, stopWorker := context.WithCancel(t.Context())
+			restarted.startInventory(workerCtx)
+			restarted.changes.mu.Lock()
+			cache := restarted.changes.inventories[restarted.indexScope()]
+			restarted.changes.mu.Unlock()
+			restored := false
+			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+				cache.mu.RLock()
+				restored = cache.generation.Revision == later.Revision
+				cache.mu.RUnlock()
+				if restored {
+					break
+				}
+			}
+			stopWorker()
+			select {
+			case <-cache.done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("restarted worker ignored cancellation")
+			}
+			if !restored {
+				t.Fatal("the restarted worker did not restore the committed generation")
+			}
+			if err := lease.release(); err != nil {
+				t.Fatal(err)
+			}
+			successor, owned, err := restarted.claimInventory(t.Context(), restartedProvider, "restarted-process")
+			if err != nil || !owned {
+				t.Fatalf("successor claim: owned=%v err=%v", owned, err)
+			}
+			records = append(records, newPod("api-1-c", "pod-c", origin.Add(15*time.Second)))
+			afterRestart := generation(origin.Add(20*time.Second), records)
+			publish(restarted, successor, &afterRestart)
+			if names := created(restartedProvider); len(names) != 2 || names[0] == names[1] || names[0] != "Pod/api-1-c" && names[1] != "Pod/api-1-c" {
+				t.Fatalf("a restart must record only the object added since the committed generation: %v", names)
+			}
+			if gaps := gapsEndingAt(restartedProvider, afterRestart.View.Kinds["Pod"].ObservedAt); len(gaps) != 0 {
+				t.Fatalf("a restart that compared with its committed generation recorded gaps: %v", gaps)
+			}
+
+			// A replaced credential starts an inventory epoch with no saved
+			// generation to compare with. Its first capture is a baseline over
+			// saved coverage: nothing it could not compare is called created or
+			// unchanged, the stretch is a recorded gap.
+			rotatedScope := scope
+			rotatedScope.CredentialID = "rotated"
+			rotated := newTestService(t, server.URL, rotatedScope)
+			rotated.SetChangeStorage(restartedProvider)
+			rotated.changes.evidenceEnabled = true
+			rotatedLease, owned, err := rotated.claimInventory(t.Context(), restartedProvider, "rotated-process")
+			if err != nil || !owned {
+				t.Fatalf("rotated claim: owned=%v err=%v", owned, err)
+			}
+			records = append(records, newPod("api-1-d", "pod-d", origin.Add(25*time.Second)))
+			afterRotation := generation(origin.Add(30*time.Second), records)
+			publish(rotated, rotatedLease, &afterRotation)
+			if names := created(restartedProvider); len(names) != 2 {
+				t.Fatalf("a credential epoch baseline recorded creations: %v", names)
+			}
+			if gaps := gapsEndingAt(restartedProvider, afterRotation.View.Kinds["Pod"].ObservedAt); !gaps["Pod"] || !gaps["ConfigMap"] {
+				t.Errorf("a credential epoch baseline claimed no change instead of a gap: %v", gaps)
+			}
+
+			// A kind the cluster stops serving and serves again has nothing to
+			// compare with on its return: a gap, not a silent hole.
+			withoutConfigMaps := []kubeindex.Record{}
+			for _, record := range records {
+				if record.Kind != "ConfigMap" {
+					withoutConfigMaps = append(withoutConfigMaps, record)
+				}
+			}
+			unserved := generation(origin.Add(40*time.Second), withoutConfigMaps)
+			unserved.View.Kinds["ConfigMap"] = kubeindex.KindStatus{State: "ready", ObservedAt: origin.Add(40 * time.Second), Absent: true}
+			publish(rotated, rotatedLease, &unserved)
+			returned := generation(origin.Add(50*time.Second), append(append([]kubeindex.Record(nil), records...), kubeindex.Record{Kind: "ConfigMap", Namespace: "shop", Name: "api-flags", UID: "cm-flags", CreatedAt: origin.Add(45 * time.Second)}))
+			publish(rotated, rotatedLease, &returned)
+			if names := created(restartedProvider); len(names) != 2 {
+				t.Fatalf("a kind served again recorded its objects as created: %v", names)
+			}
+			if gaps := gapsEndingAt(restartedProvider, returned.View.Kinds["ConfigMap"].ObservedAt); !gaps["ConfigMap"] || gaps["Pod"] {
+				t.Fatalf("a kind served again must record a gap for itself only: %v", gaps)
+			}
+		})
 	}
 }

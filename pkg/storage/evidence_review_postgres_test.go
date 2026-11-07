@@ -91,7 +91,7 @@ func TestPostgresEvidenceDeletionGenerationAndOccurrenceHeartbeat(t *testing.T) 
 	if err = reopened.CommitEvidence(t.Context(), scope, initial); !errors.Is(err, ErrEvidenceConflict) {
 		t.Fatalf("capture dedup bypassed deletion fence: %v", err)
 	}
-	if _, err = reopened.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceConflict) {
+	if _, err = reopened.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceCursorExpired) {
 		t.Fatalf("pre-delete cursor accepted: %v", err)
 	}
 }

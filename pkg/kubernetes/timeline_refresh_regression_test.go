@@ -20,6 +20,7 @@ import (
 // The reviewer's compressed 30-second re-windowing probe, strengthened to eight
 // concurrent viewers and assertions on every refresh rather than a logged 429.
 func TestTimelineReservationRollingViewersReclaimPreviewAndPreservePinnedCursor(t *testing.T) {
+	t.Parallel()
 	service, provider, base := timelineReservationFixture(t)
 	pinnedActor := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Actor: "viewer-0"})
 	first, err := service.reservationFixturePage(pinnedActor, base)

@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
@@ -80,7 +81,9 @@ func evidenceReadFailure(stage evidenceReadStage, err error) error {
 		}
 		cause = next
 	}
-	log.Printf("kubernetes: historical evidence failed stage=%s class=%s cause_type=%T", stage, class, cause)
+	if stage != evidenceIdentityProof || identityProofLog.allow(class) {
+		log.Printf("kubernetes: historical evidence failed stage=%s class=%s cause_type=%T", stage, class, cause)
+	}
 	return &evidenceReadError{stage: stage, cause: err}
 }
 
@@ -137,6 +140,18 @@ func issueObservationBounds(view kubeindex.Snapshot) (time.Time, time.Time, bool
 	return oldest, latest, complete
 }
 
+// listedBefore reports whether the previous generation holds a listing of kind
+// that a new listing can be compared with. History records only what was seen
+// to change. The first generation a cluster commits has no earlier listing of
+// any kind, and a kind the cluster starts serving later has none of its own, so
+// the objects such a listing returns already existed: they are its baseline,
+// not creations. A restarted process compares with the generation it restored
+// from storage, which keeps its listings.
+func listedBefore(previous kubeindex.Snapshot, kind string) bool {
+	state := previous.Kinds[kind]
+	return !state.ObservedAt.IsZero() && !state.Absent
+}
+
 func (service *Service) prepareEvidence(ctx context.Context, generation *inventoryGeneration, previous inventoryGeneration) error {
 	store := service.evidenceStore()
 	if store == nil {
@@ -152,7 +167,8 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 	scope := storage.EvidenceScope{OrgID: service.scope.OrgID, ClusterID: service.scope.ClusterID, ClusterUID: identity}
 	checkpoint, err := store.EvidenceCheckpoint(ctx, scope)
 	if err != nil {
-		return err
+		// The capture is published without a save, and that is a store outage.
+		return storageStageFailure("journal", err)
 	}
 	oldest, latest, complete := issueObservationBounds(generation.View)
 	if latest.IsZero() {
@@ -204,6 +220,51 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 		}
 		batch.Issues = append(batch.Issues, storage.EvidenceIssue{AuthorizationKind: authorizationKind, Broken: issue.Broken, LastSeen: latest, Key: key, Namespace: issue.Root.Namespace, Kind: issue.Root.Kind, UID: issue.Root.UID, Rule: issue.Rule, Payload: raw})
 	}
+	// A capture over the save limits is saved without its oldest, least
+	// needed records rather than lost whole. What "now" needs (issues, crash
+	// status and coverage gaps) is produced first and always kept; change
+	// records and crash terminations are then folded into a set bounded by
+	// the save limits as they are produced, so neither preparing nor
+	// publishing the capture holds more history than one save may. Kept
+	// records stay in capture order: changes, crashes, then gaps.
+	fit := newCaptureFit(batch.Issues)
+	const crashOrder, gapOrder = 1 << 40, 2 << 40
+	changeObservedAt := batch.At
+	var terminations []storage.EvidenceRecord
+	for i, crash := range generation.Crashes {
+		raw, err := json.Marshal(crash)
+		if err != nil {
+			return err
+		}
+		observed := maxTime(latest, crash.ObservedAt)
+		batch.At = maxTime(batch.At, observed)
+		record := storage.EvidenceRecord{AuthorizationKind: "Pod", ID: "crash:" + crash.ID, Type: "crash", At: crash.At, ObservedAt: crash.ObservedAt, Namespace: crash.Namespace, Kind: crash.RootKind, UID: crash.PodUID, RootUID: crash.RootUID, PodUID: crash.PodUID, Epoch: batch.Epoch, Payload: raw}
+		if crash.Type == "termination" {
+			terminations = append(terminations, record)
+			continue
+		}
+		fit.keep(crashOrder+i, record)
+	}
+	gaps := 0
+	if !checkpoint.At.IsZero() && oldest.Sub(checkpoint.At) > 2*time.Minute {
+		raw, _ := json.Marshal(kubechanges.Gap{From: checkpoint.At, To: oldest})
+		fit.keep(gapOrder+gaps, storage.EvidenceRecord{ID: "gap:" + batch.ID, Type: "coverage_gap", GapFrom: checkpoint.At, GapTo: oldest, At: oldest, ObservedAt: batch.At, Epoch: batch.Epoch, Payload: raw})
+		gaps++
+	}
+	for kind, interval := range batch.Coverage {
+		prior := checkpoint.Coverage[kind]
+		state := previous.View.Kinds[kind]
+		// A kind with no earlier listing to compare with is a baseline: what
+		// changed since its saved coverage was never seen, so the interval is
+		// recorded as a gap rather than as a stretch with no changes.
+		knownFailure := previous.EvidenceFailure != "" || state.State == "error" || state.Partial || !listedBefore(previous.View, kind)
+		if prior.To.IsZero() || !interval.To.After(prior.To) || !knownFailure && interval.To.Sub(prior.To) <= 2*inventoryCadence(kind) {
+			continue
+		}
+		raw, _ := json.Marshal(kubechanges.Gap{From: prior.To, To: interval.To})
+		fit.keep(gapOrder+gaps, storage.EvidenceRecord{ID: "gap:" + batch.ID + ":" + kind, Type: "coverage_gap", GapFrom: prior.To, GapTo: interval.To, Kind: kind, At: interval.To, ObservedAt: batch.At, Epoch: batch.Epoch, Payload: raw})
+		gaps++
+	}
 	byUID := map[string]kubeindex.Record{}
 	for _, record := range previous.View.Records {
 		byUID[record.UID] = record
@@ -211,6 +272,7 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 	for _, record := range generation.View.Records {
 		byUID[record.UID] = record
 	}
+	changes := 0
 	appendChange := func(change kubechanges.Change) error {
 		if record, ok := byUID[change.UID]; ok {
 			change.RootUID = kubebreaks.Root(record, byUID).UID
@@ -227,7 +289,8 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 		if change.Source == "observed" {
 			priority = 2
 		}
-		batch.Records = append(batch.Records, storage.EvidenceRecord{AuthorizationKind: authorizationKind, Priority: priority, ID: "change:" + change.ID, Type: "change", At: change.At, ObservedAt: batch.At, Namespace: change.Namespace, Name: change.Name, Kind: change.Kind, UID: change.UID, RootUID: change.RootUID, Rule: string(change.Type), Epoch: batch.Epoch, Payload: raw})
+		fit.offer(changes, storage.EvidenceRecord{AuthorizationKind: authorizationKind, Priority: priority, ID: "change:" + change.ID, Type: "change", At: change.At, ObservedAt: changeObservedAt, Namespace: change.Namespace, Name: change.Name, Kind: change.Kind, UID: change.UID, RootUID: change.RootUID, Rule: string(change.Type), Epoch: batch.Epoch, Payload: raw})
+		changes++
 		return nil
 	}
 	before := map[string]kubeindex.Record{}
@@ -238,7 +301,7 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 	for _, record := range generation.View.Records {
 		after[record.UID] = record
 		state := generation.View.Kinds[record.Kind]
-		if state.State != "ready" || state.Partial {
+		if state.State != "ready" || state.Partial || !listedBefore(previous.View, record.Kind) {
 			continue
 		}
 		old, known := before[record.UID]
@@ -271,38 +334,34 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 			return err
 		}
 	}
-	for _, crash := range generation.Crashes {
-		raw, err := json.Marshal(crash)
-		if err != nil {
-			return err
+	for i, crash := range generation.Crashes {
+		if crash.Type == "termination" {
+			fit.offer(crashOrder+i, terminations[0])
+			terminations = terminations[1:]
 		}
-		observed := maxTime(latest, crash.ObservedAt)
-		batch.At = maxTime(batch.At, observed)
-		batch.Records = append(batch.Records, storage.EvidenceRecord{AuthorizationKind: "Pod", ID: "crash:" + crash.ID, Type: "crash", At: crash.At, ObservedAt: crash.ObservedAt, Namespace: crash.Namespace, Kind: crash.RootKind, UID: crash.PodUID, RootUID: crash.RootUID, PodUID: crash.PodUID, Epoch: batch.Epoch, Payload: raw})
 	}
-	if !checkpoint.At.IsZero() && oldest.Sub(checkpoint.At) > 2*time.Minute {
-		raw, _ := json.Marshal(kubechanges.Gap{From: checkpoint.At, To: oldest})
-		batch.Records = append(batch.Records, storage.EvidenceRecord{ID: "gap:" + batch.ID, Type: "coverage_gap", GapFrom: checkpoint.At, GapTo: oldest, At: oldest, ObservedAt: batch.At, Epoch: batch.Epoch, Payload: raw})
-	}
+	var trim captureTrim
+	batch.Records, trim = fit.records()
 	if err = batch.Validate(); err != nil {
-		return err
+		return capturePreparationRefused(err)
 	}
-	for kind, interval := range batch.Coverage {
-		prior := checkpoint.Coverage[kind]
-		state := previous.View.Kinds[kind]
-		knownFailure := previous.EvidenceFailure != "" || state.State == "error" || state.Partial
-		if prior.To.IsZero() || !interval.To.After(prior.To) || !knownFailure && interval.To.Sub(prior.To) <= 2*inventoryCadence(kind) {
-			continue
-		}
-		raw, _ := json.Marshal(kubechanges.Gap{From: prior.To, To: interval.To})
-		batch.Records = append(batch.Records, storage.EvidenceRecord{ID: "gap:" + batch.ID + ":" + kind, Type: "coverage_gap", GapFrom: prior.To, GapTo: interval.To, Kind: kind, At: interval.To, ObservedAt: batch.At, Epoch: batch.Epoch, Payload: raw})
-	}
-	if err = batch.Validate(); err != nil {
-		return err
+	if trim.droppedTotal() > 0 {
+		logCaptureTrim(trim)
 	}
 	generation.EvidenceScope = scope
 	generation.EvidenceBatch = &batch
 	return nil
+}
+
+// capturePreparationRefused names a capture that could not be prepared for
+// saving because the store would refuse it: over the store's limits or invalid
+// in itself. A retry of the same capture cannot succeed, so history pages
+// report it as rejected rather than as an outage.
+func capturePreparationRefused(err error) error {
+	if errors.Is(err, storage.ErrInvalidEvidence) && !errors.Is(err, storage.ErrEvidenceUnstorable) {
+		err = fmt.Errorf("%w: %v", errInvalidCapture, err)
+	}
+	return storageStageFailure("journal", err)
 }
 
 func (service *Service) commitEvidence(ctx context.Context, generation inventoryGeneration) error {
@@ -311,46 +370,64 @@ func (service *Service) commitEvidence(ctx context.Context, generation inventory
 	}
 	store := service.evidenceStore()
 	if store == nil {
-		return storage.ErrUnsupported
+		return storageStageFailure("journal", storage.ErrUnsupported)
 	}
-	err := service.commitCredential(ctx, func() error {
-		batch := *generation.EvidenceBatch
-		batch.Records = append([]storage.EvidenceRecord(nil), batch.Records...)
-		for i, record := range batch.Records {
-			if !json.Valid(record.Payload) {
-				return storage.ErrInvalidEvidence
-			}
-			// Publish semantic validity with the indexed type/source metadata.
-			// A count must not classify a malformed payload as application data
-			// and discover the mismatch only after page hydration.
-			record = service.projectEvidence(record)
-			if record.Type != "coverage_gap" {
-				record.AuthorizationKind, _ = service.evidenceRecordAuthorizationKind(record)
-			}
-			batch.Records[i] = record
+	batch := *generation.EvidenceBatch
+	batch.Records = append([]storage.EvidenceRecord(nil), batch.Records...)
+	for i, record := range batch.Records {
+		if !json.Valid(record.Payload) {
+			return storageStageFailure("journal", errInvalidCapture)
 		}
-		err := store.CommitEvidence(ctx, generation.EvidenceScope, batch)
-		if !errors.Is(err, storage.ErrEvidenceConflict) {
-			return err
+		// Publish semantic validity with the indexed type/source metadata.
+		// A count must not classify a malformed payload as application data
+		// and discover the mismatch only after page hydration.
+		record = service.projectEvidence(record)
+		if record.Type != "coverage_gap" {
+			record.AuthorizationKind, _ = service.evidenceRecordAuthorizationKind(record)
 		}
+		batch.Records[i] = record
+	}
+	// The credential epoch fence is held for one store transaction at a time,
+	// never for the whole save: a large capture is saved in several
+	// transactions, and live reads that need the fence run between them.
+	var fenced error
+	batch.Fence = func(ctx context.Context, transaction func() error) error {
+		fenced = service.commitStorage(ctx, "journal", transaction)
+		return fenced
+	}
+	err := store.CommitEvidence(ctx, generation.EvidenceScope, batch)
+	if errors.Is(err, storage.ErrEvidenceConflict) {
 		checkpoint, readErr := store.EvidenceCheckpoint(ctx, generation.EvidenceScope)
-		if readErr != nil {
-			return readErr
+		switch {
+		case readErr != nil:
+			err = readErr
+		case checkpoint.Generation != batch.Generation:
+			// Explicit journal deletion invalidates queued old evidence. The next
+			// live capture starts normally; do not repopulate it by replaying a
+			// stale batch.
+			err = nil
+		default:
+			batch.Expected = checkpoint.ID
+			if !batch.At.After(checkpoint.At) {
+				// A concurrent authorized producer advanced coverage. Preserve this
+				// older observation without changing current lifecycle or
+				// inventing a recovery.
+				batch.At, batch.HistoricalOnly = checkpoint.At, true
+				batch.CoveredThrough, batch.Coverage = time.Time{}, nil
+			}
+			fenced = nil
+			err = store.CommitEvidence(ctx, generation.EvidenceScope, batch)
 		}
-		// Explicit journal deletion invalidates queued old evidence. The next live
-		// capture starts normally; do not repopulate it by replaying a stale batch.
-		if checkpoint.Generation != batch.Generation {
-			return nil
-		}
-		batch.Expected = checkpoint.ID
-		if !batch.At.After(checkpoint.At) {
-			// A concurrent authorized producer advanced coverage. Preserve this older
-			// observation without changing current lifecycle or inventing a recovery.
-			batch.At, batch.HistoricalOnly = checkpoint.At, true
-			batch.CoveredThrough, batch.Coverage = time.Time{}, nil
-		}
-		return store.CommitEvidence(ctx, generation.EvidenceScope, batch)
-	})
+	}
+	// An answer from inside the fence is already classified; anything the
+	// store answered outside it (validation, a checkpoint read) is a storage
+	// answer of this stage.
+	if err != nil && (fenced == nil || !errors.Is(err, fenced)) {
+		err = storageStageFailure("journal", err)
+	}
+	if err != nil && historySaveRejected(err) {
+		service.recordHistorySaveRejection(generation.EvidenceBatch.ID)
+	}
 	if err == nil {
 		err = service.rememberHistoryScope(generation.EvidenceScope)
 		service.notifyEvidenceCommit()
@@ -587,11 +664,14 @@ func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuer
 	if query.BreaksOnly {
 		kind = "break"
 	}
-	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, Kind: query.Kind, RootUID: query.RootUID, PodUID: query.PodUID, ResourceUID: query.ResourceUID, Type: kind, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
+	// Gaps are kept out of the keyset, so Total and the pages it implies count
+	// exactly the rows the walk shows; the page's gaps come from their own read.
+	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, Kind: query.Kind, RootUID: query.RootUID, PodUID: query.PodUID, ResourceUID: query.ResourceUID, Type: kind, GapsApart: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
 	if err != nil {
 		return TimelinePage{}, err
 	}
 	page := TimelinePage{Authority: source.Authority, CountCapped: source.CountCapped, Items: []TimelineItem{}, Gaps: []kubechanges.Gap{}, Counts: map[string]int{"change": 0, "crash": 0, "break": 0}, Next: source.Next, Since: source.Since, Until: source.Until, BreaksOnly: query.BreaksOnly, Sync: SyncStatus{State: "ready"}}
+	page.Limit = normalizePageLimit(query.Limit)
 	if !source.Checkpoint.PrunedThrough.IsZero() {
 		page.Gaps = append(page.Gaps, kubechanges.Gap{From: query.Since, To: source.Checkpoint.PrunedThrough})
 	}
@@ -641,12 +721,16 @@ func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuer
 		page.Items = append(page.Items, item)
 		page.Counts[item.Type]++
 	}
+	if page.Gaps, err = appendEvidenceGaps(page.Gaps, source.Gaps); err != nil {
+		return page, err
+	}
 	page.Counts = map[string]int{"change": source.Counts["change"], "crash": source.Counts["crash"], "break": source.Counts["issue_opened"] + source.Counts["issue_resolved"]}
 	page.CrashCount, page.Total = page.Counts["crash"], page.Counts["change"]+page.Counts["crash"]+page.Counts["break"]
 	if !source.Checkpoint.CoveredThrough.IsZero() {
 		page.Sync.AgeSeconds = max(0, time.Since(source.Checkpoint.CoveredThrough).Seconds())
 	}
 	page.Gaps = mergeEvidenceGaps(page.Gaps, source.Since, source.Until)
+	page.Capture = service.historyCapture(source.Checkpoint)
 	return page, nil
 }
 
@@ -665,6 +749,8 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
 	page.Authority, page.CountCapped = source.Authority, source.CountCapped
+	page.Total, page.Limit = source.Total, normalizePageLimit(options.Limit)
+	page.Capture = service.historyCapture(source.Checkpoint)
 	for _, record := range source.Items {
 		if record.Type == "coverage_gap" {
 			if options.Context == "persisted" || options.OccurrenceID != "" || !options.Center.IsZero() {
@@ -746,7 +832,7 @@ func (service *Service) persistedRootContext(ctx context.Context, options IssueO
 			return page, err
 		}
 		page.Sync.Partial = page.Sync.Partial || history.Sync.Partial
-		page.Authority = history.Authority
+		page.Authority, page.Capture = history.Authority, history.Capture
 		page.Partial = append(page.Partial, history.Partial...)
 		for _, issue := range history.Items {
 			if issue.Root.UID != options.RootUID || options.Namespace != "" && issue.Root.Namespace != options.Namespace {
@@ -792,8 +878,11 @@ func (service *Service) evidenceChanges(ctx context.Context, query ChangeQuery) 
 			query.Since = query.Until.Add(-24 * time.Hour)
 		}
 	}
-	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, Kind: query.Kind, RootUID: query.RootUID, Name: query.Name, Rule: string(query.Type), Type: "change", WithGaps: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
+	// Total counts changes only: coverage gaps, and changes this reader may not
+	// see, are kept out of the keyset and arrive as the page's gaps.
+	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, Kind: query.Kind, RootUID: query.RootUID, Name: query.Name, Rule: string(query.Type), Type: "change", GapsApart: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
 	page := ChangePage{Authority: source.Authority, CountCapped: source.CountCapped, Items: []Change{}, Gaps: []kubechanges.Gap{}, Next: source.Next, Sync: SyncStatus{State: "ready"}}
+	page.Total, page.Limit = source.Total, normalizePageLimit(query.Limit)
 	if err != nil {
 		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
@@ -811,11 +900,16 @@ func (service *Service) evidenceChanges(ctx context.Context, query ChangeQuery) 
 			return page, evidenceReadFailure(evidencePayloadDecode, err)
 		}
 		page.Items = append(page.Items, change)
+		page.resume = append(page.resume, source.ResumeAfter(record))
+	}
+	if page.Gaps, err = appendEvidenceGaps(page.Gaps, source.Gaps); err != nil {
+		return page, err
 	}
 	if !source.Checkpoint.PrunedThrough.IsZero() && query.Since.Before(source.Checkpoint.PrunedThrough) {
 		page.Gaps = append(page.Gaps, kubechanges.Gap{From: query.Since, To: source.Checkpoint.PrunedThrough})
 	}
 	page.Gaps = mergeEvidenceGaps(page.Gaps, source.Since, source.Until)
+	page.Capture = service.historyCapture(source.Checkpoint)
 	return page, nil
 }
 
@@ -829,8 +923,9 @@ func (service *Service) evidenceCrashes(ctx context.Context, query kubechanges.C
 			query.Since = query.Until.Add(-24 * time.Hour)
 		}
 	}
-	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, RootUID: query.RootUID, PodUID: query.PodUID, ByObservation: true, Type: "crash", WithGaps: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
+	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, RootUID: query.RootUID, PodUID: query.PodUID, ByObservation: true, Type: "crash", GapsApart: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
 	page := CrashPage{Authority: source.Authority, CountCapped: source.CountCapped, CrashPage: kubechanges.CrashPage{Items: []kubechanges.CrashEvent{}, Gaps: []kubechanges.Gap{}, CaptureGaps: []kubechanges.Gap{}, Coverage: map[string]kubechanges.Gap{}, Since: query.Since, Until: query.Until, Next: source.Next, RetentionBasis: source.Policy.Mode}, Sync: SyncStatus{State: "ready"}, Capture: service.CaptureStatus()}
+	page.Total, page.Limit = source.Total, normalizePageLimit(query.Limit)
 	if err != nil {
 		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
@@ -849,6 +944,9 @@ func (service *Service) evidenceCrashes(ctx context.Context, query kubechanges.C
 		}
 		page.Items = append(page.Items, crash)
 	}
+	if page.CaptureGaps, err = appendEvidenceGaps(page.CaptureGaps, source.Gaps); err != nil {
+		return page, err
+	}
 	page.CrashCount = source.Counts["crash"]
 	page.Since, page.Until = source.Since, source.Until
 	page.StartedAt = source.Checkpoint.StartedAt
@@ -858,11 +956,13 @@ func (service *Service) evidenceCrashes(ctx context.Context, query kubechanges.C
 	}
 	page.Gaps = mergeEvidenceGaps(page.Gaps, source.Since, source.Until)
 	page.CaptureGaps = mergeEvidenceGaps(page.CaptureGaps, source.Since, source.Until)
+	page.Capture = *service.historyCapture(source.Checkpoint)
 	return page, nil
 }
 
-func (service *Service) evidenceChangeWindow(ctx context.Context, since, until time.Time, namespace string) (kubechanges.Page, error) {
-	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: since, Until: until, Namespace: namespace, Type: "change", WithGaps: true, Limit: 500})
+func (service *Service) evidenceChangeWindow(ctx context.Context, since, until time.Time, namespace, kind string) (kubechanges.Page, error) {
+	// Gaps are read apart from changes, so only changes fill the 500-row cap.
+	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: since, Until: until, Namespace: namespace, Kind: kind, Type: "change", GapsApart: true, Limit: 500})
 	page := kubechanges.Page{Items: []Change{}, Next: source.Next, Coverage: map[string]kubechanges.Gap{}}
 	if err != nil {
 		return page, evidenceReadFailure(evidenceStoreQuery, err)
@@ -882,6 +982,9 @@ func (service *Service) evidenceChangeWindow(ctx context.Context, since, until t
 		}
 		page.Items = append(page.Items, change)
 	}
+	if page.Gaps, err = appendEvidenceGaps(page.Gaps, source.Gaps); err != nil {
+		return page, err
+	}
 	for kind, interval := range source.Checkpoint.Coverage {
 		from := interval.From
 		if from.Before(source.Checkpoint.PrunedThrough) {
@@ -894,6 +997,18 @@ func (service *Service) evidenceChangeWindow(ctx context.Context, since, until t
 	}
 	page.Gaps = mergeEvidenceGaps(page.Gaps, source.Since, source.Until)
 	return page, nil
+}
+
+// appendEvidenceGaps decodes the gap records a page read apart from its items.
+func appendEvidenceGaps(gaps []kubechanges.Gap, records []storage.EvidenceRecord) ([]kubechanges.Gap, error) {
+	for _, record := range records {
+		var gap kubechanges.Gap
+		if err := json.Unmarshal(record.Payload, &gap); err != nil {
+			return gaps, evidenceReadFailure(evidencePayloadDecode, err)
+		}
+		gaps = append(gaps, gap)
+	}
+	return gaps, nil
 }
 
 func mergeEvidenceGaps(gaps []kubechanges.Gap, since, until time.Time) []kubechanges.Gap {
@@ -922,16 +1037,251 @@ func mergeEvidenceGaps(gaps []kubechanges.Gap, since, until time.Time) []kubecha
 	return merged
 }
 
+// identityProofLog keeps an unreachable cluster from logging one identity
+// failure per read: each class is logged at most once per interval.
+var identityProofLog = &intervalLog{interval: 10 * time.Second, last: map[string]time.Time{}}
+
+type intervalLog struct {
+	mu       sync.Mutex
+	interval time.Duration
+	last     map[string]time.Time
+}
+
+func (limit *intervalLog) allow(key string) bool {
+	limit.mu.Lock()
+	defer limit.mu.Unlock()
+	now := time.Now()
+	if at, seen := limit.last[key]; seen && now.Sub(at) < limit.interval {
+		return false
+	}
+	limit.last[key] = now
+	return true
+}
+
+// restoreRetryWindow is how long an unanswered restore proof stands for every
+// caller before the cluster is asked again, so reads during an outage fail at
+// once instead of each sending its own proof.
+const restoreRetryWindow = time.Second
+
+// restoreProvedLimit bounds how many proved stored generations one credential
+// remembers.
+const restoreProvedLimit = 8
+
+// inventoryRestoreAuthority is one credential epoch's proof of stored
+// inventory. A proof covers one stored generation: every kind it holds, both
+// cluster-wide and in each namespace it was stored for. Stored data is served
+// only for a generation this epoch proved, so neither a proof of another
+// generation nor a live publication can vouch for it.
+//
+// The worker's proof has priority: it waits for the gate as long as its own
+// budget allows and cancels a reader's proof that holds it. A reader proves
+// only when the gate is free and no worker waits, so readers can never keep the
+// worker's proof from running.
 type inventoryRestoreAuthority struct {
-	once      sync.Once
-	gate      chan struct{}
-	validated atomic.Bool
+	once         sync.Once
+	gate         chan struct{}
+	mu           sync.Mutex
+	proved       []string
+	unanswered   error
+	unansweredAt time.Time
+	// resets counts reset calls, so a proof that started before a reset cannot
+	// record its result after it.
+	resets uint64
+	// workers counts worker proofs waiting for the gate; readerCancel stops the
+	// reader proof holding it.
+	workers      int
+	readerCancel context.CancelFunc
+	// outcome is how the latest proof of a stored generation ended, and
+	// settled is closed whenever a proof ends, so readers of a scope with a
+	// worker wait for its proof instead of running their own.
+	outcome struct {
+		revision string
+		err      error
+	}
+	settled chan struct{}
+}
+
+// notifyLocked wakes every reader waiting for a proof to end.
+func (authority *inventoryRestoreAuthority) notifyLocked() {
+	if authority.settled != nil {
+		close(authority.settled)
+	}
+	authority.settled = make(chan struct{})
+}
+
+// epoch returns the reset count a proof starting now records against.
+func (authority *inventoryRestoreAuthority) epoch() uint64 {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	return authority.resets
+}
+
+// covers reports whether this epoch proved the stored generation revision.
+func (authority *inventoryRestoreAuthority) covers(revision string) bool {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	return revision != "" && slices.Contains(authority.proved, revision)
+}
+
+// prove records a generation this epoch collected itself.
+func (authority *inventoryRestoreAuthority) prove(revision string) {
+	if authority == nil {
+		return
+	}
+	authority.proveSince(authority.epoch(), revision)
+}
+
+// proveSince records a generation proved by a proof that started at epoch; a
+// reset since then discards it. It reports whether the proof stands: false
+// means a reset discarded it, and its caller must not be served as if it had
+// proved anything.
+func (authority *inventoryRestoreAuthority) proveSince(epoch uint64, revision string) bool {
+	if authority == nil {
+		return false
+	}
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	if authority.resets != epoch {
+		return false
+	}
+	if revision == "" {
+		return true
+	}
+	defer authority.notifyLocked()
+	authority.unanswered = nil
+	if slices.Contains(authority.proved, revision) {
+		return true
+	}
+	authority.proved = append(authority.proved, revision)
+	if len(authority.proved) > restoreProvedLimit {
+		authority.proved = append([]string(nil), authority.proved[len(authority.proved)-restoreProvedLimit:]...)
+	}
+	return true
+}
+
+// reset forgets every proof, for a denial or a different store.
+func (authority *inventoryRestoreAuthority) reset() {
+	if authority == nil {
+		return
+	}
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	authority.proved, authority.unanswered = nil, nil
+	authority.outcome.revision, authority.outcome.err = "", nil
+	authority.resets++
+	authority.notifyLocked()
+}
+
+// recentUnanswered returns the last unanswered proof while it still stands.
+func (authority *inventoryRestoreAuthority) recentUnanswered() error {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	if authority.unanswered != nil && time.Since(authority.unansweredAt) < restoreRetryWindow {
+		return authority.unanswered
+	}
+	return nil
+}
+
+// settle records how a proof of revision ended: an unanswered proof stands for
+// the retry window, an answered one clears it. Waiting readers wake either way.
+func (authority *inventoryRestoreAuthority) settle(revision string, err error) {
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	defer authority.notifyLocked()
+	authority.outcome.revision, authority.outcome.err = revision, err
+	var unanswered restoreProofUnanswered
+	if errors.As(err, &unanswered) {
+		authority.unanswered, authority.unansweredAt = unanswered, time.Now()
+		return
+	}
+	authority.unanswered = nil
+}
+
+// errWorkerPublished tells a waiting reader that the worker now holds its own
+// generation, which answers the read instead of the stored one.
+var errWorkerPublished = errors.New("kubernetes: worker published its own generation")
+
+// awaitWorkerProof serves a reader of a scope whose worker restores it. It
+// never sends a request: it answers with the proof the worker already made of
+// this revision, or waits, within the reader's own limit, for the worker's
+// proof to end or for the worker to publish its own generation.
+func (authority *inventoryRestoreAuthority) awaitWorkerProof(ctx context.Context, revision string, published func() bool) error {
+	for {
+		if published() {
+			return errWorkerPublished
+		}
+		authority.mu.Lock()
+		if authority.settled == nil {
+			authority.settled = make(chan struct{})
+		}
+		covered := revision != "" && slices.Contains(authority.proved, revision)
+		outcome, settled := authority.outcome, authority.settled
+		authority.mu.Unlock()
+		if covered {
+			return nil
+		}
+		if outcome.revision == revision && outcome.err != nil {
+			return outcome.err
+		}
+		select {
+		case <-settled:
+		case <-ctx.Done():
+			return restoreProofUnanswered{ErrInventoryNotReady}
+		}
+	}
+}
+
+// restoreProofUnanswered is a restore proof the cluster as a whole could not
+// answer: the identity read failed, timed out or was throttled. It says nothing
+// about the stored generation, which stays the cluster's last good inventory;
+// the error reads exactly like its cause.
+type restoreProofUnanswered struct{ error }
+
+func (err restoreProofUnanswered) Unwrap() error { return err.error }
+
+// identityProofFailure classifies a failed identity read. When the cluster
+// could not answer it, the cluster is unreachable as a whole: collecting it
+// again would publish failures over the stored generation, and after a restart
+// that loses the last good inventory and the listing history compares with. Any
+// other failure, and every failure after the identity was answered, makes the
+// stored generation unusable, so the worker collects the cluster again and a
+// kind that keeps failing is reported with that kind's own error.
+func identityProofFailure(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, ErrClusterUnavailable) || errors.Is(err, ErrCredentialUnavailable) || errors.Is(err, ErrInvalidArguments) || errors.Is(err, ErrInventoryNotReady) || countsAgainstCredential(err) {
+		return inventoryPayloadError{err}
+	}
+	// The identity read is the proof's first request, so an exhausted operation
+	// budget here means its time ran out before the cluster answered.
+	switch errorClass(err) {
+	case "unavailable", "timeout", "throttled", "budget_exhausted":
+		return restoreProofUnanswered{err}
+	}
+	return inventoryPayloadError{err}
 }
 
 // Restoring a durable payload cannot turn a locally readable but revoked static
 // credential into permission to replay its old protected inventory. A live
 // capture establishes its own authority; cold restores prove it independently.
 func (service *Service) authorizeInventoryRestore(ctx context.Context, generation inventoryGeneration) error {
+	return service.authorizeRestore(ctx, generation, restoreByWorker)
+}
+
+// restoreCaller says who asks for a stored generation and so how it may prove
+// it.
+type restoreCaller int
+
+const (
+	// restoreByWorker proves with priority over readers.
+	restoreByWorker restoreCaller = iota
+	// restoreByReader proves only when the gate is free and no worker waits,
+	// within the reader's own limit.
+	restoreByReader
+	// restoreByCoveredOnly never proves: a scope whose worker runs is restored
+	// by that worker, and its readers are served only what it proved.
+	restoreByCoveredOnly
+)
+
+func (service *Service) authorizeRestore(ctx context.Context, generation inventoryGeneration, caller restoreCaller) error {
 	if len(generation.View.Kinds) == 0 || service.evidenceStore() == nil {
 		return nil
 	}
@@ -939,19 +1289,97 @@ func (service *Service) authorizeInventoryRestore(ctx context.Context, generatio
 	if authority == nil {
 		return ErrClusterUnavailable
 	}
-	if authority.validated.Load() {
+	if caller == restoreByCoveredOnly {
+		return authority.awaitWorkerProof(ctx, generation.Revision, func() bool { return false })
+	}
+	if authority.covers(generation.Revision) {
 		return nil
 	}
+	// The worker's backoff already spaces its proofs; the window holds back
+	// readers only.
+	if caller == restoreByReader {
+		if unanswered := authority.recentUnanswered(); unanswered != nil {
+			return unanswered
+		}
+	}
+	notProved := restoreProofUnanswered{ErrInventoryNotReady}
 	authority.once.Do(func() { authority.gate = make(chan struct{}, 1); authority.gate <- struct{}{} })
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-authority.gate:
+	proofCtx := ctx
+	if caller == restoreByWorker {
+		authority.mu.Lock()
+		authority.workers++
+		if authority.readerCancel != nil {
+			authority.readerCancel()
+		}
+		authority.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			authority.mu.Lock()
+			authority.workers--
+			authority.mu.Unlock()
+			return ctx.Err()
+		case <-authority.gate:
+		}
+		authority.mu.Lock()
+		authority.workers--
+		authority.mu.Unlock()
+	} else {
+		select {
+		case <-authority.gate:
+		default:
+			return notProved
+		}
+		authority.mu.Lock()
+		if authority.workers > 0 {
+			authority.mu.Unlock()
+			authority.gate <- struct{}{}
+			return notProved
+		}
+		var cancel context.CancelFunc
+		proofCtx, cancel = context.WithCancel(ctx)
+		authority.readerCancel = cancel
+		authority.mu.Unlock()
+		defer func() {
+			authority.mu.Lock()
+			authority.readerCancel = nil
+			authority.mu.Unlock()
+			cancel()
+		}()
 	}
 	defer func() { authority.gate <- struct{}{} }()
-	if authority.validated.Load() {
+	if authority.covers(generation.Revision) {
 		return nil
 	}
+	if caller == restoreByReader {
+		if unanswered := authority.recentUnanswered(); unanswered != nil {
+			return unanswered
+		}
+	}
+	epoch := authority.epoch()
+	err := service.proveStoredGeneration(proofCtx, generation)
+	if err != nil && caller == restoreByReader && proofCtx.Err() != nil {
+		if ctx.Err() == nil {
+			// A worker took over the gate; its proof decides.
+			return notProved
+		}
+		// The reader's own limit ran out before the cluster answered: that is
+		// an unanswered proof, which also holds back further reader proofs.
+		err = restoreProofUnanswered{err}
+	}
+	authority.settle(generation.Revision, err)
+	if err == nil && !authority.proveSince(epoch, generation.Revision) {
+		// A reset during the proof discarded it: the credential or store it
+		// proved may no longer hold, so the caller fails closed as if unproved.
+		return notProved
+	}
+	return err
+}
+
+// proveStoredGeneration proves that this credential may read everything one
+// stored generation holds: the physical cluster identity, every kind it stored
+// cluster-wide, and every kind it stored only for a namespace, in that
+// namespace.
+func (service *Service) proveStoredGeneration(ctx context.Context, generation inventoryGeneration) error {
 	bound, cancelIdentity := service.credentialContext(ctx)
 	defer cancelIdentity()
 	proofCtx, cancel := withOperationBudget(bound, 10*time.Second, 64, defaultOperationBytes, defaultOperationItems)
@@ -962,6 +1390,9 @@ func (service *Service) authorizeInventoryRestore(ctx context.Context, generatio
 		// history-query wrapper is only needed on the historical read surface.
 		var read *evidenceReadError
 		if errors.As(err, &read) {
+			if read.stage == evidenceIdentityProof {
+				return identityProofFailure(read.cause)
+			}
 			err = read.cause
 		}
 		return inventoryPayloadError{err}
@@ -978,9 +1409,15 @@ func (service *Service) authorizeInventoryRestore(ctx context.Context, generatio
 	if expected == "" || expected != scope.ClusterUID {
 		return inventoryPayloadError{ErrClusterUnavailable}
 	}
+	held := map[string]bool{}
+	for _, record := range generation.View.Records {
+		held[record.Kind] = true
+	}
 	checked := map[string]bool{}
 	for kind, state := range generation.View.Kinds {
-		if state.Absent || state.Error == "forbidden" || state.Error == "unauthorized" {
+		// A kind denied cluster-wide holds no cluster-wide records to prove; one
+		// that still holds some is proved like any other.
+		if state.Absent || (state.Error == "forbidden" || state.Error == "unauthorized") && !held[kind] {
 			continue
 		}
 		id := indexedResourceIDs[kind]
@@ -1000,6 +1437,31 @@ func (service *Service) authorizeInventoryRestore(ctx context.Context, generatio
 			return inventoryPayloadError{err}
 		}
 	}
-	authority.validated.Store(true)
+	// Records stored only for a namespace were listed with a namespace grant,
+	// which a cluster-wide proof of another kind says nothing about. A kind
+	// proved cluster-wide above covers every namespace.
+	namespaces := make([]string, 0, len(generation.Namespaces))
+	for namespace := range generation.Namespaces {
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+	for _, namespace := range namespaces {
+		kinds := map[string]bool{}
+		for _, record := range generation.Namespaces[namespace].Records {
+			kinds[record.Kind] = true
+		}
+		for kind := range kinds {
+			id := indexedResourceIDs[kind]
+			if id == "" {
+				return inventoryPayloadError{ErrInvalidArguments}
+			}
+			if checked[id] {
+				continue
+			}
+			if err = service.authorizeEvidenceKind(proofCtx, namespace, id); err != nil {
+				return inventoryPayloadError{err}
+			}
+		}
+	}
 	return nil
 }

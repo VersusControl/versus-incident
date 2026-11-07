@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KubernetesKindStatus, KubernetesSync } from "./api";
-import { clusterSyncEnvelope, firstReadyAt, isZeroTime, kindFailed, kindFailureReason, reportSyncHealth, syncFailureReport, syncHealth, syncHealthStateLabel, syncPollIntervalMs, syncReportIdlePollMs, syncReportPollIntervalMs } from "./kubernetesSyncHealth";
+import { clusterSyncEnvelope, firstReadyAt, historySaveDelay, historySaveLabel, isZeroTime, kindFailed, kindFailureReason, reportSyncHealth, syncFailureReport, syncHealth, syncHealthStateLabel, syncPollIntervalMs, syncReportIdlePollMs, syncReportPollIntervalMs } from "./kubernetesSyncHealth";
 
 const ready = { state: "ready", age_s: 4, partial: false };
 const zero = "0001-01-01T00:00:00Z";
@@ -150,6 +150,8 @@ describe("Cluster sync health", () => {
   it("words every failure class for an operator", () => {
     expect(kindFailureReason({ error: "record_rejected" })).toBe("some objects could not be indexed, everything else is current");
     expect(kindFailureReason({ error: "record_limit" })).toBe("too many objects for the safety limit");
+    expect(kindFailureReason({ error: "storage_unavailable" })).toBe("the cluster was read, but the snapshot could not be saved");
+    expect(kindFailureReason({ error: "storage_rejected" })).toBe("the cluster was read, but the history store rejected the snapshot");
     expect(kindFailureReason({ error: "incomplete_pages" })).toBe("the listing could not be paged through");
     expect(kindFailureReason({ error: "commit_conflict" })).toBe("credentials rotated mid-sync, retrying");
     expect(kindFailureReason({ error: "forbidden" })).toBe("permission denied");
@@ -408,4 +410,70 @@ it("prefers authoritative progress to an older overview progress envelope", () =
  expect(health.progress).toBe(progress);
  expect(health.loadingCount).toBe(8);
  expect(health.firstReadyAt).toBeUndefined();
+});
+
+describe("History save delay notice", () => {
+  const save = (saved_through?: string) => ({ capture: { mode: "continuous", behind: true, history_save: { code: "history_save_delayed", message: "m", action: "a", retryable: true, ...(saved_through ? { saved_through } : {}) } } });
+  const at = "2026-11-05T09:07:30.123456789Z";
+
+  // Local noon on the saved day, so the fixed clock never crosses midnight in any time zone.
+  const localNoon = (iso: string, days = 0) => { const day = new Date(iso); return new Date(day.getFullYear(), day.getMonth(), day.getDate() + days, 12).getTime(); };
+  const time = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  it("labels a save time from today in local hours and minutes only", () => {
+    const delay = historySaveDelay(save(at));
+    expect(delay).toEqual({ code: "history_save_delayed", rejected: false, action: "a", savedThrough: at });
+    expect(historySaveLabel(delay!, localNoon(at))).toBe(`History is temporarily not saving — showing data from ${time}`);
+  });
+
+  it("adds the short local date when the save time is from an earlier day", () => {
+    const delay = historySaveDelay(save(at))!;
+    const date = new Date(at).toLocaleDateString([], { month: "short", day: "numeric" });
+    expect(historySaveLabel(delay, localNoon(at, 1))).toBe(`History is temporarily not saving — showing data from ${date}, ${time}`);
+    expect(historySaveLabel(delay, localNoon(at, 1))).not.toBe(historySaveLabel(delay, localNoon(at)));
+    const yearAgo = new Date(at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+    expect(historySaveLabel(delay, localNoon(at, 366))).toBe(`History is temporarily not saving — showing data from ${yearAgo}, ${time}`);
+  });
+
+  it("omits the time when the backend does not know one", () => {
+    for (const page of [save(), save("0001-01-01T00:00:00Z"), save("not a time")]) {
+      const delay = historySaveDelay(page);
+      expect(delay).toEqual({ code: "history_save_delayed", rejected: false, action: "a" });
+      expect(historySaveLabel(delay!)).toBe("History is temporarily not saving — showing the last saved data");
+    }
+  });
+
+  it("is absent when the field is missing, so a healthy or live page shows nothing", () => {
+    expect(historySaveDelay()).toBeUndefined();
+    expect(historySaveDelay(undefined, null, {}, { capture: { mode: "continuous", behind: true } }, { capture: { history_save: null } })).toBeUndefined();
+  });
+
+  it("names the earliest saved time when several pages of one view disagree", () => {
+    const later = "2026-11-05T10:00:00Z";
+    expect(historySaveDelay(save(later), undefined, save(), save(at))?.savedThrough).toBe(at);
+    expect(historySaveDelay({ capture: { mode: "continuous", behind: false } }, save())).toEqual({ code: "history_save_delayed", rejected: false, action: "a" });
+  });
+
+  const rejected = (saved_through?: string, extra: Record<string, unknown> = {}) => ({ capture: { mode: "continuous", behind: true, history_save: { code: "history_save_rejected", message: "m", action: "Check the history store; it refused the batch.", retryable: false, ...(saved_through ? { saved_through } : {}), ...extra } } });
+
+  it("labels a rejected save honestly, never as temporary, with the same date rules", () => {
+    const delay = historySaveDelay(rejected(at))!;
+    expect(delay).toEqual({ code: "history_save_rejected", rejected: true, action: "Check the history store; it refused the batch.", savedThrough: at });
+    expect(historySaveLabel(delay, localNoon(at))).toBe(`History could not save the latest data — showing data from ${time}`);
+    const date = new Date(at).toLocaleDateString([], { month: "short", day: "numeric" });
+    expect(historySaveLabel(delay, localNoon(at, 1))).toBe(`History could not save the latest data — showing data from ${date}, ${time}`);
+    const untimed = historySaveLabel(historySaveDelay(rejected())!);
+    expect(untimed).toBe("History could not save the latest data — showing the last saved data");
+    for (const label of [historySaveLabel(delay), untimed]) expect(label).not.toMatch(/temporar|credential|connector/i);
+  });
+
+  it("treats a save the server will not retry as rejected whatever its code says", () => {
+    expect(historySaveDelay(save(at), rejected(undefined, { code: "history_save_delayed" }))?.rejected).toBe(true);
+  });
+
+  it("lets a rejection outrank an earlier-dated delay across the pages of one view", () => {
+    const delay = historySaveDelay(save("2026-11-05T08:00:00Z"), rejected(at), undefined)!;
+    expect(delay.rejected).toBe(true);
+    expect(delay.savedThrough).toBe(at);
+  });
 });

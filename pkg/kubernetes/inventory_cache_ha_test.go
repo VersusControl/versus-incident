@@ -85,6 +85,7 @@ func TestInventoryReplicasShareOwnerGeneration(t *testing.T) {
 }
 
 func TestInventoryUpgradeSyncFailureRetainsArchiveGeneration(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "unavailable", 503) }))
 	defer server.Close()
 	provider := storage.NewMemory()

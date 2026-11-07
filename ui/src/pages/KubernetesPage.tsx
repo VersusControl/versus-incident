@@ -11,7 +11,7 @@ import {
 } from "react";
 import { notifyManager, useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesQuery, useKubernetesCommitEvents } from "@/lib/useKubernetesCluster";
+import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesCursorReset, useKubernetesQuery, useKubernetesCommitEvents } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
 import { KubernetesFleet } from "./KubernetesFleet";
 import {
@@ -45,6 +45,7 @@ import { canStreamLogs } from "@/lib/kubernetesLogTargets";
 import { NamespaceSelect } from "@/components/NamespaceSelect";
 import { CoverageMarker } from "@/components/CoverageMarker";
 import { CursorPagination } from "@/components/Pagination";
+import { ListChangedNotice } from "@/components/ListChangedNotice";
 import { PeekPanel } from "@/components/PeekPanel";
 import { RetryableError } from "@/components/RetryableError";
 import { SkCard } from "@/components/Skeleton";
@@ -640,6 +641,9 @@ function KubernetesDashboard() {
     enabled: clusterQueriesEnabled && selectedNode !== null,
     retry: false,
   });
+  const workloadCursorReset = useKubernetesCursorReset(workloadPaging, workloads);
+  const nodeCursorReset = useKubernetesCursorReset(nodePaging, nodes);
+  const nodePodCursorReset = useKubernetesCursorReset(nodePodPaging, nodePods);
   const detail = useQuery({
     queryKey: [
       "kubernetes-detail",
@@ -808,7 +812,7 @@ function KubernetesDashboard() {
   const workloadCounts = Object.fromEntries(Object.entries(workloads.data?.counts ?? {}).filter(([kind]) => !unknownWorkloadCounts.includes(kind)));
   const workloadRecoveryExhausted = exhaustedReads.has(JSON.stringify(key("kubernetes-workloads", workloadNamespace, name.trim(), workloadKind, workloadPaging.cursor)));
   const workloadWarming = !workloadRecoveryExhausted && (workloads.unpublished || kubernetesReadNeedsRecovery(workloads.data, workloads.error));
-  const workloadCursorExpired = Boolean(workloadPaging.cursor && workloads.error instanceof ApiError && workloads.error.status === 400);
+  const workloadCursorExpired = !workloadCursorReset && Boolean(workloadPaging.cursor && workloads.error instanceof ApiError && workloads.error.status === 400);
   const workloadTotal = workloadKindOptions.reduce((sum, kind) => sum + (workloadCounts[kind] ?? 0), 0);
 
   useEffect(() => {
@@ -895,9 +899,15 @@ function KubernetesDashboard() {
   const dataOnScreen = !authorityLost && overview.data !== undefined;
   // The coverage marker explains data that is on screen. While the sync is not
   // healthy nothing is on screen, and the blocking surface names the failures.
+  // A refused broken-issues read degrades only the broken count. Cluster-wide
+  // denial is the overview's own failure and keeps its blocking state.
+  const brokenIssuesDenial = !overviewAccessDenied && brokenIssues.error instanceof ApiError && [401, 403].includes(brokenIssues.error.status)
+    ? [{ scope: "Broken issues", class: brokenIssues.error.status === 401 ? "unauthorized" : "forbidden" }]
+    : [];
   const overviewWarningMessages = view === "overview" && clusterQueriesEnabled ? [
     ...failureWarnings(overview.data?.partial_failures).map((warning) => warning.content),
     ...timelineWarnings(overviewAccessDenied ? undefined : brokenIssues.data, overviewAccessDenied ? undefined : overviewChanges).map((warning) => warning.content),
+    ...failureWarnings(brokenIssuesDenial).map((warning) => warning.content),
   ] : [];
   if (clusterUnavailable) return <p role="status" className="p-4 text-sm text-sev-warning">This cluster is no longer available.</p>;
   if (connectorUndecided) {
@@ -1165,7 +1175,8 @@ function KubernetesDashboard() {
             </div>
             <KindTabs label="Workload kind" kinds={workloadKindOptions} counts={workloadsAccessDenied ? {} : workloadCounts} allKnown={!unknownWorkloadCounts.length} selected={workloadKind} onSelect={setWorkloadKind} />
             {workloadCursorExpired && <p role="status" className="px-4 py-2 text-xs text-sev-warning">This inventory page expired or its filters changed. Restart paging.<button type="button" className="ml-2 text-link" onClick={workloadPaging.resetPage}>Restart inventory paging</button></p>}
-            {workloads.data && workloads.isError && !workloadsAccessDenied && !workloadCursorExpired && <p role="status" className="px-4 py-2 text-xs text-sev-warning">Resource inventory refresh is unavailable. Showing the last authorized observation.</p>}
+            {workloadCursorReset === "notice" && <ListChangedNotice onBack={workloadPaging.resetPage} />}
+            {workloads.data && workloads.isError && !workloadsAccessDenied && !workloadCursorExpired && !workloadCursorReset && <p role="status" className="px-4 py-2 text-xs text-sev-warning">Resource inventory refresh is unavailable. Showing the last authorized observation.</p>}
             {(workloads.isPending || workloadWarming && !workloads.data) && (
               <div className="p-4">
                 <SkCard lines={4} />
@@ -1176,7 +1187,7 @@ function KubernetesDashboard() {
                 <KubernetesPreparingPanel progress={workloads.data.sync.progress} />
               </div>
             )}
-            {(workloadsAccessDenied || !workloads.data && !workloads.isPending && !workloadWarming && !workloadCursorExpired) && (
+            {(workloadsAccessDenied || !workloads.data && !workloads.isPending && !workloadWarming && !workloadCursorExpired && !workloadCursorReset) && (
               <p role="status" className="p-4 text-sm text-sev-warning">
                 Resource inventory is unavailable.
                 {workloadRecoveryExhausted && <button type="button" className="ml-2 text-link" onClick={() => void workloads.refetch()}>Retry inventory</button>}
@@ -1222,7 +1233,7 @@ function KubernetesDashboard() {
                       {name.trim() ? "No matching workloads." : workloadNamespace !== "All" ? "No workloads in this namespace." : workloadKind !== "All" ? `No ${workloadKind} resources in this scope.` : "No workloads in this scope."}
                     </EmptyState>
                   )}
-                  <CursorPagination state={workloadPaging} next={workloads.data?.next} />
+                  <CursorPagination state={workloadPaging} next={workloads.data?.next} total={workloads.data?.total} limit={workloads.data?.limit} count={workloads.data?.items.length} />
                 </div>
               )}
             <PartialFailuresDisclosure failures={workloadsAccessDenied ? undefined : workloads.data?.partial_failures} />
@@ -1246,12 +1257,15 @@ function KubernetesDashboard() {
             <NodePods
               node={selectedNode}
               isPending={nodePods.isPending}
-              isError={nodePods.isError}
+              isError={nodePods.isError && !nodePodCursorReset}
+              listChanged={nodePodCursorReset === "notice" ? nodePodPaging.resetPage : undefined}
               truncated={Boolean(nodePods.data?.truncated)}
               partialFailures={nodePods.data?.partial_failures}
               items={selectedNodePods}
               pagination={nodePodPaging}
               next={nodePods.data?.continue}
+              total={nodePods.data?.total}
+              limit={nodePods.data?.limit}
               onClose={() => setSelectedNode(null)}
               onLogs={selectResource}
             />
@@ -1262,11 +1276,12 @@ function KubernetesDashboard() {
                   <SkCard lines={3} />
                 </div>
               )}
-              {(nodesAccessDenied || nodes.isError && !nodes.data) && (
+              {(nodesAccessDenied || nodes.isError && !nodes.data && !nodeCursorReset) && (
                 <p role="status" className="p-4 text-sm text-sev-warning">
                   Nodes are unavailable.
                 </p>
               )}
+              {nodeCursorReset === "notice" && !nodesAccessDenied && <ListChangedNotice onBack={nodePaging.resetPage} />}
               {nodes.data && !nodesAccessDenied && (
                 <div className="min-w-0 overflow-hidden">
                   <div role="list" className="max-h-[min(55vh,32rem)] divide-y divide-ink-700 overflow-y-auto">
@@ -1281,7 +1296,7 @@ function KubernetesDashboard() {
                   {nodeItems.length === 0 && (
                     <EmptyState>No nodes in this cluster.</EmptyState>
                   )}
-                  <CursorPagination state={nodePaging} next={nodes.data.continue} />
+                  <CursorPagination state={nodePaging} next={nodes.data.continue} total={nodes.data.total} limit={nodes.data.limit} count={nodeItems.length} />
                 </div>
               )}
               <PartialFailuresDisclosure failures={nodesAccessDenied ? undefined : asArray(nodes.data?.partial_failures)} />
@@ -1917,21 +1932,28 @@ function NodePods({
   node,
   isPending,
   isError,
+  listChanged,
   partialFailures,
   items,
   pagination,
   next,
+  total,
+  limit,
   onClose,
   onLogs,
 }: {
   node: KubernetesResource;
   isPending: boolean;
   isError: boolean;
+  /** Set when a refresh found the list changed; goes back to page 1. */
+  listChanged?: () => void;
   truncated: boolean;
   partialFailures?: Array<{ resource_id?: string; class: string }> | null;
   items: KubernetesResource[];
   pagination: CursorPaginationState;
   next?: string;
+  total?: number;
+  limit?: number;
   onClose: () => void;
   onLogs: (resource: KubernetesResource, tab: "logs") => void;
 }) {
@@ -1963,6 +1985,7 @@ function NodePods({
           Scheduled pods are unavailable.
         </p>
       )}
+      {listChanged && <ListChangedNotice onBack={listChanged} />}
       {!isPending && !isError && (
         <>
           <div
@@ -1981,7 +2004,7 @@ function NodePods({
           {items.length === 0 && (
             <EmptyState>No pods are scheduled to this node.</EmptyState>
           )}
-          <CursorPagination state={pagination} next={next} />
+          <CursorPagination state={pagination} next={next} total={total} limit={limit} count={items.length} />
         </>
       )}
       <PartialFailuresDisclosure failures={asArray(partialFailures)} />

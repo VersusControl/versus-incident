@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -16,7 +17,7 @@ func (p *postgresProvider) partitionEvidenceBatch(ctx context.Context) (bool, er
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='100ms'`); err != nil {
+	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='100ms'; `+evidenceHeadsWriter); err != nil {
 		return false, err
 	}
 	var locked bool
@@ -105,6 +106,27 @@ func (p *postgresProvider) partitionEvidenceBatch(ctx context.Context) (bool, er
 		return false, err
 	}
 	if len(events) == 0 && len(observations) == 0 {
+		// The read-model conversion of a scope from before read models looks
+		// each event's next version up across the whole journal. On the
+		// unpartitioned journal that is one index probe; across years of
+		// monthly partitions it is one per month and may not fit a batch.
+		// The copy therefore waits for every scope to finish converting.
+		var converting bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM kubernetes_evidence_scopes WHERE NOT read_model_ready)`).Scan(&converting); err != nil {
+			return false, err
+		}
+		if converting {
+			p.maintenanceLogMu.Lock()
+			due := time.Since(p.swapWaitLoggedAt) >= 10*time.Minute
+			if due {
+				p.swapWaitLoggedAt = time.Now()
+			}
+			p.maintenanceLogMu.Unlock()
+			if due {
+				log.Printf("storage: evidence partition switch waits for read-model conversion to finish")
+			}
+			return false, tx.Commit()
+		}
 		// Avoid a lock upgrade deadlock: this transaction has read no source
 		// rows. If active requests prevent the lock, retry another bounded batch.
 		if _, err = tx.ExecContext(ctx, `LOCK TABLE kubernetes_evidence_events,kubernetes_evidence_occurrence_observations IN ACCESS EXCLUSIVE MODE NOWAIT`); err != nil {
@@ -148,7 +170,7 @@ func (p *postgresProvider) compactEvidenceBatch(ctx context.Context) (bool, erro
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(6216456209771226)`); err != nil {
 		return false, err
 	}
-	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='100ms'`); err != nil {
+	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='100ms'; `+evidenceHeadsWriter); err != nil {
 		return false, err
 	}
 	var complete bool
@@ -191,6 +213,7 @@ func (p *postgresProvider) compactEvidenceBatch(ctx context.Context) (bool, erro
 	rows.Close()
 	cutoff := time.Now().UTC().Add(-p.evidenceRetention)
 	var pruned time.Time
+	var prunedScopes []string
 	for _, name := range names {
 		prefix := ""
 		for _, candidate := range []string{"evidence_event_month_", "evidence_observation_month_"} {
@@ -206,48 +229,130 @@ func (p *postgresProvider) compactEvidenceBatch(ctx context.Context) (bool, erro
 		if parseErr != nil || month.AddDate(0, 1, 0).After(cutoff) {
 			continue
 		}
+		// Only scopes with rows in this month lose history, so only their
+		// cursors are invalidated. The set is read inside the same transaction,
+		// before the drop, so a scope that had rows is never missed.
+		if prunedScopes, err = evidenceScopesIn(ctx, tx, name); err != nil {
+			return false, err
+		}
 		if _, err = tx.ExecContext(ctx, "DROP TABLE "+name); err != nil {
 			return false, err
+		}
+		if prefix == "evidence_event_month_" {
+			// Heads must not point at rows retention has removed.
+			if _, err = tx.ExecContext(ctx, `DELETE FROM kubernetes_evidence_event_heads WHERE event_at<$1`, month.AddDate(0, 1, 0)); err != nil {
+				return false, err
+			}
 		}
 		pruned = month.AddDate(0, 1, 0)
 		break
 	}
 	if !pruned.IsZero() {
-		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=jsonb_set(jsonb_set(checkpoint,'{pruned_through}',to_jsonb($1::timestamptz)),'{prune_revision}',to_jsonb(COALESCE((checkpoint->>'prune_revision')::bigint,0)+1)) WHERE COALESCE((checkpoint->>'pruned_through')::timestamptz,'epoch')<$1`, pruned); err != nil {
+		// Every scope that lost rows is invalidated, even one already pruned
+		// through this month: rows can arrive late in a month retention dropped.
+		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=jsonb_set(jsonb_set(checkpoint,'{pruned_through}',to_jsonb(GREATEST(COALESCE((checkpoint->>'pruned_through')::timestamptz,'epoch'),$1::timestamptz))),'{prune_revision}',to_jsonb(COALESCE((checkpoint->>'prune_revision')::bigint,0)+1)) WHERE scope_key=ANY($2::text[])`, pruned, prunedScopes); err != nil {
 			return false, err
 		}
 		return true, tx.Commit()
 	}
 	// Preserve the opening observation of every payload version and one actual
 	// observation per hour. Historical reads report the retained sample itself,
-	// never a synthetic interpolated freshness value.
+	// never a synthetic interpolated freshness value. The opening observation's
+	// revision is read from the version's read model, so a candidate never
+	// searches every monthly partition for an older sample. The later sample
+	// of the same hour is looked up once per candidate (OFFSET 0 keeps it from
+	// becoming a join), so only the candidate hour's month is searched rather
+	// than every sample the occurrence has in every month. Every statement
+	// names the expiry bound itself, so it is planned for the old months only.
 	expired := time.Now().UTC().Add(-p.evidenceRetention)
 	if sevenDays := time.Now().UTC().Add(-7 * 24 * time.Hour); expired.After(sevenDays) {
 		expired = sevenDays
 	}
-	result, err := tx.ExecContext(ctx, `WITH candidates AS (
+	result, err := tx.QueryContext(ctx, `WITH candidates AS (
 		 SELECT o.tableoid AS relation,o.ctid AS tuple FROM kubernetes_evidence_occurrence_observations o
 		 WHERE o.observed_at < $1
-		 AND EXISTS(SELECT 1 FROM kubernetes_evidence_occurrence_observations n WHERE n.scope_key=o.scope_key AND n.occurrence_id=o.occurrence_id AND n.payload_version=o.payload_version AND n.observed_at>=date_trunc('hour',o.observed_at) AND n.observed_at<date_trunc('hour',o.observed_at)+INTERVAL '1 hour' AND n.revision>o.revision)
-		 AND EXISTS(SELECT 1 FROM kubernetes_evidence_occurrence_observations first_sample WHERE first_sample.scope_key=o.scope_key AND first_sample.occurrence_id=o.occurrence_id AND first_sample.payload_version=o.payload_version AND first_sample.revision<o.revision)
+		 AND EXISTS(SELECT 1 FROM kubernetes_evidence_occurrence_observations n WHERE n.scope_key=o.scope_key AND n.occurrence_id=o.occurrence_id AND n.payload_version=o.payload_version AND n.observed_at>=date_trunc('hour',o.observed_at) AND n.observed_at<date_trunc('hour',o.observed_at)+INTERVAL '1 hour' AND n.observed_at<$2 AND n.revision>o.revision OFFSET 0)
+		 AND EXISTS(SELECT 1 FROM kubernetes_evidence_occurrence_read_versions opening WHERE opening.scope_key=o.scope_key AND opening.payload_version=o.payload_version AND opening.occurrence_id=o.occurrence_id AND opening.revision<o.revision)
 		 LIMIT 256 FOR UPDATE OF o SKIP LOCKED)
-		 DELETE FROM kubernetes_evidence_occurrence_observations o USING candidates c WHERE o.tableoid=c.relation AND o.ctid=c.tuple`, expired)
+		 DELETE FROM kubernetes_evidence_occurrence_observations o USING candidates c WHERE o.tableoid=c.relation AND o.ctid=c.tuple AND o.observed_at<$1
+		 RETURNING o.scope_key`, expired, expired.Add(time.Hour))
 	if err != nil {
 		return false, err
 	}
-	removed, err := result.RowsAffected()
-	if err != nil {
+	// Thinning removes samples only. It is counted apart from pruning, so lists
+	// that never read samples keep their page links, and an issue list ends
+	// its links only when its read reaches the thinned samples.
+	compacted := map[string]bool{}
+	for result.Next() {
+		var scope string
+		if err = result.Scan(&scope); err != nil {
+			result.Close()
+			return false, err
+		}
+		compacted[scope] = true
+	}
+	if err = result.Err(); err != nil {
+		result.Close()
 		return false, err
 	}
-	if removed > 0 {
-		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=jsonb_set(jsonb_set(checkpoint,'{prune_revision}',to_jsonb(COALESCE((checkpoint->>'prune_revision')::bigint,0)+1)),'{pruned_through}',to_jsonb(GREATEST(COALESCE((checkpoint->>'pruned_through')::timestamptz,'epoch'),$1::timestamptz)))`, expired); err != nil {
+	result.Close()
+	if len(compacted) > 0 {
+		scopes := make([]string, 0, len(compacted))
+		for scope := range compacted {
+			scopes = append(scopes, scope)
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=jsonb_set(jsonb_set(checkpoint,'{thin_revision}',to_jsonb(COALESCE((checkpoint->>'thin_revision')::bigint,0)+1)),'{thinned_through}',to_jsonb(GREATEST(COALESCE((checkpoint->>'thinned_through')::timestamptz,'epoch'),$1::timestamptz))) WHERE scope_key=ANY($2::text[])`, expired, scopes); err != nil {
 			return false, err
 		}
 	}
-	return removed > 0, tx.Commit()
+	return len(compacted) > 0, tx.Commit()
 }
 
-func prepareEvidencePartitions(ctx context.Context, tx *sql.Tx, batch EvidenceBatch) error {
+// evidenceScopesIn lists the scopes holding rows in one month partition. A
+// deployment has few scopes, so each one is probed for a single row through a
+// partition index that leads with scope_key, instead of reading the month.
+// Sequential scans are disabled for the probe alone: on a month without
+// planner statistics a scan could run past the statement timeout and stall
+// retention.
+func evidenceScopesIn(ctx context.Context, tx *sql.Tx, partition string) ([]string, error) {
+	if _, err := tx.ExecContext(ctx, evidenceScopesProbeSettings); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, evidenceScopesProbe(partition))
+	if err != nil {
+		return nil, err
+	}
+	scopes := []string{}
+	for rows.Next() {
+		var scope string
+		if err := rows.Scan(&scope); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL enable_seqscan TO DEFAULT`); err != nil {
+		return nil, err
+	}
+	return scopes, nil
+}
+
+const evidenceScopesProbeSettings = `SET LOCAL enable_seqscan=off`
+
+func evidenceScopesProbe(partition string) string {
+	return "SELECT s.scope_key FROM kubernetes_evidence_scopes s WHERE EXISTS(SELECT 1 FROM " + partition + " p WHERE p.scope_key=s.scope_key)"
+}
+
+// prepareEvidencePartitions ensures the month partitions a save writes into.
+// A journal month that ends at or before the retention cutoff is never
+// created: retention has dropped or will drop it, and its records are not
+// written.
+func prepareEvidencePartitions(ctx context.Context, tx *sql.Tx, batch EvidenceBatch, cutoff time.Time) error {
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
 		return err
 	}
@@ -272,6 +377,10 @@ func prepareEvidencePartitions(ctx context.Context, tx *sql.Tx, batch EvidenceBa
 		times  map[string]time.Time
 	}{{"kubernetes_evidence_events", eventTimes}, {"kubernetes_evidence_occurrence_observations", observationTimes}} {
 		for _, at := range entry.times {
+			month := time.Date(at.UTC().Year(), at.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
+			if entry.parent == "kubernetes_evidence_events" && !cutoff.IsZero() && !month.AddDate(0, 1, 0).After(cutoff) {
+				continue
+			}
 			if _, err := tx.ExecContext(ctx, `SELECT versus_ensure_evidence_partition(to_regclass($1::text),$2)`, entry.parent, at); err != nil {
 				return fmt.Errorf("storage: prepare evidence partition: %w", err)
 			}

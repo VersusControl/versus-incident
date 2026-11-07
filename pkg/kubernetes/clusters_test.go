@@ -64,6 +64,7 @@ func TestClusterResolveOrgScopeAndTimelineIsolation(t *testing.T) {
 }
 
 func TestClusterListFiltersBeforeReadsAndCachesByOrg(t *testing.T) {
+	t.Parallel()
 	var reads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		reads.Add(1)
@@ -237,6 +238,7 @@ func TestClusterSummaryRetriesUnreachableWithoutCachingFailure(t *testing.T) {
 }
 
 func TestClusterSummaryIncludesActualVersionAndIssueTotals(t *testing.T) {
+	t.Parallel()
 	var version atomic.Value
 	version.Store("v1.33.2-eks.123")
 	var denyIssues atomic.Bool

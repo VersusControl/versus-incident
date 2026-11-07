@@ -47,10 +47,19 @@ describe("Kubernetes presentation", () => {
     mount(<><nav aria-label="Kubernetes views" /><CoverageMarker reasons={warnings.map((warning) => warning.content)} /></>);
     const trigger = screen.getByRole("button", { name: "Resource coverage" });
     fireEvent.focus(trigger);
-    expect(screen.getByRole("region", { name: "Resource coverage details" }).textContent).toContain("secrets: permission denied");
+    const details = screen.getByRole("region", { name: "Resource coverage details" });
+    expect(details.textContent).toContain("Some data is incomplete");
+    expect(details.textContent).toContain("secrets: permission denied");
     expect(document.body.textContent).not.toContain("item_limit");
     fireEvent.keyDown(document, { key: "Escape" });
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+  it("does not call a history cap a read failure", () => {
+    mount(<><nav aria-label="Kubernetes views" /><CoverageMarker reasons={["Some changes before this break were not loaded"]} /></>);
+    fireEvent.focus(screen.getByRole("button", { name: "Resource coverage" }));
+    const details = screen.getByRole("region", { name: "Resource coverage details" });
+    expect(details.textContent).toContain("Some data is incomplete");
+    expect(details.textContent).not.toContain("could not be read");
   });
   it("accepts only readable namespace options through search and keyboard", async () => {
     const change = vi.fn();

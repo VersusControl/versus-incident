@@ -290,6 +290,7 @@ func TestTimelineExactResourceAndPodFiltersKeepTruthfulTotals(t *testing.T) {
 }
 
 func TestTimelineCountsAreCappedAndOnlyReturnedOnFirstPage(t *testing.T) {
+	t.Parallel()
 	service, _, store, scope, reads := timelineHistoryFixture(t)
 	now := time.Now().UTC()
 	records := make([]storage.EvidenceRecord, 0, 1002)

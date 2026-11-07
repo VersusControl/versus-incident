@@ -56,6 +56,9 @@ type KubernetesHistoryConfig struct {
 type KubernetesEvidenceConfig struct {
 	ObservationHeartbeat string `mapstructure:"observation_heartbeat"`
 	Retention            string `mapstructure:"retention"`
+	// SaveChunk is the most history records one save writes at a time.
+	// Values outside 1..1024 fall back to 500.
+	SaveChunk int `mapstructure:"save_chunk"`
 }
 
 // StorageConfig is the durable-storage block. It is the single source of
@@ -296,6 +299,17 @@ func redisClusterFromEnv(v string) *bool {
 	return &enabled
 }
 
+// defaultEvidenceSaveChunk is the history save part size used when none is
+// configured or the configured value is outside 1..1024.
+const defaultEvidenceSaveChunk = 500
+
+func evidenceSaveChunk(value int) int {
+	if value < 1 || value > 1024 {
+		return defaultEvidenceSaveChunk
+	}
+	return value
+}
+
 var (
 	cfg     *Config
 	cfgOnce sync.Once
@@ -348,6 +362,16 @@ func loadConfigFromPath(path string) (*Config, error) {
 			v.Set(k, os.ExpandEnv(value))
 		}
 	}
+
+	// The history save part size is resolved before environment binding: a
+	// non-empty KUBERNETES_EVIDENCE_SAVE_CHUNK overrides the file, an empty
+	// one leaves the file value, and an unreadable or out-of-range value
+	// falls back to the default instead of failing the load.
+	saveChunk := v.GetInt("kubernetes.evidence.save_chunk")
+	if val := os.Getenv("KUBERNETES_EVIDENCE_SAVE_CHUNK"); val != "" {
+		saveChunk, _ = strconv.Atoi(strings.TrimSpace(val))
+	}
+	v.Set("kubernetes.evidence.save_chunk", evidenceSaveChunk(saveChunk))
 
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))

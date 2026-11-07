@@ -48,6 +48,7 @@ func serveStreamPodObject(writer http.ResponseWriter, request *http.Request, rec
 }
 
 func TestForbiddenWorkloadSourcesAreStableStatusesNotReplayGaps(t *testing.T) {
+	t.Parallel()
 	records := workloadStreamRecords("StatefulSet", 2, 1)
 	var logReads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

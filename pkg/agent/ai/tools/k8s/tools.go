@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -536,8 +535,7 @@ func compactWorkloadPage(result kubernetes.WorkloadPage, cursor string) map[stri
 		}
 		next := result.Next
 		if len(items) < len(result.Items) {
-			start, _ := strconv.Atoi(cursor)
-			next = strconv.Itoa(start + len(items))
+			next = result.ResumeAfter(len(items))
 		}
 		if next != "" {
 			data["next"] = next
@@ -614,8 +612,7 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 		}
 		next := result.Next
 		if len(items) < len(result.Items) {
-			start, _ := strconv.Atoi(cursor)
-			next = strconv.Itoa(start + len(items))
+			next = result.ResumeAfter(len(items))
 		}
 		data := map[string]any{
 			"items": modelItems, "totals": result.Totals, "broken": result.Broken, "truncated": truncated,
@@ -729,11 +726,9 @@ func compactChanges(result kubernetes.ChangePage, scope kubernetes.Scope, cursor
 				"links": map[string]string{"ui": "/agent/kubernetes?r=" + url.QueryEscape(change.Kind+"/"+change.Namespace+"/"+change.Name)},
 			})
 		}
-		next := result.Next
-		if len(items) < len(result.Items) {
-			start, _ := strconv.Atoi(cursor)
-			next = strconv.Itoa(start + len(items))
-		}
+		// Saved history pages by position in time, so a trimmed view resumes
+		// right after the last change it shows.
+		next := result.ResumeAfter(len(items))
 		data := map[string]any{"items": modelItems, "gaps": result.Gaps, "sync": result.Sync, "truncated": truncated, "hint": "Use diagnose_k8s_workload for one object and its surrounding evidence."}
 		if next != "" {
 			data["next"] = next
@@ -1088,8 +1083,7 @@ func compactGitOpsApps(result kubernetes.GitOpsAppPage, scope kubernetes.Scope, 
 		}
 		next := result.Next
 		if len(items) < len(result.Items) {
-			start, _ := strconv.Atoi(cursor)
-			next = strconv.Itoa(start + len(items))
+			next = result.ResumeAfter(len(items))
 		}
 		if next != "" {
 			data["next"] = next
@@ -1163,13 +1157,12 @@ func compactHelmReleasePage(result kubernetes.HelmReleasePage, scope kubernetes.
 		if len(result.Partial) > 0 {
 			data["partial_failures"] = result.Partial
 		}
+		// Resume after the rows shown only when rows of this page were left
+		// out. On the last page a resume point would name the end of the
+		// list, so it would only ever lead back to an empty page.
 		next := result.Next
 		if len(items) < len(result.Items) {
-			start, _ := strconv.Atoi(cursor)
-			next = strconv.Itoa(start + len(items))
-		} else if next == "" && truncated {
-			start, _ := strconv.Atoi(cursor)
-			next = strconv.Itoa(start + len(items))
+			next = result.ResumeAfter(len(items))
 		}
 		if next != "" {
 			data["next"] = next

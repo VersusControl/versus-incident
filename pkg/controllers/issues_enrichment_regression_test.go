@@ -185,19 +185,20 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 				frameMu.Unlock()
 				t.Fatalf("enriched Issues status=%d; frame-only panic evidence=%v", status, safeFrames)
 			}
-			if !page.Sync.Partial || len(page.Items) == 0 || page.Broken.Total != plain.Broken.Total {
-				t.Fatalf("bounded history changed current issues/totals or claimed complete: items=%d total=%d partial=%t", len(page.Items), page.Broken.Total, page.Sync.Partial)
+			// A capped read is a bounded history read, not a page
+			// failure. Only the affected issues carry the warning; the page and
+			// its sync state stay clean.
+			if page.Sync.Partial || len(page.Items) == 0 || page.Broken.Total != plain.Broken.Total {
+				t.Fatalf("bounded history changed current issues/totals or marked the page partial: items=%d total=%d partial=%t", len(page.Items), page.Broken.Total, page.Sync.Partial)
 			}
-			found := false
 			for _, partial := range page.Partial {
-				found = found || partial.ResourceID == "kubernetes.history" && partial.Class == "budget_exhausted"
-			}
-			if !found {
-				t.Fatal("history continuation was not reported as bounded incomplete enrichment")
+				if partial.ResourceID == "kubernetes.history" {
+					t.Fatalf("a per-issue history cap leaked into a page-level partial: class=%s", partial.Class)
+				}
 			}
 			for _, issue := range page.Items[:min(5, len(page.Items))] {
-				if !issue.Partial || issue.History == "complete" {
-					t.Fatal("bounded enrichment falsely claimed complete per-root history")
+				if !issue.Partial || !issue.HistoryTruncated || issue.History == "complete" {
+					t.Fatalf("bounded enrichment did not warn on the affected issue: partial=%t truncated=%t history=%q", issue.Partial, issue.HistoryTruncated, issue.History)
 				}
 			}
 			if limit == "5" && (len(page.Items) != 5 || page.Next == "") {

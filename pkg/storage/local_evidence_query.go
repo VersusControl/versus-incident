@@ -98,8 +98,11 @@ func (index *localEvidence) query(parent context.Context, policy EvidencePolicy,
 		return EvidencePage{}, ErrInvalidEvidence
 	}
 	if query.Type == "occurrence" {
+		// Occurrence lists page by first_seen. A link of this list that pages
+		// in another order, or predates links naming their order, restarts the
+		// list from its first page.
 		if query.Cursor != "" && cursor.Ordering != "first_seen" {
-			return EvidencePage{}, ErrEvidenceConflict
+			return EvidencePage{}, ErrEvidenceCursorExpired
 		}
 		cursor.Ordering = "first_seen"
 	}
@@ -128,7 +131,8 @@ func (index *localEvidence) query(parent context.Context, policy EvidencePolicy,
 		cursor.Highs = make([]uint64, len(keys))
 		cursor.Pruned = make([]time.Time, len(keys))
 		cursor.PruneRevisions = make([]uint64, len(keys))
-	} else if len(cursor.OccurrenceHighs) != len(keys) || len(cursor.Generations) != len(keys) || len(cursor.Highs) != len(keys) || len(cursor.Pruned) != len(keys) || len(cursor.PruneRevisions) != len(keys) {
+		cursor.ThinRevisions = make([]uint64, len(keys))
+	} else if len(cursor.OccurrenceHighs) != len(keys) || len(cursor.Generations) != len(keys) || len(cursor.Highs) != len(keys) || len(cursor.Pruned) != len(keys) || len(cursor.PruneRevisions) != len(keys) || !cursorThinRevisionsFit(cursor, len(keys)) {
 		return page, ErrInvalidEvidence
 	}
 	for i, key := range keys {
@@ -147,9 +151,17 @@ func (index *localEvidence) query(parent context.Context, policy EvidencePolicy,
 		}
 		if query.Cursor == "" {
 			cursor.OccurrenceHighs[i], cursor.Generations[i], cursor.Highs[i] = cp.OccurrenceRevision, cp.Generation, high
-			cursor.Pruned[i], cursor.PruneRevisions[i] = cp.PrunedThrough, cp.PruneRevision
-		} else if cursor.Generations[i] != cp.Generation || cursor.Highs[i] > high ||
-			cursor.OccurrenceHighs[i] > cp.OccurrenceRevision || cursor.PruneRevisions[i] != cp.PruneRevision || !cursor.Pruned[i].Equal(cp.PrunedThrough) {
+			cursor.Pruned[i], cursor.PruneRevisions[i], cursor.ThinRevisions[i] = cp.PrunedThrough, cp.PruneRevision, cp.ThinRevision
+		} else if cursor.Generations[i] != cp.Generation || cursor.PruneRevisions[i] != cp.PruneRevision || !cursor.Pruned[i].Equal(cp.PrunedThrough) {
+			// History was pruned or replaced since the cursor was issued.
+			return page, ErrEvidenceCursorExpired
+		} else if query.Type == "occurrence" && cursorSamplesThinned(cursor, i, cp.ThinRevision) {
+			// An occurrence is listed only while it keeps a sample in the
+			// window, so a removed sample can change the rows. Other lists do
+			// not read samples and keep their page links.
+			return page, ErrEvidenceCursorExpired
+		} else if cursor.Highs[i] > high || cursor.OccurrenceHighs[i] > cp.OccurrenceRevision {
+			// A cursor ahead of the stored history was never issued for it.
 			return page, ErrEvidenceConflict
 		}
 		page.Checkpoint = mergeEvidenceCheckpoint(page.Checkpoint, cp)
@@ -162,82 +174,23 @@ func (index *localEvidence) query(parent context.Context, policy EvidencePolicy,
 	if err != nil {
 		return page, err
 	}
-	where := localKeys(keys, &args)
-	pin := localPins(keys, cursor.Highs, &args)
 	since, until := args.add(localEvidenceTime(query.Since)), args.add(localEvidenceTime(query.Until))
 	column := "e.at"
 	if query.ByObservation {
 		column = "e.observed"
 	}
-	where += " AND e.sequence<=" + pin + " AND(e.superseded IS NULL OR e.superseded>" + pin + ")"
-	window := column + ">=" + since + " AND " + column + "<=" + until
-	if query.Type == "timeline" {
-		// A timeline reads one class per branch, and each class carries only the
-		// window that applies to it (see localTimelineCandidates).
-	} else if query.WithGaps {
-		where += " AND((e.type<>'coverage_gap' AND " + window + ") OR(e.type='coverage_gap' AND e.gap_to>=" + since + " AND e.gap_from<=" + until + "))"
-	} else {
-		where += " AND " + window
-	}
-	if len(keys) > 1 {
-		where += " AND(e.key=" + args.add(keys[0]) + " OR NOT EXISTS(SELECT 1 FROM evidence_events p WHERE p.key=" + args.add(keys[0]) + " AND p.id=e.id AND p.sequence<=" + args.add(cursor.Highs[0]) + "))"
-	}
-	for _, filter := range []struct{ column, value string }{{"namespace", query.Namespace}, {"name", query.Name}, {"kind", query.Kind}, {"uid", query.UID}, {"root", query.RootUID}, {"rule", query.Rule}} {
-		if filter.value == "" {
-			continue
-		}
-		expression := "e." + filter.column + "=" + args.add(filter.value)
-		if query.WithGaps {
-			if filter.column == "namespace" || filter.column == "kind" {
-				expression = "(" + expression + " OR(e.type='coverage_gap' AND e." + filter.column + "=''))"
-			} else {
-				expression = "(e.type='coverage_gap' OR " + expression + ")"
-			}
-		}
-		where += " AND " + expression
-	}
-	if query.ResourceUID != "" {
-		value := args.add(query.ResourceUID)
-		expression := "(e.uid=" + value + " OR e.root=" + value + " OR e.pod=" + value + ")"
-		if query.Type == "timeline" {
-			expression = "(e.uid=" + value + " OR(e.type='crash' AND(e.root=" + value + " OR e.pod=" + value + ")))"
-		}
-		if query.WithGaps {
-			expression = "(e.type='coverage_gap' OR " + expression + ")"
-		}
-		where += " AND " + expression
-	}
-	if query.PodUID != "" {
-		value := args.add(query.PodUID)
-		expression := "e.pod=" + value
-		if query.Type == "timeline" {
-			expression = "(" + expression + " OR(e.type='change' AND e.uid=" + value + "))"
-		}
-		if query.WithGaps {
-			expression = "(e.type='coverage_gap' OR " + expression + ")"
-		}
-		where += " AND " + expression
-	}
-	switch query.Type {
-	case "timeline":
-		// localTimelineCandidates applies the classes and their windows.
-	case "break":
-		where += ` AND(e.type='coverage_gap' OR(e.broken=1 AND e.type IN('issue_opened','issue_resolved')))`
-	case "issue":
-		where += ` AND e.type IN('issue_opened','issue_observed','issue_resolved')`
-	case "":
-	default:
-		value := args.add(query.Type)
-		if query.WithGaps {
-			where += " AND(e.type=" + value + " OR e.type='coverage_gap')"
-		} else {
-			where += " AND e.type=" + value
-		}
+	itemGaps := query.WithGaps && !query.GapsApart
+	where := localJournalWhere(query, keys, cursor.Highs, column, since, until, itemGaps, &args)
+	branchJoins := ""
+	if query.GapsApart {
+		// Only rows this reader may list enter the keyset and the count.
+		where += " AND COALESCE(" + allowed + ",0)"
+		branchJoins = localAuthorityJoins(query)
 	}
 	from := " FROM evidence_events e" + localAuthorityJoins(query)
 	countWhere := where
 	if query.Type == "timeline" {
-		from = " FROM(" + localTimelineCandidates(where, column, since, until, 1001) + ") e" + localAuthorityJoins(query)
+		from = " FROM(" + localTimelineCandidates(where, branchJoins, column, since, until, 1001, itemGaps) + ") e" + localAuthorityJoins(query)
 		countWhere = "1"
 	}
 	permission := "(e.type='coverage_gap' OR " + allowed + ")"
@@ -271,7 +224,7 @@ func (index *localEvidence) query(parent context.Context, policy EvidencePolicy,
 	limit := args.add(query.Limit + 1)
 	rawColumn := "e.raw"
 	if query.Type == "timeline" {
-		from = " FROM(" + localTimelineCandidates(where, column, since, until, query.Limit+1) + ") e" + localAuthorityJoins(query) + " JOIN evidence_events body ON body.key=e.key AND body.sequence=e.sequence"
+		from = " FROM(" + localTimelineCandidates(where, branchJoins, column, since, until, query.Limit+1, itemGaps) + ") e" + localAuthorityJoins(query) + " JOIN evidence_events body ON body.key=e.key AND body.sequence=e.sequence"
 		where = "1"
 		rawColumn = "body.raw"
 	}
@@ -315,30 +268,180 @@ func (index *localEvidence) query(parent context.Context, policy EvidencePolicy,
 		return page, err
 	}
 	rows.Close()
-	if err = tx.Commit(); err != nil {
-		return page, err
-	}
 	for i, record := range page.Items {
 		if query.Projection != nil {
 			page.Items[i] = query.Projection(record)
 		}
 	}
-	return finishEvidencePage(page, query, cursor), nil
+	page = finishEvidencePage(page, query, cursor)
+	if query.GapsApart {
+		lower, upper := evidencePageRange(page, query, cursor)
+		if page.Gaps, err = index.queryPageGaps(ctx, tx, keys, query, cursor, column, lower, upper); err != nil {
+			return page, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return page, err
+	}
+	return page, nil
+}
+
+// queryPageGaps is the bounded gap read of one page kept apart from its items:
+// coverage gaps that overlap [lower, upper], and rows in that range the reader
+// may not see, which are returned as point gaps without their payload.
+func (index *localEvidence) queryPageGaps(ctx context.Context, tx *sql.Tx, keys []string, query EvidenceQuery, cursor evidenceCursor, column string, lower, upper time.Time) ([]EvidenceRecord, error) {
+	args := localEvidenceArgs{}
+	cte, allowed, err := localAuthority(query, &args)
+	if err != nil {
+		return nil, err
+	}
+	since, until := args.add(localEvidenceTime(lower)), args.add(localEvidenceTime(upper))
+	where := localJournalWhere(query, keys, cursor.Highs, column, since, until, true, &args)
+	if query.Type == "timeline" {
+		listable := []string{}
+		for _, class := range localTimelineClasses {
+			if !class.gap {
+				listable = append(listable, "("+class.filter+")")
+			}
+		}
+		where += " AND((e.type='coverage_gap' AND e.gap_to>=" + since + " AND e.gap_from<=" + until + ") OR((" + strings.Join(listable, " OR ") + ") AND " + column + ">=" + since + " AND " + column + "<=" + until + "))"
+	}
+	where += " AND(e.type='coverage_gap' OR NOT COALESCE(" + allowed + ",0))"
+	rows, err := tx.QueryContext(ctx, cte+"SELECT e.id,e.sequence,e.at,e.observed,e.type='coverage_gap',CASE WHEN e.type='coverage_gap' THEN e.raw END FROM evidence_events e"+localAuthorityJoins(query)+" WHERE "+where+" ORDER BY "+column+" DESC,e.id DESC LIMIT "+args.add(evidencePageGapLimit+1), []any(args)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	gaps := []EvidenceRecord{}
+	for rows.Next() {
+		var id, at, observed string
+		var sequence uint64
+		var gap bool
+		var raw []byte
+		if err = rows.Scan(&id, &sequence, &at, &observed, &gap, &raw); err != nil {
+			return nil, err
+		}
+		record := EvidenceRecord{ID: id, Sequence: sequence}
+		if record.At, err = time.Parse(time.RFC3339Nano, at); err != nil {
+			return nil, err
+		}
+		if record.ObservedAt, err = time.Parse(time.RFC3339Nano, observed); err != nil {
+			return nil, err
+		}
+		if gap {
+			if err = json.Unmarshal(raw, &record); err != nil {
+				return nil, err
+			}
+		} else {
+			record = projectEvidenceAuthority(record, EvidenceQuery{EnforceAuthority: true})
+		}
+		if query.Projection != nil {
+			record = query.Projection(record)
+		}
+		gaps = append(gaps, record)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return boundEvidenceGaps(gaps, query, lower, upper), nil
 }
 
 // Each class bounds its own window and row count before the merge, so a page never
-// hydrates history it discards and every branch keeps an ordered index scan.
-func localTimelineCandidates(where, column, since, until string, limit int) string {
+// hydrates history it discards and every branch keeps an ordered index scan. joins
+// supplies the authority joins a branch filter refers to; withGaps adds the
+// coverage-gap class.
+func localTimelineCandidates(where, joins, column, since, until string, limit int, withGaps bool) string {
 	metadata := "e.key,e.sequence,e.id,e.type,e.at,e.observed,e.namespace,e.name,e.kind,e.authority_kind,e.uid,e.root,e.pod,e.rule,e.broken,e.gap_from,e.gap_to,e.superseded"
 	branches := []string{}
 	for _, class := range localTimelineClasses {
 		window := column + ">=" + since + " AND " + column + "<=" + until
 		if class.gap {
+			if !withGaps {
+				continue
+			}
 			window = "e.gap_to>=" + since + " AND e.gap_from<=" + until
 		}
-		branches = append(branches, "SELECT * FROM(SELECT "+metadata+" FROM evidence_events e WHERE "+where+" AND("+class.filter+") AND "+window+" ORDER BY "+column+" DESC,e.id DESC LIMIT "+strconv.Itoa(limit)+")")
+		branches = append(branches, "SELECT * FROM(SELECT "+metadata+" FROM evidence_events e"+joins+" WHERE "+where+" AND("+class.filter+") AND "+window+" ORDER BY "+column+" DESC,e.id DESC LIMIT "+strconv.Itoa(limit)+")")
 	}
 	return "SELECT * FROM(" + strings.Join(branches, " UNION ALL ") + ") ORDER BY " + strings.TrimPrefix(column, "e.") + " DESC,id DESC LIMIT " + strconv.Itoa(limit)
+}
+
+// localJournalWhere filters the journal to the query over [since, until] at
+// the pinned sequences. withGaps also admits coverage gaps that overlap the
+// range; a timeline applies its classes and windows in localTimelineCandidates.
+func localJournalWhere(query EvidenceQuery, keys []string, highs []uint64, column, since, until string, withGaps bool, args *localEvidenceArgs) string {
+	where := localKeys(keys, args)
+	pin := localPins(keys, highs, args)
+	where += " AND e.sequence<=" + pin + " AND(e.superseded IS NULL OR e.superseded>" + pin + ")"
+	window := column + ">=" + since + " AND " + column + "<=" + until
+	if query.Type == "timeline" {
+		// A timeline reads one class per branch, and each class carries only the
+		// window that applies to it (see localTimelineCandidates).
+	} else if withGaps {
+		where += " AND((e.type<>'coverage_gap' AND " + window + ") OR(e.type='coverage_gap' AND e.gap_to>=" + since + " AND e.gap_from<=" + until + "))"
+	} else {
+		where += " AND " + window
+	}
+	if len(keys) > 1 {
+		where += " AND(e.key=" + args.add(keys[0]) + " OR NOT EXISTS(SELECT 1 FROM evidence_events p WHERE p.key=" + args.add(keys[0]) + " AND p.id=e.id AND p.sequence<=" + args.add(highs[0]) + "))"
+	}
+	for _, filter := range []struct{ column, value string }{{"namespace", query.Namespace}, {"name", query.Name}, {"kind", query.Kind}, {"uid", query.UID}, {"root", query.RootUID}, {"rule", query.Rule}} {
+		if filter.value == "" {
+			continue
+		}
+		expression := "e." + filter.column + "=" + args.add(filter.value)
+		if withGaps {
+			if filter.column == "namespace" || filter.column == "kind" {
+				expression = "(" + expression + " OR(e.type='coverage_gap' AND e." + filter.column + "=''))"
+			} else {
+				expression = "(e.type='coverage_gap' OR " + expression + ")"
+			}
+		}
+		where += " AND " + expression
+	}
+	if query.ResourceUID != "" {
+		value := args.add(query.ResourceUID)
+		expression := "(e.uid=" + value + " OR e.root=" + value + " OR e.pod=" + value + ")"
+		if query.Type == "timeline" {
+			expression = "(e.uid=" + value + " OR(e.type='crash' AND(e.root=" + value + " OR e.pod=" + value + ")))"
+		}
+		if withGaps {
+			expression = "(e.type='coverage_gap' OR " + expression + ")"
+		}
+		where += " AND " + expression
+	}
+	if query.PodUID != "" {
+		value := args.add(query.PodUID)
+		expression := "e.pod=" + value
+		if query.Type == "timeline" {
+			expression = "(" + expression + " OR(e.type='change' AND e.uid=" + value + "))"
+		}
+		if withGaps {
+			expression = "(e.type='coverage_gap' OR " + expression + ")"
+		}
+		where += " AND " + expression
+	}
+	switch query.Type {
+	case "timeline":
+		// localTimelineCandidates applies the classes and their windows.
+	case "break":
+		if withGaps {
+			where += ` AND(e.type='coverage_gap' OR(e.broken=1 AND e.type IN('issue_opened','issue_resolved')))`
+		} else {
+			where += ` AND e.broken=1 AND e.type IN('issue_opened','issue_resolved')`
+		}
+	case "issue":
+		where += ` AND e.type IN('issue_opened','issue_observed','issue_resolved')`
+	case "":
+	default:
+		value := args.add(query.Type)
+		if withGaps {
+			where += " AND(e.type=" + value + " OR e.type='coverage_gap')"
+		} else {
+			where += " AND e.type=" + value
+		}
+	}
+	return where
 }
 
 func (index *localEvidence) queryOccurrences(ctx context.Context, tx *sql.Tx, keys []string, query EvidenceQuery, cursor evidenceCursor, page EvidencePage) (EvidencePage, error) {

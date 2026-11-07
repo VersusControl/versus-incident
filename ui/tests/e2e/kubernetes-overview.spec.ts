@@ -5309,11 +5309,12 @@ test.describe("Workloads and focused investigation worst-case browser gate", () 
         phase = "cursor";
         await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
         await panel.getByRole("button", { name: "Next page", exact: true }).click();
-        await expect(panel).toContainText("This inventory page expired");
-        await expect(rows).toHaveCount(0);
-        await capture("cursor-expired");
-        await panel.getByRole("button", { name: "Restart inventory paging" }).click();
+        // An expired page link returns the list to page 1 on its own.
+        await expect(panel.getByRole("button", { name: "Previous page", exact: true })).toBeDisabled();
         await expect(rows).toContainText("payments-committed");
+        await expect(panel).not.toContainText("This inventory page expired");
+        await expect(panel).not.toContainText("Resource inventory refresh is unavailable");
+        await capture("cursor-expired");
         phase = "empty";
         await page.getByRole("button", { name: "Refresh Kubernetes data" }).click();
         await expect(rows).toHaveCount(0);

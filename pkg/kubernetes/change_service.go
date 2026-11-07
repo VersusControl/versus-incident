@@ -24,6 +24,28 @@ type ChangePage struct {
 	Partial     []PartialFailure  `json:"partial_failures,omitempty"`
 	Gaps        []kubechanges.Gap `json:"gaps"`
 	Sync        SyncStatus        `json:"sync"`
+	Capture     *CaptureStatus    `json:"capture,omitempty"`
+	// Total is the first page's bounded count; CountCapped marks it as a lower
+	// bound. A non-zero Limit marks Total as present.
+	Total int `json:"total,omitempty"`
+	Limit int `json:"limit,omitempty"`
+	// resume holds, per item, the cursor that continues the list after it.
+	resume []string
+}
+
+// ResumeAfter returns the cursor that continues this list after the first
+// shown items of this page, for a caller that showed fewer items than the page
+// holds. It is the page's own next cursor when every item was shown, and empty
+// when the list cannot be resumed mid-page.
+func (page ChangePage) ResumeAfter(shown int) string {
+	switch {
+	case shown == len(page.Items):
+		return page.Next
+	case shown < 1 || shown > len(page.resume):
+		return ""
+	default:
+		return page.resume[shown-1]
+	}
 }
 
 type changeStoreState struct {
@@ -93,9 +115,7 @@ func (service *Service) SetChangeStorage(provider storage.Provider) {
 		return
 	}
 	service.changes.provider = provider
-	if service.inventoryRestore != nil {
-		service.inventoryRestore.validated.Store(false)
-	}
+	service.inventoryRestore.reset()
 	service.changes.stores = make(map[kubeindex.Scope]*kubechanges.Store)
 	service.changes.captureLocks = make(map[kubeindex.Scope]*sync.Mutex)
 	service.changes.journalFailed = make(map[kubeindex.Scope]bool)

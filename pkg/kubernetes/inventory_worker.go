@@ -16,6 +16,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// keptStoredLogInterval spaces the log line for a restore the cluster could not
+// answer, so a long outage is reported without one line per retry.
+const keptStoredLogInterval = time.Minute
+
 func inventoryCadence(kind string) time.Duration {
 	if cadence := captureCadences[kind]; cadence > 0 {
 		return cadence
@@ -26,6 +30,17 @@ func inventoryCadence(kind string) time.Duration {
 	default:
 		return 5 * time.Minute
 	}
+}
+
+// collectionCadence is the scheduling interval background collection uses
+// for a production cadence. A divisor above one shortens it so fixtures can
+// exercise autonomous cycles without waiting for production intervals; staleness
+// and gap thresholds keep the production cadence.
+func (service *Service) collectionCadence(cadence time.Duration) time.Duration {
+	if service == nil || service.cadenceDivisor <= 1 {
+		return cadence
+	}
+	return cadence / time.Duration(service.cadenceDivisor)
 }
 
 func inventoryDue(state kubeindex.KindStatus, cadence time.Duration, now time.Time) bool {
@@ -79,7 +94,7 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				scope.OrgID = org
 				candidate, record, readErr := readInventoryGeneration(provider, scope, generation.Revision)
 				if readErr != nil {
-					err = readErr
+					err = inventoryReadFailure(readErr)
 					break
 				}
 				// The cluster's own metadata decides the first ready moment here,
@@ -161,7 +176,7 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			lease, owned, err = service.claimInventory(ctx, provider, owner)
 			if err == nil && owned {
 				ownedLease = lease
-				if generation.EvidenceBatch != nil && evidenceCommitted != generation.Revision {
+				if generation.EvidenceBatch != nil && evidenceCommitted != generation.Revision && !service.historySaveAbandoned(cache, generation.EvidenceBatch.ID) {
 					lease.mu.Lock()
 					guard := append([]byte(nil), lease.expected...)
 					lease.mu.Unlock()
@@ -170,7 +185,12 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 					pending.GuardExpected = guard
 					pendingGeneration := generation
 					pendingGeneration.EvidenceBatch = &pending
+					// A retried save is a storage stage like the first attempt: its
+					// failure must not reach the credential recovery gate.
+					started := time.Now()
 					err = service.commitEvidence(ctx, pendingGeneration)
+					service.recovery.stage("journal", started, err)
+					err = service.abandonRejectedHistorySave(cache, generation.EvidenceBatch.ID, err)
 					if err == nil {
 						evidenceCommitted = generation.Revision
 					}
@@ -195,24 +215,37 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			class := errorClass(err)
 			// Stable credential bytes do not imply unchanged Kubernetes permissions.
 			var unverified *inventoryAuthorityUnavailable
-			if service.inventoryRestore != nil && (class == "forbidden" || class == "unauthorized" || errors.As(err, &unverified)) {
-				service.inventoryRestore.validated.Store(false)
+			if class == "forbidden" || class == "unauthorized" || errors.As(err, &unverified) {
+				service.inventoryRestore.reset()
 			}
 			service.identity.mu.Lock()
 			renewal := service.identity.renewal
 			service.identity.mu.Unlock()
-			if !renewal {
+			// A storage failure or a lease outcome is not a credential or cluster
+			// failure, so the credential recovery gate stays open.
+			if !renewal && countsAgainstCredential(err) {
 				service.recovery.failed(err, service.client, service.scope.OrgID)
 			}
 			index = nil
 			service.logInventoryCycle(err)
+			var unanswered restoreProofUnanswered
 			cache.mu.Lock()
-			cache.failed, cache.failedClass = true, class
+			if errors.As(err, &unanswered) && len(cache.generation.View.Kinds) == 0 {
+				// Nothing is loaded yet, so readers prove the stored generation
+				// themselves and read it as soon as the cluster answers again.
+				cache.failed = false
+				if time.Since(cache.keptStoredLogged) >= keptStoredLogInterval {
+					cache.keptStoredLogged = time.Now()
+					log.Printf("kubernetes: inventory restore unanswered, stored generation kept class=%s", class)
+				}
+			} else {
+				cache.failed, cache.failedClass = true, class
+			}
 			if class == "forbidden" || class == "unauthorized" {
 				cache.authorityFailure = nil
 			}
 			cache.mu.Unlock()
-			wait, backoff = backoff, min(15*time.Second, backoff*2)
+			wait, backoff = backoff, min(service.collectionCadence(15*time.Second), backoff*2)
 		} else {
 			service.clearInventoryCycleLog()
 			backoff = 100 * time.Millisecond
@@ -234,12 +267,12 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 	cache.mu.RLock()
 	due := cache.scopePending
 	cache.mu.RUnlock()
-	due = due || len(generation.View.Kinds) < len(indexedResourceIDs) || generation.Usage.ObservedAt.IsZero() || now.Sub(generation.Usage.ObservedAt) >= 30*time.Second
+	due = due || len(generation.View.Kinds) < len(indexedResourceIDs) || generation.Usage.ObservedAt.IsZero() || now.Sub(generation.Usage.ObservedAt) >= service.collectionCadence(30*time.Second)
 	for kind, state := range generation.View.Kinds {
-		due = due || inventoryDue(state, inventoryCadence(kind), now)
+		due = due || inventoryDue(state, service.collectionCadence(inventoryCadence(kind)), now)
 	}
 	for _, state := range generation.ResourceStatus {
-		due = due || inventoryDue(state, 5*time.Minute, now)
+		due = due || inventoryDue(state, service.collectionCadence(5*time.Minute), now)
 	}
 	promoted := false
 	if !due {
@@ -308,9 +341,9 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 			return err
 		}
 		cache.mu.Lock()
-		if service.inventoryRestore != nil {
-			service.inventoryRestore.validated.Store(true)
-		}
+		// This credential collected the generation itself, which proves it; no
+		// other stored generation gains anything from that.
+		service.inventoryRestore.prove(committed.Revision)
 		cache.generation, cache.failed = committed, false
 		cache.authorityFailure = nil
 		*destination = committed
@@ -332,9 +365,7 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 		return ownedError(err)
 	}
 	cache.mu.Lock()
-	if service.inventoryRestore != nil {
-		service.inventoryRestore.validated.Store(true)
-	}
+	service.inventoryRestore.prove(generation.Revision)
 	cache.generation, cache.failed = *generation, false
 	cache.authorityFailure = nil
 	*destination = *generation
@@ -391,15 +422,15 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			continue
 		}
 		state := generation.View.Kinds[kind]
-		if inventoryDue(state, inventoryCadence(kind), now) || scopePending && (state.Error == "forbidden" || state.Error == "namespace_scope") {
+		if inventoryDue(state, service.collectionCadence(inventoryCadence(kind)), now) || scopePending && (state.Error == "forbidden" || state.Error == "namespace_scope") {
 			kinds = append(kinds, kind)
 		}
 	}
 	sortCoreKindsFirst(kinds)
-	metricsDue := generation.Usage.ObservedAt.IsZero() || now.Sub(generation.Usage.ObservedAt) >= 30*time.Second
+	metricsDue := generation.Usage.ObservedAt.IsZero() || now.Sub(generation.Usage.ObservedAt) >= service.collectionCadence(30*time.Second)
 	additionalDue := false
 	for _, state := range generation.ResourceStatus {
-		additionalDue = additionalDue || inventoryDue(state, 5*time.Minute, now)
+		additionalDue = additionalDue || inventoryDue(state, service.collectionCadence(5*time.Minute), now)
 	}
 	if len(kinds) == 0 && !metricsDue && !additionalDue && !discovered {
 		discovered, err = service.discoverNamespaceCandidates(ctx, cache, generation, now)
@@ -586,7 +617,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		additional = nil
 	}
 	for _, definition := range additional {
-		if !inventoryDue(states[definition.ID], 5*time.Minute, now) {
+		if !inventoryDue(states[definition.ID], service.collectionCadence(5*time.Minute), now) {
 			continue
 		}
 		dirty = true
@@ -775,7 +806,7 @@ func (service *Service) collectScopedInventory(ctx context.Context, cache *inven
 			// This LIST starts after the global denial, not at cycle start.
 			// Retain the real observation time so scoped proof ordering does not
 			// manufacture freshness or inherit the earlier global attempt.
-			refreshErr := scopeIndex.RefreshGuarded(ctx, kind, inventoryCadence(kind), time.Now().UTC(), func(ctx context.Context) ([]kubeindex.Record, bool, error) {
+			refreshErr := scopeIndex.RefreshGuarded(ctx, kind, service.collectionCadence(inventoryCadence(kind)), time.Now().UTC(), func(ctx context.Context) ([]kubeindex.Record, bool, error) {
 				snapshot, _ := service.namespaceIssueSnapshot(ctx, ns, []string{kind})
 				state := snapshot.Kinds[kind]
 				if state.Error != "" {

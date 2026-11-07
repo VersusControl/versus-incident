@@ -69,6 +69,7 @@ func TestRelatedDoesNotTraverseSharedConfigOrPlacement(t *testing.T) {
 }
 
 func TestRelatedIncludesSixtyThousandOwnedResources(t *testing.T) {
+	t.Parallel()
 	records := make([]kubeindex.Record, 1, 60001)
 	records[0] = kubeindex.Record{UID: "root", Kind: "Deployment", Namespace: "shop", Name: "api"}
 	for i := 0; i < 60000; i++ {

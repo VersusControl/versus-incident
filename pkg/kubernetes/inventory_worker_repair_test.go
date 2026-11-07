@@ -16,6 +16,7 @@ import (
 )
 
 func TestScopedInventoryCollectsCompleteNamespaceWithoutGlobalListPermission(t *testing.T) {
+	t.Parallel()
 	var reads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reads.Add(1)
@@ -230,5 +231,67 @@ func TestInventoryPreferredVersionAndCadenceAreNotEveryPoll(t *testing.T) {
 		if !inventoryDue(kubeindex.KindStatus{State: "ready", LastAttemptAt: now}, inventoryCadence(kind), now.Add(inventoryCadence(kind))) {
 			t.Fatalf("%s missed its cadence", kind)
 		}
+	}
+}
+
+func TestCollectionCadenceKeepsProductionIntervalsUnlessShortened(t *testing.T) {
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	for kind := range indexedResourceIDs {
+		if got := service.collectionCadence(inventoryCadence(kind)); got != inventoryCadence(kind) {
+			t.Fatalf("%s collects every %s by default, want the production %s", kind, got, inventoryCadence(kind))
+		}
+	}
+	if got := (*Service)(nil).collectionCadence(time.Minute); got != time.Minute {
+		t.Fatalf("a missing service changed the cadence to %s", got)
+	}
+	service.cadenceDivisor = 10
+	if got := service.collectionCadence(inventoryCadence("Pod")); got != 3*time.Second {
+		t.Fatalf("shortened Pod cadence = %s, want 3s", got)
+	}
+	if scoped := service.Scoped(service.Scope()); scoped.collectionCadence(time.Minute) != 6*time.Second {
+		t.Fatal("a scoped service lost the shortened cadence")
+	}
+}
+
+func TestCollectionCadenceSurvivesCredentialReplacement(t *testing.T) {
+	for _, divisor := range []int{0, 10} {
+		t.Run(strconv.Itoa(divisor), func(t *testing.T) {
+			var rotated atomic.Bool
+			source := &credentialSource{authorization: func(context.Context) (string, error) {
+				if rotated.Load() {
+					return "Bearer replacement", nil
+				}
+				return "Bearer original", nil
+			}}
+			service := NewService(&Client{credentials: source}, Scope{ClusterID: "cluster"}, 0)
+			service.cadenceDivisor = divisor
+			registry := NewServiceRegistry(service)
+			t.Cleanup(registry.Close)
+			want := time.Minute
+			if divisor > 1 {
+				want = time.Minute / time.Duration(divisor)
+			}
+			first, err := registry.ResolveCluster("org", "cluster")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := first.collectionCadence(time.Minute); got != want {
+				t.Fatalf("original service collects every %s, want %s", got, want)
+			}
+			rotated.Store(true)
+			replacement, err := registry.ResolveCluster("org", "cluster")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replacement == first || replacement.identity == first.identity {
+				t.Fatal("the bearer change did not build a replacement service")
+			}
+			if replacement.cadenceDivisor != divisor {
+				t.Fatalf("replacement divisor = %d, want %d", replacement.cadenceDivisor, divisor)
+			}
+			if got := replacement.collectionCadence(time.Minute); got != want {
+				t.Fatalf("replacement collects every %s, want %s", got, want)
+			}
+		})
 	}
 }

@@ -147,7 +147,7 @@ func TestLiveAuthorityCannotAuthorizeHistoricalCaptureOrColdReplay(t *testing.T)
 	if err = service.prepareEvidence(t.Context(), &copy, inventoryGeneration{}); !errors.Is(err, ErrInventoryNotReady) || copy.EvidenceBatch != nil {
 		t.Fatalf("unverified physical identity advanced history: %v", err)
 	}
-	if err = service.authorizeInventoryRestore(context.Background(), generation); !errors.Is(err, ErrForbidden) || service.inventoryRestore.validated.Load() {
+	if err = service.authorizeInventoryRestore(context.Background(), generation); !errors.Is(err, ErrForbidden) || service.inventoryRestore.covers(generation.Revision) {
 		t.Fatalf("live list authorized persisted replay: %v", err)
 	}
 	before := identityReads.Load()
@@ -292,7 +292,7 @@ func TestLiveListDoesNotWeakenPersistedPhysicalIdentityChecks(t *testing.T) {
 			case "mismatch":
 				expected = ErrClusterUnavailable
 			}
-			if err := service.authorizeInventoryRestore(t.Context(), generation); !errors.Is(err, expected) || service.inventoryRestore.validated.Load() {
+			if err := service.authorizeInventoryRestore(t.Context(), generation); !errors.Is(err, expected) || service.inventoryRestore.covers(generation.Revision) {
 				t.Fatalf("persisted %s proof weakened: %v", scenario, err)
 			}
 		})

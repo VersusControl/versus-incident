@@ -144,6 +144,10 @@ type ResourcePage struct {
 	EncodedTruncated bool                `json:"encoded_truncated"`
 	Omitted          []string            `json:"omitted_categories,omitempty"`
 	Partial          []PartialFailure    `json:"partial_failures,omitempty"`
+	// Total and Limit size the pager: Total counts every item the filters
+	// match, and a non-zero Limit marks Total as present.
+	Total int `json:"total,omitempty"`
+	Limit int `json:"limit,omitempty"`
 }
 
 type Overview struct {
@@ -246,6 +250,8 @@ type Scrubber interface{ Scrub(string) string }
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
 	evidenceHeartbeat      time.Duration
+	historySaveGrace       time.Duration
+	cadenceDivisor         int
 	workloadAuthority      inventoryAuthorityProofState
 	observationClock       func() time.Time
 	inventoryRestore       *inventoryRestoreAuthority
@@ -360,6 +366,8 @@ func (service *Service) Scoped(scope Scope) *Service {
 	scoped.issueAlertSink = service.issueAlertSink
 	scoped.usageHistory = service.usageHistory
 	scoped.evidenceHeartbeat = service.evidenceHeartbeat
+	scoped.historySaveGrace = service.historySaveGrace
+	scoped.cadenceDivisor = service.cadenceDivisor
 	if configured != service.configuredCredentialID && service.client != nil {
 		scoped.scope.CredentialID = scoped.captureCredentialID()
 		scoped.persistentCredentialID = scoped.captureCredentialIDAtGeneration(0)
@@ -615,6 +623,8 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		fresh = newService(ctx, previous.client, scope, previous.ttl)
 		fresh.observationClock = previous.observationClock
 		fresh.evidenceHeartbeat = previous.evidenceHeartbeat
+		fresh.historySaveGrace = previous.historySaveGrace
+		fresh.cadenceDivisor = previous.cadenceDivisor
 		fresh.recovery = previous.recovery
 		if err := fresh.validateCredential(ctx); err != nil {
 			fresh.identity.cancel()
@@ -933,17 +943,30 @@ func (service *Service) CachedResources(ctx context.Context, options ListOptions
 		if filtered[i].Namespace != filtered[j].Namespace {
 			return filtered[i].Namespace < filtered[j].Namespace
 		}
-		return filtered[i].Name < filtered[j].Name
+		if filtered[i].Name != filtered[j].Name {
+			return filtered[i].Name < filtered[j].Name
+		}
+		return filtered[i].UID < filtered[j].UID
 	})
 	limit := options.Limit
 	if limit <= 0 || limit > maxPageSize {
 		limit = defaultPageSize
 	}
-	start, end, next, err := pageWindow(options.Continue, limit, len(filtered))
+	rows := make([]string, len(filtered))
+	for position, item := range filtered {
+		rows[position] = projectedResourceIdentity(item)
+	}
+	filters := struct{ ResourceID, Namespace, Labels, Fields string }{options.ResourceID, options.Namespace, options.Labels, options.Fields}
+	cursor, err := bindSnapshotCursor("resources", service.indexScope(), filters, rows)
+	if err != nil {
+		return ResourcePage{}, err
+	}
+	start, end, next, err := cursor.window(options.Continue, limit, len(filtered))
 	if err != nil {
 		return ResourcePage{}, err
 	}
 	page.Items, page.Continue = filtered[start:end], next
+	page.Total, page.Limit = len(filtered), limit
 	return page, nil
 }
 
@@ -2471,6 +2494,13 @@ func errorClass(err error) string {
 	var throttled *ErrThrottled
 	if errors.As(err, &throttled) {
 		return "throttled"
+	}
+	var saveFailure *captureStorageError
+	if errors.As(err, &saveFailure) && saveFailure.rejected {
+		return "storage_rejected"
+	}
+	if errors.As(err, &saveFailure) {
+		return "storage_unavailable"
 	}
 	var conflict commitConflictError
 	var indexed indexReadError

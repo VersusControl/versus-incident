@@ -408,6 +408,10 @@ func DiagnoseError(err error) ErrorDetail {
 		return ErrorDetail{Code: "log_stream_busy", Message: "The concurrent Pod log stream limit has been reached.", Action: "Close another log stream and retry with backoff.", Retryable: true}
 	case errors.Is(err, errPreviousUnavailable):
 		return ErrorDetail{Code: "previous_unavailable", Message: "Previous container logs are unavailable.", Action: "Select current container logs.", Retryable: false}
+	// An expired list cursor is an invalid argument too, so it must be named
+	// before the general case: the client restarts the list at page 1.
+	case errors.Is(err, ErrCursorExpired):
+		return ErrorDetail{Code: "cursor_expired", Message: "The list changed since this page was loaded.", Action: "Reload the list from the first page.", Retryable: false}
 	case errors.Is(err, ErrInvalidArguments):
 		return ErrorDetail{Code: "invalid_arguments", Message: "The Kubernetes request is missing or has invalid parameters.", Action: "Check the namespace, resource ID, object name, container, and numeric limits.", Retryable: false}
 	case errors.Is(err, ErrRequestTooLarge):

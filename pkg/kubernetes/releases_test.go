@@ -56,11 +56,11 @@ func TestReleasesUseMetadataOnlyAndGroupLatestRevision(t *testing.T) {
 		t.Fatalf("release output contains secret payload: %s err=%v", encoded, err)
 	}
 	releasePage, err := service.Releases(context.Background(), HelmReleaseOptions{Namespace: "ops", Limit: 1})
-	if err != nil || len(releasePage.Items) != 1 || releasePage.Items[0].Name != "checkout" || releasePage.Next != "1" || !releasePage.Truncated {
+	if err != nil || len(releasePage.Items) != 1 || releasePage.Items[0].Name != "checkout" || releasePage.Next == "" || !releasePage.Truncated || releasePage.Total != 2 || releasePage.Limit != 1 {
 		t.Fatalf("first release page = %#v err=%v", releasePage, err)
 	}
 	releasePage, err = service.Releases(context.Background(), HelmReleaseOptions{Namespace: "ops", Limit: 1, Cursor: releasePage.Next})
-	if err != nil || len(releasePage.Items) != 1 || releasePage.Items[0].Name != "api" || releasePage.Next != "" || releasePage.Truncated {
+	if err != nil || len(releasePage.Items) != 1 || releasePage.Items[0].Name != "api" || releasePage.Next != "" || releasePage.Truncated || releasePage.Total != 2 || releasePage.Limit != 1 {
 		t.Fatalf("second release page = %#v err=%v", releasePage, err)
 	}
 	detail, err := service.Release(context.Background(), "ops", "checkout")

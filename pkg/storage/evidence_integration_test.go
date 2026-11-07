@@ -154,7 +154,7 @@ func TestPostgresRetainedSamplesAndCursorOrderingRemainExact(t *testing.T) {
 	if _, err = p.db.Exec(`UPDATE kubernetes_evidence_scopes SET checkpoint=jsonb_set(checkpoint,'{prune_revision}','99') WHERE scope_key=$1`, key); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = p.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceConflict) {
+	if _, err = p.QueryEvidence(t.Context(), scope, query); !errors.Is(err, ErrEvidenceCursorExpired) {
 		t.Fatalf("pruned occurrence cursor survived: %v", err)
 	}
 }
@@ -164,7 +164,7 @@ func TestPostgresEvidencePartitionLifecyclePreservesDisabledRetention(t *testing
 	if dsn == "" {
 		t.Skip("isolated harness Postgres required")
 	}
-	provider, err := NewPostgres(PostgresOptions{DSN: dsn})
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,5 +552,458 @@ func TestPostgresStartupConversionRebuildsReadModels(t *testing.T) {
 	}
 	if err = p.completeEvidenceBackfill(t.Context(), time.Minute); err != nil {
 		t.Fatalf("converted deployment repeated conversion: %v", err)
+	}
+}
+
+func TestPostgresMonthDropInvalidatesOnlyScopesItPruned(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("isolated Postgres required")
+	}
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "720h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	p := provider.(*postgresProvider)
+	// The test drives retention itself, so background maintenance cannot drop
+	// a month between a commit and the cursor that pins it.
+	p.maintenanceCancel()
+	<-p.maintenanceDone
+	settlePartitionCopy(t, p)
+	now := time.Now().UTC()
+	expiredAt := time.Date(now.Year(), now.Month()-3, 10, 12, 0, 0, 0, time.UTC)
+	recentAt := now.Add(-10 * 24 * time.Hour).Truncate(time.Microsecond)
+	run := fmt.Sprint(now.UnixNano())
+	open := func(scope EvidenceScope, at time.Time) EvidenceQuery {
+		t.Helper()
+		checkpoint, err := p.EvidenceCheckpoint(t.Context(), scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		previous := checkpoint.ID
+		for i, minute := range []int{0, 6} {
+			batch := evidenceTestBatch(scope.ClusterID+at.Format("150405")+fmt.Sprint(i), previous, at.Add(time.Duration(minute)*time.Minute), true, true)
+			previous = batch.ID
+			for n := 0; n < 3; n++ {
+				issue := batch.Issues[0]
+				issue.Key, issue.UID = fmt.Sprint(n), fmt.Sprint(n)
+				batch.Issues = append(batch.Issues, issue)
+			}
+			if err := p.CommitEvidence(t.Context(), scope, batch); err != nil {
+				t.Fatal(err)
+			}
+		}
+		query := EvidenceQuery{Since: at.Add(-time.Hour), Until: at.Add(time.Hour), Type: "occurrence", Limit: 1}
+		page, err := p.QueryEvidence(t.Context(), scope, query)
+		if err != nil || page.Next == "" {
+			t.Fatalf("opening a cursor: %v", err)
+		}
+		query.Cursor = page.Next
+		return query
+	}
+	pruned := EvidenceScope{OrgID: "default", ClusterID: "pruned-" + run, ClusterUID: "pruned"}
+	kept := EvidenceScope{OrgID: "default", ClusterID: "kept-" + run, ClusterUID: "kept"}
+	prunedQuery, keptQuery := open(pruned, expiredAt), open(kept, recentAt)
+	before, err := p.QueryEvidence(t.Context(), kept, keptQuery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settle := func() {
+		t.Helper()
+		for i := 0; ; i++ {
+			if i == 1000 {
+				t.Fatal("retention never settled")
+			}
+			more, err := p.compactEvidenceBatch(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !more {
+				return
+			}
+		}
+	}
+	settle()
+	after, err := p.QueryEvidence(t.Context(), kept, keptQuery)
+	if err != nil || !reflect.DeepEqual(before.Items, after.Items) {
+		t.Fatalf("dropping another scope's month invalidated this cursor: %v", err)
+	}
+	if _, err = p.QueryEvidence(t.Context(), pruned, prunedQuery); !errors.Is(err, ErrEvidenceCursorExpired) {
+		t.Fatalf("a cursor over dropped rows was still served: %v", err)
+	}
+	// Rows that arrive late in a month already pruned are dropped again, and
+	// the scope's cursors over them are invalidated again.
+	lateQuery := open(pruned, expiredAt.Add(time.Hour))
+	settle()
+	if _, err = p.QueryEvidence(t.Context(), pruned, lateQuery); !errors.Is(err, ErrEvidenceCursorExpired) {
+		t.Fatalf("a cursor over late rows in a dropped month was still served: %v", err)
+	}
+	if still, err := p.QueryEvidence(t.Context(), kept, keptQuery); err != nil || !reflect.DeepEqual(before.Items, still.Items) {
+		t.Fatalf("a second drop invalidated another scope's cursor: %v", err)
+	}
+}
+
+// settlePartitionCopy finishes the move to the partitioned layout, which is
+// the only layout retention drops months from.
+func settlePartitionCopy(t *testing.T, p *postgresProvider) {
+	t.Helper()
+	for i := 0; ; i++ {
+		if i == 64 {
+			t.Fatal("partition copy never settled")
+		}
+		more, err := p.backfillEvidenceBatch(t.Context(), evidenceBackgroundBackfill)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copyMore, err := p.partitionEvidenceBatch(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !more && !copyMore {
+			return
+		}
+	}
+}
+
+// The probe that finds which scopes a dropped month held runs under the
+// retention statement timeout, so it must probe an index per scope rather
+// than read the month. EVIDENCE_PROBE_SCALE=1 fills the month with a million
+// rows first.
+func TestPostgresMonthScopeProbeUsesTheScopeIndex(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("isolated Postgres required")
+	}
+	scale := os.Getenv("EVIDENCE_PROBE_SCALE") == "1"
+	if scale && testing.Short() {
+		t.Skip("million-row month is not a short test")
+	}
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "720h"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+	p := provider.(*postgresProvider)
+	p.maintenanceCancel()
+	<-p.maintenanceDone
+	settlePartitionCopy(t, p)
+	now := time.Now().UTC()
+	at := time.Date(now.Year(), now.Month()-4, 3, 12, 0, 0, 0, time.UTC)
+	scope := EvidenceScope{OrgID: "default", ClusterID: "probe-" + fmt.Sprint(now.UnixNano()), ClusterUID: "probe"}
+	// A store with retention never writes into a month retention has passed,
+	// so the month is seeded the way a deployment that enables retention later
+	// holds it: through a store without retention.
+	seed, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = seed.(EvidenceStore).CommitEvidence(t.Context(), scope, evidenceTestBatch("probe", "", at, true, true))
+	_ = seed.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := evidenceScopeKey(scope)
+	partition := "evidence_event_month_" + at.Format("200601")
+	if scale {
+		started := time.Now()
+		if _, err = p.db.ExecContext(t.Context(), `INSERT INTO kubernetes_evidence_events(scope_key,event_id,event_version,event_type,event_at,observed_at,epoch,payload)
+		 SELECT $1,'scale-'||g,'v','change',$2::timestamptz+g*INTERVAL '1 millisecond',$2::timestamptz,'scale','{}'::jsonb FROM generate_series(1,1000000) g`, key, at); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("seeded a million rows in %s in %s", partition, time.Since(started).Round(time.Second))
+	}
+	tx, err := p.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(t.Context(), `SET LOCAL statement_timeout='2s'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.ExecContext(t.Context(), evidenceScopesProbeSettings); err != nil {
+		t.Fatal(err)
+	}
+	var raw []byte
+	if err = tx.QueryRowContext(t.Context(), "EXPLAIN (FORMAT JSON) "+evidenceScopesProbe(partition)).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var plans []struct {
+		Plan map[string]any `json:"Plan"`
+	}
+	if err = json.Unmarshal(raw, &plans); err != nil || len(plans) != 1 {
+		t.Fatalf("plan: %v", err)
+	}
+	probed := false
+	var walk func(node map[string]any)
+	walk = func(node map[string]any) {
+		if node["Relation Name"] == partition {
+			switch node["Node Type"] {
+			case "Index Scan", "Index Only Scan":
+				probed = true
+			default:
+				t.Fatalf("the month probe reads %s by %v, not an index probe: %s", partition, node["Node Type"], raw)
+			}
+		}
+		children, _ := node["Plans"].([]any)
+		for _, child := range children {
+			if next, ok := child.(map[string]any); ok {
+				walk(next)
+			}
+		}
+	}
+	walk(plans[0].Plan)
+	if !probed {
+		t.Fatalf("the month probe never reached %s: %s", partition, raw)
+	}
+	started := time.Now()
+	scopes, err := evidenceScopesIn(t.Context(), tx, partition)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("month probe: %v", err)
+	}
+	found := false
+	for _, candidate := range scopes {
+		found = found || candidate == key
+	}
+	if !found || elapsed > 500*time.Millisecond {
+		t.Fatalf("month probe found=%t in %s", found, elapsed)
+	}
+	t.Logf("month probe over %s took %s", partition, elapsed)
+}
+
+// longOpenIssueCapture saves one capture of issues that stay open, with the
+// given change records, as the capture layer does every heartbeat.
+func longOpenIssueCapture(t *testing.T, store EvidenceStore, scope EvidenceScope, id string, at time.Time, issues int, records []EvidenceRecord) {
+	t.Helper()
+	checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := EvidenceBatch{ID: id, Expected: checkpoint.ID, Generation: checkpoint.Generation, At: at, CoveredThrough: at, Epoch: "paging", Records: records}
+	for i := 0; i < issues; i++ {
+		issue := pagingIssue(fmt.Sprintf("pod-%d", i), "shop", at)
+		issue.Broken = true
+		batch.Issues = append(batch.Issues, issue)
+	}
+	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatalf("commit %s: %v", id, err)
+	}
+}
+
+// seedLongOpenIssues saves issues opened at opened and sampled every five
+// minutes for sampled, then recent captures with changes, through a store
+// without retention: retention never saves a sample it would already thin.
+func seedLongOpenIssues(t *testing.T, dsn string, scope EvidenceScope, opened time.Time, sampled time.Duration, issues int, now time.Time) {
+	t.Helper()
+	seed := worstCaseProvider(t, dsn, PostgresOptions{EvidenceRetention: "0"})
+	n := 0
+	for at := opened; !at.After(opened.Add(sampled)); at = at.Add(5 * time.Minute) {
+		longOpenIssueCapture(t, seed, scope, fmt.Sprintf("old-%d", n), at, issues, nil)
+		n++
+	}
+	for i := 0; i < 6; i++ {
+		at := now.Add(-time.Duration(60-i*5) * time.Minute)
+		changes := []EvidenceRecord{pagingChange(fmt.Sprintf("change-%d-a", i), "shop", at, at, "a"), pagingChange(fmt.Sprintf("change-%d-b", i), "shop", at, at, "b")}
+		longOpenIssueCapture(t, seed, scope, fmt.Sprintf("recent-%d", i), at, issues, changes)
+	}
+}
+
+// drainEvidencePages reads the pages after a cursor and returns every row
+// id, failing on a repeated row.
+func drainEvidencePages(t *testing.T, store EvidenceStore, scope EvidenceScope, query EvidenceQuery, seen []string) []string {
+	t.Helper()
+	ids := map[string]bool{}
+	for _, id := range seen {
+		ids[id] = true
+	}
+	for query.Cursor != "" {
+		page, err := store.QueryEvidence(t.Context(), scope, query)
+		if err != nil {
+			t.Fatalf("%s page after %d rows: %v", query.Type, len(seen), err)
+		}
+		for _, item := range page.Items {
+			if ids[item.ID] {
+				t.Fatalf("%s row %s repeated", query.Type, item.ID)
+			}
+			ids[item.ID] = true
+			seen = append(seen, item.ID)
+		}
+		query.Cursor = page.Next
+	}
+	return seen
+}
+
+func evidencePageIDs(page EvidencePage) []string {
+	ids := []string{}
+	for _, item := range page.Items {
+		ids = append(ids, item.ID)
+	}
+	return ids
+}
+
+// thinUntilSettled runs retention passes until there is nothing left to
+// remove and returns the scope's checkpoint.
+func thinUntilSettled(t *testing.T, p *postgresProvider, scope EvidenceScope) EvidenceCheckpoint {
+	t.Helper()
+	for i := 0; ; i++ {
+		if i == 1000 {
+			t.Fatal("retention never settled")
+		}
+		more, err := p.compactEvidenceBatch(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !more {
+			break
+		}
+	}
+	checkpoint, err := p.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return checkpoint
+}
+
+// Thinning removes only issue samples. A Changes, Timeline or break list never
+// reads them, and an issue list reads them only near the end of its window, so
+// each keeps its page links unless the samples it reads were thinned. The rows
+// read across the thinning match a fresh read, none skipped or repeated.
+func TestPostgresThinningKeepsPageLinksOfListsItCannotChange(t *testing.T) {
+	dsn := worstCaseDatabase(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	scope := EvidenceScope{OrgID: "default", ClusterID: "long-open", ClusterUID: "long-open"}
+	opened := now.Add(-8 * 24 * time.Hour)
+	seedLongOpenIssues(t, dsn, scope, opened, 2*time.Hour, 3, now)
+	p := worstCaseProvider(t, dsn, PostgresOptions{EvidenceRetention: "168h"})
+
+	lists := []EvidenceQuery{
+		{Type: "change", Since: now.Add(-2 * time.Hour), Until: now, Limit: 2},
+		{Type: "timeline", GapsApart: true, Since: now.Add(-9 * 24 * time.Hour), Until: now, Limit: 2},
+		{Type: "break", GapsApart: true, Since: now.Add(-9 * 24 * time.Hour), Until: now, Limit: 1},
+		{Type: "occurrence", Since: now.Add(-9 * 24 * time.Hour), Until: now, Limit: 1},
+	}
+	firsts := make([]EvidencePage, len(lists))
+	for i, query := range lists {
+		page, err := p.QueryEvidence(t.Context(), scope, query)
+		if err != nil || page.Next == "" {
+			t.Fatalf("%s first page: next=%q err=%v", query.Type, page.Next, err)
+		}
+		firsts[i] = page
+	}
+	// An issue list that ends inside the thinned hours reads the samples
+	// thinning removes.
+	historic := EvidenceQuery{Type: "occurrence", Since: opened.Add(-time.Hour), Until: opened.Add(90 * time.Minute), Limit: 1}
+	historicPage, err := p.QueryEvidence(t.Context(), scope, historic)
+	if err != nil || historicPage.Next == "" {
+		t.Fatalf("historic issue page: next=%q err=%v", historicPage.Next, err)
+	}
+
+	before, err := p.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := thinUntilSettled(t, p, scope)
+
+	for i, query := range lists {
+		next := query
+		next.Cursor = firsts[i].Next
+		got := drainEvidencePages(t, p, scope, next, evidencePageIDs(firsts[i]))
+		fresh := query
+		fresh.Limit = 500
+		want, err := p.QueryEvidence(t.Context(), scope, fresh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, evidencePageIDs(want)) {
+			t.Fatalf("%s rows across thinning = %v, want %v", query.Type, got, evidencePageIDs(want))
+		}
+	}
+	historic.Cursor = historicPage.Next
+	if _, err = p.QueryEvidence(t.Context(), scope, historic); !errors.Is(err, ErrEvidenceCursorExpired) {
+		t.Fatalf("issue page over thinned samples: %v, want the list restarted from its first page", err)
+	}
+	if after.ThinRevision == before.ThinRevision || after.PruneRevision != before.PruneRevision || !after.PrunedThrough.Equal(before.PrunedThrough) {
+		t.Fatalf("thinning recorded thin %d->%d prune %d->%d pruned through %s->%s; want samples thinned and nothing pruned",
+			before.ThinRevision, after.ThinRevision, before.PruneRevision, after.PruneRevision, before.PrunedThrough, after.PrunedThrough)
+	}
+}
+
+// A steady cluster under the default retention, with issues open longer than
+// it, keeps its page links while maintenance runs and captures keep arriving.
+func TestPostgresDefaultRetentionKeepsPageLinksOfASteadyCluster(t *testing.T) {
+	t.Setenv("KUBERNETES_EVIDENCE_RETENTION", "")
+	dsn := worstCaseDatabase(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	scope := EvidenceScope{OrgID: "default", ClusterID: "steady", ClusterUID: "steady"}
+	// Enough old samples that retention thins them over several passes.
+	seedLongOpenIssues(t, dsn, scope, now.Add(-10*24*time.Hour), 12*time.Hour, 3, now)
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, ObservationHeartbeat: "5m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+	p := provider.(*postgresProvider)
+	p.maintenanceCancel()
+	<-p.maintenanceDone
+	settlePartitionCopy(t, p)
+	if p.evidenceRetention != 7*24*time.Hour {
+		t.Fatalf("default retention = %s, want 168h", p.evidenceRetention)
+	}
+
+	lists := []EvidenceQuery{
+		{Type: "change", Since: now.Add(-2 * time.Hour), Until: now, Limit: 2},
+		{Type: "timeline", GapsApart: true, Since: now.Add(-2 * time.Hour), Until: now, Limit: 2},
+		{Type: "occurrence", Since: now.Add(-11 * 24 * time.Hour), Until: now, Limit: 1},
+	}
+	cursors := make([]EvidenceQuery, len(lists))
+	seen := make([][]string, len(lists))
+	for i, query := range lists {
+		page, err := p.QueryEvidence(t.Context(), scope, query)
+		if err != nil || page.Next == "" {
+			t.Fatalf("%s first page: next=%q err=%v", query.Type, page.Next, err)
+		}
+		cursors[i], seen[i] = query, evidencePageIDs(page)
+		cursors[i].Cursor = page.Next
+	}
+	start, err := p.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thinned := 0
+	for pass := 0; pass < 4; pass++ {
+		more, err := p.compactEvidenceBatch(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if more {
+			thinned++
+		}
+		longOpenIssueCapture(t, p, scope, fmt.Sprintf("steady-%d", pass), now.Add(time.Duration(pass*5-30)*time.Minute), 3, nil)
+		for i := range cursors {
+			if cursors[i].Cursor == "" {
+				continue
+			}
+			page, err := p.QueryEvidence(t.Context(), scope, cursors[i])
+			if err != nil {
+				t.Fatalf("pass %d: %s next page: %v", pass, cursors[i].Type, err)
+			}
+			seen[i] = append(seen[i], evidencePageIDs(page)...)
+			cursors[i].Cursor = page.Next
+		}
+	}
+	end, err := p.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thinned < 2 || end.ThinRevision < start.ThinRevision+2 || end.PruneRevision != start.PruneRevision {
+		t.Fatalf("maintenance thinned in %d passes (thin %d->%d, prune %d->%d), want several thinning passes and no pruning",
+			thinned, start.ThinRevision, end.ThinRevision, start.PruneRevision, end.PruneRevision)
+	}
+	for i := range cursors {
+		got := drainEvidencePages(t, p, scope, cursors[i], seen[i])
+		if len(got) < 2 {
+			t.Fatalf("%s read %d rows", lists[i].Type, len(got))
+		}
 	}
 }

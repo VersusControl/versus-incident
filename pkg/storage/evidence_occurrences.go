@@ -222,21 +222,27 @@ func sortOccurrenceHistory(state *evidenceState) {
 }
 
 // The existing explicit file budget covers compact observations as well as
-// journal rows. Removing either invalidates pinned pages, never silently rebases.
+// journal rows. Removing either invalidates the pinned pages that read it, never
+// silently rebases: a removed journal row counts as pruning, which every list
+// sees, and a removed sample counts as thinning, which only issue lists see.
 func dropOldestEvidence(state *evidenceState) int {
-	var at time.Time
 	var raw []byte
 	if len(state.Observations) > 0 && (len(state.Records) == 0 || state.Observations[0].At.Before(evidenceRetentionTime(state.Records[0]))) {
-		at = state.Observations[0].At
+		at := state.Observations[0].At
 		raw, _ = json.Marshal(state.Observations[0])
 		state.Observations = state.Observations[1:]
-	} else if len(state.Records) > 0 {
-		at = state.Records[0].At
-		raw, _ = json.Marshal(state.Records[0])
-		state.Records = state.Records[1:]
-	} else {
+		if at.After(state.Checkpoint.ThinnedThrough) {
+			state.Checkpoint.ThinnedThrough = at
+		}
+		state.Checkpoint.ThinRevision++
+		return len(raw) + 1
+	}
+	if len(state.Records) == 0 {
 		return 0
 	}
+	at := state.Records[0].At
+	raw, _ = json.Marshal(state.Records[0])
+	state.Records = state.Records[1:]
 	if at.After(state.Checkpoint.PrunedThrough) {
 		state.Checkpoint.PrunedThrough = at
 	}

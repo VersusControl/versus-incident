@@ -5,7 +5,7 @@ import { createElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "./api";
 import { hasKubernetesPublication, kubernetesAccessLost, kubernetesReadNeedsRecovery, kubernetesReportAuthorityLost, kubernetesQueryUsesKinds, kubernetesInventoryNotReady, retainKubernetesPublication } from "./kubernetesContinuity";
-import { useKubernetesCommitEvents, useKubernetesQuery } from "./useKubernetesCluster";
+import { commitStreamRetryCapMs, commitStreamRetryDelay, useKubernetesCommitEvents, useKubernetesQuery } from "./useKubernetesCluster";
 
 const committed = { items: ["checkout"], broken: { total: 3 }, allocatable_cpu: "8", observed_at: "2026-10-28T00:00:00Z", sync: { state: "ready", age_s: 20, partial: false } };
 const warming = { items: [], broken: { total: 0 }, allocatable_cpu: undefined, observed_at: "2026-10-28T00:13:00Z", sync: { state: "syncing", age_s: 800, partial: false } };
@@ -301,6 +301,17 @@ describe("Kubernetes publication continuity", () => {
     expect(hasKubernetesPublication(partial, "invalid")).toBe(false);
   });
 
+  it("withholds an overview that could read none of its kinds", () => {
+    // The server reports a partial denial as ready+partial; error+partial means
+    // no requested kind was readable, so the zero counts are not a publication.
+    const refused = ["core~v1~nodes", "core~v1~pods", "core~v1~namespaces", "apps~v1~deployments", "apps~v1~statefulsets", "apps~v1~daemonsets", "batch~v1~jobs", "batch~v1~cronjobs"]
+      .map((resource_id) => ({ resource_id, class: "forbidden" }));
+    const overview = { connector: "kubernetes", cluster_id: "limited", observed_at: committed.observed_at, nodes: 0, pods: 0, namespaces: 0, workloads: 0,
+      sync: { state: "error", age_s: 30, partial: true }, partial_failures: refused };
+    expect(hasKubernetesPublication(overview, committed.observed_at)).toBe(false);
+    expect(hasKubernetesPublication({ ...overview, sync: { state: "ready", age_s: 30, partial: true }, partial_failures: refused.slice(0, 1) }, committed.observed_at)).toBe(true);
+  });
+
   it("admits only the currently scoped first partial response and hides permission denial", async () => {
     const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const partial = { items: [{ kind: "Deployment", namespace: "shop", name: "checkout" }], counts: { Deployment: 1, Job: 0 }, sync: { state: "error", partial: true },
@@ -452,5 +463,14 @@ describe("Kubernetes publication continuity", () => {
     await waitFor(() => expect(result.current.isFetching).toBe(false));
     expect(result.current.data).toBeUndefined();
     cache.clear();
+  });
+});
+
+describe("commit stream reconnect delay", () => {
+  it("doubles from one second and spreads retries at the cap", () => {
+    expect([0, 1, 2, 3, 4, 5].map(failures => commitStreamRetryDelay(failures))).toEqual([1000, 2000, 4000, 8000, 16000, 32000]);
+    expect(commitStreamRetryDelay(6, () => 0)).toBe(commitStreamRetryCapMs * 0.8);
+    expect(commitStreamRetryDelay(40, () => 1)).toBe(commitStreamRetryCapMs);
+    expect(commitStreamRetryDelay(-3)).toBe(1000);
   });
 });

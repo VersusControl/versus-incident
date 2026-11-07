@@ -62,7 +62,7 @@ export function CoverageMarker({ reasons }: { reasons: ReactNode[] }) {
       style={{ ...position, width: "min(320px, calc(100vw - 16px))", zIndex: 1000 }}
       onMouseLeave={() => { if (!panel.current?.contains(document.activeElement)) setOpen(false); }}
       className="fixed overflow-auto rounded-control border border-ink-600 bg-surface-raised p-3 text-xs text-ink-200 shadow-overlay">
-      <p className="font-medium">Some resources could not be read</p>
+      <p className="font-medium">Some data is incomplete</p>
       <ul tabIndex={unique.length > 3 ? 0 : undefined} aria-label="Coverage reasons" className="mt-2 max-h-14 space-y-1 overflow-y-auto break-words">{unique.map((reason, index) => <li key={typeof reason === "string" ? reason : index}>{reason}</li>)}</ul>
     </div>, document.body)}
   </>;

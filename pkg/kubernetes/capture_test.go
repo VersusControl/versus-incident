@@ -213,6 +213,7 @@ func TestCrashJournalHealthyPollsDoNotStarveLateCrashes(t *testing.T) {
 }
 
 func TestCrashJournalCompletedInitPollsDoNotStarveLateCrash(t *testing.T) {
+	t.Parallel()
 	for _, reason := range []string{"Completed", ""} {
 		t.Run("reason="+reason, func(t *testing.T) {
 			now := time.Now().UTC()

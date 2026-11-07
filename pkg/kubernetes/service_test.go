@@ -729,6 +729,7 @@ func TestGetWorkloadReturnsTypedBoundedRelatedFacts(t *testing.T) {
 }
 
 func TestUsageAndOverviewExposeMetricsAvailabilityFreshnessAndExactQuantities(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name              string
 		nodeMetrics       bool
@@ -817,6 +818,7 @@ func TestUsageAndOverviewExposeMetricsAvailabilityFreshnessAndExactQuantities(t 
 }
 
 func TestOverviewUsesFullPreCapMetricsFreshnessAndTotals(t *testing.T) {
+	t.Parallel()
 	freshTimestamp := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 	staleTimestamp := time.Now().UTC().Add(-10 * time.Minute).Format(time.RFC3339Nano)
 	metrics := make([]any, 0, 501)
@@ -869,6 +871,7 @@ func TestOverviewUsesFullPreCapMetricsFreshnessAndTotals(t *testing.T) {
 }
 
 func TestOverviewDoesNotAggregateIncompleteMetrics(t *testing.T) {
+	t.Parallel()
 	timestamp := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 	metrics := []any{
 		map[string]any{"kind": "PodMetrics", "metadata": map[string]any{"namespace": "shop", "name": "pod-a"}, "timestamp": timestamp, "containers": []any{map[string]any{"usage": map[string]any{"cpu": "1", "memory": "1Gi"}}}},
@@ -905,6 +908,7 @@ func TestOverviewDoesNotAggregateIncompleteMetrics(t *testing.T) {
 }
 
 func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
+	t.Parallel()
 	const podCount = 6501
 	var podRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -955,6 +959,7 @@ func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
 }
 
 func TestOverviewMarksFailedPodCollectionUnavailableAndPreservesDiscoveryPartial(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api":
@@ -990,6 +995,7 @@ func TestOverviewMarksFailedPodCollectionUnavailableAndPreservesDiscoveryPartial
 }
 
 func TestOverviewReadsMetricsBeforeInventoryBudgetIsExhausted(t *testing.T) {
+	t.Parallel()
 	timestamp := time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
 	var eventRequests atomic.Int32
 	var podMetricRequests atomic.Int32
@@ -1063,6 +1069,7 @@ func TestOverviewReadsMetricsBeforeInventoryBudgetIsExhausted(t *testing.T) {
 }
 
 func TestUsageMarksMissingMetricsAPIUnavailable(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api":
@@ -1159,6 +1166,7 @@ func TestAggregateEncodedTrimAttributesDroppedTailWithoutDuplicateOmissions(t *t
 }
 
 func TestTerminalEncodedSizeTruncationPropagatesThroughAggregates(t *testing.T) {
+	t.Parallel()
 	var continuationRequests atomic.Int32
 	// The projection keeps at most the index label bound, so each object is
 	// wider than one aggregate page only once the page holds enough of them.
@@ -1987,6 +1995,7 @@ func TestPodLogStreamRetainedResumeBoundary(t *testing.T) {
 }
 
 func TestPodLogStreamCheckpointBandwidth(t *testing.T) {
+	t.Parallel()
 	const lineCount = 10000
 	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

@@ -24,6 +24,7 @@ func TestTimelineAdmissionErrorsKeepDistinctHTTPContracts(t *testing.T) {
 		{"storage contention", "timeline_storage_busy", "1", kubernetes.ErrTimelineContention, http.StatusServiceUnavailable, true},
 		{"pinned capacity", "stream_busy", "", kubernetes.ErrIndexStreamBusy, http.StatusTooManyRequests, true},
 		{"expired or replaced cursor", "invalid_arguments", "", kubernetes.ErrInvalidArguments, http.StatusBadRequest, false},
+		{"list changed under a snapshot cursor", "cursor_expired", "", kubernetes.ErrCursorExpired, http.StatusBadRequest, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, wrapped := range []bool{false, true} {

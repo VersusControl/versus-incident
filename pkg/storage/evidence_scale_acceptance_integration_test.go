@@ -95,7 +95,7 @@ func TestPostgresEvidenceScaleAcceptance(t *testing.T) {
 	if dsn == "" || results == "" {
 		t.Fatal("TEST_POSTGRES_DSN and HARNESS_RESULTS_DIR are required")
 	}
-	provider, err := NewPostgres(PostgresOptions{DSN: dsn})
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestPostgresEvidenceScaleServiceReadAcceptance(t *testing.T) {
 	if dsn == "" || results == "" {
 		t.Fatal("TEST_POSTGRES_DSN and HARNESS_RESULTS_DIR are required")
 	}
-	provider, err := NewPostgres(PostgresOptions{DSN: dsn})
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +656,7 @@ func TestPostgresEvidenceScalePreparedPlanExplain(t *testing.T) {
 	if os.Getenv("EVIDENCE_SCALE_PLAN_PROBE") != "1" {
 		t.Skip("set EVIDENCE_SCALE_PLAN_PROBE=1 for the isolated cached-plan probe")
 	}
-	provider, err := NewPostgres(PostgresOptions{DSN: os.Getenv("TEST_POSTGRES_DSN")})
+	provider, err := NewPostgres(PostgresOptions{DSN: os.Getenv("TEST_POSTGRES_DSN"), EvidenceRetention: "0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +808,7 @@ func TestPostgresEvidenceScalePinnedContinuation(t *testing.T) {
 	if os.Getenv("EVIDENCE_SCALE_PINNED_PROBE") != "1" {
 		t.Skip("set EVIDENCE_SCALE_PINNED_PROBE=1 for the retained-corpus pin probe")
 	}
-	provider, err := NewPostgres(PostgresOptions{DSN: os.Getenv("TEST_POSTGRES_DSN")})
+	provider, err := NewPostgres(PostgresOptions{DSN: os.Getenv("TEST_POSTGRES_DSN"), EvidenceRetention: "0"})
 	if err != nil {
 		t.Fatal(err)
 	}
