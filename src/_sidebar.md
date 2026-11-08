@@ -116,6 +116,6 @@
   - [v1.4.30](/migration/migration-v1.4.30.md)
   - [v1.4.27](/migration/migration-v1.4.27.md)
 
-- In development
+- In Development
   - [AWS Harness](/in-development/aws-harness)
-  - [Connect your AWS account](/in-development/aws-harness-connect)
+  - [AWS FinOps Agent](/in-development/aws-finops-agent)

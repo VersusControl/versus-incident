@@ -24,6 +24,8 @@ account and region at once:
 - **What is exposed to the internet?**
 - **What is it costing, and what moved?**
 
+Cost has its own page: [AWS FinOps Agent](./aws-finops-agent.md).
+
 ## A quick tour
 
 ### See everything at a glance
