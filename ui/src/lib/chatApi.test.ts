@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, AUTH_EXPIRED_EVENT, clearSecret, setSecret } from "./api";
+import { api, AUTH_EXPIRED_EVENT, clearSecret } from "./api";
 
 class MemoryStorage {
   private values = new Map<string, string>();
@@ -40,20 +40,18 @@ function streamResponse(frames: string[], status = 200) {
 }
 
 describe("chat API", () => {
-  it("removes legacy gateway secrets without loading or persisting them", async () => {
+  it("removes legacy gateway secrets on load and never sends them", async () => {
     local.setItem("versus.gatewaySecret", "legacy");
     session.setItem("versus.gatewaySecret", "current");
     vi.resetModules();
     const freshApi = await import("./api");
 
-    expect(freshApi.getSecret()).toBeNull();
     expect(session.getItem("versus.gatewaySecret")).toBeNull();
     expect(local.getItem("versus.gatewaySecret")).toBeNull();
 
-    freshApi.setSecret("memory-only");
-    expect(freshApi.getSecret()).toBe("memory-only");
-    expect(session.getItem("versus.gatewaySecret")).toBeNull();
-    expect(local.getItem("versus.gatewaySecret")).toBeNull();
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    await freshApi.api.getAgentConfig();
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).has("X-Gateway-Secret")).toBe(false);
   });
 
   it("cleans local storage when session storage cleanup throws", async () => {
@@ -63,9 +61,8 @@ describe("chat API", () => {
       throw new Error("session storage unavailable");
     });
     vi.resetModules();
-    const freshApi = await import("./api");
+    await import("./api");
 
-    expect(freshApi.getSecret()).toBeNull();
     expect(local.getItem("versus.gatewaySecret")).toBeNull();
     expect(session.getItem("versus.gatewaySecret")).toBe("legacy");
   });
@@ -77,15 +74,13 @@ describe("chat API", () => {
       throw new Error("local storage unavailable");
     });
     vi.resetModules();
-    const freshApi = await import("./api");
+    await import("./api");
 
-    expect(freshApi.getSecret()).toBeNull();
     expect(session.getItem("versus.gatewaySecret")).toBeNull();
     expect(local.getItem("versus.gatewaySecret")).toBe("legacy");
   });
 
-  it("sends auth/cookie/no-store policy and parses named multiline SSE", async () => {
-    setSecret("gateway-secret");
+  it("sends cookie-only/no-store policy and parses named multiline SSE", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       streamResponse([
         "event: model_delta\r\ndata: {\"seq\":1,\"at\":\"\",\"kind\":\"model_delta\",\r\n",
@@ -101,7 +96,7 @@ describe("chat API", () => {
       expect.objectContaining({ credentials: "same-origin", cache: "no-store" }),
     );
     const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(new Headers(init.headers).get("X-Gateway-Secret")).toBe("gateway-secret");
+    expect(new Headers(init.headers).has("X-Gateway-Secret")).toBe(false);
     expect(JSON.parse(String(init.body))).toEqual({ message: "hello", attachment: { service: "api" } });
     expect(events).toEqual([
       { seq: 1, at: "", kind: "model_delta", delta: "hello" },
@@ -109,36 +104,7 @@ describe("chat API", () => {
     ]);
   });
 
-  it("uses the shared approval list and decision routes", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
-      const url = String(input);
-      if (url.endsWith("/api/v1/agent/approvals?state=pending")) {
-        return Promise.resolve(new Response(JSON.stringify({ approvals: [] }), { status: 200 }));
-      }
-      return Promise.resolve(new Response(JSON.stringify({ id: "approval-1", state: "approved" }), { status: 200 }));
-    });
-
-    await api.listAgentApprovals("pending");
-    await api.approveAgentApproval("approval/1", "nonce-value");
-    await api.rejectAgentApproval("approval-2", "Not safe to apply");
-
-    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      "/api/v1/agent/approvals?state=pending",
-      "/api/v1/agent/approvals/approval%2F1/approve",
-      "/api/v1/agent/approvals/approval-2/reject",
-    ]);
-    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({ nonce: "nonce-value" });
-    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({ reason: "Not safe to apply" });
-  });
-
-  it.each(["approve", "reject"] as const)("preserves the read-only conflict code for %s commands", async (decision) => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ code: "approval_read_only", message: "created before the upgrade; propose again" }), { status: 409 }));
-    const command = decision === "approve" ? api.approveAgentApproval("archived", "nonce") : api.rejectAgentApproval("archived", "Not safe");
-    await expect(command).rejects.toMatchObject({ status: 409, body: { code: "approval_read_only" } });
-  });
-
   it("dispatches auth-expired and throws a safe ApiError on 401", async () => {
-    setSecret("rotated");
     const expired = vi.fn();
     window.addEventListener(AUTH_EXPIRED_EVENT, expired);
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -152,18 +118,7 @@ describe("chat API", () => {
     window.removeEventListener(AUTH_EXPIRED_EVENT, expired);
   });
 
-  it("dispatches auth-expired for enterprise cookie expiry without a gateway secret", async () => {
-    clearSecret();
-    const expired = vi.fn();
-    window.addEventListener(AUTH_EXPIRED_EVENT, expired);
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('{"error":"session expired"}', { status: 401 }));
-    await expect(api.streamChatMessage("s1", "hello", undefined, () => {})).rejects.toMatchObject({ status: 401 });
-    expect(expired).toHaveBeenCalledTimes(1);
-    window.removeEventListener(AUTH_EXPIRED_EVENT, expired);
-  });
-
   it("dispatches auth-expired for cookie-only multipart and report image requests", async () => {
-    clearSecret();
     const expired = vi.fn();
     window.addEventListener(AUTH_EXPIRED_EVENT, expired);
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(

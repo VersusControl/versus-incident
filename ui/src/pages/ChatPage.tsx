@@ -267,7 +267,22 @@ function approvalIds(events: ChatEvent[] | undefined) {
   return [...ids];
 }
 
-function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: EvidenceSelection) => void }) {
+// Assigns every approval id to the first saved turn that holds it, so an action
+// proposal shows one CLI hint even when several turns or a retained live run
+// carry the same approval.
+function approvalHintOwners(turns: ChatTurn[]) {
+  const byTurn = new Map<string, string[]>();
+  const shown = new Set<string>();
+  for (const turn of turns) {
+    if (turn.role === "user" || turn.role === "compaction") continue;
+    const owned = approvalIds(turn.events).filter((id) => !shown.has(id));
+    owned.forEach((id) => shown.add(id));
+    if (owned.length > 0) byTurn.set(turn.id, owned);
+  }
+  return { byTurn, shown };
+}
+
+function TurnView({ turn, approvals, onEvidence }: { turn: ChatTurn; approvals: string[]; onEvidence: (value: EvidenceSelection) => void }) {
   if (turn.role === "compaction") {
     if (turn.content.trimStart().startsWith('{"kind":"session_discovery"')) return null;
     if (turn.content === "Chat run ended without an assistant answer." || turn.content.startsWith("The model could not produce a response.")) {
@@ -288,7 +303,7 @@ function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: Ev
   return (
     <article className="my-6 min-w-0">
       {turn.tool_calls?.map((call, index) => <ToolActivity key={`${turn.id}-${index}`} event={traceEvent(call, index)} />)}
-      {approvalIds(turn.events).map((id) => <ActionCliHint key={`${turn.id}-approval-${id}`} approvalId={id} />)}
+      {approvals.map((id) => <ActionCliHint key={`${turn.id}-approval-${id}`} approvalId={id} />)}
       <MarkdownText>{turn.content}</MarkdownText>
       <CitationList
         citations={turn.citations}
@@ -303,12 +318,12 @@ function TurnView({ turn, onEvidence }: { turn: ChatTurn; onEvidence: (value: Ev
   );
 }
 
-function LiveBlocks({ blocks, terminal }: { blocks: ChatStreamBlock[]; terminal: ChatEvent | null }) {
+function LiveBlocks({ blocks, terminal, savedApprovals }: { blocks: ChatStreamBlock[]; terminal: ChatEvent | null; savedApprovals: ReadonlySet<string> }) {
   return (
     <div className="my-6 min-w-0">
       {blocks.map((block) => {
         if (block.kind === "tool") return <ToolActivity key={block.key} event={block.event} />;
-        if (block.kind === "approval") return block.event.approval ? <ActionCliHint key={block.key} approvalId={block.event.approval.id} /> : null;
+        if (block.kind === "approval") return block.event.approval && !savedApprovals.has(block.event.approval.id) ? <ActionCliHint key={block.key} approvalId={block.event.approval.id} /> : null;
         if (block.kind === "compaction") return <div key={block.key} className="my-3 text-center text-2xs italic text-ink-400">{block.text}</div>;
         return <MarkdownText key={block.key}>{block.text}</MarkdownText>;
       })}
@@ -473,6 +488,7 @@ export function ChatPage() {
     Math.abs(new Date(turn.created_at).getTime() - new Date(optimistic.created_at).getTime()) <= 5 * 60 * 1000
   );
   const displayTurns = optimistic && !optimisticPersisted ? [...turns, optimistic] : turns;
+  const approvalHints = approvalHintOwners(displayTurns);
 
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
@@ -735,8 +751,8 @@ export function ChatPage() {
                     {!conversationStarted && <div className="mx-auto max-w-lg text-center"><VersusChatLogo /><h2 className="mt-3 text-base font-semibold text-ink-50">Versus DevOps Chat</h2><div className="mt-5 flex flex-wrap justify-center gap-2">{suggestions.map((suggestion) => <button key={suggestion} type="button" onClick={() => setDraft(suggestion)} className="rounded-control border border-ink-500/60 bg-surface px-3 py-2 text-left text-xs text-ink-200 hover:border-accent/60 hover:bg-accent-subtle">{suggestion}</button>)}</div></div>}
                     {selectedId && sessionQ.isLoading && <div className="flex justify-center py-20 text-ink-400"><LoaderCircle className="animate-spin" aria-label="Loading conversation" /></div>}
                     {sessionQ.isError && <RetryableError error={sessionQ.error} onRetry={() => sessionQ.refetch()} retrying={sessionQ.isFetching} context="Couldn't load this conversation" />}
-                    {displayTurns.map((turn) => <TurnView key={turn.id} turn={turn} onEvidence={openEvidence} />)}
-                    {selectedRun && (selectedRun.active || stream.blocks.length > 0 || stream.terminal) && <LiveBlocks blocks={stream.blocks} terminal={stream.terminal} />}
+                    {displayTurns.map((turn) => <TurnView key={turn.id} turn={turn} approvals={approvalHints.byTurn.get(turn.id) ?? []} onEvidence={openEvidence} />)}
+                    {selectedRun && (selectedRun.active || stream.blocks.length > 0 || stream.terminal) && <LiveBlocks blocks={stream.blocks} terminal={stream.terminal} savedApprovals={approvalHints.shown} />}
                     {active && stream.blocks.length === 0 && <div className="flex items-center gap-2 py-4 text-xs text-ink-400"><LoaderCircle size={14} className="animate-spin" />Thinking</div>}
                     {selectedRun?.error && <div role="alert" className="my-4 flex items-center justify-between gap-3 rounded-control border border-sev-critical/40 bg-sev-critical/10 p-3 text-xs text-sev-critical"><span>{selectedRun.error.message}</span><div className="flex gap-2"><button type="button" onClick={retryResync} className="btn">Retry</button><button type="button" onClick={() => setLiveRuns((runs) => {
                       const run = runs[selectedId as string];

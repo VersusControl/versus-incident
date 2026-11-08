@@ -33,7 +33,6 @@ func adminGatewayGuard(c *fiber.Ctx) error {
 	expected := cfg.GatewaySecret
 	got := c.Get("X-Gateway-Secret")
 	if expected != "" && secureEqual(got, expected) {
-		middleware.MarkHeaderCredential(c)
 		grantCommunityPermissions(c)
 		return c.Next()
 	}
