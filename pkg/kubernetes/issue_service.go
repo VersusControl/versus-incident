@@ -63,7 +63,10 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 	for _, kind := range kinds {
 		state, exists := status.Kinds[kind]
 		if !options.captureOnly {
-			optional := kind == "Secret" || kind == "ServiceAccount" || kind == "ConfigMap" || kind == "PersistentVolumeClaim" || kind == "ControllerRevision" || kind == "Node" && (options.Namespace != "" || service.client.namespace != "")
+			// Nodes only add node-level issues and context. An identity that may
+			// not list them still reads every workload issue, and the denial is
+			// named below as a partial failure rather than refusing the read.
+			optional := kind == "Secret" || kind == "ServiceAccount" || kind == "ConfigMap" || kind == "PersistentVolumeClaim" || kind == "ControllerRevision" || kind == "Node"
 			if !optional && state.Error == "forbidden" {
 				return IssuePage{}, ErrForbidden
 			}
@@ -228,11 +231,22 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		if first.Broken != second.Broken {
 			return first.Broken
 		}
+		// Newest break first within a severity; issues without a break time
+		// follow those with one.
+		if (first.BrokeAt == nil) != (second.BrokeAt == nil) {
+			return first.BrokeAt != nil
+		}
 		if first.BrokeAt != nil && second.BrokeAt != nil && !first.BrokeAt.Equal(*second.BrokeAt) {
-			return first.BrokeAt.Before(*second.BrokeAt)
+			return first.BrokeAt.After(*second.BrokeAt)
 		}
 		if first.Count != second.Count {
 			return first.Count > second.Count
+		}
+		// The rest is a total order over issue identity, so issues that tie on
+		// everything above (a Deployment and a StatefulSet both named "web")
+		// keep one order on every read and offset pages never overlap.
+		if first.Root.Kind != second.Root.Kind {
+			return first.Root.Kind < second.Root.Kind
 		}
 		if first.Root.Namespace != second.Root.Namespace {
 			return first.Root.Namespace < second.Root.Namespace
@@ -240,20 +254,38 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		if first.Root.Name != second.Root.Name {
 			return first.Root.Name < second.Root.Name
 		}
+		if first.Root.UID != second.Root.UID {
+			return first.Root.UID < second.Root.UID
+		}
 		return first.Rule < second.Rule
 	})
 	start, end, next := 0, len(page.Items), ""
+	page.Total = len(page.Items)
 	if !options.unpaged {
-		var err error
-		start, end, next, err = pageWindow(options.Cursor, normalizePageLimit(options.Limit), len(page.Items))
+		page.Limit = normalizePageLimit(options.Limit)
+		rows := make([]string, len(page.Items))
+		for position, issue := range page.Items {
+			rows[position] = issue.Root.Kind + "\x00" + issue.Root.Namespace + "\x00" + issue.Root.Name + "\x00" + issue.Root.UID + "\x00" + issue.Rule + "\x00" + issue.Severity
+		}
+		filters := struct {
+			Namespace, Severity, Kind, RootUID string
+			Broken                             bool
+		}{options.Namespace, options.Severity, options.Kind, options.RootUID, options.Broken}
+		cursor, err := bindSnapshotCursor("issues", service.indexScope(), filters, rows)
 		if err != nil {
 			return IssuePage{}, err
 		}
+		start, end, next, err = cursor.window(options.Cursor, page.Limit, len(page.Items))
+		if err != nil {
+			return IssuePage{}, err
+		}
+		page.resume = cursor.resumeFrom(start)
 	}
 	page.Items, page.Next = page.Items[start:end], next
 	if options.RootUID != "" && len(page.Items) > 1 {
 		page.Items = page.Items[:1]
 		page.Next = ""
+		page.Total = 1
 	}
 	page.Truncated = false
 	if !page.Sync.Partial && page.Sync.State == "error" {
@@ -261,29 +293,25 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 	}
 	if options.IncludeChanges && len(page.Items) > 0 {
 		edges, complete := kubegraph.BuildComplete(kubeindex.Snapshot{Records: records}, 0)
-		earliest := now
-		for _, issue := range page.Items[:min(5, len(page.Items))] {
-			if issue.BrokeAt != nil && issue.BrokeAt.Before(earliest) {
-				earliest = *issue.BrokeAt
+		enriched := page.Items[:min(5, len(page.Items))]
+		breaks := make([]kubebreaks.Break, len(enriched))
+		for position, issue := range enriched {
+			item, exists := brokenByRoot[issue.Root.UID]
+			if !exists {
+				item = kubebreaks.Break{Root: kref.Ref{Kind: issue.Root.Kind, Name: issue.Root.Name, Namespace: issue.Root.Namespace, UID: issue.Root.UID}, BrokeAt: now}
 			}
+			breaks[position] = item
 		}
-		history := kubechanges.Page{}
+		// Each issue reads only the window its correlation uses, so the same
+		// issue is enriched, and warned about, identically on every page and
+		// under every list filter.
+		windows, windowOf := issueChangeWindows(breaks)
+		nodeWindowOf := issueNodeWindows(&windows, breaks, records, byUID)
 		if err := service.validateCredential(ctx); err != nil {
 			return IssuePage{}, err
 		}
-		if service.evidenceStore() != nil {
-			history, err = service.evidenceChangeWindow(ctx, earliest.Add(-30*time.Minute), now.Add(2*time.Minute), options.Namespace)
-			if err != nil || history.Next != "" {
-				class := "budget_exhausted"
-				if err != nil {
-					class = errorClass(err)
-				}
-				page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: class})
-				page.Sync.Partial = true
-				failed = true
-			}
-		}
-		if store := service.changeStore(); store != nil && service.evidenceStore() == nil {
+		store := service.changeStore()
+		if store != nil && service.evidenceStore() == nil {
 			if err := service.commitCredential(ctx, func() error {
 				return store.Append(kubechanges.Reconstruct(service.scope.ClusterID, records, now), now)
 			}); err != nil && !errors.Is(err, kubechanges.ErrLeaseLost) {
@@ -291,20 +319,56 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 				page.Sync.Partial = true
 				failed = true
 			}
-			// A continuous owner fences demand reconstruction writes, not
-			// history reads. Its stored coverage still governs completeness.
-			history, err = store.ReadWindow(earliest.Add(-30*time.Minute), now.Add(2*time.Minute), now)
-			if err != nil {
-				page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: errorClass(err)})
+		}
+		// The local change store reads whole-cluster windows, so a namespaced
+		// issue's own window already holds the Node changes an extra Node
+		// window would add. Only a window some issue uses as its own is read
+		// there; a cluster-scoped root's own window keeps only its own kind.
+		wholeCluster := service.evidenceStore() == nil && store != nil
+		ownWindow := make([]bool, len(windows))
+		for _, index := range windowOf {
+			ownWindow[index] = true
+		}
+		for index := range windows {
+			window := &windows[index]
+			var readErr error
+			switch {
+			case service.evidenceStore() != nil:
+				window.page, readErr = service.evidenceChangeWindow(ctx, window.from, window.to, window.namespace, window.kind)
+			case store != nil && !ownWindow[index]:
+				continue
+			case store != nil:
+				// A continuous owner fences demand reconstruction writes, not
+				// history reads. Its stored coverage still governs completeness.
+				window.page, readErr = store.ReadWindow(window.from, window.to, now)
+				if readErr == nil && window.kind != "" {
+					window.page.Items = changesOfKind(window.page.Items, window.kind)
+				}
+			}
+			if readErr != nil {
+				page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: errorClass(readErr)})
 				page.Sync.Partial = true
 				failed = true
+				continue
 			}
+			// A full window is a bounded read, not a failure: only the issue, or
+			// the same-instant issues, that use this window are marked as
+			// missing some changes.
+			window.truncated = window.page.Next != ""
 		}
-		for position := range page.Items[:min(5, len(page.Items))] {
+		for position := range enriched {
 			issue := &page.Items[position]
-			item, exists := brokenByRoot[issue.Root.UID]
-			if !exists {
-				item = kubebreaks.Break{Root: kref.Ref{Kind: issue.Root.Kind, Name: issue.Root.Name, Namespace: issue.Root.Namespace, UID: issue.Root.UID}, BrokeAt: now}
+			item := breaks[position]
+			window := windows[windowOf[position]]
+			history := window.page
+			truncated := window.truncated
+			if index := nodeWindowOf[position]; index >= 0 && !wholeCluster {
+				history = mergeIssueChangeWindows(history, windows[index].page)
+				truncated = truncated || windows[index].truncated
+			}
+			if truncated {
+				issue.HistoryTruncated = true
+				issue.Partial = true
 			}
 			denied := map[string]bool{}
 			for _, kind := range []string{"Secret", "ConfigMap", "ServiceAccount", "PersistentVolumeClaim"} {
@@ -433,4 +497,104 @@ func (service *Service) rememberBreaks(items []kubebreaks.Break, namespace strin
 			}
 		}
 	}
+}
+
+// issueChangeWindow is one bounded history read, shared only by issues that
+// broke at the same instant in the same scope. A namespaced window reads one
+// namespace; a cluster-scoped window (namespace empty) reads one cluster-scoped
+// kind, so a busy namespace can never fill another issue's read.
+type issueChangeWindow struct {
+	from, to        time.Time
+	namespace, kind string
+	page            kubechanges.Page
+	truncated       bool
+}
+
+// issueChangeWindows returns one correlation window per distinct break time
+// and issue scope, and for each break the index of its window. Each break
+// reads exactly [BrokeAt-30m, BrokeAt+2m], the range correlation reads, in its
+// own root's namespace. A cluster-scoped root reads its own kind instead.
+// Overlapping windows are never merged: a merged read that hits its cap would
+// mark, and crowd out, every issue in it, so an issue's changes and warnings
+// would depend on its neighbours on the page or on the list filter. Only
+// identical windows share a read.
+func issueChangeWindows(breaks []kubebreaks.Break) ([]issueChangeWindow, []int) {
+	windows := []issueChangeWindow{}
+	windowOf := make([]int, len(breaks))
+	for position := range breaks {
+		root := breaks[position].Root
+		kind := ""
+		if root.Namespace == "" {
+			kind = root.Kind
+		}
+		windowOf[position] = addIssueChangeWindow(&windows, breaks[position].BrokeAt, root.Namespace, kind)
+	}
+	return windows, windowOf
+}
+
+// issueNodeWindows adds a cluster-scoped Node window for each namespaced break
+// whose Pods run on an indexed Node, because correlation links that Node's
+// changes to the issue. It returns, per break, the index of that window or -1.
+// Same-instant breaks share the Node read, so a request reads at most one
+// namespace window and one Node window per enriched issue.
+func issueNodeWindows(windows *[]issueChangeWindow, breaks []kubebreaks.Break, records []kubeindex.Record, byUID map[string]kubeindex.Record) []int {
+	nodeWindowOf := make([]int, len(breaks))
+	nodes := map[string]bool{}
+	for _, record := range records {
+		if record.Kind == "Node" {
+			nodes[record.Name] = true
+		}
+	}
+	for position := range breaks {
+		nodeWindowOf[position] = -1
+		root := breaks[position].Root
+		if root.Namespace == "" || len(nodes) == 0 {
+			continue
+		}
+		for _, record := range records {
+			if record.Kind == "Pod" && record.NodeName != "" && nodes[record.NodeName] && kubebreaks.Root(record, byUID).UID == root.UID {
+				nodeWindowOf[position] = addIssueChangeWindow(windows, breaks[position].BrokeAt, "", "Node")
+				break
+			}
+		}
+	}
+	return nodeWindowOf
+}
+
+func addIssueChangeWindow(windows *[]issueChangeWindow, brokeAt time.Time, namespace, kind string) int {
+	from, to := brokeAt.Add(-30*time.Minute), brokeAt.Add(2*time.Minute)
+	for index, window := range *windows {
+		if window.from.Equal(from) && window.to.Equal(to) && window.namespace == namespace && window.kind == kind {
+			return index
+		}
+	}
+	*windows = append(*windows, issueChangeWindow{from: from, to: to, namespace: namespace, kind: kind})
+	return len(*windows) - 1
+}
+
+// changesOfKind keeps the changes to objects of one kind.
+func changesOfKind(changes []Change, kind string) []Change {
+	kept := make([]Change, 0, len(changes))
+	for _, change := range changes {
+		if change.Kind == kind {
+			kept = append(kept, change)
+		}
+	}
+	return kept
+}
+
+// mergeIssueChangeWindows combines an issue's own window with the
+// cluster-scoped window it also correlates against.
+func mergeIssueChangeWindows(own, cluster kubechanges.Page) kubechanges.Page {
+	merged := kubechanges.Page{Items: append(append([]Change{}, own.Items...), cluster.Items...), Gaps: append(append([]kubechanges.Gap{}, own.Gaps...), cluster.Gaps...), Coverage: map[string]kubechanges.Gap{}}
+	for _, page := range []kubechanges.Page{own, cluster} {
+		for kind, interval := range page.Coverage {
+			merged.Coverage[kind] = interval
+		}
+	}
+	merged.Next = own.Next
+	if merged.Next == "" {
+		merged.Next = cluster.Next
+	}
+	return merged
 }

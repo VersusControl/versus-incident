@@ -1223,6 +1223,7 @@ func TestKindFirstListedLaterProducesNoChangesOrBreaks(t *testing.T) {
 // as never listed, and that mark is in the generation a new replica reads: the
 // replica's first listing of the kind later is still a baseline.
 func TestAbsentKindSurvivesThePublishedGenerationForANewReplica(t *testing.T) {
+	t.Parallel()
 	base := storage.NewMemory()
 	fleet := newBootFleet(t, "acme", base, "boot")
 	fixture := newFakeCluster(t, "boot-token", "boot-api")

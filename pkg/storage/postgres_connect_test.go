@@ -2,13 +2,74 @@ package storage
 
 // postgres_connect_test.go — covers the bounded, redacted, retried Postgres
 // connect hardening: redactDSN must never leak a password, and an unreachable
-// DSN must fail within its configured budget instead of hanging.
+// DSN must fail within its configured budget instead of hanging. It also covers
+// how the startup options for Kubernetes history are resolved.
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestEvidenceRetentionOption(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured string
+		env        string
+		want       time.Duration
+		invalid    bool
+	}{
+		{name: "empty means seven days", want: 168 * time.Hour},
+		{name: "zero keeps everything", configured: "0", want: 0},
+		{name: "configured value", configured: "720h", want: 720 * time.Hour},
+		{name: "environment overrides the configured value", configured: "720h", env: "0", want: 0},
+		{name: "environment alone", env: "9504h", want: 9504 * time.Hour},
+		{name: "negative is rejected", configured: "-1h", invalid: true},
+		{name: "unreadable is rejected", configured: "7d", invalid: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("KUBERNETES_EVIDENCE_RETENTION", test.env)
+			got, err := evidenceRetentionOption(test.configured)
+			if test.invalid {
+				if err == nil {
+					t.Fatalf("retention %q accepted as %s, want an error", test.configured, got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("retention = %s, %v; want %s", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestEvidenceRetentionZeroDeletesAndThinsNothing(t *testing.T) {
+	// No database: with retention off neither path may reach one.
+	p := &postgresProvider{evidenceRetention: 0}
+	if cutoff := p.evidenceCutoff(); !cutoff.IsZero() {
+		t.Fatalf("save cutoff = %s, want none so every record is written", cutoff)
+	}
+	ran, err := p.compactEvidenceBatch(context.Background())
+	if ran || err != nil {
+		t.Fatalf("compaction ran = %v, err = %v; want no month drop and no thinning", ran, err)
+	}
+}
+
+func TestEvidenceRetentionDefaultSetsSaveCutoff(t *testing.T) {
+	t.Setenv("KUBERNETES_EVIDENCE_RETENTION", "")
+	retention, err := evidenceRetentionOption("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &postgresProvider{evidenceRetention: retention}
+	before := time.Now().UTC().Add(-168 * time.Hour)
+	cutoff := p.evidenceCutoff()
+	if cutoff.Before(before) || cutoff.After(time.Now().UTC().Add(-168*time.Hour)) {
+		t.Fatalf("save cutoff = %s, want seven days ago", cutoff)
+	}
+}
 
 func TestRedactDSN(t *testing.T) {
 	cases := []struct {

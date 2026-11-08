@@ -107,9 +107,9 @@ func (controller *ChatAdminController) Register(router fiber.Router) {
 	apiV1.Post("/sessions/:id/turns", controller.message)
 	apiV1.Post("/sessions/:id/cancel", controller.cancel)
 	apiV1.Get("/sessions/:id/events", controller.replayEvents)
-	apiV1.Post("/proposals", controller.requireAgentApproval, controller.createProposal)
+	apiV1.Post("/proposals", actionsDisabled)
 	apiV1.Get("/approvals", controller.requireAgentApproval, controller.listApprovals)
-	apiV1.Post("/approvals/:id/approve", controller.requireAgentApproval, controller.approve)
+	apiV1.Post("/approvals/:id/approve", actionsDisabled)
 	apiV1.Post("/approvals/:id/reject", controller.requireAgentApproval, controller.reject)
 }
 
@@ -164,6 +164,19 @@ func (controller *ChatAdminController) requireAgentApproval(c *fiber.Ctx) error 
 	return c.Next()
 }
 
+// actionsDisabled refuses every request to propose or approve an
+// infrastructure action, whatever credential the caller holds. Action
+// execution is turned off on the server, so no browser session, gateway
+// secret or upstream session may create a proposal directly or run an
+// approved change. It answers before permission checks and before any
+// approval service is resolved, so a refused request writes nothing to the
+// ledger, saves no proposal and never reaches an action adapter. Proposals
+// raised by the chat agent are still recorded, and listing and rejecting
+// approvals stay available.
+func actionsDisabled(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusForbidden).JSON(agentapi.Error{Code: "actions_disabled", Message: "Actions are turned off on this server."})
+}
+
 func approvalContext(c *fiber.Ctx) context.Context {
 	return core.WithCallerAuthorization(c.UserContext(), core.CallerAuthorization{
 		Actor:         requestActor(c),
@@ -183,32 +196,6 @@ func (controller *ChatAdminController) listApprovals(c *fiber.Ctx) error {
 		return writeApprovalError(c, err)
 	}
 	return c.JSON(fiber.Map{"approvals": approvals})
-}
-
-func (controller *ChatAdminController) createProposal(c *fiber.Ctx) error {
-	var input act.ProposalInput
-	if err := c.BodyParser(&input); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(agentapi.Error{Code: "invalid_request", Message: "invalid action proposal"})
-	}
-	result, err := controller.approvalService(c).Propose(approvalContext(c), input)
-	if err != nil {
-		return writeApprovalError(c, err)
-	}
-	return c.Status(fiber.StatusCreated).JSON(result)
-}
-
-func (controller *ChatAdminController) approve(c *fiber.Ctx) error {
-	var request struct {
-		Nonce string `json:"nonce"`
-	}
-	if err := c.BodyParser(&request); err != nil || strings.TrimSpace(request.Nonce) == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(agentapi.Error{Code: "invalid_request", Message: "nonce is required"})
-	}
-	approval, err := controller.approvalService(c).Approve(approvalContext(c), c.Params("id"), request.Nonce, requestActor(c))
-	if err != nil {
-		return writeApprovalError(c, err)
-	}
-	return c.JSON(approval)
 }
 
 func (controller *ChatAdminController) reject(c *fiber.Ctx) error {

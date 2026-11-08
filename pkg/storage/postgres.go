@@ -34,6 +34,10 @@ type PostgresOptions struct {
 	HistoryReadConcurrency int
 	ObservationHeartbeat   string
 	EvidenceRetention      string
+	// EvidenceSaveChunk is the most journal records one save transaction
+	// writes (1..1024, default 500). A larger capture is saved in several
+	// transactions of at most this many records.
+	EvidenceSaveChunk int
 }
 
 type postgresProvider struct {
@@ -45,8 +49,26 @@ type postgresProvider struct {
 	historyDB               *sql.DB
 	maintenanceCancel       context.CancelFunc
 	maintenanceDone         chan struct{}
-	observationHeartbeat    time.Duration
-	evidenceRetention       time.Duration
+	// evidenceSingleStep reads the journal in one statement instead of a walk
+	// over months; tests compare the two.
+	evidenceSingleStep bool
+	// evidenceMonthsListed, when set, runs after a journal read has listed
+	// the months and before it reads any; tests change the months there.
+	evidenceMonthsListed func()
+	// maintenanceLogMu guards the times maintenance last logged progress.
+	maintenanceLogMu     sync.Mutex
+	headsLoggedAt        time.Time
+	swapWaitLoggedAt     time.Time
+	observationHeartbeat time.Duration
+	writeMu              sync.Mutex
+	amplifiedWrites      int
+	evidenceRetention    time.Duration
+	// evidenceSaveChunk and evidenceSaveTimeout bound each save transaction.
+	evidenceSaveChunk   int
+	evidenceSaveTimeout time.Duration
+	// evidenceChunkFault lets in-package tests act inside one save
+	// transaction, before it writes, for example to fail or delay it.
+	evidenceChunkFault func(ctx context.Context, tx *sql.Tx, part, size int) error
 }
 
 var (
@@ -247,17 +269,9 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 		}
 		heartbeat = parsed
 	}
-	retention := time.Duration(0)
-	rawRetention := opts.EvidenceRetention
-	if raw := os.Getenv("KUBERNETES_EVIDENCE_RETENTION"); raw != "" {
-		rawRetention = raw
-	}
-	if rawRetention != "" {
-		parsed, parseErr := time.ParseDuration(rawRetention)
-		if parseErr != nil || parsed < 0 {
-			return nil, fmt.Errorf("storage: invalid evidence retention duration")
-		}
-		retention = parsed
+	retention, err := evidenceRetentionOption(opts.EvidenceRetention)
+	if err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("pgx", opts.DSN)
 	if err != nil {
@@ -301,7 +315,9 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 		time.Sleep(backoff)
 	}
 
-	p := &postgresProvider{db: db, observationHeartbeat: heartbeat, evidenceRetention: retention}
+	// Values outside 1..1024 fall back to the default.
+	saveChunk := postgresPositiveOption(opts.EvidenceSaveChunk, "KUBERNETES_EVIDENCE_SAVE_CHUNK", defaultEvidenceSaveChunk)
+	p := &postgresProvider{db: db, observationHeartbeat: heartbeat, evidenceRetention: retention, evidenceSaveChunk: saveChunk, evidenceSaveTimeout: defaultEvidenceSaveTimeout}
 	if err := p.migrate(); err != nil {
 		if hint := pgSetupHint(err, dbName); hint != "" {
 			log.Printf("%s", hint)
@@ -315,12 +331,35 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 		return nil, err
 	}
 	p.historyDB.SetMaxOpenConns(readConcurrency)
-	p.historyDB.SetMaxIdleConns(min(readConcurrency, defaultPostgresMaxIdleConns))
+	// Every history connection stays open: a reused plan is per connection,
+	// and a new connection plans each statement again for every month.
+	p.historyDB.SetMaxIdleConns(readConcurrency)
 	if err := p.completeEvidenceBackfill(context.Background(), evidenceStartupBudget); err != nil {
 		log.Printf("storage: evidence read-model conversion continues in background")
 	}
 	p.startEvidenceMaintenance()
 	return p, nil
+}
+
+// defaultEvidenceRetention is how long Kubernetes history is kept when no
+// retention is configured. A retention of "0" keeps everything.
+const defaultEvidenceRetention = 7 * 24 * time.Hour
+
+// evidenceRetentionOption resolves the history retention: the environment
+// overrides the configured value, and an empty value means the default.
+func evidenceRetentionOption(configured string) (time.Duration, error) {
+	raw := configured
+	if env := os.Getenv("KUBERNETES_EVIDENCE_RETENTION"); env != "" {
+		raw = env
+	}
+	if raw == "" {
+		return defaultEvidenceRetention, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("storage: invalid evidence retention duration")
+	}
+	return parsed, nil
 }
 
 func postgresPositiveOption(value int, env string, fallback int) int {
@@ -335,6 +374,26 @@ func postgresPositiveOption(value int, env string, fallback int) int {
 	return fallback
 }
 
+// evidenceHeadsWriter declares, for the rest of a transaction, that its
+// journal writes keep the heads table current. A journal or heads write
+// without it, such as one from a replica of an earlier release or a
+// data-only restore, makes the database mark the scope's heads incomplete
+// (migration 029), so saves look events up in the journal again until the
+// background pass has given every current row its head.
+const evidenceHeadsWriter = `SET LOCAL versus.evidence_heads='maintained'`
+
+// evidenceReadPlanCacheMode makes history reads plan each statement for its
+// values, so a statement over the partitioned observations covers only the
+// months its bound values reach. A plan kept for reuse would cover every
+// month, and a statistics refresh of any month, which autovacuum does
+// regularly for the current one, would make every connection plan it again.
+// Journal reads are the exception once the journal is partitioned: every one,
+// ranged or not, walks the months in steps that name their partitions and
+// keep their plans (journalWalkSettings), so a statistics refresh re-plans
+// only the steps naming that month. History reads also never compile to
+// machine code: a read returns a page, and compiling costs more than it saves.
+const evidenceReadPlanCacheMode = "force_custom_plan"
+
 func (p *postgresProvider) beginEvidenceRead(ctx context.Context) (*sql.Tx, error) {
 	db := p.historyDB
 	if db == nil {
@@ -344,7 +403,7 @@ func (p *postgresProvider) beginEvidenceRead(ctx context.Context) (*sql.Tx, erro
 	if err != nil {
 		return nil, err
 	}
-	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'`); err != nil {
+	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL jit=off; SET LOCAL plan_cache_mode=`+evidenceReadPlanCacheMode); err != nil {
 		_ = tx.Rollback()
 		return nil, err
 	}

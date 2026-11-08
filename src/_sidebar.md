@@ -111,13 +111,10 @@
   - [Regex](/agent/regex)
 
 - Migration
+  - [v1.4.35](/migration/migration-v1.4.35.md)
   - [v1.4.34](/migration/migration-v1.4.34.md)
   - [v1.4.30](/migration/migration-v1.4.30.md)
   - [v1.4.27](/migration/migration-v1.4.27.md)
-  - [v1.4.26](/migration/migration-v1.4.26.md)
-  - [v1.4.25](/migration/migration-v1.4.25.md)
-  - [v1.4.22](/migration/migration-v1.4.22.md)
-  - [v1.4.13](/migration/migration-v1.4.13.md)
 
 - In development
   - [AWS Harness](/in-development/aws-harness)

@@ -37,6 +37,11 @@ type CrashEvent struct {
 	At              time.Time `json:"at"`
 	TimeSource      string    `json:"time_source"`
 	ObservedAt      time.Time `json:"observed_at"`
+	// FinishedAt is the termination's reported finish time when it is later
+	// than the observation, as when the node clock runs ahead. At then shows
+	// the observation time, but the termination keeps the identity of its
+	// finish time.
+	FinishedAt time.Time `json:"finished_at,omitzero"`
 }
 
 // CrashQuery bounds observation time; CrashEvent.At remains the actual event time.
@@ -79,8 +84,12 @@ func CrashID(event CrashEvent) string {
 	identity := []any{event.Cluster, event.PodUID, event.Container, event.Init, event.Type}
 	if event.Type == "termination" {
 		identity = append(identity, event.Reason, event.ExitCode, event.Signal)
+		// A termination is identified by when it finished, never by when it
+		// was observed, so clock skew cannot split or merge terminations.
 		if event.TimeSource == "finished_at" {
 			identity = append(identity, event.At.UTC().Format(time.RFC3339Nano))
+		} else if !event.FinishedAt.IsZero() {
+			identity = append(identity, event.FinishedAt.UTC().Format(time.RFC3339Nano))
 		} else {
 			identity = append(identity, event.RestartCount, event.TerminationSlot)
 		}
@@ -106,6 +115,9 @@ func validCrash(event CrashEvent) bool {
 		return false
 	}
 	if event.TerminationSlot != "" && event.TerminationSlot != "current" && event.TerminationSlot != "previous" {
+		return false
+	}
+	if !event.FinishedAt.IsZero() && (event.Type != "termination" || event.TimeSource != "observed_at" || !event.FinishedAt.After(event.ObservedAt)) {
 		return false
 	}
 	for _, reason := range []string{event.Reason, event.WaitingReason} {

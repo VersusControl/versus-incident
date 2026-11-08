@@ -1,8 +1,8 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import { api, ApiError, createKubernetesApi, retainKubernetesHistoryCounts, type KubernetesClusters, type KubernetesCrashQuery } from "./api";
 import { useCursorPagination } from "./pagination";
-import { hasKubernetesPublication, kubernetesAccessLost, kubernetesFailureCode, retainKubernetesPublication } from "./kubernetesContinuity";
+import { hasKubernetesPublication, kubernetesAccessLost, kubernetesCursorExpired, kubernetesFailureCode, retainKubernetesPublication } from "./kubernetesContinuity";
 import { focusedCrashes } from "./kubernetesFocusedHistory";
 
 export function kubernetesKey(cluster: string | undefined, ...parts: readonly unknown[]) {
@@ -88,6 +88,46 @@ export function useKubernetesQuery<T>(options: UseQueryOptions<T, Error, T, read
   const unpublished = missingPublication && (query.data as { sync?: { state?: string } }).sync?.state === "syncing";
   const hidden = accessLost || missingPublication;
   return { ...query, unpublished, data: hidden ? undefined : retained, dataUpdatedAt: query.dataUpdatedAt || lastGood.current?.at || 0 };
+}
+
+/**
+ * How a cursor-paged list answers the server refusing the current page's link
+ * because the list it pointed into changed:
+ * - "reset": the reader just asked for this page, so the list goes back to
+ *   page 1 on its own.
+ * - "notice": the page was already on screen and a background or live
+ *   refresh was refused. Its rows stay, with an offer to go back to page 1;
+ *   moving the reader without asking would lose their place.
+ * Either way the view shows no error. The first page sends no cursor, so a
+ * refusal there is never read as expiry and cannot loop. A page counts as on
+ * screen only once its own read has finished since the reader arrived, so a
+ * cached page that is being read again still resets.
+ */
+export type KubernetesCursorExpiry = "reset" | "notice" | undefined;
+
+export function useKubernetesCursorReset(
+  paging: { cursor?: string; resetPage: () => void },
+  read: { error: unknown; isFetching: boolean; isSuccess: boolean; isPlaceholderData: boolean },
+): KubernetesCursorExpiry {
+  const { cursor, resetPage } = paging;
+  // Which page the reader is on, and whether its own read has finished since
+  // they arrived. Leaving a page forgets it, so returning to it counts as a
+  // new arrival.
+  const [visit, setVisit] = useState<{ cursor?: string; loaded: boolean }>({ cursor, loaded: false });
+  if (visit.cursor !== cursor) setVisit({ cursor, loaded: false });
+  else if (cursor && !visit.loaded && read.isSuccess && !read.isPlaceholderData && !read.isFetching) setVisit({ cursor, loaded: true });
+  const arrived = visit.cursor !== cursor || !visit.loaded;
+  // A refusal on a page that has not loaded yet may be a cached answer being
+  // read again, so it waits for that read. On a page already on screen the
+  // refusal stays in force while later refreshes run, so their wait never
+  // turns the notice into an error.
+  const expired = Boolean(cursor) && kubernetesCursorExpired(read.error) && (!arrived || !read.isFetching);
+  const expiry: KubernetesCursorExpiry = !expired ? undefined : arrived ? "reset" : "notice";
+  // Before paint, so the refusal never flashes as an error.
+  useLayoutEffect(() => {
+    if (expiry === "reset") resetPage();
+  }, [expiry, resetPage]);
+  return expiry;
 }
 
 export function useBrokenIssues(enabled = true) {
@@ -214,7 +254,7 @@ export function useKubernetesCommitEvents(enabled: boolean) {
       if (disposed) return;
       connected = false;
       setState("reconnecting");
-      retry = setTimeout(() => void run(), Math.min(1000 * 2 ** failures++, 30000));
+      retry = setTimeout(() => void run(), commitStreamRetryDelay(failures++));
     };
     const fallback = setInterval(() => {
       if (denied && recoveryOnly) recover();
@@ -231,6 +271,19 @@ export function useKubernetesCommitEvents(enabled: boolean) {
     };
   }, [enabled, client, key, cluster, cache]);
   return { streamState: state, sync };
+}
+
+/** Longest wait between commit-stream reconnects while the server keeps failing. */
+export const commitStreamRetryCapMs = 60_000;
+
+/**
+ * Exponential reconnect delay. Once it reaches the cap it is spread over the
+ * last fifth of the cap, so open tabs do not reconnect in lockstep.
+ */
+export function commitStreamRetryDelay(failures: number, random: () => number = Math.random): number {
+  const delay = 1000 * 2 ** Math.max(0, failures);
+  if (delay < commitStreamRetryCapMs) return delay;
+  return Math.round(commitStreamRetryCapMs * (0.8 + 0.2 * random()));
 }
 
 export function useKubernetesCrashes(options: Omit<KubernetesCrashQuery, "limit" | "cursor">, enabled = true, keepAcrossRanges = false, focused = false) {

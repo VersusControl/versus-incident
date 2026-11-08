@@ -28,9 +28,10 @@ interface Props {
 //  - an established SSO session (the HttpOnly versus_enterprise_session cookie),
 //    probed via the deployment org's whoami. After the OIDC callback redirects
 //    to "/", a held session opens the app directly instead of re-prompting; or
-//  - on an OSS/community binary, the X-Gateway-Secret gateway secret, verified
-//    against /api/admin/config/agent (always mounted + secret-gated, so it
-//    works whether or not the agent is enabled). The gateway secret is OSS-only
+//  - on an OSS/community binary, the HttpOnly gateway session cookie that
+//    sign-in obtains by exchanging the gateway secret once, probed via
+//    /api/admin/config/agent (always mounted + auth-gated, so it works whether
+//    or not the agent is enabled). The gateway secret is OSS-only
 //    — a licensed binary never offers it; its sign-in is the built-in admin / SSO.
 //    Community and Enterprise login are authoritative, separate states;
 //    transient discovery failures show retry and never expose gateway login.

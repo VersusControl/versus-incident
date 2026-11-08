@@ -38,7 +38,18 @@ type GitOpsAppPage struct {
 	Next      string           `json:"next,omitempty"`
 	Partial   []PartialFailure `json:"partial_failures,omitempty"`
 	Truncated bool             `json:"truncated"`
+	// Total and Limit size the pager: Total counts every item the filters
+	// match, and a non-zero Limit marks Total as present.
+	Total int `json:"total,omitempty"`
+	Limit int `json:"limit,omitempty"`
+	// resume mints cursors inside the page for callers that show fewer rows.
+	resume snapshotResume
 }
+
+// ResumeAfter returns the cursor that continues this list after the first
+// shown rows of this page, for a caller that showed fewer rows than the page
+// holds. It is empty when the page cannot be resumed that way.
+func (page GitOpsAppPage) ResumeAfter(shown int) string { return page.resume.after(shown) }
 
 type Rollout struct {
 	Namespace  string `json:"namespace"`
@@ -116,14 +127,31 @@ func (service *Service) GitOpsApps(ctx context.Context, options GitOpsAppOptions
 		if result.Items[i].Namespace != result.Items[j].Namespace {
 			return result.Items[i].Namespace < result.Items[j].Namespace
 		}
-		return result.Items[i].Name < result.Items[j].Name
+		if result.Items[i].Name != result.Items[j].Name {
+			return result.Items[i].Name < result.Items[j].Name
+		}
+		// An Argo CD Application and a Flux Kustomization can share a name.
+		if result.Items[i].Tool != result.Items[j].Tool {
+			return result.Items[i].Tool < result.Items[j].Tool
+		}
+		return result.Items[i].Kind < result.Items[j].Kind
 	})
-	start, end, next, err := pageWindow(options.Cursor, normalizePageLimit(options.Limit), len(result.Items))
+	rows := make([]string, len(result.Items))
+	for position, app := range result.Items {
+		rows[position] = app.Tool + "\x00" + app.Kind + "\x00" + app.Namespace + "\x00" + app.Name
+	}
+	cursor, err := bindSnapshotCursor("gitops_apps", service.indexScope(), struct{ Namespace, Tool, Status string }{options.Namespace, options.Tool, options.Status}, rows)
 	if err != nil {
 		return GitOpsAppPage{}, err
 	}
+	start, end, next, err := cursor.window(options.Cursor, normalizePageLimit(options.Limit), len(result.Items))
+	if err != nil {
+		return GitOpsAppPage{}, err
+	}
+	result.Total, result.Limit = len(result.Items), normalizePageLimit(options.Limit)
 	result.Items = result.Items[start:end]
 	result.Next = next
+	result.resume = cursor.resumeFrom(start)
 	result.Truncated = result.Truncated || next != ""
 	return result, nil
 }

@@ -133,8 +133,13 @@ func TestWorkloadsCountRequiresSuccessfulAuthorizedObservation(t *testing.T) {
 				if len(page.Partial) != 1 || page.Partial[0].Class != failure {
 					t.Fatalf("failure lost: %+v", page)
 				}
-				if containsString(page.Sync.Pending, indexedResourceIDs["CronJob"]) || page.Sync.State == "ready" {
-					t.Fatalf("failed LIST changed into pending or ready: %+v", page.Sync)
+				if containsString(page.Sync.Pending, indexedResourceIDs["CronJob"]) || !page.Sync.Partial {
+					t.Fatalf("failed LIST changed into pending or complete: %+v", page.Sync)
+				}
+				// A denied LIST is a coverage gap of a healthy sync; every other
+				// failure leaves the sync failed.
+				if (page.Sync.State == "ready") != (failure == "forbidden") {
+					t.Fatalf("%s LIST reported sync state %q", failure, page.Sync.State)
 				}
 			})
 		}

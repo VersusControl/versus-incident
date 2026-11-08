@@ -69,6 +69,9 @@ type inventoryCache struct {
 	failed           bool
 	failedClass      string
 	authorityFailure error
+	// keptStoredLogged is when the worker last logged keeping the stored
+	// generation because the cluster could not answer its restore proof.
+	keptStoredLogged time.Time
 	authorityProof   inventoryAuthorityProofState
 	started          bool
 	namespaces       map[string]bool
@@ -76,6 +79,15 @@ type inventoryCache struct {
 	scopePending     bool
 	candidates       namespaceCandidateManifest
 	progress         inventoryProgress
+	// abandonedSave is the published capture whose history save the store
+	// rejected for good. It is not retried; the next capture records the gap.
+	abandonedSave string
+	// refusal is the last capture refusal logged for this scope, so a lasting
+	// condition is logged once rather than on every publish.
+	refusal struct {
+		mu     sync.Mutex
+		logged string
+	}
 }
 
 func inventoryKey(scope Scope) string {
@@ -132,13 +144,22 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 	service.changes.mu.Lock()
 	cache := service.changes.inventories[service.indexScope()]
 	provider := service.changes.provider
+	// A scope whose worker runs is restored by that worker alone.
+	caller := restoreByReader
+	if cache != nil && cache.started {
+		caller = restoreByCoveredOnly
+	}
 	service.changes.mu.Unlock()
-	if cache != nil {
+	// fromCache answers from the worker's own generation when it holds one.
+	fromCache := func() (inventoryGeneration, bool, error) {
+		if cache == nil {
+			return inventoryGeneration{}, false, nil
+		}
 		cache.mu.RLock()
 		generation, failed, failedClass, authorityFailure := cache.generation, cache.failed, cache.failedClass, cache.authorityFailure
 		cache.mu.RUnlock()
 		if authorityFailure != nil {
-			return inventoryGeneration{}, authorityFailure
+			return inventoryGeneration{}, true, authorityFailure
 		}
 		if len(generation.View.Kinds) > 0 {
 			if failed {
@@ -153,12 +174,16 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 				generation.Usage.Fresh, generation.Usage.Availability = false, "stale"
 				generation.Usage.Partial = append(append([]PartialFailure(nil), generation.Usage.Partial...), PartialFailure{ResourceID: "kubernetes.inventory", Class: inventoryCycleClass(failedClass)})
 			}
-			return generation, nil
+			return generation, true, nil
 		}
 		if failed {
 			generation.View.Kinds = cycleFailureKinds(inventoryCycleClass(failedClass))
-			return generation, nil
+			return generation, true, nil
 		}
+		return inventoryGeneration{}, false, nil
+	}
+	if generation, answered, err := fromCache(); answered {
+		return generation, err
 	}
 	if provider != nil {
 		// Upgrade precedence is explicit; never combine generations from different
@@ -179,8 +204,31 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 				if err := service.validateCredential(ctx); err != nil {
 					return inventoryGeneration{}, err
 				}
-				if err := service.authorizeInventoryRestore(ctx, generation); err != nil {
+				proofCtx, cancel := context.WithTimeout(ctx, readerProofWait)
+				var err error
+				if caller == restoreByCoveredOnly && service.inventoryRestore != nil && service.evidenceStore() != nil {
+					err = service.inventoryRestore.awaitWorkerProof(proofCtx, generation.Revision, func() bool {
+						cache.mu.RLock()
+						defer cache.mu.RUnlock()
+						return len(cache.generation.View.Kinds) > 0
+					})
+				} else {
+					err = service.authorizeRestore(proofCtx, generation, caller)
+				}
+				cancel()
+				if errors.Is(err, errWorkerPublished) {
+					if current, answered, err := fromCache(); answered {
+						return current, err
+					}
+					return inventoryGeneration{}, restoreProofUnanswered{ErrInventoryNotReady}
+				}
+				if err != nil {
 					return inventoryGeneration{}, err
+				}
+				// The worker may have published its own generation while this
+				// proof ran; that one is current, so it is the answer.
+				if current, answered, err := fromCache(); answered {
+					return current, err
 				}
 				return generation, nil
 			}
@@ -215,6 +263,11 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 	}
 	return generation, nil
 }
+
+// readerProofWait bounds a read's own proof of a stored generation, which runs
+// only for a scope without a worker, so a cluster that does not answer fails
+// the read within seconds instead of holding it for a whole proof budget.
+const readerProofWait = 3 * time.Second
 
 // failedInventoryKinds reports that a cycle failed before these kinds could be
 // relisted. The class comes from the cycle's own failure, so the answer is as

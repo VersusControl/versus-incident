@@ -377,6 +377,7 @@ func (ctx *cancelAfterContext) Err() error {
 }
 
 func TestFileModelPagingBoundedAndStable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	providerValue, err := NewFile(FileOptions{DataDir: dir})
 	if err != nil {
@@ -473,6 +474,7 @@ func TestFileModelPagingRestartLegacyCancellationAndScope(t *testing.T) {
 }
 
 func TestFileModelPagingRejectsSymlinkAndConcurrentWrite(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	providerValue, err := NewFile(FileOptions{DataDir: dir})
 	if err != nil {
@@ -515,6 +517,7 @@ func TestFileModelPagingRejectsSymlinkAndConcurrentWrite(t *testing.T) {
 }
 
 func TestFileModelPagingMalformedProgressAndIndexedPurge(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	providerValue, err := NewFile(FileOptions{DataDir: dir})
 	if err != nil {
@@ -693,6 +696,7 @@ func assertRestartedModelStateKeys(t *testing.T, dir string, keyCount int) {
 }
 
 func TestFileModelStateHighCardinalityRestartPaging(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	providerValue, err := NewFile(FileOptions{DataDir: dir})
 	if err != nil {
@@ -721,6 +725,7 @@ func TestFileModelStateHighCardinalityRestartPaging(t *testing.T) {
 }
 
 func TestFileModelStateConcurrentNamespaceIntegrityAcrossProviders(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const providerCount = 4
 	providers := make([]Provider, 0, providerCount)

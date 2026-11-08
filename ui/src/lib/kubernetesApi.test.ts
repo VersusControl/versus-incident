@@ -1,11 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, clearSecret, createKubernetesApi, kubernetesClusterPath, setSecret } from "./api";
+import { api, createKubernetesApi, kubernetesClusterPath } from "./api";
 import { focusedChanges } from "./kubernetesFocusedHistory";
 
 afterEach(() => {
   vi.restoreAllMocks();
-  clearSecret();
 });
 
 describe("Kubernetes resource API", () => {
@@ -182,6 +181,23 @@ describe("Kubernetes resource API", () => {
     expect(Object.fromEntries(urls[1].searchParams)).toEqual({ root_uid: "root-uid", include: "changes", namespace: "shop", cluster: "prod-eu" });
   });
 
+  it.each([
+    ["a body with no catalog fields", { items: [], totals: {}, gaps: [], truncated: false }, false],
+    ["a null cluster list", { multiple: true, clusters: null }, true],
+    ["an empty body", null, false],
+  ])("reads %s as an empty cluster list instead of an undefined one", async (_, body, multiple) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(body)));
+    const catalog = await api.kubernetesClusters();
+    expect(catalog).toEqual({ multiple, clusters: [] });
+    expect(catalog.clusters.find((entry) => entry.id === "east")).toBeUndefined();
+  });
+
+  it("keeps a well-formed cluster catalog exactly as the server sent it", async () => {
+    const east = { id: "east", provider: "generic", health: "healthy", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "ready" }, observed_at: "2026-11-07T10:00:00Z" };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ multiple: true, clusters: [east] })));
+    expect(await api.kubernetesClusters()).toEqual({ multiple: true, clusters: [east] });
+  });
+
   it("preserves single URLs and encodes cluster scope without discarding filters", () => {
     expect(kubernetesClusterPath("/api/admin/kubernetes/overview")).toBe("/api/admin/kubernetes/overview");
     const url = new URL(kubernetesClusterPath("/api/admin/kubernetes/search?q=a%2Bb&cluster=old", "prod/eu+one"), "http://localhost");
@@ -228,15 +244,14 @@ describe("Kubernetes resource API", () => {
     expect(fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)))).toEqual([{ role: "responder", clusters: ["staging"] }, { role: "admin", clusters: [] }, { role: "viewer" }, { role: "admin", clusters: [] }]);
   });
 
-  it("streams Pod lines with gateway headers, cancellation, and cursor-only resume options", async () => {
-    setSecret("test-gateway");
+  it("streams Pod lines with the session cookie, cancellation, and cursor-only resume options", async () => {
     const signal = new AbortController().signal;
     const onEvent = vi.fn();
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('event: line\ndata: {"text":"repeated","container":"app","ordinal":2,"cursor":"resume"}\n\nevent: end\ndata: {"reason":"complete"}\n\n', { headers: { "Content-Type": "text/event-stream" } }));
     await api.kubernetesPodLogStream("payments", "checkout", { container: "app", cursor: "resume", since_seconds: 3600, tail_lines: 500 }, onEvent, signal);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/admin/kubernetes/pods/payments/checkout/logs/stream?timestamps=true&container=app&cursor=resume");
     const init = fetchMock.mock.calls[0][1];
-    expect(new Headers(init?.headers).get("X-Gateway-Secret")).toBe("test-gateway");
+    expect(new Headers(init?.headers).has("X-Gateway-Secret")).toBe(false);
     expect(init?.signal).toBe(signal);
     expect(init?.credentials).toBe("same-origin");
     expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "line", text: "repeated", ordinal: 2 }));
@@ -435,14 +450,5 @@ describe("Kubernetes resource API", () => {
     expect(result.items_available).toBe(false);
     expect(result.availability).toBe("unavailable");
     expect(result.sync.partial).toBe(true);
-  });
-
-  it("submits a Kubernetes action proposal to the shared agent route", async () => {
-    const proposal = { type: "k8s.rollout_restart", target: { cluster: "production", kind: "Deployment", namespace: "payments", name: "checkout" }, params: {}, reason: "Restore service" };
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ proposal: { id: "proposal-1" }, approval: { id: "approval-1" }, nonce: "decision-nonce" }), { status: 201 })));
-
-    await api.proposeAgentAction(proposal);
-
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/agent/proposals", expect.objectContaining({ method: "POST", body: JSON.stringify(proposal) }));
   });
 });

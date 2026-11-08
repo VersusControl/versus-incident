@@ -30,7 +30,6 @@ function fromLearnExclusionsWire(r: LearnExclusionsWire): LearnExclusions {
 
 const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
-let secretCache: string | null | undefined;
 
 function removeLegacySecret() {
   try {
@@ -152,20 +151,14 @@ async function logStreamError(response: Response, label: string): Promise<ApiErr
   return failure;
 }
 
-export function getSecret(): string | null {
-  if (secretCache === undefined) {
-    secretCache = null;
-    removeLegacySecret();
-  }
-  return secretCache;
-}
+// Older builds kept the gateway secret in browser storage. Purge it as soon as
+// the client loads so a stale copy never outlives the upgrade.
+removeLegacySecret();
 
-export function setSecret(value: string) {
-  secretCache = value;
-}
-
+// clearSecret removes any gateway secret an older build left in browser
+// storage. The client itself never holds one: after sign-in every request
+// authenticates with the HttpOnly session cookie.
 export function clearSecret() {
-  secretCache = null;
   removeLegacySecret();
 }
 
@@ -195,7 +188,8 @@ export async function gatewaySessionLogout(): Promise<void> {
 }
 
 // AUTH_EXPIRED_EVENT fires when an authenticated request returns 401. The
-// listener distinguishes OSS secret rotation from enterprise session expiry.
+// listener distinguishes an expired OSS gateway session from an expired
+// enterprise session.
 export const AUTH_EXPIRED_EVENT = "versus:auth-expired";
 
 function notifyAuthExpired() {
@@ -203,14 +197,10 @@ function notifyAuthExpired() {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const secret = getSecret() ?? "";
   const headers = new Headers(init.headers);
-  // OSS/community authenticates the data plane with the gateway secret; the
-  // enterprise console authenticates with the HttpOnly session cookie
-  // (versus_enterprise_session) carried via credentials: same-origin and holds
-  // no secret. Attach the header ONLY when a secret is actually held, so a
-  // licensed binary never sends X-Gateway-Secret — session-only, no fallback.
-  if (secret) headers.set("X-Gateway-Secret", secret);
+  // The browser authenticates with an HttpOnly session cookie only (the OSS
+  // gateway session or versus_enterprise_session), carried via
+  // credentials: same-origin. It never sends a header credential.
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -954,13 +944,6 @@ export interface AgentProposal {
   expires_at: string;
 }
 
-export interface AgentProposalResult {
-  proposal?: AgentProposal;
-  approval?: AgentApproval;
-  nonce?: string;
-  guide?: { action: string; command: string; risk: string };
-}
-
 export interface ChatToolCall {
   call_id?: string;
   Name: string;
@@ -1125,16 +1108,8 @@ export interface RunbookUploadResult {
 // must NOT set a JSON Content-Type — the browser sets the multipart
 // boundary itself from the FormData.
 async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
-  const secret = getSecret() ?? "";
-  const headers = new Headers();
-  // Attach the gateway secret ONLY when one is held (OSS/community). The
-  // enterprise console holds no secret and authenticates with the session
-  // cookie via credentials: same-origin.
-  if (secret) headers.set("X-Gateway-Secret", secret);
-
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers,
     body: form,
     credentials: "same-origin",
   });
@@ -1682,6 +1657,16 @@ export interface KubernetesClusters {
   clusters: KubernetesClusterSummary[];
 }
 
+/**
+ * Every consumer of the catalog reads `clusters` as a list and `multiple` as a
+ * flag. A body that leaves either out — an older server, a proxy, or a stub —
+ * reads as an empty list and a single cluster, never as a page that throws
+ * while rendering.
+ */
+export function normalizeKubernetesClusters(body: Partial<KubernetesClusters> | null | undefined): KubernetesClusters {
+  return { multiple: body?.multiple === true, clusters: Array.isArray(body?.clusters) ? body.clusters : [] };
+}
+
 export function kubernetesClusterPath(path: string, cluster?: string): string {
   if (!cluster) return path;
   const [pathname, search = ""] = path.split("?");
@@ -2207,7 +2192,7 @@ export interface KubernetesResource {
   projection_truncated?: string[] | null;
 }
 
-export interface KubernetesResourcePage {
+export interface KubernetesResourcePage extends KubernetesPageTotals {
   items: KubernetesResource[] | null;
   continue?: string;
   truncated: boolean;
@@ -2274,7 +2259,7 @@ export interface KubernetesWorkload {
   partial_failures?: Array<{ resource_id?: string; class: string }>;
 }
 
-export interface KubernetesWorkloadPage {
+export interface KubernetesWorkloadPage extends KubernetesPageTotals {
   sync?: KubernetesSync;
   items: KubernetesResource[];
   counts?: Record<string, number>;
@@ -2328,6 +2313,8 @@ export interface KubernetesIssue {
   untracked?: string[];
   /** True only for real evidence failures, never for evidence that is still loading. */
   partial?: boolean;
+  /** The changes around this break exceeded the bounded history read. */
+  history_truncated?: boolean;
   /** Evidence resource ids still loading; history and changes may be incomplete for that reason only. */
   pending?: string[];
 }
@@ -2335,6 +2322,16 @@ export interface KubernetesIssue {
 export interface KubernetesHistoryCounts {
   count_capped?: boolean;
   total?: number;
+  /** Page size; a positive limit means `total` sizes the pager. */
+  limit?: number;
+}
+
+/** Exact paging totals a snapshot-backed list reports. */
+export interface KubernetesPageTotals {
+  /** Items matching the filters across all pages. */
+  total?: number;
+  /** Page size; a positive limit means `total` is present. */
+  limit?: number;
 }
 
 /** Continuations carry rows, while the first page owns snapshot count metadata. */
@@ -2362,6 +2359,8 @@ export interface KubernetesIssuePage extends KubernetesHistoryCounts {
   next?: string;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   sync: KubernetesSync;
+  /** Present on pages served from saved history. */
+  capture?: KubernetesCaptureStatus;
 }
 
 export type KubernetesChangeType = "created" | "deleted" | "image_changed" | "replicas_changed" | "spec_changed" | "rollout_started" | "rollout_completed" | "rollout_stalled" | "config_ref_changed" | "config_changed" | "warning_burst";
@@ -2415,6 +2414,33 @@ export interface KubernetesCrashQuery {
   cursor?: string;
 }
 
+/**
+ * Present on a saved-history page only while the latest capture could not be
+ * saved: the cluster was read, but saved history ends at `saved_through`. It
+ * clears after the next successful save and is never a credential or
+ * connector fault.
+ */
+export interface KubernetesHistorySave {
+  /** `history_save_delayed` clears by itself; `history_save_rejected` needs an operator. */
+  code: "history_save_delayed" | "history_save_rejected" | (string & {});
+  message: string;
+  action: string;
+  retryable: boolean;
+  /** Time of the last saved history checkpoint, when one is known. */
+  saved_through?: string;
+}
+
+export interface KubernetesCaptureStatus {
+  mode: string;
+  evidence_mode?: string;
+  evidence_error?: string;
+  reason?: string;
+  last_cycle_at?: string;
+  behind: boolean;
+  verification?: { stage: string; http_status?: number };
+  history_save?: KubernetesHistorySave;
+}
+
 export interface KubernetesCrashPage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
   crash_count?: number;
@@ -2429,7 +2455,7 @@ export interface KubernetesCrashPage extends KubernetesHistoryCounts {
   capture_gaps: Array<{ from: string; to: string }>;
   coverage: Record<string, { from: string; to: string }>;
   limitations: string[];
-  capture: { mode: string; evidence_mode?: string; evidence_error?: string; reason?: string; last_cycle_at?: string; behind: boolean; verification?: { stage: string; http_status?: number } };
+  capture: KubernetesCaptureStatus;
   sync: KubernetesSync;
 }
 
@@ -2441,6 +2467,8 @@ export interface KubernetesChangesPage extends KubernetesHistoryCounts {
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   gaps?: Array<{ from: string; to: string }>;
   sync: KubernetesSync;
+  /** Present on pages served from saved history. */
+  capture?: KubernetesCaptureStatus;
 }
 
 export type KubernetesTimelineEntry =
@@ -2462,6 +2490,8 @@ export interface KubernetesTimelinePage extends KubernetesHistoryCounts {
   breaks_only?: boolean;
   since: string;
   until: string;
+  /** Present on pages served from saved history. */
+  capture?: KubernetesCaptureStatus;
 }
 
 export interface KubernetesTimelineQuery {
@@ -2722,7 +2752,7 @@ export interface KubernetesGitOpsApp {
   suspended: boolean;
 }
 
-export interface KubernetesGitOpsPage {
+export interface KubernetesGitOpsPage extends KubernetesPageTotals {
   items: KubernetesGitOpsApp[];
   available: boolean;
   reason?: string;
@@ -2916,11 +2946,6 @@ const agentCapabilitiesApi = {
     ),
   listAgentToolsets: (agent: AgentToolKind) =>
     request<AgentToolsetAvailability[]>(`/api/admin/agent/toolsets?agent=${agent}`),
-  proposeAgentAction: (proposal: { type: string; target: AgentProposal["target"]; params: unknown; reason: string }) =>
-    request<AgentProposalResult>("/api/v1/agent/proposals", {
-      method: "POST",
-      body: JSON.stringify(proposal),
-    }),
   setAgentToolsetEnabled: (agent: AgentToolKind, id: string, enabled: boolean) =>
     request<{ agent: AgentToolKind; id: string; enabled: boolean; changed: boolean }>(
       `/api/admin/agent/toolsets/${agent}/${encodeURIComponent(id)}`,
@@ -3144,8 +3169,6 @@ export function createKubernetesApi(cluster?: string) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
     if (!response.ok || !response.body) {
       throw await logStreamError(response, "Pod");
@@ -3181,8 +3204,6 @@ export function createKubernetesApi(cluster?: string) {
       else if (value !== undefined && value !== "") query.set(key, String(value));
     }
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
     if (!response.ok || !response.body) {
       throw await logStreamError(response, "Workload");
@@ -3238,7 +3259,7 @@ export function createKubernetesApi(cluster?: string) {
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> }>(`/api/admin/kubernetes/releases?${query}`);
+    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> } & KubernetesPageTotals>(`/api/admin/kubernetes/releases?${query}`);
   },
   kubernetesRelease: (namespace: string, name: string) =>
     request<KubernetesHelmRelease>(`/api/admin/kubernetes/releases/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
@@ -3251,8 +3272,6 @@ export function createKubernetesApi(cluster?: string) {
   },
   kubernetesCommitStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal, lastEventID?: string): Promise<void> => {
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     if (lastEventID) headers.set("Last-Event-ID", lastEventID);
     const response = await fetch(`${API_BASE}${kubernetesClusterPath("/api/admin/kubernetes/commits/stream", cluster)}`, {
       headers, credentials: "same-origin", cache: "no-store", signal,
@@ -3270,8 +3289,6 @@ export function createKubernetesApi(cluster?: string) {
   },
   kubernetesStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal): Promise<void> => {
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret() ?? "";
-    if (secret) headers.set("X-Gateway-Secret", secret);
     // The record feed for the pods, deployments and nodes views. Its `sync`
     // envelope only covers the kinds this request names, so nothing here
     // decides whether a cluster is healthy: sync health reads the cluster-wide
@@ -3826,7 +3843,7 @@ export const api = {
   ...agentCapabilitiesApi,
   ...awsSettingsApi,
   ...createKubernetesApi(),
-  kubernetesClusters: () => request<KubernetesClusters>("/api/admin/kubernetes/clusters"),
+  kubernetesClusters: async () => normalizeKubernetesClusters(await request<Partial<KubernetesClusters> | null>("/api/admin/kubernetes/clusters")),
   /**
    * The cluster-wide sync report for one named cluster, for surfaces that show
    * several clusters at once and therefore cannot use the scoped client.
@@ -4571,7 +4588,7 @@ export const api = {
   // streamAnalysis runs an analysis and reports each step as it happens.
   //
   // It uses fetch + a stream reader rather than EventSource, because
-  // EventSource is GET-only and cannot carry the gateway-secret header. The
+  // EventSource is GET-only and this endpoint is a POST. The
   // returned promise resolves with the terminal event; callers that want the
   // full record fetch it by `analysis_id`.
   //
@@ -4582,9 +4599,7 @@ export const api = {
     onEvent: (ev: AnalyzeEvent) => void,
     opts: { requestedBy?: string; signal?: AbortSignal } = {},
   ): Promise<AnalyzeEvent | null> => {
-    const secret = getSecret() ?? "";
     const headers = new Headers({ "Content-Type": "application/json" });
-    if (secret) headers.set("X-Gateway-Secret", secret);
 
     const res = await fetch(
       `${API_BASE}/api/admin/incidents/${incidentID}/analyze/stream`,
@@ -4628,18 +4643,6 @@ export const api = {
     ),
   getChatSession: (id: string) =>
     request<ChatSession>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`),
-  listAgentApprovals: (state: "pending" | "all" = "pending") =>
-    request<{ approvals: AgentApproval[] }>(`/api/v1/agent/approvals?state=${state}`),
-  approveAgentApproval: (id: string, nonce: string) =>
-    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/approve`, {
-      method: "POST",
-      body: JSON.stringify({ nonce }),
-    }),
-  rejectAgentApproval: (id: string, reason: string) =>
-    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/reject`, {
-      method: "POST",
-      body: JSON.stringify({ reason }),
-    }),
   deleteChatSession: (id: string) =>
     request<void>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -4655,9 +4658,7 @@ export const api = {
     onEvent: (event: ChatEvent) => void,
     signal?: AbortSignal,
   ): Promise<ChatEvent | null> => {
-    const secret = getSecret() ?? "";
     const headers = new Headers({ "Content-Type": "application/json" });
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const response = await fetch(
       `${API_BASE}/api/admin/chat/sessions/${encodeURIComponent(id)}/messages`,
       {
@@ -4836,13 +4837,11 @@ export const api = {
     }
   },
 
-  // fetchIncidentsReportImage fetches the rendered PNG for a window with the
-  // gateway-secret header and returns a Blob — an <img src> cannot carry the
-  // header, so the preview loads the bytes here and renders via an object URL.
+  // fetchIncidentsReportImage fetches the rendered PNG for a window and returns
+  // a Blob. Loading the bytes here instead of through <img src> lets an expired
+  // session raise the auth-expired event; the preview renders via an object URL.
   fetchIncidentsReportImage: async (window: string): Promise<Blob> => {
-    const secret = getSecret() ?? "";
     const headers = new Headers();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const qs = window ? `?window=${encodeURIComponent(window)}` : "";
     const res = await fetch(
       `${API_BASE}/api/admin/reports/incidents/report.png${qs}`,

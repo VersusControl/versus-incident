@@ -1,14 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, type ChatSession } from "@/lib/api";
+import { api, ApiError, type ChatEvent, type ChatSession } from "@/lib/api";
 import * as apiModule from "@/lib/api";
+import { DEVOPS_AGENT_DOCS_URL } from "@/components/chat/ActionCliHint";
 import { ChatPage } from "./ChatPage";
-
-const role = vi.hoisted(() => ({ enterprise: false, hasSession: false, loading: false }));
-vi.mock("@/lib/useEffectiveRole", () => ({ useEffectiveRole: () => role }));
 
 vi.mock("@/components/TopBar", () => ({
   TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => (
@@ -28,9 +26,6 @@ vi.mock("@/lib/api", async (importActual) => {
       deleteChatSession: vi.fn(),
       cancelChatRun: vi.fn(),
       streamChatMessage: vi.fn(),
-      listAgentApprovals: vi.fn(),
-      approveAgentApproval: vi.fn(),
-      rejectAgentApproval: vi.fn(),
       kubernetesOverview: vi.fn(),
       kubernetesSearch: vi.fn(),
     },
@@ -45,6 +40,18 @@ const baseSession: ChatSession = {
   updated_at: "2026-08-28T10:05:00Z",
   turns: [],
 };
+
+const hintLabel = "Actions run from the Versus DevOps Agent CLI";
+
+const approvalEvent: ChatEvent = { seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "Restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-05T13:00:00Z" }, approval_nonce: "nonce-value" };
+
+function expectNoApprovalControls() {
+  expect(screen.queryByRole("region", { name: "Action approval" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "Reason for rejection" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Open action approvals" })).toBeNull();
+}
 
 function renderPage(url = "/agent/chat") {
   const client = new QueryClient({
@@ -61,8 +68,6 @@ function renderPage(url = "/agent/chat") {
 }
 
 beforeEach(() => {
-  role.enterprise = false;
-  role.hasSession = false;
   vi.spyOn(api, "kubernetesClusters").mockResolvedValue({ multiple: false, clusters: [] });
   document.documentElement.removeAttribute("data-theme");
   Object.defineProperty(window, "matchMedia", {
@@ -74,9 +79,6 @@ beforeEach(() => {
   vi.mocked(api.createChatSession).mockResolvedValue(baseSession);
   vi.mocked(api.deleteChatSession).mockResolvedValue(undefined);
   vi.mocked(api.cancelChatRun).mockResolvedValue(undefined);
-  vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: [] });
-  vi.mocked(api.approveAgentApproval).mockResolvedValue({ id: "approval-1", proposal: { id: "proposal-1", run_id: "run-1", type: "restart", target: { kind: "Deployment", namespace: "shop", name: "checkout" }, params: {}, params_hash: "hash", dry_run: "restart checkout", risk: "medium", reason: "Restore service", proposed_by: "agent", expires_at: "2026-10-05T13:00:00Z" }, state: "approved", expires_at: "2026-10-05T13:00:00Z" });
-  vi.mocked(api.rejectAgentApproval).mockResolvedValue({ id: "approval-1", proposal: { id: "proposal-1", run_id: "run-1", type: "restart", target: { kind: "Deployment", namespace: "shop", name: "checkout" }, params: {}, params_hash: "hash", dry_run: "restart checkout", risk: "medium", reason: "Restore service", proposed_by: "agent", expires_at: "2026-10-05T13:00:00Z" }, state: "rejected", expires_at: "2026-10-05T13:00:00Z" });
   vi.mocked(api.streamChatMessage).mockResolvedValue({
     seq: 2,
     at: "2026-08-28T10:06:00Z",
@@ -120,72 +122,175 @@ describe("ChatPage", () => {
     await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "What changed?", { resource: { provider: "kubernetes", cluster: "east", resource_id: "apps~v1~deployments", namespace: "shop", name: "checkout", uid: "checkout-uid", include_changes: true } }, expect.any(Function), expect.any(AbortSignal)));
   });
 
-  it.each(["pending", "executed", "rejected"])("shows archived %s approvals without decision commands", async (state) => {
-    const approval = await api.approveAgentApproval("fixture", "fixture");
-    vi.mocked(api.approveAgentApproval).mockClear();
-    vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: [{ ...approval, state, read_only: true }] });
-    renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "Open action approvals" }));
-    const card = await screen.findByRole("region", { name: "Action approval" });
-    expect(within(card).getByText("Before upgrade")).toBeTruthy();
-    expect(within(card).getByText(new RegExp(state))).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
-    expect(screen.queryByRole("textbox", { name: "Reason for rejection" })).toBeNull();
-    expect(api.listAgentApprovals).toHaveBeenCalledWith("all");
-    expect(api.approveAgentApproval).not.toHaveBeenCalled();
-    expect(api.rejectAgentApproval).not.toHaveBeenCalled();
-  });
-
-  it("does not make a saved pending approval actionable through history UI state", async () => {
-    const approval = await api.approveAgentApproval("fixture", "fixture");
-    vi.mocked(api.approveAgentApproval).mockClear();
-    vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: [{ ...approval, state: "pending" }] });
-    renderPage();
-    fireEvent.click(screen.getByRole("button", { name: "Open action approvals" }));
-    await screen.findByRole("region", { name: "Action approval" });
-    expect(screen.queryByText("Before upgrade")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
-    expect(api.approveAgentApproval).not.toHaveBeenCalled();
-  });
-
-  it.each(["event", "list"] as const)("blocks nonce-bearing archive approvals using %s metadata", async (source) => {
-    role.enterprise = true;
-    role.hasSession = true;
-    const me = vi.spyOn(api, "rbacMe").mockResolvedValue({ role: "admin", permissions: ["agent:approve"], clusters: null });
-    const approval = await api.approveAgentApproval("fixture", "fixture");
-    vi.mocked(api.approveAgentApproval).mockClear();
-    vi.mocked(api.listAgentApprovals).mockResolvedValue({ approvals: source === "list" ? [{ ...approval, read_only: true }] : [] });
+  it("shows a CLI hint instead of an approval card for a live action proposal", async () => {
     vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
-      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", read_only: source === "event", cluster: "two", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "Restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-11T18:00:00Z" }, approval_nonce: "old-nonce" });
+      onEvent(approvalEvent);
       return { seq: 2, at: "", kind: "run_finished" };
     });
     renderPage();
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await screen.findByText("Before upgrade");
-    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
-    expect(api.approveAgentApproval).not.toHaveBeenCalled();
-    expect(api.rejectAgentApproval).not.toHaveBeenCalled();
-    me.mockRestore();
+    const hint = await screen.findByRole("button", { name: hintLabel });
+    expect(hint.getAttribute("aria-expanded")).toBe("false");
+    expectNoApprovalControls();
   });
 
-  it("turns a stale actionable card read-only after the server rejects its decision", async () => {
-    vi.mocked(api.approveAgentApproval).mockRejectedValueOnce(new ApiError(409, "created before the upgrade; propose again", { code: "approval_read_only" }));
+  it("shows the CLI hint for an action proposal saved in session history", async () => {
+    const saved: ChatSession = { ...baseSession, turns: [
+      { id: "u1", role: "user", content: "Restart checkout", created_at: baseSession.created_at },
+      { id: "a1", role: "assistant", content: "I proposed a restart.", created_at: baseSession.updated_at, events: [approvalEvent, { ...approvalEvent, seq: 2 }] },
+    ] };
+    vi.mocked(api.listChatSessions).mockResolvedValue([saved]);
+    vi.mocked(api.getChatSession).mockResolvedValue(saved);
+    renderPage("/agent/chat?session=session-1");
+    await screen.findByText("I proposed a restart.");
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(1);
+    expectNoApprovalControls();
+  });
+
+  it("keeps a single CLI hint once the finished run is reloaded from history", async () => {
     vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
-      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "Restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-11T18:00:00Z" }, approval_nonce: "old-nonce" });
+      vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [
+        { id: "u1", role: "user", content: "Restart checkout", created_at: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "I proposed a restart.", created_at: new Date().toISOString(), events: [approvalEvent] },
+      ] });
+      onEvent(approvalEvent);
+      onEvent({ seq: 2, at: "", kind: "model_delta", delta: "I proposed a restart." });
+      return { seq: 3, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(screen.getAllByText("I proposed a restart.")).toHaveLength(1));
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(1);
+  });
+
+  it("shows one CLI hint after a retained live run's approval later appears in the saved session", async () => {
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent(approvalEvent);
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    const { client } = renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: hintLabel });
+    await waitFor(() => expect(api.getChatSession).toHaveBeenCalled());
+    vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [
+      { id: "u1", role: "user", content: "Restart checkout", created_at: new Date().toISOString() },
+      { id: "a1", role: "assistant", content: "Saved answer.", created_at: new Date().toISOString(), events: [approvalEvent] },
+    ] });
+    await act(async () => { await client.refetchQueries({ queryKey: ["chat-session", "session-1"] }); });
+    await screen.findByText("Saved answer.");
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(1);
+  });
+
+  it("shows one CLI hint when the stream drops after an approval the saved session already holds", async () => {
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [
+        { id: "u1", role: "user", content: "Restart checkout", created_at: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "Saved answer.", created_at: new Date().toISOString(), events: [approvalEvent] },
+      ] });
+      onEvent(approvalEvent);
+      throw new Error("stream disconnected");
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Saved answer.");
+    await screen.findByText("stream disconnected");
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(1);
+  });
+
+  it("shows one CLI hint per approval id when the saved session holds only some live approvals", async () => {
+    const secondApproval: ChatEvent = { ...approvalEvent, seq: 2, approval: { ...approvalEvent.approval!, id: "approval-2" } };
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [
+        { id: "u1", role: "user", content: "Restart checkout", created_at: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "Saved answer.", created_at: new Date().toISOString(), events: [approvalEvent] },
+      ] });
+      onEvent(approvalEvent);
+      onEvent(secondApproval);
+      return { seq: 3, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Saved answer.");
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(2);
+  });
+
+  it("opens the CLI hint popover with the approval command and docs link, and closes on Escape", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent(approvalEvent);
       return { seq: 2, at: "", kind: "run_finished" };
     });
     renderPage();
     fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Approve action" }));
-    await screen.findByText("Before upgrade");
-    expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
-    expect(api.approveAgentApproval).toHaveBeenCalledTimes(1);
+    const hint = await screen.findByRole("button", { name: hintLabel });
+
+    fireEvent.focus(hint);
+    const popover = screen.getByRole("dialog", { name: "Actions aren't available in the web UI" });
+    expect(hint.getAttribute("aria-expanded")).toBe("true");
+    expect(within(popover).getByText("To run this action, use the Versus DevOps Agent CLI.")).toBeTruthy();
+    expect(within(popover).getByText("versus-devops approvals approve approval-1")).toBeTruthy();
+    const docs = within(popover).getByRole("link", { name: /Read the docs/ });
+    expect(docs.getAttribute("href")).toBe(DEVOPS_AGENT_DOCS_URL);
+    expect(DEVOPS_AGENT_DOCS_URL).toBe("https://devops-agent.versusincident.com");
+    expect(docs.getAttribute("target")).toBe("_blank");
+    expect(docs.getAttribute("rel")).toContain("noopener");
+
+    fireEvent.click(within(popover).getByRole("button", { name: "Copy command" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("versus-devops approvals approve approval-1"));
+    expect(await within(popover).findByRole("button", { name: "Command copied" })).toBeTruthy();
+
+    fireEvent.keyDown(popover, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Actions aren't available in the web UI" })).toBeNull();
+    expect(document.activeElement).toBe(hint);
+  });
+
+  it("opens the CLI hint by tap or hover, stays open over the popover, and closes on an outside press or pointer exit", async () => {
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent(approvalEvent);
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    const hint = await screen.findByRole("button", { name: hintLabel });
+    const dialogName = { name: "Actions aren't available in the web UI" };
+
+    fireEvent.click(hint);
+    const popover = screen.getByRole("dialog", dialogName);
+    fireEvent.pointerDown(popover);
+    expect(screen.getByRole("dialog", dialogName)).toBeTruthy();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("dialog", dialogName)).toBeNull();
+
+    fireEvent.click(hint);
+    fireEvent.click(hint);
+    expect(screen.queryByRole("dialog", dialogName)).toBeNull();
+
+    vi.useFakeTimers();
+    try {
+      const widget = hint.parentElement as HTMLElement;
+      fireEvent.pointerEnter(widget, { pointerType: "mouse" });
+      expect(screen.getByRole("dialog", dialogName)).toBeTruthy();
+      fireEvent.pointerOver(screen.getByRole("dialog", dialogName), { pointerType: "mouse" });
+      vi.advanceTimersByTime(500);
+      expect(screen.getByRole("dialog", dialogName)).toBeTruthy();
+      fireEvent.pointerLeave(widget, { pointerType: "mouse" });
+      act(() => { vi.advanceTimersByTime(500); });
+      expect(screen.queryByRole("dialog", dialogName)).toBeNull();
+      fireEvent.pointerEnter(widget, { pointerType: "mouse" });
+      expect(screen.getByRole("dialog", dialogName)).toBeTruthy();
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.queryByRole("dialog", dialogName)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("continues existing full history without resetting the thread and deletes it normally", async () => {
@@ -240,41 +345,6 @@ describe("ChatPage", () => {
     factory.mockRestore();
   });
 
-  it.each([
-    { permissions: [], clusters: [], allowed: false },
-    { permissions: [], clusters: null, allowed: false },
-    { permissions: ["agent:approve"], clusters: ["one"], allowed: false },
-    { permissions: ["agent:approve"], clusters: ["two"], allowed: true },
-    { permissions: ["agent:approve"], clusters: [], allowed: false },
-    { permissions: ["agent:approve"], clusters: null, allowed: true },
-    { permissions: ["agent:approve"], clusters: undefined, allowed: false },
-  ])("gates action decisions using effective permission and target scope: %j", async ({ permissions, clusters, allowed }) => {
-    role.enterprise = true;
-    role.hasSession = true;
-    const me = vi.spyOn(api, "rbacMe").mockResolvedValue({ role: "admin", permissions, clusters });
-    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
-      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", cluster: "two", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/api", effect: "Restart api", risk: "medium", state: "pending", expires_at: "2026-10-09T18:00:00Z" }, approval_nonce: "nonce" });
-      return { seq: 2, at: "", kind: "run_finished" };
-    });
-    renderPage();
-    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart api" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-    await screen.findByRole("region", { name: "Action approval" });
-    await waitFor(() => expect(me).toHaveBeenCalled());
-    if (allowed) {
-      fireEvent.click(await screen.findByRole("button", { name: "Approve action" }));
-      await waitFor(() => expect(api.approveAgentApproval).toHaveBeenCalledWith("approval-1", "nonce"));
-    }
-    else {
-      await screen.findByText("Action approval permission is unavailable for this target.");
-      expect(screen.queryByRole("button", { name: "Approve action" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
-      expect(api.approveAgentApproval).not.toHaveBeenCalled();
-      expect(api.rejectAgentApproval).not.toHaveBeenCalled();
-    }
-    me.mockRestore();
-  });
-
   it("hides scroll-to-bottom after starting a new empty thread", async () => {
     const populated = {
       ...baseSession,
@@ -317,6 +387,7 @@ describe("ChatPage", () => {
     renderPage();
     expect(screen.getByRole("button", { name: "Open chat history" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Open Tool catalog" }).getAttribute("href")).toBe("/agent/tools");
+    expect(screen.queryByRole("button", { name: "Open action approvals" })).toBeNull();
     const logo = screen.getByRole("img", { name: "Versus" }) as HTMLImageElement;
     expect(logo.src).toContain("/versus-logo-light.svg");
     document.documentElement.setAttribute("data-theme", "light");
@@ -343,25 +414,6 @@ describe("ChatPage", () => {
     await waitFor(() => expect(api.createChatSession).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getAllByText("Deployment v42 changed checkout.")).toHaveLength(1));
     expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "What changed?", undefined, expect.any(Function), expect.any(AbortSignal));
-  });
-
-  it("keeps approval cards after chat completes and submits the operator decision", async () => {
-    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
-      onEvent({ seq: 1, at: "", kind: "approval_required", approval: { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "Restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-05T13:00:00Z" }, approval_nonce: "nonce-value" });
-      return { seq: 2, at: "", kind: "run_finished" };
-    });
-    renderPage();
-    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send" }));
-
-    const card = await screen.findByRole("region", { name: "Action approval" });
-    expect(within(card).getByText("Deployment/shop/checkout")).toBeTruthy();
-    fireEvent.change(within(card).getByRole("textbox", { name: "Reason for rejection" }), { target: { value: "The rollout is still active" } });
-    fireEvent.click(within(card).getByRole("button", { name: "Reject action" }));
-
-    await waitFor(() => expect(api.rejectAgentApproval).toHaveBeenCalledWith("approval-1", "The rollout is still active"));
-    expect(await within(card).findByText(/rejected/)).toBeTruthy();
-    expect(api.approveAgentApproval).not.toHaveBeenCalled();
   });
 
   it("searches with the Kubernetes resource API and sends the selected attachment", async () => {

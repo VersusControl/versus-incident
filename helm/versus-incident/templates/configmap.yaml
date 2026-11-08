@@ -48,6 +48,7 @@ data:
       evidence:
         observation_heartbeat: {{ .Values.kubernetes.evidence.observationHeartbeat | quote }}
         retention: {{ .Values.kubernetes.evidence.retention | quote }}
+        save_chunk: {{ .Values.kubernetes.evidence.saveChunk }}
 
     alert:
       debug_body: {{ .Values.alert.debugBody }}

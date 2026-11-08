@@ -66,6 +66,9 @@ type Issue struct {
 	Rebuilt       []string                  `json:"rebuilt,omitempty"`
 	Untracked     []string                  `json:"untracked,omitempty"`
 	Partial       bool                      `json:"partial,omitempty"`
+	// HistoryTruncated reports that the changes around this break exceeded the
+	// bounded history read, so some earlier changes were not loaded.
+	HistoryTruncated bool `json:"history_truncated,omitempty"`
 	// Pending lists resource IDs whose evidence is still loading; History
 	// and Changes may fill in once they are listed.
 	Pending []string `json:"pending,omitempty"`
@@ -89,7 +92,21 @@ type IssuePage struct {
 	Partial            []PartialFailure      `json:"partial_failures,omitempty"`
 	Sync               SyncStatus            `json:"sync"`
 	Broken             BrokenTotals          `json:"broken"`
+	// Total and Limit size the pager: Total counts every item the filters
+	// match, and a non-zero Limit marks Total as present.
+	Total int `json:"total,omitempty"`
+	Limit int `json:"limit,omitempty"`
+
+	// Capture is present on pages served from saved history.
+	Capture *CaptureStatus `json:"capture,omitempty"`
+	// resume mints cursors inside the page for callers that show fewer rows.
+	resume snapshotResume
 }
+
+// ResumeAfter returns the cursor that continues this list after the first
+// shown rows of this page, for a caller that showed fewer rows than the page
+// holds. It is empty when the page cannot be resumed that way.
+func (page IssuePage) ResumeAfter(shown int) string { return page.resume.after(shown) }
 
 // PersistedRootContext describes captured identity, not a live graph lookup.
 type PersistedRootContext struct {
@@ -136,13 +153,7 @@ func (service *Service) Issues(ctx context.Context, options IssueOptions) (Issue
 	if options.OccurrenceID != "" || !options.Center.IsZero() {
 		return IssuePage{}, ErrInvalidArguments
 	}
-	currentCursor := options.Cursor != ""
-	for _, ch := range options.Cursor {
-		if ch < '0' || ch > '9' {
-			currentCursor = false
-			break
-		}
-	}
+	currentCursor := options.Cursor != "" && isSnapshotCursor(options.Cursor)
 	if !options.Since.IsZero() || !options.Until.IsZero() || options.Cursor != "" && !currentCursor {
 		if options.Severity != "" && options.Severity != "critical" && options.Severity != "warning" && options.Severity != "info" {
 			return IssuePage{}, ErrInvalidArguments

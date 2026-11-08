@@ -37,7 +37,18 @@ type HelmReleasePage struct {
 	Next      string           `json:"next,omitempty"`
 	Truncated bool             `json:"truncated"`
 	Partial   []PartialFailure `json:"partial_failures,omitempty"`
+	// Total and Limit size the pager: Total counts every item the filters
+	// match, and a non-zero Limit marks Total as present.
+	Total int `json:"total,omitempty"`
+	Limit int `json:"limit,omitempty"`
+	// resume mints cursors inside the page for callers that show fewer rows.
+	resume snapshotResume
 }
+
+// ResumeAfter returns the cursor that continues this list after the first
+// shown rows of this page, for a caller that showed fewer rows than the page
+// holds. It is empty when the page cannot be resumed that way.
+func (page HelmReleasePage) ResumeAfter(shown int) string { return page.resume.after(shown) }
 
 type helmMetadataList struct {
 	Items []struct {
@@ -89,12 +100,22 @@ func (service *Service) Releases(ctx context.Context, options HelmReleaseOptions
 		}
 		return releases[i].Name < releases[j].Name
 	})
-	start, end, next, windowErr := pageWindow(options.Cursor, normalizePageLimit(options.Limit), len(releases))
+	rows := make([]string, len(releases))
+	for position, release := range releases {
+		rows[position] = release.Namespace + "\x00" + release.Name
+	}
+	cursor, err := bindSnapshotCursor("helm_releases", service.indexScope(), struct{ Namespace, Status string }{options.Namespace, options.Status}, rows)
+	if err != nil {
+		return HelmReleasePage{}, err
+	}
+	start, end, next, windowErr := cursor.window(options.Cursor, normalizePageLimit(options.Limit), len(releases))
 	if windowErr != nil {
 		return HelmReleasePage{}, windowErr
 	}
 	result.Items = append(result.Items, releases[start:end]...)
 	result.Next = next
+	result.resume = cursor.resumeFrom(start)
+	result.Total, result.Limit = len(releases), normalizePageLimit(options.Limit)
 	result.Truncated = result.Truncated || incomplete || next != ""
 	return result, nil
 }

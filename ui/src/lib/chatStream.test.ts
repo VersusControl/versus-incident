@@ -107,6 +107,16 @@ describe("reduceChatEvent", () => {
     expect(approval.blocks).toMatchObject([{ kind: "approval", event: { approval: { id: "approval-1" }, approval_nonce: "nonce-value" } }]);
   });
 
+  it("keeps one approval block when the stream repeats an approval id", () => {
+    const approval = { id: "approval-1", proposal_id: "proposal-1", run_id: "run-1", type: "restart", target: "Deployment/shop/checkout", effect: "restart checkout", risk: "medium", state: "pending", expires_at: "2026-10-05T13:00:00Z" };
+    const first = reduceChatEvent(emptyChatStream, event(1, "approval_required", { approval }));
+    const repeated = reduceChatEvent(first, event(2, "approval_required", { approval }));
+    const other = reduceChatEvent(repeated, event(3, "approval_required", { approval: { ...approval, id: "approval-2" } }));
+
+    expect(repeated).toBe(first);
+    expect(other.blocks.map((block) => block.key)).toEqual(["approval-approval-1", "approval-approval-2"]);
+  });
+
   it("resets all live state before a new run", () => {
     const active = reduceChatEvent(
       emptyChatStream,

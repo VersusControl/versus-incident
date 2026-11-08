@@ -1,5 +1,9 @@
 import type { KubernetesChangesPage, KubernetesIssue, KubernetesIssuePage } from "@/lib/api";
 import { settledSync } from "@/lib/kubernetesPending";
+import { knownFailureReason } from "@/lib/kubernetesSyncHealth";
+
+/** Readable names for failure sources that are not Kubernetes resource ids. */
+const failureSources: Record<string, string> = { "kubernetes.history": "Change history" };
 
 export type KubernetesWarning = { id: string; content: string };
 
@@ -14,7 +18,7 @@ export function failureWarnings(failures?: Array<{ resource_id?: string; scope?:
   };
   return (failures ?? []).filter((failure) => !["item_limit", "request_limit", "budget", "page_limit", "syncing"].includes(failure.class)).map((failure) => ({
     id: `failure:${failure.resource_id ?? ""}:${failure.scope ?? ""}:${failure.class}`,
-    content: `${failure.resource_id?.split("~").at(-1) || failure.scope || "Kubernetes resources"}: ${reasons[failure.class] ?? "could not be read"}`,
+    content: `${failureSources[failure.resource_id ?? ""] ?? (failure.resource_id?.split("~").at(-1) || failure.scope || "Kubernetes resources")}: ${reasons[failure.class] ?? knownFailureReason(failure.class) ?? "could not be read"}`,
   }));
 }
 
@@ -26,6 +30,7 @@ export function issueWarnings(issue?: KubernetesIssue): KubernetesWarning[] {
   }
 
   for (const kind of [...new Set(issue.untracked ?? [])].sort()) warnings.push({ id: `untracked:${kind}`, content: `${kind} history is not tracked` });
+  if (issue.history_truncated) warnings.push({ id: "history-truncated", content: "Some changes before this break were not loaded" });
   return warnings;
 }
 

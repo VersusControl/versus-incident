@@ -220,10 +220,7 @@ connectors:
 With `multiple: true`, only `multiple` and `clusters` belong directly under
 `kubernetes`. Each cluster entry owns its `change_capture`; there is no inherited
 top-level setting. See the [per-cluster example](/agent/kubernetes/multi-cluster#setup)
-for continuous capture in east and demand capture in west. Helm values use
-`connectors.kubernetes.changeCapture` for a single cluster and `changeCapture`
-inside each `connectors.kubernetes.clusters` entry for multiple clusters.
-Restart Versus after configuration changes.
+for continuous capture in east and demand capture in west. Restart Versus after configuration changes.
 
 ### Linked break-log source
 
@@ -265,18 +262,12 @@ affected namespace. These budgets do not guarantee all-fleet identity coverage
 or retention of every excerpt for a full day. Settled excerpts may outlast source
 retention only within the same limits; they are not a long-term archive.
 
-Each self-hosted deployment has one organization: OSS writes and reads `default`;
-a licensed deployment writes its licensed organization and reads
-`[licensed organization, default]`. The two concurrent background-settle slots
-are shared across the deployment, not multiplied by organization or cluster.
-Current Kubernetes namespace authority still applies to reads and settling.
-
 ### History storage
 
 | Backend | Kubernetes evidence policy |
 | --- | --- |
 | File | Per evidence scope, up to **24 hours**, **5,000 history records**, and a **4 MiB serialized evidence-state budget**. Older history is pruned to fit; active issue state is protected. If protected state still cannot fit, the commit fails rather than deleting active state. Persist the data directory to survive restarts. |
-| [PostgreSQL](/configuration/postgres-storage) | No application-imposed history age, total-record or total-byte retention limit, and no automatic Kubernetes-history pruning. Operators manage capacity and any explicit deletion/lifecycle policy. |
+| [PostgreSQL](/configuration/postgres-storage) | Kept for **7 days** by default (`kubernetes.evidence.retention: "168h"`) and deleted by whole calendar month, so pages show at least the last 7 days and up to about 5 weeks. Set a longer value, or `"0"` to keep everything. See [How long history is kept](/configuration/postgres-storage#how-long-history-is-kept). |
 | Memory | Ephemeral: evidence is lost when the process stops. |
 
 Bounded pages, query windows and per-operation payload limits constrain work,
@@ -287,7 +278,7 @@ uncaptured or file-pruned evidence.
 | --- | --- |
 | Configured continuous capture reports effective Demand | Check the reported reason. Projected ServiceAccount tokens must be verifiable against the cluster API server. Unverified rotating or cloud identities, and unsupported storage, fall back to demand; selecting continuous alone does not guarantee coverage. |
 | History has gaps or is unavailable | Check capture mode, runtime uptime, current reader permissions, and the backend's history policy above. Revoked credentials stop capture; missing permissions leave incomplete history. Expand the history warnings rather than assuming nothing changed. |
-| Multiple replicas need continuous history | Use shared PostgreSQL storage and the same connector configuration on current versions. Duplicate-free capture is verified for static readers and verified projected ServiceAccount readers, not every cloud identity. Confirm effective continuous capture on each replica. Stop all old capture instances before upgrading; do not run old and new capture together. |
+| Multiple replicas need continuous history | Use shared PostgreSQL storage and the same connector configuration on current versions. Duplicate-free capture is verified for static readers and verified projected ServiceAccount readers, not every cloud identity. Confirm effective continuous capture on each replica. v1.4.34 and v1.4.35 replicas can run together during a rolling update; see [What happens on first start](/migration/migration-v1.4.35.md#what-happens-on-first-start). When upgrading from a version before v1.4.34, stop all old capture instances first. |
 | A large cluster responds slowly | Large inventories, including around 50,000 resources, can still be slow. Retry the read. Temporarily switching to demand may help reduce background work, but is not a guaranteed fix and can leave idle history gaps. |
 
 ## Kubernetes RBAC
@@ -369,52 +360,6 @@ For least privilege, replace `ClusterRole`/`ClusterRoleBinding` with a `Role`
 and `RoleBinding` in each observed namespace, remove nodes/namespaces and node
 metrics, and accept a partial cluster overview. API discovery itself may
 still be visible, while forbidden resource reads are reported as partial.
-
-### Actor credentials and RBAC
-
-Dashboard, Chat, and Analyze reads use the reader identity above. Optional
-actions use a separate identity; enabling actions does not give the reader
-write permissions. Actions require an explicit `actions.auth.mode` and reject
-`in_cluster` mode, which would reuse the pod ServiceAccount.
-
-```yaml
-connectors:
-  kubernetes:
-    endpoint: https://api.example
-    ca_data: ${KUBERNETES_CA_DATA}
-    auth:
-      mode: token_file
-      token_file: /run/secrets/kubernetes-reader-token
-    actions:
-      enable: true
-      max_replicas: 20
-      timeout: 15s
-      auth:
-        mode: token_file
-        token_file: /run/secrets/kubernetes-actor-token
-```
-
-Bind the actor separately and grant only the verbs and resource types needed
-for the operations you enable. The chart's `kubernetesActionsRBAC` settings
-provide optional, separate actor ServiceAccount grants; mount that identity's
-token for `actions.auth.token_file`. Reader RBAC and a successful dashboard
-connection do not authorize action execution; action policy and approval
-requirements still apply.
-
-The optional chart actor grants are:
-
-| Scope | Resources | Verbs |
-| --- | --- | --- |
-| Selected namespace | `apps`: deployments, deployments/scale, statefulsets, statefulsets/scale, daemonsets | `get`, `patch` |
-| Selected namespace | `batch`: cronjobs | `get`, `patch` |
-| Selected namespace | `batch`: jobs | `get`, `create` |
-| Cluster-wide | Core nodes | `get`, `patch` |
-
-Set `kubernetesActionsRBAC.enabled: true` only when these grants are appropriate.
-`namespace` defaults to the release namespace; `serviceAccountName` defaults
-to a separate chart-generated actor name. Use separately managed, narrower
-bindings if you do not need every chart grant. These bindings do not grant
-Pod exec or Secret reads.
 
 ## Connection options
 

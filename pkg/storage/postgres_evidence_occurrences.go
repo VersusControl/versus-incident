@@ -68,8 +68,11 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 	if err != nil {
 		return EvidencePage{}, err
 	}
+	// One occurrence's history pages by last_seen. A link of this list that
+	// pages in another order, or predates links naming their order, restarts
+	// the list from its first page.
 	if query.Cursor != "" && cursor.Ordering != "last_seen" {
-		return EvidencePage{}, ErrEvidenceConflict
+		return EvidencePage{}, ErrEvidenceCursorExpired
 	}
 	cursor.Ordering = "last_seen"
 	scopes, err := evidenceReadScopes(scope)
@@ -94,7 +97,9 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 	generations := make([]uint64, len(keys))
 	highs := make([]uint64, len(keys))
 	prunes := make([]uint64, len(keys))
-	rows, err := tx.QueryContext(ctx, `SELECT scope_key,checkpoint FROM kubernetes_evidence_scopes WHERE scope_key=ANY($1::text[])`, keys)
+	thins, thinned := make([]uint64, len(keys)), make([]time.Time, len(keys))
+	ready := true
+	rows, err := tx.QueryContext(ctx, `SELECT scope_key,checkpoint,read_model_ready FROM kubernetes_evidence_scopes WHERE scope_key=ANY($1::text[])`, keys)
 	if err != nil {
 		return page, err
 	}
@@ -102,10 +107,12 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 		var key string
 		var raw []byte
 		var cp EvidenceCheckpoint
-		if err = rows.Scan(&key, &raw); err != nil {
+		var modelReady bool
+		if err = rows.Scan(&key, &raw, &modelReady); err != nil {
 			rows.Close()
 			return page, err
 		}
+		ready = ready && modelReady
 		if err = json.Unmarshal(raw, &cp); err != nil {
 			rows.Close()
 			return page, err
@@ -114,6 +121,7 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 			if k == key {
 				generations[i], highs[i] = cp.Generation, cp.OccurrenceRevision
 				prunes[i] = cp.PruneRevision
+				thins[i], thinned[i] = cp.ThinRevision, cp.ThinnedThrough
 			}
 		}
 		page.Checkpoint = mergeEvidenceCheckpoint(page.Checkpoint, cp)
@@ -123,17 +131,31 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 		return page, err
 	}
 	rows.Close()
+	// Availability is read from the version read model, which a converting
+	// scope has not finished building; answer not-ready as list reads do.
+	if !ready {
+		return page, ErrEvidenceNotReady
+	}
 	if query.Cursor == "" {
 		cursor.Generations = generations
 		cursor.OccurrenceHighs = highs
 		cursor.PruneRevisions = prunes
+		cursor.ThinRevisions = thins
 	} else {
-		if len(cursor.Generations) != len(keys) || len(cursor.OccurrenceHighs) != len(keys) {
+		if len(cursor.Generations) != len(keys) || len(cursor.OccurrenceHighs) != len(keys) || !cursorThinRevisionsFit(cursor, len(keys)) {
 			return page, ErrInvalidEvidence
 		}
 		for i := range keys {
-			if cursor.Generations[i] != generations[i] || cursor.OccurrenceHighs[i] > highs[i] || len(cursor.PruneRevisions) != len(keys) || cursor.PruneRevisions[i] != prunes[i] {
+			if len(cursor.PruneRevisions) != len(keys) || cursor.OccurrenceHighs[i] > highs[i] && cursor.Generations[i] == generations[i] && cursor.PruneRevisions[i] == prunes[i] {
 				return page, ErrEvidenceConflict
+			}
+			if cursor.Generations[i] != generations[i] || cursor.PruneRevisions[i] != prunes[i] {
+				// History was pruned or replaced since the cursor was issued.
+				return page, ErrEvidenceCursorExpired
+			}
+			if cursorSamplesThinned(cursor, i, thins[i]) && occurrenceThinningReaches(query.Until, thinned[i]) {
+				// Samples were thinned where this read looks for them.
+				return page, ErrEvidenceCursorExpired
 			}
 		}
 	}
@@ -144,16 +166,51 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 		}
 		values[i] = int64(high)
 	}
-	args := []any{keys, query.Since, query.Until, values, query.OccurrenceID}
-	// The repeatable-read transaction pins all scopes together on page one. Later
-	// transactions explicitly constrain every observation to that same prefix.
-	// One indexed latest-revision probe per scope for the requested occurrence.
-	visible := `SELECT s.scope_key,o.occurrence_id,o.revision,o.observed_at,o.last_seen,o.payload_version,o.measurements FROM unnest($1::text[])s(scope_key)
- JOIN LATERAL(SELECT occurrence_id,revision,observed_at,last_seen,payload_version,measurements FROM kubernetes_evidence_occurrence_observations
- WHERE scope_key=s.scope_key AND occurrence_id=$5 AND revision<=($4::bigint[])[array_position($1::text[],s.scope_key)] AND observed_at<=$3 ORDER BY revision DESC LIMIT 1)o ON TRUE`
+	// One latest-revision sample per scope for the requested occurrence, at or
+	// before the pin. The newest version visible at the pin opened at or before
+	// every later sample, so the sample lookup starts at that opening's month;
+	// both lookups are bounded statements planned for the months they read.
+	wanted := make([]occurrenceSampleKey, len(keys))
+	for i, key := range keys {
+		wanted[i] = occurrenceSampleKey{scope: key, occurrence: query.OccurrenceID, pin: values[i], opened: time.Unix(0, 0).UTC()}
+		var opened sql.NullTime
+		if err = tx.QueryRowContext(ctx, `SELECT observed_at FROM kubernetes_evidence_occurrence_read_versions
+ WHERE scope_key=$1 AND occurrence_id=$2 AND revision<=$3 AND observed_at<=$4 ORDER BY revision DESC LIMIT 1`, key, query.OccurrenceID, values[i], query.Until).Scan(&opened); err != nil && err != sql.ErrNoRows {
+			return page, err
+		}
+		if opened.Valid {
+			wanted[i].opened = opened.Time
+		}
+	}
+	samples, err := occurrenceSamples(ctx, tx, wanted, query.Until)
+	if err != nil {
+		return page, err
+	}
+	visibleScopes, visibleRevisions, visibleObserved, visibleSeen, visibleVersions, visibleMeasurements := []string{}, []int64{}, []time.Time{}, []time.Time{}, []string{}, []*string{}
+	for i, sample := range samples {
+		if !sample.found {
+			continue
+		}
+		visibleScopes, visibleRevisions = append(visibleScopes, keys[i]), append(visibleRevisions, sample.revision)
+		visibleObserved, visibleSeen, visibleVersions = append(visibleObserved, sample.observed), append(visibleSeen, sample.lastSeen), append(visibleVersions, sample.version)
+		var measurements *string
+		if sample.measurements != nil {
+			text := string(sample.measurements)
+			measurements = &text
+		}
+		visibleMeasurements = append(visibleMeasurements, measurements)
+	}
+	args := []any{keys, query.Since, query.Until, values, query.OccurrenceID, visibleScopes, visibleRevisions, visibleObserved, visibleSeen, visibleVersions, visibleMeasurements}
+	visible := `SELECT v.scope_key,$5::text AS occurrence_id,v.revision,v.observed_at,v.last_seen,v.payload_version,v.measurements::jsonb AS measurements
+ FROM unnest($6::text[],$7::bigint[],$8::timestamptz[],$9::timestamptz[],$10::text[],$11::text[]) AS v(scope_key,revision,observed_at,last_seen,payload_version,measurements)
+ WHERE cardinality($4::bigint[])=cardinality($1::text[])`
+	// The indexed severity comes from the version read model, so availability
+	// follows the same decode rule as list reads.
 	cte := `WITH visible AS (` + visible + `), preferred AS (
- SELECT DISTINCT ON(o.occurrence_id) o.occurrence_id,o.revision,o.observed_at,o.last_seen,v.payload,o.measurements
+ SELECT DISTINCT ON(o.occurrence_id) o.occurrence_id,o.revision,o.observed_at,o.last_seen,v.payload,o.measurements,
+ r.severity AS indexed_severity
  FROM visible o JOIN kubernetes_evidence_occurrence_versions v ON v.scope_key=o.scope_key AND v.payload_version=o.payload_version
+ JOIN kubernetes_evidence_occurrence_read_versions r ON r.scope_key=o.scope_key AND r.payload_version=o.payload_version
  ORDER BY o.occurrence_id,array_position($1::text[],o.scope_key)
  ) `
 	column := "last_seen"
@@ -173,7 +230,7 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 	severity, broken, _ := strings.Cut(query.Variant, ":")
 	if severity != "" {
 		args = append(args, severity)
-		where += fmt.Sprintf(" AND payload->'payload'->>'severity'=$%d", len(args))
+		where += fmt.Sprintf(" AND indexed_severity=$%d", len(args))
 	}
 	if broken == "broken" {
 		where += ` AND payload->>'broken'='true'`
@@ -187,9 +244,14 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 		return page, err
 	}
 	if query.Cursor == "" {
+		// Count an undecodable payload as unavailable, matching the read model.
+		countAllowed := allowed
+		if query.EnforceAuthority {
+			countAllowed = "(" + allowed + " AND indexed_severity<>'')"
+		}
 		countRows, countErr := tx.QueryContext(ctx, cte+`SELECT type,severity,broken,COUNT(*) FROM(
- SELECT CASE WHEN NOT COALESCE(`+allowed+`,FALSE) THEN 'coverage_gap' WHEN payload->>'closed_at' IS NOT NULL THEN 'issue_resolved' WHEN payload->>'observation_only'='true' THEN 'issue_observed' ELSE 'issue_opened' END AS type,
- CASE WHEN `+allowed+` THEN COALESCE(payload->'payload'->>'severity','') ELSE '' END AS severity,
+ SELECT CASE WHEN NOT COALESCE(`+countAllowed+`,FALSE) THEN 'coverage_gap' WHEN payload->>'closed_at' IS NOT NULL THEN 'issue_resolved' WHEN payload->>'observation_only'='true' THEN 'issue_observed' ELSE 'issue_opened' END AS type,
+ CASE WHEN `+allowed+` THEN indexed_severity ELSE '' END AS severity,
  CASE WHEN `+allowed+` THEN COALESCE((payload->>'broken')::boolean,FALSE) ELSE FALSE END AS broken
  FROM preferred WHERE `+where+` LIMIT 1001) bounded GROUP BY type,severity,broken`, args...)
 		if countErr != nil {
@@ -231,13 +293,16 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 	}
 	for rows.Next() {
 		var observation occurrenceObservation
-		var raw []byte
+		var raw, measurements []byte
 		var issue EvidenceIssue
 		var authorized bool
-		if err = rows.Scan(&observation.OccurrenceID, &observation.Revision, &observation.At, &observation.LastSeen, &authorized, &raw, &observation.Measurements); err != nil {
+		// Measurements are NULL for an unauthorized row and for a payload with
+		// no measurable fields.
+		if err = rows.Scan(&observation.OccurrenceID, &observation.Revision, &observation.At, &observation.LastSeen, &authorized, &raw, &measurements); err != nil {
 			rows.Close()
 			return page, err
 		}
+		observation.Measurements = measurements
 		if authorized && json.Unmarshal(raw, &issue) != nil {
 			rows.Close()
 			return page, ErrInvalidEvidence

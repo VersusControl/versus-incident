@@ -399,9 +399,7 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 func inventoryDeltas(previous, current kubeindex.Snapshot, kinds []string) <-chan kubeindex.Delta {
 	requested := make(map[string]bool, len(kinds))
 	for _, kind := range kinds {
-		// A kind the cluster did not serve was never listed: its first listing
-		// with content is a baseline, not a creation.
-		requested[kind] = !previous.Kinds[kind].ObservedAt.IsZero() && !previous.Kinds[kind].Absent && current.Kinds[kind].State == "ready"
+		requested[kind] = listedBefore(previous, kind) && current.Kinds[kind].State == "ready"
 	}
 	old := make(map[string]kubeindex.Record, len(previous.Records))
 	for _, record := range previous.Records {
@@ -438,6 +436,7 @@ func scopedIndexStatus(status kubeindex.Status, requested []string) kubeindex.St
 	status.State = "ready"
 	status.Partial = false
 	oldest := time.Time{}
+	readable, unreadable := 0, 0
 	for _, kind := range requested {
 		kindStatus, exists := allKinds[kind]
 		if !exists {
@@ -447,7 +446,15 @@ func scopedIndexStatus(status kubeindex.Status, requested []string) kubeindex.St
 			continue
 		}
 		status.Kinds[kind] = kindStatus
-		if kindStatus.Partial || kindStatus.State != "ready" {
+		if isUnreadableSyncKind(kindStatus) {
+			// A kind the connector identity may not list is a coverage gap of
+			// an otherwise healthy sync, the same answer the sync report gives:
+			// the view is partial, never failed.
+			status.Partial = true
+			unreadable++
+		} else if kindStatus.State == "ready" && !kindStatus.Partial && !kindStatus.Absent {
+			readable++
+		} else if kindStatus.Partial || kindStatus.State != "ready" {
 			status.Partial = true
 			if kindStatus.State == "error" {
 				status.State = "error"
@@ -458,6 +465,11 @@ func scopedIndexStatus(status kubeindex.Status, requested []string) kubeindex.St
 		if !kindStatus.ObservedAt.IsZero() && (oldest.IsZero() || kindStatus.ObservedAt.Before(oldest)) {
 			oldest = kindStatus.ObservedAt
 		}
+	}
+	if status.State == "ready" && readable == 0 && unreadable > 0 {
+		// Nothing requested is readable: a gap with no data around it is a
+		// connector that cannot see this view, as the sync report says too.
+		status.State = "error"
 	}
 	if !oldest.IsZero() {
 		status.AgeSeconds = time.Since(oldest).Seconds()

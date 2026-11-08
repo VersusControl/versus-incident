@@ -392,6 +392,75 @@ describe("Timeline range and filters", () => {
   });
 });
 
+describe("History save delay on saved-history views", () => {
+  const history_save = { code: "history_save_delayed", message: "The cluster was read, but the latest capture could not be saved to history.", action: "History catches up automatically.", retryable: true };
+
+  it("keeps the root change lane and crash evidence on screen under one calm notice", async () => {
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
+    vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...crashPage, capture: { mode: "continuous", behind: true, history_save } });
+    vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(logPage());
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValue({ items: [change], sync, capture: { mode: "continuous", behind: true, history_save: { ...history_save, saved_through: "2026-10-14T12:01:00Z" } } });
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    const saved = new Date("2026-10-14T12:01:00Z");
+    // The fixture's save time is from an earlier day than the test clock, so the date is named.
+    const notice = await screen.findByText(`History is temporarily not saving — showing data from ${saved.toLocaleDateString([], { month: "short", day: "numeric", ...(saved.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) })}, ${saved.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+    expect(notice.closest("[role=status]")).toBeTruthy();
+    expect(screen.getAllByText(/History is temporarily not saving/)).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "Timeline lane checkout" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Captured crash evidence" })).toBeTruthy();
+    expect(screen.queryByText("Related change history is unavailable.")).toBeNull();
+    expect(screen.queryByText("Crash journal unavailable.")).toBeNull();
+    expect(screen.queryByText(/credential|connector/i)).toBeNull();
+  });
+
+  it("keeps historical grouped issues listed with the notice", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=issues&since=2026-10-14T11:00:00Z&until=2026-10-14T13:00:00Z");
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(async (options) => options?.since
+      ? { items: [issue], totals: { warning: 1 }, truncated: false, sync, capture: { mode: "continuous", behind: true, history_save } }
+      : { items: [], totals: { warning: 0 }, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
+    mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    await screen.findByText("History is temporarily not saving — showing the last saved data");
+    expect(screen.getAllByText(/checkout/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Grouped issues are unavailable.")).toBeNull();
+  });
+
+  it("keeps the root lane and crash evidence when a later page reports a rejected save", async () => {
+    window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
+    vi.spyOn(api, "kubernetesRelated").mockResolvedValue({ nodes: [], edges: [], omitted: {}, sync });
+    vi.spyOn(api, "kubernetesCrashes").mockResolvedValue({ ...crashPage, capture: { mode: "continuous", behind: true, history_save } });
+    vi.spyOn(api, "kubernetesBreakLogs").mockResolvedValue(logPage());
+    vi.spyOn(api, "kubernetesChanges").mockResolvedValueOnce({ items: [change], next: "older", sync })
+      .mockResolvedValueOnce({ items: [], sync, capture: { mode: "continuous", behind: true, history_save: { ...history_save, code: "history_save_rejected", retryable: false, action: "Check the history store." } } });
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    const label = await screen.findByText("History could not save the latest data — showing the last saved data");
+    const notice = label.closest("[role=status]") as HTMLElement;
+    expect(notice.className).toContain("text-sev-warning");
+    expect(within(notice).getByText("Check the history store.")).toBeTruthy();
+    expect(screen.queryByText(/History is temporarily not saving/)).toBeNull();
+    expect(screen.getByRole("region", { name: "Timeline lane checkout" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Captured crash evidence" })).toBeTruthy();
+    expect(screen.queryByText(/credential|connector/i)).toBeNull();
+  });
+
+  it("keeps the unfocused timeline rows with the notice, and drops it once saves resume", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+    const entry: KubernetesTimelineEntry = { type: "change", id: change.id, at: change.at, change };
+    const reads = vi.spyOn(api, "kubernetesTimeline").mockResolvedValue(timelinePage([entry], { capture: { mode: "continuous", behind: true, history_save } }));
+    const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    await screen.findByText("History is temporarily not saving — showing the last saved data");
+    expect(screen.getByRole("button", { name: "Open change details" })).toBeTruthy();
+    expect(screen.queryByText("Timeline unavailable.")).toBeNull();
+    reads.mockResolvedValue(timelinePage([entry], { capture: { mode: "continuous", behind: false } }));
+    await act(async () => { await client.invalidateQueries(); });
+    await waitFor(() => expect(screen.queryByText(/History is temporarily not saving/)).toBeNull());
+    expect(screen.getByRole("button", { name: "Open change details" })).toBeTruthy();
+  });
+});
+
 describe("Persisted root identity independent of historical windows", () => {
   it("uses the selected crash's verified observation time and keeps that anchor across range changes", async () => {
     const event: KubernetesCrashEvent = { id: "selected-crash", sequence: 1, cluster: "east", namespace: "shop", pod: "checkout-a", pod_uid: "pod-a",
@@ -815,6 +884,21 @@ describe("Issue evidence still loading", () => {
     fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
     expect(await screen.findByText("No change on it, its config or its nodes")).toBeTruthy();
     expect(screen.queryByText("Evidence loading")).toBeNull();
+  });
+
+  it("marks a capped history on the collapsed Issues row and words its empty body as a cap", async () => {
+    const detail = { ...issue, changes: [], history_truncated: true };
+    const lookup = vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [detail], totals: {}, truncated: false, sync }));
+    mount(<BreakRow issue={{ ...issue, history_truncated: true }} resource={{ resource_id: "apps~v1~deployments", ...issue.root }} onSelectResource={vi.fn()} collapsed sourceSync={sync} />);
+    expect(lookup).not.toHaveBeenCalled();
+    const marker = screen.getByRole("button", { name: "Resource coverage" });
+    fireEvent.click(marker);
+    expect(within(screen.getByRole("region", { name: "Resource coverage details" })).getByText("Some changes before this break were not loaded")).toBeTruthy();
+    fireEvent.keyDown(marker, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "Expand checkout" }));
+    expect(await screen.findByText("Some changes before this break were not loaded")).toBeTruthy();
+    expect(screen.queryByText("No recorded change in available evidence")).toBeNull();
+    expect(screen.queryByText("No change on it, its config or its nodes")).toBeNull();
   });
 
   it("does not claim a healthy broken summary while evidence kinds load", async () => {

@@ -80,6 +80,7 @@ func main() {
 			HistoryReadConcurrency: cfg.Storage.Postgres.HistoryReadConcurrency,
 			ObservationHeartbeat:   cfg.Kubernetes.Evidence.ObservationHeartbeat,
 			EvidenceRetention:      cfg.Kubernetes.Evidence.Retention,
+			EvidenceSaveChunk:      cfg.Kubernetes.Evidence.SaveChunk,
 		},
 	})
 	if err != nil {

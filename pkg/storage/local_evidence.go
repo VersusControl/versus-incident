@@ -66,6 +66,15 @@ func openLocalEvidence(path string) (*localEvidence, error) {
 	}
 	dsn := "file:evidence-" + uuid.NewString() + "?mode=memory&cache=shared&_pragma=busy_timeout(5000)"
 	if path != "" {
+		// The default data directory is relative to the working directory. A
+		// relative path in a file: URI is parsed as a URI authority, which
+		// SQLite rejects on every statement, so the URI always carries an
+		// absolute path.
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		path = absolute
 		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 			if err := validateLocalEvidenceArtifact(path + suffix); err != nil {
 				return nil, err

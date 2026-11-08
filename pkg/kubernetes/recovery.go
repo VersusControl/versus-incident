@@ -3,10 +3,15 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/rand"
 	"sync"
 	"time"
+
+	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // recoveryScope is one read authority's view of the shared provider. The provider
@@ -264,16 +269,107 @@ type recoveryStage struct {
 	at     time.Time
 }
 
+// captureStorageError marks a failure saving captured state. The cluster was
+// read successfully; only storage failed, so it never counts against the
+// credential or the cluster. A rejected save is one the store refused as
+// unsupported, oversized or invalid: retrying the same capture cannot succeed.
+type captureStorageError struct {
+	stage    string
+	cause    error
+	rejected bool
+}
+
+func (err *captureStorageError) Error() string {
+	return "kubernetes: capture storage " + err.stage + " failed"
+}
+
+func (err *captureStorageError) Unwrap() error { return err.cause }
+
+// storageStageFailure wraps a storage-stage error unless it is a lease,
+// credential, permission or cancellation outcome, which keep their meaning. A
+// journal conflict is the store's lease fence answering that another owner
+// moved the inventory, so it is a lease outcome too.
+func storageStageFailure(stage string, err error) error {
+	var credential *credentialFailure
+	if err == nil || errors.As(err, &credential) || errors.Is(err, errInventoryLeaseLost) || errors.Is(err, kubechanges.ErrLeaseLost) ||
+		errors.Is(err, storage.ErrEvidenceConflict) ||
+		errors.Is(err, ErrCredentialUnavailable) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) ||
+		errors.Is(err, context.Canceled) {
+		return err
+	}
+	return &captureStorageError{stage: stage, cause: err, rejected: historySaveRejected(err)}
+}
+
+// countsAgainstCredential reports whether a capture cycle failure may close the
+// credential recovery gate, which every reader is told as an unresolved
+// connector credential. Only a typed credential failure, a credential answer
+// (unavailable or rejected) or an answered permission denial counts; storage,
+// lease, deadline, cancellation, contention and unknown failures never do.
+func countsAgainstCredential(err error) bool {
+	var failure *credentialFailure
+	return errors.As(err, &failure) || errors.Is(err, ErrCredentialUnavailable) || errors.Is(err, ErrUnauthorized) || answerDenied(err)
+}
+
+// inventoryReadFailure marks a failed read of the published inventory as a
+// storage failure. Malformed stored data keeps its meaning so the worker can
+// re-collect over it.
+func inventoryReadFailure(err error) error {
+	var payloadFault inventoryPayloadError
+	if errors.As(err, &payloadFault) || errors.Is(err, kubeindex.ErrInvalidRecord) {
+		return err
+	}
+	return storageStageFailure("read", err)
+}
+
+// errInvalidCapture is a capture whose own payload is invalid, found before it
+// reaches the store.
+var errInvalidCapture = fmt.Errorf("kubernetes: capture payload is invalid: %w", storage.ErrInvalidEvidence)
+
+// historySaveRejected reports a refusal that a retry of the same capture cannot
+// fix, as opposed to an outage that clears on its own. Invalid evidence counts
+// only when the capture itself is invalid: the store also answers invalid
+// evidence for inconsistent saved state, which repair or retention can clear.
+func historySaveRejected(err error) bool {
+	return errors.Is(err, storage.ErrEvidenceLimit) || errors.Is(err, errInvalidCapture) || errors.Is(err, storage.ErrUnsupported) || errors.Is(err, storage.ErrEvidenceUnstorable)
+}
+
+// captureRefusalReason names, in a fixed vocabulary, why a capture was not
+// saved to history. It never carries record text, error text or cluster names.
+func captureRefusalReason(err error) string {
+	switch {
+	case errors.Is(err, storage.ErrEvidenceLimit):
+		return "over_save_limit"
+	case errors.Is(err, storage.ErrEvidenceUnstorable):
+		return "unstorable_text"
+	case errors.Is(err, errInvalidCapture), errors.Is(err, storage.ErrInvalidEvidence):
+		return "invalid_capture"
+	case errors.Is(err, storage.ErrUnsupported):
+		return "store_unsupported"
+	case errors.Is(err, ErrInventoryNotReady):
+		return "authority_unverified"
+	case errors.Is(err, ErrIncompleteInventory):
+		return "incomplete_inventory"
+	}
+	return errorClass(err)
+}
+
 func recoveryReason(err error, stage string) string {
+	var saveFailure *captureStorageError
 	switch {
 	case err == nil:
 		return "ready"
-	case errors.Is(err, errInventoryLeaseLost):
+	case errors.Is(err, errInventoryLeaseLost), errors.Is(err, storage.ErrEvidenceConflict):
 		return "lease_lost"
+	case errors.As(err, &saveFailure) && saveFailure.rejected:
+		return "storage_rejected"
+	case errors.As(err, &saveFailure):
+		return "storage_unavailable"
 	case errors.Is(err, ErrCredentialUnavailable):
 		return "credential_unavailable"
 	case errors.Is(err, ErrUnauthorized):
 		return "credential_rejected"
+	case errors.As(err, new(*credentialFailure)):
+		return "credential_unavailable"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):

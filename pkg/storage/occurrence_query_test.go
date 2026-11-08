@@ -170,7 +170,7 @@ func TestOccurrenceQueryPinsFreshnessPayloadAndDeletionGeneration(t *testing.T) 
 				t.Fatal(err)
 			}
 			stale := capture("after-delete", now.Add(-10*time.Second), `{"severity":"warning"}`, true)
-			if _, err = store.QueryEvidence(t.Context(), scope, q); !errors.Is(err, ErrEvidenceConflict) {
+			if _, err = store.QueryEvidence(t.Context(), scope, q); !errors.Is(err, ErrEvidenceCursorExpired) {
 				t.Fatalf("pre-delete occurrence cursor survived: %v", err)
 			}
 			archive := scope
@@ -352,7 +352,7 @@ func TestPostgresEvidenceQueriesLeavePreexistingJournalUntouched(t *testing.T) {
 	if dsn == "" {
 		t.Skip("explicit isolated harness Postgres required")
 	}
-	provider, err := NewPostgres(PostgresOptions{DSN: dsn})
+	provider, err := NewPostgres(PostgresOptions{DSN: dsn, EvidenceRetention: "0"})
 	if err != nil {
 		t.Fatal("isolated database unavailable")
 	}

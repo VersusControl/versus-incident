@@ -19,6 +19,7 @@ import (
 // This matrix separates a selected-namespace proof's transport/envelope from
 // the same journal's all-namespace query. No live cluster objects are fixtures.
 func TestEvidenceAuthorizationQueryScopeMatrix(t *testing.T) {
+	t.Parallel()
 	for _, shape := range []string{"complete-empty", "complete-object", "complete-null", "complete-null-all-scopes", "null-items-unproven", "wrong-negotiated-kind", "forbidden", "unserved"} {
 		t.Run(shape, func(t *testing.T) {
 			var mu sync.Mutex

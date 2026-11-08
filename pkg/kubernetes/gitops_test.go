@@ -107,11 +107,11 @@ func TestGitOpsAppsAndRolloutUseDiscoveredResources(t *testing.T) {
 		t.Fatalf("apps = %#v err=%v", apps, err)
 	}
 	appPage, err := service.GitOpsApps(t.Context(), GitOpsAppOptions{Tool: "argocd", Limit: 1})
-	if err != nil || len(appPage.Items) != 1 || appPage.Items[0].Name != "checkout" || appPage.Next != "1" || !appPage.Truncated {
+	if err != nil || len(appPage.Items) != 1 || appPage.Items[0].Name != "checkout" || appPage.Next == "" || !appPage.Truncated || appPage.Total != 2 || appPage.Limit != 1 {
 		t.Fatalf("first GitOps page = %#v err=%v", appPage, err)
 	}
 	appPage, err = service.GitOpsApps(t.Context(), GitOpsAppOptions{Tool: "argocd", Limit: 1, Cursor: appPage.Next})
-	if err != nil || len(appPage.Items) != 1 || appPage.Items[0].Name != "api" || appPage.Next != "" || appPage.Truncated {
+	if err != nil || len(appPage.Items) != 1 || appPage.Items[0].Name != "api" || appPage.Next != "" || appPage.Truncated || appPage.Total != 2 || appPage.Limit != 1 {
 		t.Fatalf("second GitOps page = %#v err=%v", appPage, err)
 	}
 	rollout, err := service.Rollout(t.Context(), "apps", "checkout")

@@ -3,13 +3,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { notifyManager, QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { BrowserRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, type KubernetesIssue } from "@/lib/api";
+import { api, ApiError, type KubernetesIssue, type KubernetesIssuePage } from "@/lib/api";
 import * as apiModule from "@/lib/api";
 import { KubernetesPage } from "./KubernetesPage";
 import { ToastProvider } from "@/components/Toast";
 
 vi.mock("@/components/TopBar", () => ({ TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => <header><span>{title}</span>{actions}</header> }));
-vi.mock("@/lib/api", async (importActual) => { const actual = await importActual<typeof import("@/lib/api")>(); return { ...actual, api: { ...actual.api, listAgentToolsets: vi.fn(), proposeAgentAction: vi.fn(), approveAgentApproval: vi.fn(), rejectAgentApproval: vi.fn(), kubernetesOverview: vi.fn(), kubernetesSyncHealth: vi.fn(), kubernetesClusterSyncHealth: vi.fn(), kubernetesOverviewGraph: vi.fn(), kubernetesIssues: vi.fn(), kubernetesChanges: vi.fn(), kubernetesGraph: vi.fn(), kubernetesNamespaces: vi.fn(), kubernetesNeighborhood: vi.fn(), kubernetesCommitStream: vi.fn(), kubernetesTop: vi.fn(), kubernetesReleases: vi.fn(), kubernetesGitOpsApps: vi.fn(), kubernetesRollout: vi.fn(), kubernetesRollouts: vi.fn(), kubernetesTraffic: vi.fn(), kubernetesDiagnose: vi.fn(), kubernetesWorkloadLogs: vi.fn(), kubernetesPodLogs: vi.fn(), kubernetesUsage: vi.fn(), kubernetesWorkloads: vi.fn(), kubernetesWorkload: vi.fn(), kubernetesNodes: vi.fn(), kubernetesNodePods: vi.fn(), kubernetesSearch: vi.fn(), kubernetesEvents: vi.fn(), kubernetesDescribe: vi.fn() } }; });
+vi.mock("@/lib/api", async (importActual) => { const actual = await importActual<typeof import("@/lib/api")>(); return { ...actual, api: { ...actual.api, listAgentToolsets: vi.fn(), kubernetesOverview: vi.fn(), kubernetesSyncHealth: vi.fn(), kubernetesClusterSyncHealth: vi.fn(), kubernetesOverviewGraph: vi.fn(), kubernetesIssues: vi.fn(), kubernetesChanges: vi.fn(), kubernetesGraph: vi.fn(), kubernetesNamespaces: vi.fn(), kubernetesNeighborhood: vi.fn(), kubernetesCommitStream: vi.fn(), kubernetesTop: vi.fn(), kubernetesReleases: vi.fn(), kubernetesGitOpsApps: vi.fn(), kubernetesRollout: vi.fn(), kubernetesRollouts: vi.fn(), kubernetesTraffic: vi.fn(), kubernetesDiagnose: vi.fn(), kubernetesWorkloadLogs: vi.fn(), kubernetesPodLogs: vi.fn(), kubernetesUsage: vi.fn(), kubernetesWorkloads: vi.fn(), kubernetesWorkload: vi.fn(), kubernetesNodes: vi.fn(), kubernetesNodePods: vi.fn(), kubernetesSearch: vi.fn(), kubernetesEvents: vi.fn(), kubernetesDescribe: vi.fn() } }; });
 
 function LocationProbe() { const location = useLocation(); return <output aria-label="Current location">{location.pathname}{location.search}</output>; }
 function renderPage(client = new QueryClient({ defaultOptions: { queries: { retry: false } } }), seedCatalog = true) {
@@ -280,6 +280,252 @@ describe("KubernetesPage", () => {
 		await within(inventory).findByText("replacement-page-one");
 		expect(within(inventory).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(true);
 		expect(vi.mocked(api.kubernetesWorkloads).mock.calls.at(-1)?.[0].cursor).toBeUndefined();
+	});
+	describe("a page link the server refuses as expired", () => {
+		const expired = () => new ApiError(400, "Inventory generation changed", { code: "cursor_expired", error: "Inventory generation changed" });
+		const node = (name: string) => ({ resource_id: "core~v1~nodes", kind: "Node", name, conditions: [{ type: "Ready", status: "True" }] });
+		// Opens page 2 of a list whose page 2 link the server refuses, and checks
+		// the list is back on a fresh page 1 with no error and no repeated read.
+		async function pageForwardAndBack(list: { region: () => HTMLElement; row: (name: string) => Promise<HTMLElement>; fault: RegExp; cursorCalls: () => number }, firstRow: string, replacementRow: string, flip: () => void) {
+			await list.row(firstRow);
+			flip();
+			fireEvent.click(within(list.region()).getByRole("button", { name: "Next page" }));
+			await list.row(replacementRow);
+			// Page 1 sends no cursor, so the list settles there instead of asking again.
+			await new Promise(resolve => setTimeout(resolve, 50));
+			expect(list.cursorCalls()).toBe(1);
+			expect(within(list.region()).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(true);
+			expect(within(list.region()).queryByText(list.fault)).toBeNull();
+		}
+		const byText = (name: string) => screen.findByText(name, undefined, { timeout: 3000 });
+
+		it("returns Workloads to page 1 without an error or a restart prompt", async () => {
+			let replacement = false;
+			vi.mocked(api.kubernetesWorkloads).mockImplementation(async options => {
+				if (options?.cursor) throw expired();
+				return { items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: replacement ? "replacement-page-one" : "old-page-one" }],
+					counts: { Deployment: 21 }, next: "20", total: 21, limit: 20, truncated: true };
+			});
+			renderWorkloads();
+			await pageForwardAndBack({ region: () => screen.getByRole("region", { name: "Workloads" }), row: byText, fault: /refresh is unavailable|expired|Restart/,
+				cursorCalls: () => vi.mocked(api.kubernetesWorkloads).mock.calls.filter(([options]) => options?.cursor).length }, "old-page-one", "replacement-page-one", () => { replacement = true; });
+		});
+
+		it("keeps Workloads rows on screen with a notice when a background refresh finds the list changed", async () => {
+			const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+			let mode: "ok" | "expired" | "refreshed" = "ok";
+			vi.mocked(api.kubernetesWorkloads).mockImplementation(async options => {
+				const row = (name: string) => ({ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name });
+				if (!options?.cursor) return { items: [row("page-one")], counts: { Deployment: 40 }, next: "20", total: 40, limit: 20, truncated: false };
+				if (mode === "expired") throw expired();
+				return { items: [row(mode === "refreshed" ? "page-two-refreshed" : "page-two")], counts: { Deployment: 40 }, total: 40, limit: 20, truncated: false };
+			});
+			renderWorkloads(client);
+			await screen.findByText("page-one");
+			const inventory = screen.getByRole("region", { name: "Workloads" });
+			fireEvent.click(within(inventory).getByRole("button", { name: "Next page" }));
+			await within(inventory).findByText("page-two");
+			const cursorCalls = () => vi.mocked(api.kubernetesWorkloads).mock.calls.filter(([options]) => options?.cursor).length;
+			const before = cursorCalls();
+
+			mode = "expired";
+			await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
+			const notice = await within(inventory).findByText("This list changed since this page loaded.");
+			expect(notice.getAttribute("role")).toBe("status");
+			expect(notice.className).not.toMatch(/sev-/);
+			expect(within(inventory).getByText("page-two")).toBeTruthy();
+			expect(within(inventory).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(false);
+			expect(within(inventory).queryByText(/refresh is unavailable|expired|Restart/)).toBeNull();
+			await new Promise(resolve => setTimeout(resolve, 50));
+			expect(cursorCalls()).toBe(before + 1);
+
+			// The next successful load clears the notice.
+			mode = "refreshed";
+			await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
+			await within(inventory).findByText("page-two-refreshed");
+			expect(within(inventory).queryByText("This list changed since this page loaded.")).toBeNull();
+
+			// The notice's action goes back to page 1.
+			mode = "expired";
+			await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
+			fireEvent.click(await within(inventory).findByRole("button", { name: "Back to page 1" }));
+			await within(inventory).findByText("page-one");
+			expect(within(inventory).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(true);
+			expect(within(inventory).queryByText("This list changed since this page loaded.")).toBeNull();
+
+			// Returning to a page is a new request, so a refusal then resets.
+			fireEvent.click(within(inventory).getByRole("button", { name: "Next page" }));
+			await waitFor(() => expect(within(inventory).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(true));
+			await new Promise(resolve => setTimeout(resolve, 50));
+			expect(within(inventory).getByText("page-one")).toBeTruthy();
+			expect(within(inventory).queryByText("This list changed since this page loaded.")).toBeNull();
+		});
+
+		it("keeps Issues rows on screen with a notice when a background refresh finds the list changed", async () => {
+			window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+			const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+			let mode: "ok" | "expired" | "refreshed" = "ok";
+			vi.mocked(api.kubernetesIssues).mockImplementation(async options => {
+				const page = (name: string, next?: string) => ({ items: [{ root: { kind: "Deployment", name, namespace: "shop", uid: name }, rule: "pod.crash_loop", severity: "critical", count: 1, broken: true, broke_at: "2026-10-17T12:00:00Z" }],
+					totals: { critical: 40 }, total: 40, limit: 20, next, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+				if (!options?.cursor) return page("issue-page-one", "20");
+				if (mode === "expired") throw expired();
+				return page(mode === "refreshed" ? "issue-page-two-refreshed" : "issue-page-two");
+			});
+			renderPage(client);
+			await screen.findByRole("button", { name: "Open resource issue-page-one" }, { timeout: 3000 });
+			const issues = screen.getByRole("region", { name: "Kubernetes issues" });
+			fireEvent.click(within(issues).getByRole("button", { name: "Next page" }));
+			await within(issues).findByRole("button", { name: "Open resource issue-page-two" });
+
+			mode = "expired";
+			await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-issues"] }); });
+			await within(issues).findByText("This list changed since this page loaded.");
+			expect(within(issues).getByRole("button", { name: "Open resource issue-page-two" })).toBeTruthy();
+			expect(within(issues).queryByText("Grouped issues are unavailable.")).toBeNull();
+			expect(within(issues).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(false);
+
+			mode = "refreshed";
+			await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-issues"] }); });
+			await within(issues).findByRole("button", { name: "Open resource issue-page-two-refreshed" });
+			expect(within(issues).queryByText("This list changed since this page loaded.")).toBeNull();
+		});
+
+		it("keeps the notice, and shows no error, while a later background refresh is in flight", async () => {
+			window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+			const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+			let mode: "ok" | "expired" | "held" = "ok";
+			let release: (() => void) | undefined;
+			const page = (name: string, next?: string) => ({ items: [{ root: { kind: "Deployment", name, namespace: "shop", uid: name }, rule: "pod.crash_loop", severity: "critical", count: 1, broken: true, broke_at: "2026-10-17T12:00:00Z" }],
+				totals: { critical: 40 }, total: 40, limit: 20, next, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+			vi.mocked(api.kubernetesIssues).mockImplementation(async options => {
+				if (!options?.cursor) return page("issue-page-one", "20");
+				if (mode === "expired") throw expired();
+				if (mode === "held") {
+					await new Promise<void>(resolve => { release = resolve; });
+					return page("issue-page-two-refreshed");
+				}
+				return page("issue-page-two");
+			});
+			renderPage(client);
+			await screen.findByRole("button", { name: "Open resource issue-page-one" }, { timeout: 3000 });
+			const issues = screen.getByRole("region", { name: "Kubernetes issues" });
+			fireEvent.click(within(issues).getByRole("button", { name: "Next page" }));
+			await within(issues).findByRole("button", { name: "Open resource issue-page-two" });
+			mode = "expired";
+			await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-issues"] }); });
+			await within(issues).findByText("This list changed since this page loaded.");
+
+			// The second background refresh is held open.
+			mode = "held";
+			await act(async () => { void client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-issues"] }); });
+			await waitFor(() => expect(release).toBeDefined());
+			await waitFor(() => expect(client.isFetching({ queryKey: ["kubernetes", "_", "kubernetes-issues"] })).toBeGreaterThan(0));
+			expect(within(issues).getByText("This list changed since this page loaded.")).toBeTruthy();
+			expect(within(issues).getByRole("button", { name: "Open resource issue-page-two" })).toBeTruthy();
+			expect(within(issues).queryByText("Grouped issues are unavailable.")).toBeNull();
+			expect(within(issues).queryByText("unavailable")).toBeNull();
+			expect(within(issues).getByRole("button", { name: "Previous page" }).hasAttribute("disabled")).toBe(false);
+
+			await act(async () => { release?.(); });
+			await within(issues).findByRole("button", { name: "Open resource issue-page-two-refreshed" });
+			expect(within(issues).queryByText("This list changed since this page loaded.")).toBeNull();
+		});
+
+		it("keeps the Workloads notice without a restart prompt while a later background refresh is in flight", async () => {
+			const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+			let mode: "ok" | "expired" | "held" = "ok";
+			let release: (() => void) | undefined;
+			const row = (name: string) => ({ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name });
+			vi.mocked(api.kubernetesWorkloads).mockImplementation(async options => {
+				if (!options?.cursor) return { items: [row("page-one")], counts: { Deployment: 40 }, next: "20", total: 40, limit: 20, truncated: false };
+				if (mode === "expired") throw expired();
+				if (mode === "held") await new Promise<void>(resolve => { release = resolve; });
+				return { items: [row(mode === "held" ? "page-two-refreshed" : "page-two")], counts: { Deployment: 40 }, total: 40, limit: 20, truncated: false };
+			});
+			renderWorkloads(client);
+			await screen.findByText("page-one");
+			const inventory = screen.getByRole("region", { name: "Workloads" });
+			fireEvent.click(within(inventory).getByRole("button", { name: "Next page" }));
+			await within(inventory).findByText("page-two");
+			mode = "expired";
+			await act(async () => { await client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
+			await within(inventory).findByText("This list changed since this page loaded.");
+
+			mode = "held";
+			await act(async () => { void client.invalidateQueries({ queryKey: ["kubernetes", "_", "kubernetes-workloads"] }); });
+			await waitFor(() => expect(release).toBeDefined());
+			expect(within(inventory).getByText("This list changed since this page loaded.")).toBeTruthy();
+			expect(within(inventory).getByText("page-two")).toBeTruthy();
+			expect(within(inventory).queryByText(/refresh is unavailable|This inventory page expired|Restart inventory paging|Resource inventory is unavailable/)).toBeNull();
+
+			await act(async () => { release?.(); });
+			await within(inventory).findByText("page-two-refreshed");
+			expect(within(inventory).queryByText("This list changed since this page loaded.")).toBeNull();
+		});
+
+		it("keeps the restart prompt for a refused page that is not an expired link", async () => {
+			vi.mocked(api.kubernetesWorkloads).mockImplementation(async options => {
+				if (options?.cursor) throw new ApiError(400, "Invalid query", { code: "invalid_arguments", error: "Invalid query" });
+				return { items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "old-page-one" }],
+					counts: { Deployment: 21 }, next: "20", truncated: true };
+			});
+			renderWorkloads();
+			await screen.findByText("old-page-one");
+			const inventory = screen.getByRole("region", { name: "Workloads" });
+			fireEvent.click(within(inventory).getByRole("button", { name: "Next page" }));
+			expect(await within(inventory).findByRole("button", { name: "Restart inventory paging" })).toBeTruthy();
+		});
+
+		it("returns Issues to page 1 without an error", async () => {
+			window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+			let replacement = false;
+			vi.mocked(api.kubernetesIssues).mockImplementation(async options => {
+				if (options?.cursor) throw expired();
+				const name = replacement ? "replacement-issue" : "old-issue";
+				return { items: [{ root: { kind: "Deployment", name, namespace: "shop", uid: name }, rule: "pod.crash_loop", severity: "critical", count: 1, broken: true, broke_at: "2026-10-17T12:00:00Z" }],
+					totals: { critical: 21 }, total: 21, limit: 20, next: "20", truncated: false, sync: { state: "ready", age_s: 0, partial: false } };
+			});
+			renderPage();
+			await pageForwardAndBack({ region: () => screen.getByRole("region", { name: "Kubernetes issues" }), row: name => screen.findByRole("button", { name: `Open resource ${name}` }, { timeout: 3000 }), fault: /Grouped issues are unavailable/,
+				cursorCalls: () => vi.mocked(api.kubernetesIssues).mock.calls.filter(([options]) => options?.cursor).length }, "old-issue", "replacement-issue", () => { replacement = true; });
+		});
+
+		it("returns Nodes to page 1 without an error", async () => {
+			window.history.replaceState(null, "", "/agent/kubernetes?view=nodes");
+			let replacement = false;
+			vi.mocked(api.kubernetesNodes).mockImplementation(async cursor => {
+				if (cursor) throw expired();
+				return { items: [node(replacement ? "node-new" : "node-old")], continue: "1", total: 2, limit: 1, truncated: false };
+			});
+			renderPage();
+			await pageForwardAndBack({ region: () => document.body, row: byText, fault: /Nodes are unavailable/,
+				cursorCalls: () => vi.mocked(api.kubernetesNodes).mock.calls.filter(([cursor]) => cursor).length }, "node-old", "node-new", () => { replacement = true; });
+		});
+
+		it("returns Helm releases to page 1 without an error", async () => {
+			window.history.replaceState(null, "", "/agent/kubernetes?view=releases");
+			let replacement = false;
+			vi.mocked(api.kubernetesReleases).mockImplementation(async options => {
+				if (options?.cursor) throw expired();
+				return { items: [{ namespace: "shop", name: replacement ? "new-release" : "old-release", current: { revision: 1, status: "deployed" }, history: [], health: "Healthy" }], next: "20", total: 21, limit: 20, truncated: false };
+			});
+			renderPage();
+			await pageForwardAndBack({ region: () => screen.getByRole("region", { name: "Helm releases" }), row: byText, fault: /Release metadata is unavailable/,
+				cursorCalls: () => vi.mocked(api.kubernetesReleases).mock.calls.filter(([options]) => options?.cursor).length }, "old-release", "new-release", () => { replacement = true; });
+		});
+
+		it("returns GitOps applications to page 1 without an error", async () => {
+			window.history.replaceState(null, "", "/agent/kubernetes?view=gitops");
+			let replacement = false;
+			vi.mocked(api.kubernetesGitOpsApps).mockImplementation(async options => {
+				if (options?.cursor) throw expired();
+				return { items: [{ tool: "argocd", kind: "Application", namespace: "argocd", name: replacement ? "new-app" : "old-app", sync: "Synced", health: "Healthy", revision: "abc" }], available: true, next: "20", total: 21, limit: 20, truncated: false };
+			});
+			renderPage();
+			await pageForwardAndBack({ region: () => screen.getByRole("region", { name: "GitOps applications" }), row: byText, fault: /GitOps status is unavailable/,
+				cursorCalls: () => vi.mocked(api.kubernetesGitOpsApps).mock.calls.filter(([options]) => options?.cursor).length }, "old-app", "new-app", () => { replacement = true; });
+		});
 	});
 	it("follows the coverage tip router link into the Agent tab without reloading", async () => {
 		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline&root_uid=root&namespace=shop");
@@ -1087,6 +1333,66 @@ describe("KubernetesPage", () => {
 		expect(view.container.textContent).not.toContain("·");
 	});
 
+	it("shows one severity count for the selected filter and never Unknown for it", async () => {
+		const issue = { root: { kind: "Deployment", namespace: "payments", name: "checkout", api_version: "apps/v1" }, rule: "workload.unavailable", severity: "critical" as const, count: 1 };
+		vi.mocked(api.kubernetesIssues).mockImplementation(async (options = {}) => options.severity
+			? { items: [issue], totals: { critical: 1 }, truncated: false, sync: { state: "direct", age_s: 0, partial: false } }
+			: { items: [issue], totals: { critical: 1, warning: 2, info: 3 }, truncated: false, sync: { state: "direct", age_s: 0, partial: false } });
+		renderPage();
+		fireEvent.click(screen.getByRole("tab", { name: "Issues" }));
+		const issues = await screen.findByRole("region", { name: "Kubernetes issues" });
+		await within(issues).findByLabelText("critical count");
+		expect(within(issues).getByLabelText("critical count").textContent).toBe("1");
+		expect(within(issues).getByLabelText("warning count").textContent).toBe("2");
+		expect(within(issues).getByLabelText("info count").textContent).toBe("3");
+		fireEvent.change(screen.getByLabelText("Issue severity"), { target: { value: "critical" } });
+		await waitFor(() => expect(within(issues).getByLabelText("critical count").textContent).toBe("1"));
+		expect(within(issues).queryByLabelText("warning count")).toBeNull();
+		expect(within(issues).queryByLabelText("info count")).toBeNull();
+		expect(within(issues).queryByText("Unknown")).toBeNull();
+	});
+
+	it("still shows Unknown for an incomplete snapshot", async () => {
+		vi.mocked(api.kubernetesIssues).mockResolvedValue({ items: [], totals: { critical: 1 }, truncated: false, sync: { state: "ready", age_s: 0, partial: true } });
+		renderPage();
+		fireEvent.click(screen.getByRole("tab", { name: "Issues" }));
+		const issues = await screen.findByRole("region", { name: "Kubernetes issues" });
+		await waitFor(() => expect(within(issues).getAllByText("Unknown")).toHaveLength(3));
+	});
+
+	it("shows only the selected severity as Unknown when its snapshot is incomplete", async () => {
+		const issue = { root: { kind: "Deployment", namespace: "payments", name: "checkout", api_version: "apps/v1" }, rule: "workload.unavailable", severity: "critical" as const, count: 1 };
+		vi.mocked(api.kubernetesIssues).mockImplementation(async (options = {}): Promise<KubernetesIssuePage> => options.severity
+			? { items: [], totals: { warning: 4 }, truncated: false, sync: { state: "ready", age_s: 0, partial: true } }
+			: { items: [issue], totals: { critical: 1, warning: 2, info: 3 }, truncated: false, sync: { state: "direct", age_s: 0, partial: false } });
+		renderPage();
+		fireEvent.click(screen.getByRole("tab", { name: "Issues" }));
+		const issues = await screen.findByRole("region", { name: "Kubernetes issues" });
+		await within(issues).findByLabelText("warning count");
+		fireEvent.change(screen.getByLabelText("Issue severity"), { target: { value: "warning" } });
+		await waitFor(() => expect(within(issues).getByLabelText("warning count").textContent).toBe("Unknown"));
+		expect(within(issues).getAllByText("Unknown")).toHaveLength(1);
+		expect(within(issues).queryByLabelText("critical count")).toBeNull();
+		expect(within(issues).queryByLabelText("info count")).toBeNull();
+	});
+
+	it("counts zero, not Unknown, for a selected severity with no matches in a complete snapshot", async () => {
+		const issue = { root: { kind: "Deployment", namespace: "payments", name: "checkout", api_version: "apps/v1" }, rule: "workload.unavailable", severity: "critical" as const, count: 1 };
+		// The server counts only the severities it matched, so an empty filtered page has no key for the selection.
+		vi.mocked(api.kubernetesIssues).mockImplementation(async (options = {}): Promise<KubernetesIssuePage> => options.severity
+			? { items: [], totals: {}, truncated: false, sync: { state: "direct", age_s: 0, partial: false } }
+			: { items: [issue], totals: { critical: 1 }, truncated: false, sync: { state: "direct", age_s: 0, partial: false } });
+		renderPage();
+		fireEvent.click(screen.getByRole("tab", { name: "Issues" }));
+		const issues = await screen.findByRole("region", { name: "Kubernetes issues" });
+		await within(issues).findByLabelText("critical count");
+		fireEvent.change(screen.getByLabelText("Issue severity"), { target: { value: "info" } });
+		await screen.findByText("No issues match these filters.");
+		expect(within(issues).queryByLabelText("critical count")).toBeNull();
+		expect(within(issues).getByLabelText("info count").textContent).toBe("0");
+		expect(within(issues).queryByText("Unknown")).toBeNull();
+	});
+
 	it("shows an accessible skeleton while an Issues filter request is pending", async () => {
 		vi.mocked(api.kubernetesIssues).mockImplementation((options = {}) => options.severity
 			? new Promise(() => {})
@@ -1469,7 +1775,6 @@ describe("KubernetesPage", () => {
 		act(() => { window.history.pushState(null, "", `/agent/kubernetes?r=apps~v1~deployments/default/checkout&tab=${tab}`); window.dispatchEvent(new PopStateEvent("popstate")); });
 		expect(within(tabs).getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
 		expect(new URLSearchParams(window.location.search).has("tab")).toBe(false);
-		expect(api.proposeAgentAction).not.toHaveBeenCalled();
 		expect(api.kubernetesWorkloadLogs).not.toHaveBeenCalled();
 	});
 
@@ -3246,6 +3551,67 @@ describe("Kubernetes unreadable kinds", () => {
 		expect(container.querySelector('[data-sync-problem="Node"]')?.textContent).not.toContain("0001");
 		expect(container.querySelector("[data-unreadable-note]")?.textContent).toContain("Secret");
 		expect(screen.queryByRole("region", { name: "Nodes" })).toBeNull();
+	});
+
+	// Only Node and Secret LISTs are refused. The overview answers ready but
+	// partial, naming the refused kinds in partial_failures. The broken-issues
+	// read alone is denied: that one section degrades, the rest stays on screen.
+	it("keeps the Overview body when only Node and Secret are refused and the broken-issues read is denied", async () => {
+		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, cluster_id: "limited-cluster", nodes: 0, ready_nodes: 0, pods: 1, running_pods: 1, workloads: 1,
+			usage_source: "unavailable", metrics_status: "unavailable", metrics_fresh: false, truncated: false,
+			partial_failures: [{ resource_id: "core~v1~nodes", class: "forbidden" }, { resource_id: "core~v1~secrets", class: "forbidden" }],
+			sync: { state: "ready", age_s: 30, partial: true } });
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({
+			...base, state: "ready", first_ready_at: "2026-10-26T09:12:00Z", unreadable_kinds: 2,
+			kinds: { Pod: readyKind, Deployment: readyKind, Node: forbidden, Secret: forbidden },
+			unreadable: [
+				{ kind: "Node", state: "error", class: "forbidden", records: 0, since: "2026-10-26T10:49:24Z" },
+				{ kind: "Secret", state: "error", class: "forbidden", records: 0, since: "2026-10-26T10:49:24Z" },
+			],
+		});
+		const denied = { action: "Grant the connector identity the required read-only Kubernetes RBAC permissions.", code: "cluster_permission_denied", error: "Kubernetes denied access to this resource.", partial: true, retryable: false };
+		vi.mocked(api.kubernetesIssues).mockRejectedValue(new ApiError(403, denied.error, denied));
+		const { container } = renderPage();
+		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
+		await waitFor(() => expect(api.kubernetesIssues).toHaveBeenCalled());
+		await settle();
+		// The denial of one sub-read never blanks the Overview.
+		expect(screen.getByRole("region", { name: "Cluster health" })).toBeTruthy();
+		expect(screen.getByRole("heading", { name: "CPU capacity" })).toBeTruthy();
+		expect(screen.getByRole("region", { name: "Overview topology" })).toBeTruthy();
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(screen.queryByText(/Couldn't load Kubernetes overview/)).toBeNull();
+		// The broken count alone is unknown, and the denial is named in the one
+		// coverage marker next to the refused kind.
+		expect(screen.getByRole("button", { name: "Broken unknown" })).toBeTruthy();
+		expect(screen.getAllByRole("button", { name: "Resource coverage" })).toHaveLength(1);
+		fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
+		const details = screen.getByRole("region", { name: "Resource coverage details" });
+		expect(details.textContent).toContain("nodes: permission denied");
+		expect(details.textContent).toContain("Broken issues: permission denied");
+	});
+
+	// error+partial means none of the overview's kinds could be read, so its
+	// zero counts are not shown as Cluster health.
+	it("withholds the Overview body when none of the overview's kinds is readable", async () => {
+		const refused = ["core~v1~nodes", "core~v1~pods", "core~v1~namespaces", "apps~v1~deployments", "apps~v1~statefulsets", "apps~v1~daemonsets", "batch~v1~jobs", "batch~v1~cronjobs"]
+			.map((resource_id) => ({ resource_id, class: "forbidden" }));
+		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, cluster_id: "limited-cluster", nodes: 0, ready_nodes: 0, pods: 0, running_pods: 0, namespaces: 0, active_namespaces: 0, workloads: 0,
+			partial_failures: refused, sync: { state: "error", age_s: 30, partial: true } });
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({
+			...base, state: "ready", first_ready_at: "2026-10-26T09:12:00Z", unreadable_kinds: 2,
+			kinds: { ConfigMap: readyKind, Service: readyKind, Node: forbidden, Pod: forbidden },
+			unreadable: [
+				{ kind: "Node", state: "error", class: "forbidden", records: 0, since: "2026-10-26T10:49:24Z" },
+				{ kind: "Pod", state: "error", class: "forbidden", records: 0, since: "2026-10-26T10:49:24Z" },
+			],
+		});
+		const { container } = renderPage();
+		await waitFor(() => expect(container.querySelector("[data-unreadable-note]")).not.toBeNull());
+		await settle();
+		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
+		expect(screen.queryByRole("heading", { name: "CPU capacity" })).toBeNull();
+		expect(screen.queryByRole("region", { name: "Overview topology" })).toBeNull();
 	});
 
 	it("shows no note at all when every kind is readable", async () => {

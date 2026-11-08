@@ -1807,20 +1807,18 @@ upgradeTest.describe("OSS to Enterprise persistent history", () => {
           const body: { code?: string } = await response.json();
           return { status: response.status, code: body.code };
         }, { id, decision });
-        expect(result).toEqual({ status: 409, code: "approval_read_only" });
+        expect(result).toEqual(decision === "approve" ? { status: 403, code: "actions_disabled" } : { status: 409, code: "approval_read_only" });
       }
     }
     for (const [name, viewport] of [["desktop", { width: 1440, height: 1000 }], ["mobile", { width: 390, height: 844 }]] as const) {
       await page.setViewportSize(viewport);
-      await page.getByRole("button", { name: "Open action approvals" }).click();
-      const dialog = page.getByRole("dialog", { name: "Action approvals" });
-      await expect(dialog.getByText("Before upgrade", { exact: true })).toHaveCount(2);
-      await expect(dialog.getByRole("button", { name: "Approve action" })).toHaveCount(0);
-      await expect(dialog.getByRole("button", { name: "Reject action" })).toHaveCount(0);
+      await expect(page.getByText("Pre-upgrade investigation retained.", { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Open action approvals" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Approve action" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Reject action" })).toHaveCount(0);
       await upgradeFixture.assertPublic(page, [approvals.body]);
       expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
-      await shot(page, `upgrade-approvals-${name}.png`);
-      await page.keyboard.press("Escape");
+      await shot(page, `upgrade-chat-${name}.png`);
     }
 
     await openApp(page, `${upgradeFixture.enterpriseURL}/agent/kubernetes?cluster=${encodeURIComponent(seed.cluster_id)}&view=timeline`);

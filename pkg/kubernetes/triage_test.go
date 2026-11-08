@@ -171,7 +171,7 @@ func TestIssuesCursorRoundTripReturnsStableNonNullItems(t *testing.T) {
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster-a"})
 	warmTestInventory(t, service, "shop")
 	page, err := service.Issues(t.Context(), IssueOptions{Namespace: "shop", Limit: 1})
-	if err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Root.Name != "api-a" || page.Next != "1" || page.Truncated {
+	if err != nil || page.Items == nil || len(page.Items) != 1 || page.Items[0].Root.Name != "api-a" || page.Next == "" || page.Truncated {
 		t.Fatalf("first issue page = %#v err=%v", page, err)
 	}
 	page, err = service.Issues(t.Context(), IssueOptions{Namespace: "shop", Limit: 1, Cursor: page.Next})

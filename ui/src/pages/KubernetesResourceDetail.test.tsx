@@ -801,6 +801,43 @@ describe("Resource detail surfaces", () => {
       ),
     );
   });
+  it("keeps resource history on screen with a calm notice while history saves are delayed", async () => {
+    const savedThrough = "2026-10-21T07:45:00Z";
+    vi.mocked(api.kubernetesTimeline).mockResolvedValue(timelinePage([{ type: "crash", id: crash.id, at: crash.at, crash }], {
+      capture: { mode: "continuous", behind: true, history_save: { code: "history_save_delayed", message: "The cluster was read, but the latest capture could not be saved to history.", action: "History catches up automatically.", retryable: true, saved_through: savedThrough } },
+    }));
+    mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    const time = new Date(savedThrough).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const notice = await screen.findByText(`History is temporarily not saving — showing data from ${time}`);
+    const status = notice.closest("[role=status]") as HTMLElement;
+    expect(status.dataset.historySaveNotice).toBe("delayed");
+    expect(status.className).not.toContain("text-sev-warning");
+    expect(within(status).queryByText("History catches up automatically.")).toBeNull();
+    expect(screen.getByRole("button", { name: "View logs before crash" })).toBeTruthy();
+    expect(screen.queryByText("History unavailable.")).toBeNull();
+    expect(screen.queryByText(/credential|connector/i)).toBeNull();
+  });
+  it("keeps resource history on screen under a warning-toned notice with the server's action when the store rejects saves", async () => {
+    const savedThrough = "2026-10-21T07:45:00Z";
+    vi.mocked(api.kubernetesTimeline).mockResolvedValue(timelinePage([{ type: "crash", id: crash.id, at: crash.at, crash }], {
+      capture: { mode: "continuous", behind: true, history_save: { code: "history_save_rejected", message: "The history store refused the latest capture.", action: "Check the history store; saved history will not catch up on its own.", retryable: false, saved_through: savedThrough } },
+    }));
+    mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    const time = new Date(savedThrough).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const label = await screen.findByText(`History could not save the latest data — showing data from ${time}`);
+    const notice = label.closest("[role=status]") as HTMLElement;
+    expect(notice.dataset.historySaveNotice).toBe("rejected");
+    expect(notice.className).toContain("text-sev-warning");
+    expect(within(notice).getByText("Check the history store; saved history will not catch up on its own.")).toBeTruthy();
+    expect(notice.textContent).not.toMatch(/temporar|credential|connector/i);
+    expect(screen.getByRole("button", { name: "View logs before crash" })).toBeTruthy();
+    expect(screen.queryByText("History unavailable.")).toBeNull();
+  });
+  it("shows no save notice when the history page carries no save delay", async () => {
+    mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    await screen.findByRole("button", { name: "View logs before crash" });
+    expect(screen.queryByText(/History is temporarily not saving/)).toBeNull();
+  });
   it("does not show crashes from same-name replacement Pods", async () => {
     vi.mocked(api.kubernetesTimeline).mockResolvedValue(timelinePage([]));
     mount(

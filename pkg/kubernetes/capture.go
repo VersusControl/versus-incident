@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"sync"
@@ -22,6 +23,96 @@ type CaptureStatus struct {
 	LastCycleAt   *time.Time                   `json:"last_cycle_at,omitempty"`
 	Behind        bool                         `json:"behind"`
 	Verification  *projectedVerificationStatus `json:"verification,omitempty"`
+	// HistorySave is present only on pages served from saved history, and only
+	// while the published capture has not reached it: the cluster was read, so
+	// live pages stay current, but saved history ends at the last checkpoint.
+	HistorySave *HistorySaveStatus `json:"history_save,omitempty"`
+}
+
+// HistorySaveStatus tells a history reader that the data it was served is the
+// last committed history, not a failure of the read itself. It carries only a
+// fixed code and the committed time, never the storage error.
+type HistorySaveStatus struct {
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	Action    string `json:"action"`
+	Retryable bool   `json:"retryable"`
+	// SavedThrough is the time of the last committed history checkpoint.
+	SavedThrough *time.Time `json:"saved_through,omitempty"`
+}
+
+// defaultHistorySaveGrace is how long a published capture may wait for its
+// history save before readers are told history is behind. A healthy save
+// follows publication within seconds, so this never flags a save in flight.
+const defaultHistorySaveGrace = time.Minute
+
+func historySaveStatus(rejected bool, savedThrough time.Time) *HistorySaveStatus {
+	status := &HistorySaveStatus{Code: "history_save_delayed", Message: "The cluster was read, but the latest capture has not been saved to history yet.", Action: "Saved history catches up once the history store accepts writes again.", Retryable: true}
+	if rejected {
+		status = &HistorySaveStatus{Code: "history_save_rejected", Message: "The cluster was read, but the history store rejected the latest capture.", Action: "Check the Versus server logs; saved history does not advance until the store accepts the capture."}
+	}
+	if !savedThrough.IsZero() {
+		at := savedThrough.UTC()
+		status.SavedThrough = &at
+	}
+	return status
+}
+
+// permanentPreparationFailure reports a capture that could not be prepared for
+// saving for a reason a retry of the same capture cannot fix: over the
+// store's limits, invalid in itself, holding text the store cannot keep, or a
+// store that cannot save history at all. Every other preparation failure is
+// transient and reads as delayed.
+func permanentPreparationFailure(class string) bool {
+	switch class {
+	case "storage_rejected", "storage_limit", "invalid_evidence", "storage_unsupported":
+		return true
+	}
+	return false
+}
+
+// historySaveRejectionKey names the stored note that the store refused one
+// published capture, so every replica gives the same answer as the owner.
+func historySaveRejectionKey(scope Scope) string {
+	return "kubernetes/history-save/" + logIdentity(scope.OrgID+"\x00"+scope.ClusterID+"\x00"+scope.CredentialID)
+}
+
+type historySaveRejection struct {
+	Batch string `json:"batch"`
+}
+
+// recordHistorySaveRejection stores which published capture the history store
+// refused. A store outage usually fails this write as well; readers then fall
+// back to reporting a delay, which is the honest answer for an outage.
+func (service *Service) recordHistorySaveRejection(batchID string) {
+	service.changes.mu.Lock()
+	provider := service.changes.provider
+	service.changes.mu.Unlock()
+	if provider == nil {
+		return
+	}
+	payload, err := json.Marshal(historySaveRejection{Batch: batchID})
+	if err == nil {
+		err = provider.WriteBlob(historySaveRejectionKey(service.scope), payload)
+	}
+	if err != nil {
+		log.Printf("kubernetes: history save rejection note deferred")
+	}
+}
+
+func (service *Service) historySaveWasRejected(batchID string) bool {
+	service.changes.mu.Lock()
+	provider := service.changes.provider
+	service.changes.mu.Unlock()
+	if provider == nil {
+		return false
+	}
+	raw, err := provider.ReadBlob(historySaveRejectionKey(service.scope))
+	if err != nil || len(raw) == 0 {
+		return false
+	}
+	var note historySaveRejection
+	return json.Unmarshal(raw, &note) == nil && note.Batch == batchID
 }
 
 type captureLoop struct {
@@ -569,7 +660,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 			if !(kind == "Secret" && state.Error == "forbidden" || kind == "ControllerRevision" && (state.Error == "forbidden" || state.Error == "not_found")) {
 				behind = true
 			}
-			loop.next[kind] = now.Add(cadence)
+			loop.next[kind] = now.Add(service.collectionCadence(cadence))
 			if state.Error == "syncing" || state.State == "" || state.State == "warming" {
 				loop.next[kind] = now.Add(250 * time.Millisecond)
 			}
@@ -584,11 +675,11 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 		if !checkpoint.IsZero() && !observed.After(checkpoint) {
 			if previous.IsZero() || checkpoint.After(previous) {
 				success[kind] = checkpoint
-				loop.next[kind] = now.Add(cadence)
+				loop.next[kind] = now.Add(service.collectionCadence(cadence))
 			}
 			continue
 		}
-		loop.next[kind] = now.Add(cadence)
+		loop.next[kind] = now.Add(service.collectionCadence(cadence))
 		if previous.IsZero() {
 			coverage[kind] = kubechanges.Gap{From: observed, To: observed}
 			if old := loop.gapFrom[kind]; !old.IsZero() {
@@ -681,4 +772,48 @@ func (service *Service) withEvidenceStatus(status CaptureStatus) CaptureStatus {
 		cache.mu.RUnlock()
 	}
 	return status
+}
+
+// historyCapture is the capture status for a page served from saved history.
+// Whether history is behind is decided from stored state only: the published
+// generation names the capture waiting to be saved, and the checkpoint the page
+// was read against names the last one saved. Every replica reads the same two,
+// so the owner and the others give the same answer.
+func (service *Service) historyCapture(checkpoint storage.EvidenceCheckpoint) *CaptureStatus {
+	status := service.CaptureStatus()
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	if cache == nil {
+		return &status
+	}
+	cache.mu.RLock()
+	var pending storage.EvidenceBatch
+	if batch := cache.generation.EvidenceBatch; batch != nil {
+		pending = storage.EvidenceBatch{ID: batch.ID, At: batch.At, Generation: batch.Generation}
+	}
+	failure := cache.generation.EvidenceFailure
+	cache.mu.RUnlock()
+	// The capture could not be prepared for saving at all, whatever the reason,
+	// so the published capture carries no save and history stops at the
+	// checkpoint. Readers are always told; a refusal that a retry cannot fix
+	// reads as rejected, anything else as delayed.
+	if pending.ID == "" && failure != "" {
+		status.Behind = true
+		status.HistorySave = historySaveStatus(permanentPreparationFailure(failure), checkpoint.At)
+		return &status
+	}
+	grace := service.historySaveGrace
+	if grace <= 0 {
+		grace = defaultHistorySaveGrace
+	}
+	// A capture fenced by an explicit journal deletion is never saved, and one
+	// no newer than the checkpoint has nothing left to add.
+	if pending.ID == "" || pending.ID == checkpoint.ID || pending.Generation != checkpoint.Generation ||
+		!pending.At.After(checkpoint.At) || time.Since(pending.At) < grace {
+		return &status
+	}
+	status.Behind = true
+	status.HistorySave = historySaveStatus(service.historySaveWasRejected(pending.ID), checkpoint.At)
+	return &status
 }

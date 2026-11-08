@@ -152,3 +152,48 @@ func TestRunSQLMigrations_TxPerFileRollback(t *testing.T) {
 		t.Fatalf("ledger recorded %d files, want 0", recorded)
 	}
 }
+
+// A statement marked for a partitioned table only builds its index on a
+// partitioned table, and on each of its partitions, and is skipped on a plain
+// table, which keeps such a migration from duplicating an index the plain
+// table already has. Postgres-gated.
+func TestRunSQLMigrations_PartitionedTableOnly(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN not set; skipping postgres tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	const ledger = "zz_partitioned_only_ledger"
+	cleanup := func() {
+		_, _ = db.Exec("DROP TABLE IF EXISTS zz_plain_journal CASCADE")
+		_, _ = db.Exec("DROP TABLE IF EXISTS zz_parted_journal CASCADE")
+		_, _ = db.Exec("DROP TABLE IF EXISTS " + ledger + " CASCADE")
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if _, err = db.Exec(`CREATE TABLE zz_plain_journal(id INT, at TIMESTAMPTZ);
+CREATE TABLE zz_parted_journal(id INT, at TIMESTAMPTZ) PARTITION BY RANGE(at);
+CREATE TABLE zz_parted_journal_a PARTITION OF zz_parted_journal FOR VALUES FROM ('2020-01-01') TO ('2030-01-01')`); err != nil {
+		t.Fatal(err)
+	}
+	fsys := fstest.MapFS{"m/001_online.sql": {Data: []byte("-- versus:nontransactional\n" +
+		"-- versus:partitioned-table\nCREATE INDEX CONCURRENTLY IF NOT EXISTS zz_plain_at ON zz_plain_journal(at);\n" +
+		"-- versus:partitioned-table\nCREATE INDEX CONCURRENTLY IF NOT EXISTS zz_parted_at ON zz_parted_journal(at);\n" +
+		"-- versus:partitioned-table\nCREATE INDEX CONCURRENTLY IF NOT EXISTS zz_absent_at ON zz_absent_journal(at)")}}
+	if err = storage.RunSQLMigrations(db, fsys, "m", ledger); err != nil {
+		t.Fatal(err)
+	}
+	var plain, parted, partitions int
+	if err = db.QueryRow(`SELECT (SELECT COUNT(*) FROM pg_indexes WHERE tablename='zz_plain_journal'),
+ (SELECT COUNT(*) FROM pg_indexes WHERE tablename='zz_parted_journal'),
+ (SELECT COUNT(*) FROM pg_indexes WHERE tablename='zz_parted_journal_a')`).Scan(&plain, &parted, &partitions); err != nil {
+		t.Fatal(err)
+	}
+	if plain != 0 || parted != 1 || partitions != 1 {
+		t.Fatalf("indexes: plain=%d partitioned=%d partition=%d, want 0, 1, 1", plain, parted, partitions)
+	}
+}
