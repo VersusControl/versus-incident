@@ -6,8 +6,6 @@ import {
   createKubernetesApi,
   clearSecret,
   gatewaySessionLogout,
-  getSecret,
-  setSecret,
   signIn,
 } from "./api";
 
@@ -59,13 +57,11 @@ describe("OSS gateway session", () => {
     expect(received).not.toHaveBeenCalled();
   });
   it("exchanges the secret once and retains no browser-readable credential", async () => {
-    setSecret("stale-memory-value");
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(new Response("{}", { status: 200 }));
 
     await signIn("  gateway-secret  ");
-    expect(getSecret()).toBeNull();
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining("/api/auth/gateway-session"),
@@ -83,9 +79,13 @@ describe("OSS gateway session", () => {
   });
 
   it("rejects a failed exchange without retaining the secret", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 401 }));
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response("{}", { status: 200 }));
     await expect(signIn("wrong-secret")).rejects.toEqual(expect.objectContaining<ApiError>({ status: 401 }));
-    expect(getSecret()).toBeNull();
+    await api.getAgentConfig();
+    const next = fetchMock.mock.calls[1][1] as RequestInit;
+    expect(new Headers(next.headers).has("X-Gateway-Secret")).toBe(false);
   });
 
   it("deletes the OSS session cookie and tolerates revoke failure", async () => {

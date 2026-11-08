@@ -30,7 +30,6 @@ function fromLearnExclusionsWire(r: LearnExclusionsWire): LearnExclusions {
 
 const SECRET_KEY = "versus.gatewaySecret";
 const API_BASE = import.meta.env.VITE_API_BASE_URL || ""; // empty → uses Vite proxy
-let secretCache: string | null | undefined;
 
 function removeLegacySecret() {
   try {
@@ -152,20 +151,14 @@ async function logStreamError(response: Response, label: string): Promise<ApiErr
   return failure;
 }
 
-export function getSecret(): string | null {
-  if (secretCache === undefined) {
-    secretCache = null;
-    removeLegacySecret();
-  }
-  return secretCache;
-}
+// Older builds kept the gateway secret in browser storage. Purge it as soon as
+// the client loads so a stale copy never outlives the upgrade.
+removeLegacySecret();
 
-export function setSecret(value: string) {
-  secretCache = value;
-}
-
+// clearSecret removes any gateway secret an older build left in browser
+// storage. The client itself never holds one: after sign-in every request
+// authenticates with the HttpOnly session cookie.
 export function clearSecret() {
-  secretCache = null;
   removeLegacySecret();
 }
 
@@ -195,7 +188,8 @@ export async function gatewaySessionLogout(): Promise<void> {
 }
 
 // AUTH_EXPIRED_EVENT fires when an authenticated request returns 401. The
-// listener distinguishes OSS secret rotation from enterprise session expiry.
+// listener distinguishes an expired OSS gateway session from an expired
+// enterprise session.
 export const AUTH_EXPIRED_EVENT = "versus:auth-expired";
 
 function notifyAuthExpired() {
@@ -203,14 +197,10 @@ function notifyAuthExpired() {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const secret = getSecret() ?? "";
   const headers = new Headers(init.headers);
-  // OSS/community authenticates the data plane with the gateway secret; the
-  // enterprise console authenticates with the HttpOnly session cookie
-  // (versus_enterprise_session) carried via credentials: same-origin and holds
-  // no secret. Attach the header ONLY when a secret is actually held, so a
-  // licensed binary never sends X-Gateway-Secret — session-only, no fallback.
-  if (secret) headers.set("X-Gateway-Secret", secret);
+  // The browser authenticates with an HttpOnly session cookie only (the OSS
+  // gateway session or versus_enterprise_session), carried via
+  // credentials: same-origin. It never sends a header credential.
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -954,13 +944,6 @@ export interface AgentProposal {
   expires_at: string;
 }
 
-export interface AgentProposalResult {
-  proposal?: AgentProposal;
-  approval?: AgentApproval;
-  nonce?: string;
-  guide?: { action: string; command: string; risk: string };
-}
-
 export interface ChatToolCall {
   call_id?: string;
   Name: string;
@@ -1125,16 +1108,8 @@ export interface RunbookUploadResult {
 // must NOT set a JSON Content-Type — the browser sets the multipart
 // boundary itself from the FormData.
 async function uploadMultipart<T>(path: string, form: FormData): Promise<T> {
-  const secret = getSecret() ?? "";
-  const headers = new Headers();
-  // Attach the gateway secret ONLY when one is held (OSS/community). The
-  // enterprise console holds no secret and authenticates with the session
-  // cookie via credentials: same-origin.
-  if (secret) headers.set("X-Gateway-Secret", secret);
-
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
-    headers,
     body: form,
     credentials: "same-origin",
   });
@@ -2971,11 +2946,6 @@ const agentCapabilitiesApi = {
     ),
   listAgentToolsets: (agent: AgentToolKind) =>
     request<AgentToolsetAvailability[]>(`/api/admin/agent/toolsets?agent=${agent}`),
-  proposeAgentAction: (proposal: { type: string; target: AgentProposal["target"]; params: unknown; reason: string }) =>
-    request<AgentProposalResult>("/api/v1/agent/proposals", {
-      method: "POST",
-      body: JSON.stringify(proposal),
-    }),
   setAgentToolsetEnabled: (agent: AgentToolKind, id: string, enabled: boolean) =>
     request<{ agent: AgentToolKind; id: string; enabled: boolean; changed: boolean }>(
       `/api/admin/agent/toolsets/${agent}/${encodeURIComponent(id)}`,
@@ -3199,8 +3169,6 @@ export function createKubernetesApi(cluster?: string) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
     if (!response.ok || !response.body) {
       throw await logStreamError(response, "Pod");
@@ -3236,8 +3204,6 @@ export function createKubernetesApi(cluster?: string) {
       else if (value !== undefined && value !== "") query.set(key, String(value));
     }
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const response = await fetch(`${API_BASE}${kubernetesClusterPath(`/api/admin/kubernetes/workloads/${encodeURIComponent(kind)}/${encodeURIComponent(name)}/logs/stream?${query}`, cluster)}`, { headers, credentials: "same-origin", cache: "no-store", signal });
     if (!response.ok || !response.body) {
       throw await logStreamError(response, "Workload");
@@ -3306,8 +3272,6 @@ export function createKubernetesApi(cluster?: string) {
   },
   kubernetesCommitStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal, lastEventID?: string): Promise<void> => {
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     if (lastEventID) headers.set("Last-Event-ID", lastEventID);
     const response = await fetch(`${API_BASE}${kubernetesClusterPath("/api/admin/kubernetes/commits/stream", cluster)}`, {
       headers, credentials: "same-origin", cache: "no-store", signal,
@@ -3325,8 +3289,6 @@ export function createKubernetesApi(cluster?: string) {
   },
   kubernetesStream: async (onEvent: (event: ServerSentEvent) => void, signal?: AbortSignal): Promise<void> => {
     const headers = new Headers({ Accept: "text/event-stream" });
-    const secret = getSecret() ?? "";
-    if (secret) headers.set("X-Gateway-Secret", secret);
     // The record feed for the pods, deployments and nodes views. Its `sync`
     // envelope only covers the kinds this request names, so nothing here
     // decides whether a cluster is healthy: sync health reads the cluster-wide
@@ -4124,7 +4086,7 @@ export const api = {
   // streamAnalysis runs an analysis and reports each step as it happens.
   //
   // It uses fetch + a stream reader rather than EventSource, because
-  // EventSource is GET-only and cannot carry the gateway-secret header. The
+  // EventSource is GET-only and this endpoint is a POST. The
   // returned promise resolves with the terminal event; callers that want the
   // full record fetch it by `analysis_id`.
   //
@@ -4135,9 +4097,7 @@ export const api = {
     onEvent: (ev: AnalyzeEvent) => void,
     opts: { requestedBy?: string; signal?: AbortSignal } = {},
   ): Promise<AnalyzeEvent | null> => {
-    const secret = getSecret() ?? "";
     const headers = new Headers({ "Content-Type": "application/json" });
-    if (secret) headers.set("X-Gateway-Secret", secret);
 
     const res = await fetch(
       `${API_BASE}/api/admin/incidents/${incidentID}/analyze/stream`,
@@ -4181,18 +4141,6 @@ export const api = {
     ),
   getChatSession: (id: string) =>
     request<ChatSession>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`),
-  listAgentApprovals: (state: "pending" | "all" = "pending") =>
-    request<{ approvals: AgentApproval[] }>(`/api/v1/agent/approvals?state=${state}`),
-  approveAgentApproval: (id: string, nonce: string) =>
-    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/approve`, {
-      method: "POST",
-      body: JSON.stringify({ nonce }),
-    }),
-  rejectAgentApproval: (id: string, reason: string) =>
-    request<AgentApproval>(`/api/v1/agent/approvals/${encodeURIComponent(id)}/reject`, {
-      method: "POST",
-      body: JSON.stringify({ reason }),
-    }),
   deleteChatSession: (id: string) =>
     request<void>(`/api/admin/chat/sessions/${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -4208,9 +4156,7 @@ export const api = {
     onEvent: (event: ChatEvent) => void,
     signal?: AbortSignal,
   ): Promise<ChatEvent | null> => {
-    const secret = getSecret() ?? "";
     const headers = new Headers({ "Content-Type": "application/json" });
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const response = await fetch(
       `${API_BASE}/api/admin/chat/sessions/${encodeURIComponent(id)}/messages`,
       {
@@ -4389,13 +4335,11 @@ export const api = {
     }
   },
 
-  // fetchIncidentsReportImage fetches the rendered PNG for a window with the
-  // gateway-secret header and returns a Blob — an <img src> cannot carry the
-  // header, so the preview loads the bytes here and renders via an object URL.
+  // fetchIncidentsReportImage fetches the rendered PNG for a window and returns
+  // a Blob. Loading the bytes here instead of through <img src> lets an expired
+  // session raise the auth-expired event; the preview renders via an object URL.
   fetchIncidentsReportImage: async (window: string): Promise<Blob> => {
-    const secret = getSecret() ?? "";
     const headers = new Headers();
-    if (secret) headers.set("X-Gateway-Secret", secret);
     const qs = window ? `?window=${encodeURIComponent(window)}` : "";
     const res = await fetch(
       `${API_BASE}/api/admin/reports/incidents/report.png${qs}`,

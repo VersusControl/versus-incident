@@ -90,6 +90,9 @@ export function reduceChatEvent(
     if (index >= 0) blocks[index] = { ...blocks[index], event: bounded } as ChatStreamBlock;
     else blocks.push({ kind: "tool", key: `tool-${bounded.call_id || bounded.seq}`, event: bounded });
   } else if (bounded.kind === "approval_required" && bounded.approval) {
+    const approvalId = bounded.approval.id;
+    // A repeated approval event keeps its first block: one hint per approval id.
+    if (blocks.some((block) => block.kind === "approval" && block.event.approval?.id === approvalId)) return state;
     blocks.push({ kind: "approval", key: `approval-${bounded.approval.id}`, event: bounded });
   } else if (bounded.kind === "compacted" || bounded.kind === "events_elided" || bounded.kind === "trace_compacted") {
     blocks.push({

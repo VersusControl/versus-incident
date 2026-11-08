@@ -107,9 +107,9 @@ func (controller *ChatAdminController) Register(router fiber.Router) {
 	apiV1.Post("/sessions/:id/turns", controller.message)
 	apiV1.Post("/sessions/:id/cancel", controller.cancel)
 	apiV1.Get("/sessions/:id/events", controller.replayEvents)
-	apiV1.Post("/proposals", controller.requireAgentApproval, requireCLICredential, controller.createProposal)
+	apiV1.Post("/proposals", actionsDisabled)
 	apiV1.Get("/approvals", controller.requireAgentApproval, controller.listApprovals)
-	apiV1.Post("/approvals/:id/approve", controller.requireAgentApproval, requireCLICredential, controller.approve)
+	apiV1.Post("/approvals/:id/approve", actionsDisabled)
 	apiV1.Post("/approvals/:id/reject", controller.requireAgentApproval, controller.reject)
 }
 
@@ -164,19 +164,17 @@ func (controller *ChatAdminController) requireAgentApproval(c *fiber.Ctx) error 
 	return c.Next()
 }
 
-// requireCLICredential keeps approving and directly proposing infrastructure
-// actions off the web console. The console authenticates with an HttpOnly
-// session cookie and never holds a header credential: the OSS sign-in discards
-// the gateway secret after exchanging it, and an enterprise browser session is
-// cookie-only. The versus-devops CLI sends a gateway secret or bearer token in
-// a header, so only it reaches these routes. A stolen or script-driven browser
-// session therefore cannot approve or execute a change. Listing and rejecting
-// approvals stay available to both surfaces.
-func requireCLICredential(c *fiber.Ctx) error {
-	if !middleware.RequestHeaderCredential(c) {
-		return c.Status(fiber.StatusForbidden).JSON(agentapi.Error{Code: "act_requires_cli", Message: "actions can be proposed and approved only from the versus-devops CLI with VERSUS_TOKEN or VERSUS_GATEWAY_SECRET"})
-	}
-	return c.Next()
+// actionsDisabled refuses every request to propose or approve an
+// infrastructure action, whatever credential the caller holds. Action
+// execution is turned off on the server, so no browser session, gateway
+// secret or upstream session may create a proposal directly or run an
+// approved change. It answers before permission checks and before any
+// approval service is resolved, so a refused request writes nothing to the
+// ledger, saves no proposal and never reaches an action adapter. Proposals
+// raised by the chat agent are still recorded, and listing and rejecting
+// approvals stay available.
+func actionsDisabled(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusForbidden).JSON(agentapi.Error{Code: "actions_disabled", Message: "Actions are turned off on this server."})
 }
 
 func approvalContext(c *fiber.Ctx) context.Context {
@@ -198,32 +196,6 @@ func (controller *ChatAdminController) listApprovals(c *fiber.Ctx) error {
 		return writeApprovalError(c, err)
 	}
 	return c.JSON(fiber.Map{"approvals": approvals})
-}
-
-func (controller *ChatAdminController) createProposal(c *fiber.Ctx) error {
-	var input act.ProposalInput
-	if err := c.BodyParser(&input); err != nil {
-		return c.Status(fiber.StatusBadRequest).JSON(agentapi.Error{Code: "invalid_request", Message: "invalid action proposal"})
-	}
-	result, err := controller.approvalService(c).Propose(approvalContext(c), input)
-	if err != nil {
-		return writeApprovalError(c, err)
-	}
-	return c.Status(fiber.StatusCreated).JSON(result)
-}
-
-func (controller *ChatAdminController) approve(c *fiber.Ctx) error {
-	var request struct {
-		Nonce string `json:"nonce"`
-	}
-	if err := c.BodyParser(&request); err != nil || strings.TrimSpace(request.Nonce) == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(agentapi.Error{Code: "invalid_request", Message: "nonce is required"})
-	}
-	approval, err := controller.approvalService(c).Approve(approvalContext(c), c.Params("id"), request.Nonce, requestActor(c))
-	if err != nil {
-		return writeApprovalError(c, err)
-	}
-	return c.JSON(approval)
 }
 
 func (controller *ChatAdminController) reject(c *fiber.Ctx) error {

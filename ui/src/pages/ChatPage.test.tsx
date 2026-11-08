@@ -26,9 +26,6 @@ vi.mock("@/lib/api", async (importActual) => {
       deleteChatSession: vi.fn(),
       cancelChatRun: vi.fn(),
       streamChatMessage: vi.fn(),
-      listAgentApprovals: vi.fn(),
-      approveAgentApproval: vi.fn(),
-      rejectAgentApproval: vi.fn(),
       kubernetesOverview: vi.fn(),
       kubernetesSearch: vi.fn(),
     },
@@ -54,9 +51,6 @@ function expectNoApprovalControls() {
   expect(screen.queryByRole("button", { name: "Reject action" })).toBeNull();
   expect(screen.queryByRole("textbox", { name: "Reason for rejection" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Open action approvals" })).toBeNull();
-  expect(api.listAgentApprovals).not.toHaveBeenCalled();
-  expect(api.approveAgentApproval).not.toHaveBeenCalled();
-  expect(api.rejectAgentApproval).not.toHaveBeenCalled();
 }
 
 function renderPage(url = "/agent/chat") {
@@ -169,6 +163,60 @@ describe("ChatPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(screen.getAllByText("I proposed a restart.")).toHaveLength(1));
     expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(1);
+  });
+
+  it("shows one CLI hint after a retained live run's approval later appears in the saved session", async () => {
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      onEvent(approvalEvent);
+      return { seq: 2, at: "", kind: "run_finished" };
+    });
+    const { client } = renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: hintLabel });
+    await waitFor(() => expect(api.getChatSession).toHaveBeenCalled());
+    vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [
+      { id: "u1", role: "user", content: "Restart checkout", created_at: new Date().toISOString() },
+      { id: "a1", role: "assistant", content: "Saved answer.", created_at: new Date().toISOString(), events: [approvalEvent] },
+    ] });
+    await act(async () => { await client.refetchQueries({ queryKey: ["chat-session", "session-1"] }); });
+    await screen.findByText("Saved answer.");
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(1);
+  });
+
+  it("shows one CLI hint when the stream drops after an approval the saved session already holds", async () => {
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [
+        { id: "u1", role: "user", content: "Restart checkout", created_at: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "Saved answer.", created_at: new Date().toISOString(), events: [approvalEvent] },
+      ] });
+      onEvent(approvalEvent);
+      throw new Error("stream disconnected");
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Saved answer.");
+    await screen.findByText("stream disconnected");
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(1);
+  });
+
+  it("shows one CLI hint per approval id when the saved session holds only some live approvals", async () => {
+    const secondApproval: ChatEvent = { ...approvalEvent, seq: 2, approval: { ...approvalEvent.approval!, id: "approval-2" } };
+    vi.mocked(api.streamChatMessage).mockImplementation(async (_id, _message, _attachment, onEvent) => {
+      vi.mocked(api.getChatSession).mockResolvedValue({ ...baseSession, turns: [
+        { id: "u1", role: "user", content: "Restart checkout", created_at: new Date().toISOString() },
+        { id: "a1", role: "assistant", content: "Saved answer.", created_at: new Date().toISOString(), events: [approvalEvent] },
+      ] });
+      onEvent(approvalEvent);
+      onEvent(secondApproval);
+      return { seq: 3, at: "", kind: "run_finished" };
+    });
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "Restart checkout" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Saved answer.");
+    expect(screen.getAllByRole("button", { name: hintLabel })).toHaveLength(2);
   });
 
   it("opens the CLI hint popover with the approval command and docs link, and closes on Escape", async () => {

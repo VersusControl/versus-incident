@@ -94,28 +94,6 @@ func RequestAuthorized(c *fiber.Ctx) bool {
 	return v
 }
 
-const headerCredentialContextKey = "versus.header_credential"
-
-// MarkHeaderCredential records that the request was authenticated by a
-// credential the caller presented explicitly in a request header (a gateway
-// secret or a bearer token) rather than by a cookie the browser attaches on
-// its own. Routes that must never be driven from a browser session admit only
-// requests carrying this mark. A registered auth handler that admits a header
-// token calls it next to MarkAuthorized; one that admits a browser session
-// cookie must not.
-func MarkHeaderCredential(c *fiber.Ctx) {
-	c.Locals(headerCredentialContextKey, true)
-}
-
-// RequestHeaderCredential reports whether the request was authenticated by an
-// explicit header credential. It defaults to false, so a request admitted by a
-// session cookie, or by an auth handler that does not say how it
-// authenticated, is treated as a browser session.
-func RequestHeaderCredential(c *fiber.Ctx) bool {
-	v, _ := c.Locals(headerCredentialContextKey).(bool)
-	return v
-}
-
 const requestPermissionPrefix = "versus.permission."
 
 // SetRequestPermission records one request-scoped, role-neutral permission decision.
