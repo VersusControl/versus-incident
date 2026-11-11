@@ -426,6 +426,70 @@ describe("AWS settings failure states", () => {
   });
 });
 
+describe("AWS account removal", () => {
+  async function removeFirstAccount() {
+    renderPage();
+    await screen.findByText("Accounts");
+    fireEvent.click(screen.getAllByRole("button", { name: /^Remove / })[0]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText("Account removed")).toBeTruthy();
+  }
+
+  it("adds the cost-data line when the purge is pending", async () => {
+    vi.mocked(api.deleteAwsAccount).mockResolvedValue({ purge: "pending" });
+    await removeFirstAccount();
+    expect(screen.getByText("Cost data clears at the next refresh.")).toBeTruthy();
+  });
+
+  it("shows only the success title when no purge is pending", async () => {
+    vi.mocked(api.deleteAwsAccount).mockResolvedValue({});
+    await removeFirstAccount();
+    expect(screen.queryByText("Cost data clears at the next refresh.")).toBeNull();
+  });
+
+  it("words a remove refused because storage is down, not as an AWS failure", async () => {
+    const { ApiError } = await import("@/lib/api");
+    vi.mocked(api.deleteAwsAccount).mockRejectedValue(
+      new ApiError(503, "storage_unavailable", { error: "storage_unavailable" }),
+    );
+    renderPage();
+    await screen.findByText("Accounts");
+    fireEvent.click(screen.getAllByRole("button", { name: /^Remove / })[0]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove" }));
+    expect(await screen.findByText("Storage is unavailable")).toBeTruthy();
+    expect(screen.getByText("Try again shortly.")).toBeTruthy();
+    expect(screen.queryByText("The AWS request failed")).toBeNull();
+  });
+
+  it("words a rename refused for a config-managed account, not as an AWS failure", async () => {
+    const { ApiError } = await import("@/lib/api");
+    vi.mocked(api.updateAwsAccount).mockRejectedValue(
+      new ApiError(409, "config_managed", { error: "config_managed" }),
+    );
+    renderPage();
+    await screen.findByText("Accounts");
+    fireEvent.click(screen.getAllByRole("button", { name: /^Rename / })[0]);
+    fireEvent.change(screen.getByLabelText("Account name"), { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save name" }));
+    expect(await screen.findByText("Set in the config file")).toBeTruthy();
+    expect(screen.getByText("Change it in the config file.")).toBeTruthy();
+    expect(screen.queryByText("The AWS request failed")).toBeNull();
+  });
+
+  it("words a save refused during a cost refresh, never the raw code", async () => {
+    const { ApiError } = await import("@/lib/api");
+    vi.mocked(api.updateAwsOptions).mockRejectedValue(
+      new ApiError(409, "refresh_in_progress", { error: "refresh_in_progress" }),
+    );
+    renderPage();
+    await screen.findByText("Accounts");
+    fireEvent.click(screen.getByLabelText("Read Trusted Advisor data"));
+    expect(await screen.findByText("A cost refresh is running")).toBeTruthy();
+    expect(screen.getByText("Try again in a few seconds.")).toBeTruthy();
+    expect(screen.queryByText("refresh_in_progress")).toBeNull();
+  });
+});
+
 describe("AWS settings connect panel layout", () => {
   it("gives the right column the design width and keeps API use on one line", async () => {
     renderPage();

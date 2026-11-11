@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -10,6 +11,105 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrSchemaOutOfDate reports a database built by an older version of the
+// table schema: the tables exist, so startup would otherwise succeed, but
+// they lack columns the running code writes, leaving a store that half
+// works. The only safe recovery is to recreate the database.
+var ErrSchemaOutOfDate = errors.New("storage: database schema is out of date")
+
+// SchemaOutOfDateError names the table and column a database is missing.
+// It unwraps to ErrSchemaOutOfDate so a caller can classify it.
+type SchemaOutOfDateError struct {
+	Table  string
+	Column string
+}
+
+func (e *SchemaOutOfDateError) Error() string {
+	return fmt.Sprintf("%s: table %s has no column %s; the database was created by an older schema and cannot be upgraded in place — recreate it", ErrSchemaOutOfDate, e.Table, e.Column)
+}
+
+func (e *SchemaOutOfDateError) Unwrap() error { return ErrSchemaOutOfDate }
+
+// requiredTableColumns is the startup assertion over the AWS and FinOps key
+// columns. Each table was created with CREATE TABLE IF NOT EXISTS, so an
+// older edition of a migration file leaves an existing table unchanged while
+// the code starts writing columns it does not have.
+var requiredTableColumns = []struct {
+	table   string
+	columns []string
+}{
+	{"aws_sync_units", []string{"account", "region", "service", "generation", "state", "gaps"}},
+	{"aws_unit_generations", []string{"service", "seq", "digest", "resource_count", "gaps", "valid_from", "valid_to"}},
+	{"aws_resources", []string{"service", "arn", "digest", "valid_from", "valid_to"}},
+	{"aws_health", []string{"service", "arn", "kind", "digest", "valid_from", "valid_to"}},
+	{"aws_security_flags", []string{"service", "arn", "flag", "digest", "valid_from", "valid_to"}},
+	{"aws_changes", []string{"event_id", "service", "event_time", "detail"}},
+	{"aws_change_coverage", []string{"account", "region", "covered_from", "covered_until"}},
+	{"finops_cost_lines", []string{"service_name", "net_amortized_micros", "estimated_team", "estimated_region"}},
+	{"finops_cost_daily", []string{"usage_group", "net_amortized_micros", "lines", "overflowed"}},
+	{"finops_cost_monthly", []string{"min_day", "net_amortized_micros", "lines", "overflowed"}},
+	{"finops_increases", []string{"suspects", "detail"}},
+	{"finops_increase_events", []string{"until_day"}},
+	{"finops_saving_decisions", []string{"payer", "account", "kind", "title", "orphaned_at"}},
+}
+
+// assertTableSchema fails closed when the database lacks a column the code
+// reads or writes, instead of starting a store whose totals work and whose
+// writes fail with an unclassified SQL error.
+func assertTableSchema(ctx context.Context, db *sql.DB, postgres bool) error {
+	if db == nil {
+		return nil
+	}
+	for _, required := range requiredTableColumns {
+		have, err := tableColumns(ctx, db, required.table, postgres)
+		if err != nil {
+			return err
+		}
+		for _, column := range required.columns {
+			if !have[column] {
+				return &SchemaOutOfDateError{Table: required.table, Column: column}
+			}
+		}
+	}
+	return nil
+}
+
+// tableColumns lists one table's columns on either backend.
+func tableColumns(ctx context.Context, db *sql.DB, table string, postgres bool) (map[string]bool, error) {
+	var rows *sql.Rows
+	var err error
+	if postgres {
+		rows, err = db.QueryContext(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1`, table)
+	} else {
+		// The table names come from the fixed list above, never from input.
+		rows, err = db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	have := map[string]bool{}
+	for rows.Next() {
+		if postgres {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			have[name] = true
+			continue
+		}
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, err
+		}
+		have[name] = true
+	}
+	return have, rows.Err()
+}
 
 // migrate.go — RunSQLMigrations: a fully FS- and table-agnostic
 // Postgres migration runner.

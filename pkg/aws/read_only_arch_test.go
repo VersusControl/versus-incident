@@ -195,6 +195,13 @@ func containsViolation(violations []string, operation string) bool {
 // a variable that happens to be called "client" but is not an SDK client does
 // not create a false positive.
 func scanReadOnlySurface(positions *token.FileSet, file *ast.File) ([]string, int) {
+	violations, operations, _ := scanSurface(positions, file)
+	return violations, operations
+}
+
+// scanSurface is scanReadOnlySurface plus the name of every SDK operation
+// called, counted.
+func scanSurface(positions *token.FileSet, file *ast.File) ([]string, int, map[string]int) {
 	packages := map[string]bool{}
 	for _, imported := range file.Imports {
 		path := strings.Trim(imported.Path.Value, `"`)
@@ -224,11 +231,26 @@ func scanReadOnlySurface(positions *token.FileSet, file *ast.File) ([]string, in
 		return true
 	})
 
-	scanner := surfaceScanner{positions: positions, packages: packages, fields: fields}
+	// Functions in the file that build and return a client count as
+	// constructors, so a client obtained through a local helper is checked.
+	helpers := map[string]bool{}
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Type.Results == nil {
+			continue
+		}
+		for _, result := range function.Type.Results.List {
+			if isSDKClientType(result.Type, packages) {
+				helpers[function.Name.Name] = true
+			}
+		}
+	}
+
+	scanner := surfaceScanner{positions: positions, packages: packages, fields: fields, helpers: helpers, names: map[string]int{}}
 	packageClients := map[string]bool{}
 	for _, declaration := range file.Decls {
 		if general, ok := declaration.(*ast.GenDecl); ok {
-			collectDeclaredClients(general, packages, packageClients)
+			collectDeclaredClients(general, packages, helpers, packageClients)
 		}
 	}
 
@@ -244,7 +266,7 @@ func scanReadOnlySurface(positions *token.FileSet, file *ast.File) ([]string, in
 			if typed.Body == nil {
 				continue
 			}
-			collectDeclaredClients(typed.Body, packages, clients)
+			collectDeclaredClients(typed.Body, packages, helpers, clients)
 			found, count := scanner.scanCalls(typed.Body, clients)
 			violations = append(violations, found...)
 			operations += count
@@ -254,13 +276,15 @@ func scanReadOnlySurface(positions *token.FileSet, file *ast.File) ([]string, in
 			operations += count
 		}
 	}
-	return violations, operations
+	return violations, operations, scanner.names
 }
 
 type surfaceScanner struct {
 	positions *token.FileSet
 	packages  map[string]bool
 	fields    map[string]bool
+	helpers   map[string]bool
+	names     map[string]int
 }
 
 func (scanner surfaceScanner) scanCalls(root ast.Node, clients map[string]bool) ([]string, int) {
@@ -276,11 +300,12 @@ func (scanner surfaceScanner) scanCalls(root ast.Node, clients map[string]bool) 
 			return true
 		}
 		line := scanner.positions.Position(call.Pos()).Line
-		if receiver, ok := clientReceiver(selector.X, clients, scanner.fields, scanner.packages); ok {
+		if receiver, ok := clientReceiver(selector.X, clients, scanner.fields, scanner.packages, scanner.helpers); ok {
 			if nonOperationMethods[selector.Sel.Name] {
 				return true
 			}
 			operations++
+			scanner.names[selector.Sel.Name]++
 			if !hasAllowedPrefix(selector.Sel.Name) {
 				violations = append(violations, "line "+strconv.Itoa(line)+" calls SDK operation \""+selector.Sel.Name+"\" on "+receiver+" outside the read-only surface")
 			}
@@ -298,7 +323,7 @@ func (scanner surfaceScanner) scanCalls(root ast.Node, clients map[string]bool) 
 	return violations, operations
 }
 
-func collectDeclaredClients(root ast.Node, packages, clients map[string]bool) {
+func collectDeclaredClients(root ast.Node, packages, helpers, clients map[string]bool) {
 	ast.Inspect(root, func(node ast.Node) bool {
 		switch typed := node.(type) {
 		case *ast.ValueSpec:
@@ -308,16 +333,23 @@ func collectDeclaredClients(root ast.Node, packages, clients map[string]bool) {
 				}
 			}
 			for index, name := range typed.Names {
-				if index < len(typed.Values) && isSDKConstructor(typed.Values[index], packages) {
+				if index < len(typed.Values) && isClientSource(typed.Values[index], packages, helpers) {
 					clients[name.Name] = true
 				}
 			}
 		case *ast.AssignStmt:
+			// "api, err := helper(...)" binds the client to the first name.
+			if len(typed.Rhs) == 1 && len(typed.Lhs) > 1 && isClientSource(typed.Rhs[0], packages, helpers) {
+				if name, ok := typed.Lhs[0].(*ast.Ident); ok {
+					clients[name.Name] = true
+				}
+				return true
+			}
 			if len(typed.Lhs) != len(typed.Rhs) {
 				return true
 			}
 			for index, value := range typed.Rhs {
-				if !isSDKConstructor(value, packages) {
+				if !isClientSource(value, packages, helpers) {
 					continue
 				}
 				if name, ok := typed.Lhs[index].(*ast.Ident); ok {
@@ -351,24 +383,38 @@ func copyNames(source map[string]bool) map[string]bool {
 	return clone
 }
 
-func clientReceiver(expr ast.Expr, clients, fields, packages map[string]bool) (string, bool) {
+func clientReceiver(expr ast.Expr, clients, fields, packages, helpers map[string]bool) (string, bool) {
 	switch typed := expr.(type) {
 	case *ast.Ident:
 		if clients[typed.Name] {
 			return typed.Name, true
 		}
 	case *ast.ParenExpr:
-		return clientReceiver(typed.X, clients, fields, packages)
+		return clientReceiver(typed.X, clients, fields, packages, helpers)
 	case *ast.SelectorExpr:
 		if fields[typed.Sel.Name] {
 			return typed.Sel.Name, true
 		}
 	case *ast.CallExpr:
-		if isSDKConstructor(typed, packages) {
+		if isClientSource(typed, packages, helpers) {
 			return "a freshly built client", true
 		}
 	}
 	return "", false
+}
+
+// isClientSource reports an SDK constructor or a call to a local helper that
+// returns a client.
+func isClientSource(expr ast.Expr, packages, helpers map[string]bool) bool {
+	if isSDKConstructor(expr, packages) {
+		return true
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	identifier, ok := call.Fun.(*ast.Ident)
+	return ok && helpers[identifier.Name]
 }
 
 func isSDKClientType(expr ast.Expr, packages map[string]bool) bool {
@@ -409,4 +455,116 @@ func hasAllowedPrefix(operation string) bool {
 		}
 	}
 	return false
+}
+
+// TestReadOnlySurfaceScannerSeesHelperBuiltClients covers clients returned
+// by a local helper, the shape every collector uses.
+func TestReadOnlySurfaceScannerSeesHelperBuiltClients(t *testing.T) {
+	const source = `package scratch
+
+import (
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+)
+
+func ec2Client() (*ec2.Client, error) {
+	return ec2.NewFromConfig(aws.Config{}), nil
+}
+
+func write(ctx context.Context) {
+	api, _ := ec2Client()
+	_, _ = api.TerminateInstances(ctx, &ec2.TerminateInstancesInput{})
+}
+`
+	positions, parsed := parseTestSource(t, source)
+	violations, operations := scanReadOnlySurface(positions, parsed)
+	if operations != 1 || !containsViolation(violations, "TerminateInstances") {
+		t.Fatalf("helper-built client missed: %d operations, %v", operations, violations)
+	}
+}
+
+// collectorMetadataGets are the only Get operations collectors may call:
+// each returns metadata, never object contents, policy bodies or secrets.
+var collectorMetadataGets = map[string]bool{
+	"GetResources":          true,
+	"GetQueueAttributes":    true,
+	"GetPublicAccessBlock":  true,
+	"GetBucketPolicyStatus": true,
+	"GetBucketEncryption":   true,
+	"GetRestApis":           true,
+}
+
+// TestCollectorsCallOnlyMetadataReads narrows the read-only surface for the
+// collectors: Describe and List calls, LookupEvents, and a closed list of
+// metadata Gets.
+func TestCollectorsCallOnlyMetadataReads(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("collect", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := map[string]int{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		positions, parsed := parseAWSFile(t, name)
+		violations, _, names := scanSurface(positions, parsed)
+		for _, violation := range violations {
+			t.Errorf("%s: %s", name, violation)
+		}
+		for operation, count := range names {
+			called[operation] += count
+		}
+	}
+	for operation := range called {
+		switch {
+		case strings.HasPrefix(operation, "Describe"), strings.HasPrefix(operation, "List"), operation == "LookupEvents":
+		case collectorMetadataGets[operation]:
+		default:
+			t.Errorf("collectors call %s, outside Describe, List, LookupEvents and the metadata Gets", operation)
+		}
+	}
+	for _, expected := range []string{"DescribeInstances", "DescribeTargetHealth", "GetBucketEncryption", "GetQueueAttributes", "LookupEvents", "DescribeAlarms"} {
+		if called[expected] == 0 {
+			t.Errorf("scan did not see %s; collectors are not being checked", expected)
+		}
+	}
+	if len(called) < 50 {
+		t.Fatalf("scan saw %d distinct collector operations; expected the whole catalog", len(called))
+	}
+}
+
+// TestAWSPackagesKeepTheirLayering: the model is a standard-library leaf,
+// the store and change pipeline never talk to AWS, and nothing under
+// pkg/aws reaches into the Kubernetes connector.
+func TestAWSPackagesKeepTheirLayering(t *testing.T) {
+	err := filepath.WalkDir(".", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return err
+		}
+		_, parsed := parseAWSFile(t, name)
+		directory := filepath.ToSlash(filepath.Dir(name))
+		for _, imported := range parsed.Imports {
+			path := strings.Trim(imported.Path.Value, `"`)
+			if strings.Contains(path, "/pkg/kubernetes") {
+				t.Errorf("%s imports %s", name, path)
+			}
+			switch directory {
+			case "model":
+				if strings.Contains(path, ".") {
+					t.Errorf("%s: the model must import only the standard library, found %s", name, path)
+				}
+			case "snapshot", "changes":
+				if strings.HasPrefix(path, sdkModulePath) {
+					t.Errorf("%s: %s must not call AWS, found %s", name, directory, path)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

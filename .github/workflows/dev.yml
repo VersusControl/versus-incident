@@ -67,6 +67,29 @@ jobs:
           path: coverage.out
           retention-days: 7
 
+  # Build the release Dockerfile on every pull request and push without pushing
+  # the image. `go build ./...` compiles packages, so it cannot catch a
+  # Dockerfile that builds a narrower target than the package.
+  docker-build:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=docker-build
+          cache-to: type=gha,mode=max,scope=docker-build
+
   build-and-push-dev:
     name: Build & push dev image
     runs-on: ubuntu-latest

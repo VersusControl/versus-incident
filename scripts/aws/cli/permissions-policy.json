@@ -10,6 +10,7 @@
         "autoscaling:Describe*",
         "health:Describe*",
         "cloudformation:Describe*",
+        "cloudformation:ListStackResources",
         "cloudfront:List*",
         "cloudtrail:LookupEvents",
         "cloudwatch:DescribeAlarms*",
@@ -47,6 +48,7 @@
         "states:List*",
         "resource-explorer-2:Search",
         "servicecatalog:ListApplications",
+        "servicecatalog:ListAssociatedResources",
         "tag:GetResources"
       ]
     },
@@ -72,10 +74,14 @@
       "Effect": "Deny",
       "Resource": "*",
       "Action": [
+        "account:*",
         "aws-portal:*",
         "billing:*",
+        "consolidatedbilling:*",
         "invoicing:*",
-        "payments:*"
+        "payments:*",
+        "purchase-orders:*",
+        "tax:*"
       ]
     }
   ]

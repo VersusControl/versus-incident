@@ -20,7 +20,7 @@ variable "external_id" {
 }
 
 variable "optional_data" {
-  description = "When true, adds Cost Explorer, Security Hub findings, AWS Config advanced query and Trusted Advisor reads. Off by default; Cost Explorer is billed per request."
+  description = "When true, adds cost reads (Cost Explorer, AWS Budgets, Cost Optimization Hub and Compute Optimizer), Security Hub findings, AWS Config advanced query and Trusted Advisor reads. Off by default; Cost Explorer is billed per request."
   type        = bool
   default     = false
 }

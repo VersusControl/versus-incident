@@ -30,7 +30,7 @@ func TestSavedBudgetReachesTheLimiterAtRuntime(t *testing.T) {
 		WithLimiter(limiter),
 	)
 
-	before, err := connector.View(context.Background(), "default", true)
+	before, err := connector.Connection(context.Background(), Principal{Org: "default", CanWrite: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestSavedBudgetReachesTheLimiterAtRuntime(t *testing.T) {
 	if limiter.MaxRPS() != 7 {
 		t.Fatalf("limiter rate = %d, want 7 without a restart", limiter.MaxRPS())
 	}
-	after, err := connector.View(context.Background(), "default", true)
+	after, err := connector.Connection(context.Background(), Principal{Org: "default", CanWrite: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestGlobalProbesDoNotInflateTheBudget(t *testing.T) {
 	if _, err := connector.CheckAccount(context.Background(), account); err != nil {
 		t.Fatal(err)
 	}
-	view, err := connector.View(context.Background(), "default", true)
+	view, err := connector.Connection(context.Background(), Principal{Org: "default", CanWrite: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestOptionalDataSourcesFollowExplicitConfig(t *testing.T) {
 	// Shipped defaults: every optional key false, budget at the documented
 	// default, no stored value. Nothing is config-locked.
 	service, _ := build(config.AWSConnectorConfig{Budgets: config.AWSBudgetsConfig{MaxRequestsPerSecond: DefaultBudgetRPS}})
-	view, err := service.View(context.Background(), "default", true)
+	view, err := service.Connection(context.Background(), Principal{Org: "default", CanWrite: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestOptionalDataSourcesFollowExplicitConfig(t *testing.T) {
 		Budgets:      config.AWSBudgetsConfig{MaxRequestsPerSecond: 10},
 		OptionalData: config.AWSOptionalDataConfig{CostExplorer: true},
 	})
-	view, err = service.View(context.Background(), "default", true)
+	view, err = service.Connection(context.Background(), Principal{Org: "default", CanWrite: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestOptionalDataSourcesFollowExplicitConfig(t *testing.T) {
 	if err := service.SaveOptions("default", Options{CostExplorer: &enabled, MaxRequestsPerSecond: &budget}); err != nil {
 		t.Fatal(err)
 	}
-	view, err = service.View(context.Background(), "default", true)
+	view, err = service.Connection(context.Background(), Principal{Org: "default", CanWrite: true})
 	if err != nil {
 		t.Fatal(err)
 	}

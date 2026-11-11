@@ -55,6 +55,7 @@ data "aws_iam_policy_document" "metadata_reads" {
       "health:Describe*",
       # CloudFormation
       "cloudformation:Describe*",
+      "cloudformation:ListStackResources",
       # CloudFront
       "cloudfront:List*",
       # CloudTrail
@@ -113,6 +114,7 @@ data "aws_iam_policy_document" "metadata_reads" {
       # Shared inventory helpers
       "resource-explorer-2:Search",
       "servicecatalog:ListApplications",
+      "servicecatalog:ListAssociatedResources",
       "tag:GetResources",
     ]
   }
@@ -134,8 +136,17 @@ data "aws_iam_policy_document" "optional_data" {
 
     actions = [
       # Cost Explorer, billed per request by AWS
-      "ce:GetAnomalies",
       "ce:GetCostAndUsage",
+      "ce:GetCostAndUsageWithResources",
+      "ce:GetCostForecast",
+      "ce:GetSavingsPlansCoverage",
+      # Cost Explorer, free
+      "ce:ListCostAllocationTags",
+      # AWS Budgets definitions, read-only
+      "budgets:ViewBudget",
+      # Rightsizing and idle advice
+      "cost-optimization-hub:ListRecommendations",
+      "compute-optimizer:GetEC2InstanceRecommendations",
       # Security Hub findings
       "securityhub:GetFindings",
       # AWS Config advanced query
@@ -154,7 +165,8 @@ resource "aws_iam_role_policy" "optional_data" {
   policy = data.aws_iam_policy_document.optional_data.json
 }
 
-# Explicit denies: data-plane, secret and log-body reads stay out even if a
+# Explicit denies: data-plane, secret and log-body reads, and every billing
+# account, invoice, payment, tax and account settings API, stay out even if a
 # managed policy is later attached with a broader allow.
 data "aws_iam_policy_document" "deny_reads" {
   statement {
@@ -184,10 +196,14 @@ data "aws_iam_policy_document" "deny_reads" {
     resources = ["*"]
 
     actions = [
+      "account:*",
       "aws-portal:*",
       "billing:*",
+      "consolidatedbilling:*",
       "invoicing:*",
       "payments:*",
+      "purchase-orders:*",
+      "tax:*",
     ]
   }
 }

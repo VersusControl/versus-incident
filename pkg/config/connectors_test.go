@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestChangeCaptureConfig(t *testing.T) {
@@ -351,5 +352,111 @@ func TestAWSConnectorEnableEnvironmentOverride(t *testing.T) {
 	loaded, err = loadConfigFromPath(main)
 	if err != nil || loaded.Connectors.AWS.Enable {
 		t.Fatalf("disable override: %v", err)
+	}
+}
+
+func TestAWSCollectConfigShapeDefaultsAndClone(t *testing.T) {
+	loaded, err := decodeConnectors(map[string]any{"aws": map[string]any{
+		"collect": map[string]any{
+			"enable":    "false",
+			"intervals": map[string]any{"inventory": "30m", "health": "1m"},
+			"history":   map[string]any{"max_generations": "10", "change_retention": "48h"},
+		},
+		"applications": map[string]any{"sources": []any{"tags", "appregistry"}, "tag_keys": []any{"app", "component"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect := loaded.AWS.Collect
+	if collect.Enable || collect.InventoryInterval() != 30*time.Minute || collect.HealthInterval() != time.Minute || collect.ChangesInterval() != DefaultAWSChangesInterval {
+		t.Fatalf("collect = %+v", collect)
+	}
+	if collect.MaxGenerations() != 10 || collect.MaxAge() != DefaultAWSHistoryMaxAge || collect.ChangeRetention() != 48*time.Hour {
+		t.Fatalf("history = %+v", collect.History)
+	}
+	if !reflect.DeepEqual(loaded.AWS.Applications.EffectiveSources(), []string{"tags", "appregistry"}) || !reflect.DeepEqual(loaded.AWS.Applications.TagKeys, []string{"app", "component"}) {
+		t.Fatalf("applications = %+v", loaded.AWS.Applications)
+	}
+
+	cloned := cloneConnectorsConfig(loaded)
+	cloned.AWS.Applications.Sources[0] = "changed"
+	cloned.AWS.Applications.TagKeys[0] = "changed"
+	cloned.AWS.Collect.Intervals.Health = "9m"
+	if loaded.AWS.Applications.Sources[0] != "tags" || loaded.AWS.Applications.TagKeys[0] != "app" || loaded.AWS.Collect.Intervals.Health != "1m" {
+		t.Fatal("aws collect clone mutated source")
+	}
+
+	defaults, err := decodeConnectors(nil)
+	if err != nil || !defaults.AWS.Collect.Enable {
+		t.Fatalf("collection must default on: %+v, %v", defaults.AWS.Collect, err)
+	}
+	empty, _ := decodeConnectors(map[string]any{"aws": map[string]any{}})
+	if !empty.AWS.Collect.Enable || empty.AWS.Collect.Intervals.Inventory != "15m0s" || !reflect.DeepEqual(empty.AWS.Applications.Sources, DefaultAWSApplicationSources()) {
+		t.Fatalf("collect defaults = %+v / %+v", empty.AWS.Collect, empty.AWS.Applications)
+	}
+	var zero AWSCollectConfig
+	if zero.InventoryInterval() != DefaultAWSInventoryInterval || zero.MaxGenerations() != DefaultAWSHistoryGenerations {
+		t.Fatal("zero collect config has no defaults")
+	}
+}
+
+func TestAWSCollectConfigRejections(t *testing.T) {
+	cases := []map[string]any{
+		{"collect": map[string]any{"intervals": map[string]any{"health": "5s"}}},
+		{"collect": map[string]any{"intervals": map[string]any{"changes": "sensitive-value"}}},
+		{"collect": map[string]any{"intervals": map[string]any{"inventory": "48h"}}},
+		{"collect": map[string]any{"history": map[string]any{"max_generations": 20000}}},
+		{"collect": map[string]any{"history": map[string]any{"max_age": "1m"}}},
+		{"collect": map[string]any{"unknown": true}},
+		{"applications": map[string]any{"sources": []any{"sensitive-value"}}},
+		{"applications": map[string]any{"sources": []any{"tags", "tags"}}},
+		{"applications": map[string]any{"tag_keys": []any{"a,b"}}},
+		{"applications": map[string]any{"tag_keys": []any{""}}},
+	}
+	for index, aws := range cases {
+		_, err := decodeConnectors(map[string]any{"aws": aws})
+		if err == nil || strings.Contains(err.Error(), "sensitive-value") {
+			t.Fatalf("case %d: unsafe or missing rejection: %v", index, err)
+		}
+	}
+}
+
+func TestAWSCollectEnvironmentOverrides(t *testing.T) {
+	directory := t.TempDir()
+	main := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(main, []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "connectors.yaml"), []byte("connectors:\n  aws:\n    enable: true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("VERSUS_CONNECTORS_AWS_COLLECT_ENABLE", "false")
+	t.Setenv("VERSUS_CONNECTORS_AWS_COLLECT_HEALTH_INTERVAL", "90s")
+	t.Setenv("VERSUS_CONNECTORS_AWS_COLLECT_HISTORY_MAX_GENERATIONS", "7")
+	t.Setenv("VERSUS_CONNECTORS_AWS_COLLECT_HISTORY_MAX_AGE", "24h")
+	loaded, err := loadConfigFromPath(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect := loaded.Connectors.AWS.Collect
+	if collect.Enable || collect.HealthInterval() != 90*time.Second || collect.MaxGenerations() != 7 || collect.MaxAge() != 24*time.Hour {
+		t.Fatalf("env overrides = %+v", collect)
+	}
+	t.Setenv("VERSUS_CONNECTORS_AWS_COLLECT_ENABLE", "true")
+	if loaded, err = loadConfigFromPath(main); err != nil || !loaded.Connectors.AWS.Collect.Enable {
+		t.Fatalf("enable override: %v", err)
+	}
+	for name, value := range map[string]string{
+		"VERSUS_CONNECTORS_AWS_COLLECT_ENABLE":                  "sensitive-value",
+		"VERSUS_CONNECTORS_AWS_COLLECT_HEALTH_INTERVAL":         "1s",
+		"VERSUS_CONNECTORS_AWS_COLLECT_HISTORY_MAX_GENERATIONS": "-3",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, value)
+			_, err := loadConfigFromPath(main)
+			if err == nil || strings.Contains(err.Error(), "sensitive-value") {
+				t.Fatalf("invalid override accepted or echoed: %v", err)
+			}
+		})
 	}
 }

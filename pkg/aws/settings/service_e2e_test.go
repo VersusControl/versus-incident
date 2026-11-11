@@ -132,7 +132,7 @@ func TestNewAccountConnectEndToEnd(t *testing.T) {
 		t.Fatalf("account regions/api use = %+v / %+v", account.Regions, account.APIUse)
 	}
 
-	settingsView, err := connector.View(ctx, "default", true)
+	settingsView, err := connector.Connection(ctx, Principal{Org: "default", CanWrite: true})
 	if err != nil {
 		t.Fatal(err)
 	}

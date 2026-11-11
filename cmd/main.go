@@ -17,8 +17,11 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/agent/act"
 	"github.com/VersusControl/versus-incident/pkg/agent/ledger"
+	awscollect "github.com/VersusControl/versus-incident/pkg/aws/collect"
+	awscost "github.com/VersusControl/versus-incident/pkg/aws/cost"
 	awslimit "github.com/VersusControl/versus-incident/pkg/aws/limit"
 	awssettings "github.com/VersusControl/versus-incident/pkg/aws/settings"
+	awssnapshot "github.com/VersusControl/versus-incident/pkg/aws/snapshot"
 	c "github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -34,6 +37,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/teams"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 	"github.com/redis/go-redis/v9"
@@ -245,8 +249,14 @@ func main() {
 	}
 	toolAvailability.BindIntegrationConstruction("kubernetes", constructed > 0, constructionHealth)
 	registerToolAvailabilityController(app, toolAvailability, kubernetesService)
-	awsSettingsService := registerAWSSettingsController(app, store, cfg)
-	awsSettingsService.Start(rootCtx)
+	awsConnector := registerAWSSettingsController(app, store, cfg)
+	awsConnector.settings.Start(rootCtx)
+	awsConnector.scheduler.Start(rootCtx)
+	// The agent's AWS tools read through the same settings service, snapshot
+	// store and limiter as the admin routes.
+	agent.ConfigureAWS(func() *awssettings.Service { return awsConnector.settings })
+	costScheduler := registerAWSFinOps(app, store, cfg, awsConnector)
+	costScheduler.Start(rootCtx)
 	if err := registerActionHistoryService(store); err != nil {
 		log.Fatalf("action history: failed to start: %v", err)
 	}
@@ -306,6 +316,31 @@ func main() {
 	if !agent.WaitForShutdownFlush(agentDone, agentFlushGrace) {
 		log.Printf("agent: shutdown flush did not finish within %s; learned state may be incomplete", agentFlushGrace)
 	}
+	// The deferred store close must not pull storage from under a collector
+	// that is still finishing a write.
+	if !waitForStop(awsConnector.scheduler.Stopped(), awsCollectorStopGrace) {
+		log.Printf("aws collect: collectors did not stop within %s", awsCollectorStopGrace)
+	}
+	if !waitForStop(costScheduler.Stopped(), awsCollectorStopGrace) {
+		log.Printf("aws cost: refresh did not stop within %s", awsCollectorStopGrace)
+	}
+}
+
+// awsCollectorStopGrace bounds how long shutdown waits for the AWS
+// collectors after the root context is cancelled.
+const awsCollectorStopGrace = 10 * time.Second
+
+// waitForStop waits for done or grace, whichever comes first, and reports
+// whether done closed.
+func waitForStop(done <-chan struct{}, grace time.Duration) bool {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // agentFlushGrace bounds how long the process waits for the agent worker to
@@ -329,18 +364,190 @@ func registerActionHistoryService(store storage.Provider) error {
 	return nil
 }
 
+// awsConnector holds the AWS connector's long-lived parts: the settings
+// service, the committed snapshot store every AWS read uses, and the
+// collector scheduler. The probes and the collectors share one limiter.
+// httpClient is the AWS transport override every AWS caller shares; it is nil
+// (the hardened default) except in a harness_fakeaws build.
+type awsConnector struct {
+	settings   *awssettings.Service
+	snapshots  *awssnapshot.Store
+	scheduler  *awscollect.Scheduler
+	limiter    *awslimit.Manager
+	httpClient aws.HTTPClient
+}
+
 // registerAWSSettingsController mounts the AWS connector's admin surface and
-// returns the service so boot can start its health and self-test loops.
-func registerAWSSettingsController(app *fiber.App, store storage.Provider, cfg *c.Config) *awssettings.Service {
+// builds the snapshot store and collectors behind it, so boot can start the
+// health, self-test and collection loops.
+func registerAWSSettingsController(app *fiber.App, store storage.Provider, cfg *c.Config) awsConnector {
 	limiter := awslimit.NewManager(cfg.Connectors.AWS.Budgets.MaxRequestsPerSecond)
-	service := awssettings.NewService(
-		awssettings.NewStore(store, tenancy.DefaultOrgScope()),
-		awssettings.WithConfig(func() c.AWSConnectorConfig { return c.GetConfig().Connectors.AWS }),
+	// current reads the live connector config, falling back to the boot
+	// config before the global one is loaded.
+	current := func() c.AWSConnectorConfig {
+		if live := c.GetConfigOrNil(); live != nil {
+			return live.Connectors.AWS
+		}
+		return cfg.Connectors.AWS
+	}
+	scope := tenancy.DefaultOrgScope()
+	var service *awssettings.Service
+	snapshots := awssnapshot.New(store, scope, awssnapshot.WithTagAllowlist(func() []string {
+		// The same effective allowlist the collectors redact with at write.
+		if service == nil {
+			return awssettings.DefaultTagValueAllowlist()
+		}
+		return service.TagValueAllowlist()
+	}), awssnapshot.WithOptions(func() awssnapshot.Options {
+		connector := current()
+		return awssnapshot.Options{
+			MaxGenerations:  connector.Collect.MaxGenerations(),
+			MaxAge:          connector.Collect.MaxAge(),
+			ChangeRetention: connector.Collect.ChangeRetention(),
+			AppSources:      connector.Applications.EffectiveSources(),
+		}
+	}))
+	// harnessClient is nil except in a harness_fakeaws build pointed at the
+	// fake AWS endpoint.
+	harnessClient := awsHarnessHTTPClient()
+	collector := awscollect.New(snapshots, limiter,
+		awscollect.WithHTTPClient(harnessClient),
+		awscollect.WithLogger(log.Printf),
+		awscollect.WithOptions(func() awscollect.Options {
+			return awscollect.Options{
+				TagAllowlist: service.TagValueAllowlist(),
+				AppTagKeys:   current().Applications.EffectiveTagKeys(),
+			}
+		}),
+	)
+	scheduler := awscollect.NewScheduler(collector,
+		func(ctx context.Context) []awscollect.Target {
+			targets := service.CollectTargets(ctx)
+			out := make([]awscollect.Target, 0, len(targets))
+			for _, target := range targets {
+				out = append(out, awscollect.Target{AccountID: target.AccountID, Regions: target.Regions, Credentials: target.Credentials})
+			}
+			return out
+		},
+		func() awscollect.Intervals {
+			collect := current().Collect
+			return awscollect.Intervals{Inventory: collect.InventoryInterval(), Health: collect.HealthInterval(), Changes: collect.ChangesInterval()}
+		},
+		func() bool {
+			connector := current()
+			return connector.Enable && connector.Collect.Enable
+		},
+		awscollect.WithAccounts(func(ctx context.Context) ([]string, error) { return service.AccountIDs(ctx) }),
+	)
+	service = awssettings.NewService(
+		awssettings.NewStore(store, scope),
+		awssettings.WithConfig(func() c.AWSConnectorConfig { return current() }),
 		awssettings.WithLimiter(limiter),
 		awssettings.WithAIInfo(awssettings.AIInfo{Enabled: cfg.Agent.AI.Enable, Provider: cfg.Agent.AI.Provider, Model: cfg.Agent.AI.Model}),
+		awssettings.WithSnapshots(snapshots),
+		awssettings.WithAccountAdded(scheduler.Trigger),
+		awssettings.WithHTTPClient(harnessClient),
 	)
 	controllers.NewAWSSettingsController(service).Register(app.Group("/api"))
-	return service
+	return awsConnector{settings: service, snapshots: snapshots, scheduler: scheduler, limiter: limiter, httpClient: harnessClient}
+}
+
+// finopsDeployment names the deployment's cost signal source.
+const finopsDeployment = "default"
+
+// awsCostOptions maps the connector configuration onto one cost refresh's
+// options. Cost calls share the connector's limiter, inventory and AWS
+// transport, so a harness_fakeaws build redirects them with every other AWS
+// call; otherwise the cost adapter keeps its hardened default client.
+func awsCostOptions(conn c.AWSConnectorConfig, targets []awscost.Target, allowlist []string, connector awsConnector) awscost.Options {
+	opts := awscost.FromConfig(conn, targets, allowlist, finopsDeployment)
+	opts.Limiter = connector.limiter
+	opts.Inventory = connector.snapshots
+	if connector.httpClient != nil {
+		opts.HTTPClient = connector.httpClient
+	}
+	return opts
+}
+
+// registerAWSFinOps mounts the FinOps routes, binds the read-only FinOps
+// agent tools and builds the once-a-day cost refresh. Cost is read only when
+// the AWS connector and its Cost Explorer opt-in are both on; otherwise the
+// routes answer enabled=false and nothing calls AWS. New increases go
+// through the existing alert path once each.
+func registerAWSFinOps(app *fiber.App, store storage.Provider, cfg *c.Config, connector awsConnector) *awscost.Scheduler {
+	current := func() c.AWSConnectorConfig {
+		if live := c.GetConfigOrNil(); live != nil {
+			return live.Connectors.AWS
+		}
+		return cfg.Connectors.AWS
+	}
+	scope := tenancy.DefaultOrgScope()
+	adapter, err := awscost.New(store, scope, awscost.Options{Deployment: finopsDeployment, Limiter: connector.limiter,
+		Enabled: func() bool { return false }, DisabledReason: awscost.ReasonCostDataOff})
+	if err != nil {
+		log.Fatalf("aws cost: invalid options")
+	}
+	// Deleting an account deletes the cost data it paid for.
+	connector.settings.SetPayerRemover(adapter)
+	var backend *awscost.Backend
+	prepare := func(ctx context.Context) error {
+		conn := current()
+		// Read before the accounts: an account deleted between this read and
+		// the update keeps its removal, because this snapshot's revision is
+		// then not newer than the one the deletion recorded. An unreadable
+		// revision reads as zero, which revives no removed account.
+		revision, err := connector.settings.AccountsRevision(ctx)
+		if err != nil {
+			log.Printf("aws cost: account settings revision unreadable; removed accounts stay out of collection")
+		}
+		// The accounts are read after the revision too, also with cost data
+		// off, so a pending cost purge can tell an account added again from
+		// one still removed.
+		var accounts []string
+		if ids, err := connector.settings.AccountIDs(ctx); err == nil {
+			accounts = append([]string{}, ids...)
+		}
+		var targets []awscost.Target
+		if conn.CostDataEnabled() {
+			for _, target := range connector.settings.CostTargets(ctx) {
+				targets = append(targets, awscost.Target{AccountID: target.AccountID, Credentials: target.Credentials,
+					Cause: target.Cause, Since: target.Since})
+			}
+		}
+		opts := awsCostOptions(conn, targets, connector.settings.TagValueAllowlist(), connector)
+		opts.SettingsRevision = revision
+		opts.SettingsAccounts = accounts
+		// Resource-level cost for the services with an open increase.
+		opts.ResourceServices = func() []string { return backend.OpenIncreaseServices(context.Background()) }
+		return adapter.Update(opts)
+	}
+	backend = awscost.NewBackend(adapter, awscost.NewStore(store, scope), current)
+	controllers.NewAWSFinOpsController(backend).Register(app.Group("/api"))
+	agent.ConfigureFinOps(backend.Reader)
+	signals := awscost.NewSignalSource(finopsDeployment, awscost.ServiceFunc(backend.Service), nil)
+	sink := func(ctx context.Context, sig core.Signal) error {
+		return services.CreateIncidentFromFinOpsSignal(ctx, scope.Write, sig)
+	}
+	return awscost.NewScheduler(adapter,
+		func() (bool, int, int, *time.Location) {
+			conn := current()
+			finops := conn.FinOps.Effective()
+			hour, minute := finops.RefreshClock()
+			return conn.CostDataEnabled(), hour, minute, finops.Location()
+		},
+		prepare,
+		awscost.WithLogger(log.Printf),
+		awscost.WithAfterRefresh(func(ctx context.Context, _ awscost.RefreshResult) {
+			if _, err := awscost.PumpAlerts(ctx, signals, sink); err != nil {
+				log.Printf("aws cost: increase or budget alerts not sent; retried after the next refresh")
+			}
+			// Saving decisions follow the savings the refreshed data
+			// produces; syncing here keeps page reads free of writes.
+			if err := backend.Service().SyncSavingDecisions(ctx); err != nil {
+				log.Printf("aws cost: saving decisions not synced; retried after the next refresh")
+			}
+		}),
+	)
 }
 
 func registerToolAvailabilityController(app *fiber.App, availability *agent.ToolAvailabilityService, services ...*kubernetes.ServiceRegistry) {

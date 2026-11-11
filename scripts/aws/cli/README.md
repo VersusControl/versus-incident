@@ -16,9 +16,10 @@ The role is identical in effect:
   `versus-reader-metadata-reads` holds the explicit allow list plus both deny
   statements (`DenyDataPlaneAndSecretReads`, `DenyBillingAccountSurfaces`).
   Optional-data actions are not in it.
-- `optional-data-policy.json` is the `OptionalDataReads` allow list (Cost
-  Explorer, Security Hub findings, AWS Config advanced queries, Trusted
-  Advisor), attached only when you ask for it.
+- `optional-data-policy.json` is the `OptionalDataReads` allow list (cost
+  reads from Cost Explorer, AWS Budgets, Cost Optimization Hub and Compute
+  Optimizer, plus Security Hub findings, AWS Config advanced queries and
+  Trusted Advisor), attached only when you ask for it.
 
 ## The six commands
 

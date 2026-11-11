@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -541,5 +542,45 @@ func TestHelmChartRendersAWSConnectors(t *testing.T) {
 	}
 	if aws.Budgets.MaxRequestsPerSecond != 2 || aws.HealthCheckInterval != "5m" || aws.OptionalData.CostExplorer || aws.OptionalData.SecurityHub {
 		t.Fatalf("aws defaults = %+v", aws)
+	}
+	collect := aws.Collect
+	if collect.Enable || collect.InventoryInterval() != 30*time.Minute || collect.HealthInterval() != time.Minute || collect.ChangesInterval() != 10*time.Minute {
+		t.Fatalf("aws collect = %+v", collect)
+	}
+	if collect.MaxGenerations() != 12 || collect.MaxAge() != 48*time.Hour || collect.ChangeRetention() != 72*time.Hour {
+		t.Fatalf("aws collect history = %+v", collect.History)
+	}
+	if !reflect.DeepEqual(aws.Applications.Sources, []string{"tags", "cloudformation"}) || !reflect.DeepEqual(aws.Applications.TagKeys, []string{"app"}) {
+		t.Fatalf("aws applications = %+v", aws.Applications)
+	}
+}
+
+// TestHelmChartAWSCollectDefaults renders the chart's own defaults and
+// checks they match the loader's defaults, so the chart and the binary
+// never disagree about collection.
+func TestHelmChartAWSCollectDefaults(t *testing.T) {
+	requireRenderableChart(t)
+	files := renderChartFiles(t, chartScenario{name: "aws-collect-defaults", args: []string{"--set", "connectors.aws.enable=true"}})
+	directory := t.TempDir()
+	for name, body := range files {
+		if strings.HasSuffix(name, ".yaml") {
+			if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect := loaded.Connectors.AWS.Collect
+	if !collect.Enable || collect.InventoryInterval() != DefaultAWSInventoryInterval || collect.HealthInterval() != DefaultAWSHealthInterval ||
+		collect.ChangesInterval() != DefaultAWSChangesInterval || collect.MaxGenerations() != DefaultAWSHistoryGenerations ||
+		collect.MaxAge() != DefaultAWSHistoryMaxAge || collect.ChangeRetention() != DefaultAWSChangeRetention {
+		t.Fatalf("chart collect defaults = %+v", collect)
+	}
+	if !reflect.DeepEqual(loaded.Connectors.AWS.Applications.EffectiveSources(), DefaultAWSApplicationSources()) ||
+		!reflect.DeepEqual(loaded.Connectors.AWS.Applications.EffectiveTagKeys(), DefaultAWSApplicationTagKeys()) {
+		t.Fatalf("chart applications = %+v", loaded.Connectors.AWS.Applications)
 	}
 }

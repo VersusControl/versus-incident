@@ -44,7 +44,7 @@ func (s *Server) serve(writer http.ResponseWriter, request awsRequest) {
 		return
 	}
 	if request.account.Denied[request.service] {
-		s.writeError(writer, request.protocol, http.StatusForbidden, "AccessDenied",
+		writeErrorFor(writer, request, http.StatusForbidden, "AccessDenied",
 			"User is not authorized to perform: "+request.operation())
 		return
 	}

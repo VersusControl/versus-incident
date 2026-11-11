@@ -134,6 +134,13 @@ timeline events behind it.
 You can see which reads were made, how long they took, how many tokens were
 used and which model answered.
 
+The same answers are available to the DevOps agent in web **Chat** and the
+`versus-devops` command line tool, through read-only tools that never call AWS:
+`get_aws_connection` for the connection status, and `cost_breakdown`,
+`cost_drivers`, `cost_increases`, `cost_increase_detail`,
+`savings_opportunities`, `budget_status` and `cost_accounts` for cost. See the
+[Tool Reference](../agent/tools/overview.md#aws-tools).
+
 ### Get connected
 
 ![AWS Harness Settings: the accounts list, a three step connect panel and a privacy summary](../docs/images/aws-harness-settings.png)

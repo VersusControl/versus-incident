@@ -6,6 +6,7 @@ connectors:
       enable: false
       auth:
         mode: ""
+
   aws:
     enable: false
     accounts: []
@@ -19,6 +20,20 @@ connectors:
       config: false
       trusted_advisor: false
     health_check_interval: 5m
+    # FinOps page; cost is read only when optional_data.cost_explorer is true.
+    finops:
+      team_tag_key: team
+      min_increase_usd_per_month: 100
+      min_driver_usd: 50
+      target_coverage: 0.8
+      max_paid_requests_per_day: 20   # paid Cost Explorer requests per day, $0.01 each
+      refresh_time: "09:00"           # once a day, report.timezone
+      cost_source_account: ""         # payer account ID; empty = each account reads its own
+      budgets: []                     # - {name: AWS total, scope: deployment, monthly_usd: 42000}
+      account_groups: []              # - {name: Production, accounts: ["111122223333"]}
+      report:
+        timezone: UTC
+        slack_summary: false
 
 # Multi-cluster form replaces the single connection block above.
 # connectors:

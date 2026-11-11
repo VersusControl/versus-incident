@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	mathrand "math/rand/v2"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/aws/catalog"
 	"github.com/VersusControl/versus-incident/pkg/aws/limit"
 	"github.com/VersusControl/versus-incident/pkg/aws/probe"
+	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
 	"github.com/VersusControl/versus-incident/pkg/awsauth"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
@@ -184,6 +186,12 @@ type Service struct {
 	now        func() time.Time
 	templates  Templates
 	selfTester *SelfTester
+	snapshots  *snapshot.Store
+	// accountAdded runs after a wizard account is connected.
+	accountAdded func(accountID string)
+	// payersMu guards payers, which boot may set after the service is built.
+	payersMu sync.RWMutex
+	payers   PayerRemover
 
 	mu               sync.Mutex
 	principal        string
@@ -822,9 +830,34 @@ func jitter(interval time.Duration) time.Duration {
 	return interval + offset
 }
 
-// View builds the settings answer. When the connector is off it answers only
-// enabled=false so the UI can explain how to turn it on.
-func (conn *Service) View(ctx context.Context, org string, canWrite bool) (SettingsView, error) {
+// Principal is who asks for the connection view: the organization it reads,
+// whether it may change settings, and whether it is an agent. An agent read
+// never looks up the server identity, because that is an AWS call and agent
+// reads use stored state only.
+type Principal struct {
+	Org      string
+	CanWrite bool
+	Agent    bool
+}
+
+// AgentPrincipal is the principal an agent tool reads as: the request's
+// write organization when the context carries a scope, else the
+// deployment's, read-only.
+func (conn *Service) AgentPrincipal(ctx context.Context) Principal {
+	org := conn.storageOrg()
+	if scope, ok := tenancy.ContextOrgScope(ctx); ok && scope.Normalized().Write != "" {
+		org = scope.Normalized().Write
+	}
+	return Principal{Org: org, Agent: true}
+}
+
+// Connection builds the connection view: accounts, health, the service
+// summary, regions, API use, freshness and the privacy self-test. It is the
+// one method behind GET /api/admin/aws/settings and the get_aws_connection
+// agent tool. When the connector is off it answers only enabled=false so the
+// UI can explain how to turn it on. It never starts a probe.
+func (conn *Service) Connection(ctx context.Context, principal Principal) (SettingsView, error) {
+	org, canWrite := principal.Org, principal.CanWrite
 	connector := conn.connector()
 	if !connector.Enable {
 		return SettingsView{Enabled: false}, nil
@@ -840,9 +873,13 @@ func (conn *Service) View(ctx context.Context, org string, canWrite bool) (Setti
 		storedSet[account.AccountID] = true
 	}
 	merged := MergeAccounts(stored, connector.Accounts)
+	principalARN := ""
+	if !principal.Agent {
+		principalARN = conn.Principal(ctx)
+	}
 	view := SettingsView{
 		Enabled:      true,
-		PrincipalARN: conn.Principal(ctx),
+		PrincipalARN: principalARN,
 		Accounts:     make([]AccountView, 0, len(merged)),
 		Capabilities: CapabilitiesView{Organizations: OrganizationsCapability(), CanWrite: canWrite},
 	}
@@ -977,6 +1014,7 @@ func (conn *Service) accountViewWithOptions(org string, account AccountRecord, c
 		APIUse:      APIUseView{UsedRPS: usage.UsedRPS, BudgetRPS: usage.BudgetRPS},
 		RoleARN:     account.RoleARN,
 		Conflict:    conflict,
+		Sync:        conn.syncView(account.AccountID),
 	}
 	if view.Status == "" {
 		view.Status = StatusUnknown
@@ -1105,6 +1143,9 @@ func (conn *Service) Commit(ctx context.Context, org, draftID, displayName strin
 		return AccountView{}, err
 	}
 	_ = conn.store.DeleteDraft(org, draftID)
+	if conn.accountAdded != nil {
+		conn.accountAdded(record.AccountID)
+	}
 	return conn.accountView(org, record, false)
 }
 
@@ -1150,6 +1191,7 @@ func normalizeRegions(requested []string, discovered []RegionStatus) ([]string, 
 
 // UpdateAccount changes a wizard account's display name or regions.
 func (conn *Service) UpdateAccount(org, accountID, displayName string, regions []string) (AccountView, error) {
+	var removed []string
 	account, configured, err := conn.effectiveAccount(org, accountID)
 	if err != nil {
 		return AccountView{}, err
@@ -1170,23 +1212,107 @@ func (conn *Service) UpdateAccount(org, accountID, displayName string, regions [
 		if normalizeErr != nil {
 			return AccountView{}, normalizeErr
 		}
+		removed = removedRegions(account.Regions, clean)
 		account.Regions = clean
 	}
 	account.Source = SourceWizard
 	if err := conn.store.SaveAccount(org, account); err != nil {
 		return AccountView{}, err
 	}
+	if conn.snapshots != nil {
+		for _, region := range removed {
+			if err := conn.snapshots.PurgeRegion(accountID, region); err != nil {
+				return AccountView{}, classifyStoreError(err)
+			}
+		}
+	}
 	return conn.accountView(org, account, false)
 }
 
-// DeleteAccount removes a wizard account and its health record.
-func (conn *Service) DeleteAccount(org, accountID string) error {
+// removedRegions lists the regions in before that are not in after.
+func removedRegions(before, after []string) []string {
+	kept := make(map[string]bool, len(after))
+	for _, region := range after {
+		kept[region] = true
+	}
+	var removed []string
+	for _, region := range before {
+		if !kept[region] {
+			removed = append(removed, region)
+		}
+	}
+	return removed
+}
+
+// costPurgeWait bounds how long an account removal waits for a running
+// cost refresh before it leaves the cost purge to that refresh.
+const costPurgeWait = 5 * time.Second
+
+// AccountRemoval is the outcome of a removed account. PurgePending is true
+// when its cost data was not deleted yet: the account is gone and kept out
+// of collection, and the next cost refresh deletes the data.
+type AccountRemoval struct {
+	PurgePending bool
+}
+
+// DeleteAccount removes a wizard account and its health record. The
+// account's inventory and change history are purged first and the cost data
+// is marked removed; the settings record is deleted after, so a purge that
+// cannot reach its store leaves the record in place and a later attempt can
+// finish the delete. The cost data is then deleted if no cost refresh is
+// running within costPurgeWait; otherwise the removal answers with the purge
+// pending, and the refresh deletes it. No account lock is held meanwhile.
+func (conn *Service) DeleteAccount(ctx context.Context, org, accountID string) (AccountRemoval, error) {
 	_, configured, err := conn.effectiveAccount(org, accountID)
 	if err != nil {
-		return err
+		return AccountRemoval{}, err
 	}
 	if configured {
-		return ErrConfigManaged
+		return AccountRemoval{}, ErrConfigManaged
 	}
-	return conn.store.DeleteAccount(org, accountID)
+	remover := conn.payerRemover()
+	// Purge what the account produced before forgetting it: a read must never
+	// keep serving an account that is no longer connected. The cost tombstone
+	// is stored under the store's account lock with the revision read before
+	// the removal, so the tombstone and the removal agree on it.
+	err = conn.store.RemoveAccount(org, accountID, func(revision uint64) error {
+		if conn.snapshots != nil {
+			if err := conn.snapshots.PurgeAccount(accountID); err != nil {
+				return classifyStoreError(err)
+			}
+		}
+		if remover != nil {
+			if err := remover.MarkPayerRemoved(ctx, accountID, revision); err != nil {
+				return classifyStoreError(err)
+			}
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, ErrRevisionContended):
+		// The record is gone and the tombstone was stored at the revision
+		// the options still read, so the account stays out of collection;
+		// the next cost refresh purges it.
+		return AccountRemoval{PurgePending: remover != nil}, nil
+	case err != nil:
+		return AccountRemoval{}, err
+	}
+	if remover == nil {
+		return AccountRemoval{}, nil
+	}
+	purged, err := remover.PurgePayer(ctx, accountID, costPurgeWait)
+	if err != nil {
+		log.Printf("aws settings: account %s removed; its cost data is left to the next cost refresh: %v", accountID, err)
+	}
+	return AccountRemoval{PurgePending: !purged}, nil
+}
+
+// classifyStoreError wraps a snapshot store's "no inventory tables" sentinel
+// in the connector's closed storage error, so the API answers storage
+// unavailable instead of an internal failure. Other errors pass through.
+func classifyStoreError(err error) error {
+	if err != nil && errors.Is(err, snapshot.ErrNoStorage) {
+		return fmt.Errorf("%w: %w", ErrNoStorage, err)
+	}
+	return err
 }

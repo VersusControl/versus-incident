@@ -329,6 +329,19 @@ describe("service access grid", () => {
     expect(progress.textContent).toContain("24 of 24 services checked");
   });
 
+  it("shows Not in this region for a service with no regional endpoint", () => {
+    const services = fullServices().map((s) =>
+      s.service === "eks"
+        ? { ...s, status: "not_used" as const, items: 0, error_code: "not_available_in_region" }
+        : s,
+    );
+    render(<AwsServiceAccessGrid services={services} columns={2} />);
+    const row = screen.getByLabelText("EKS: Not in this region");
+    expect(within(row).getByText("Not in this region")).toBeTruthy();
+    expect(within(row).queryByText("Not used")).toBeNull();
+    expect(within(row).queryByText(/not_available_in_region/)).toBeNull();
+  });
+
   it("reads a throttled probe as Not checked, never as a denial", () => {
     render(<AwsServiceAccessGrid services={partialServices()} columns={2} />);
     const throttled = screen.getByLabelText(

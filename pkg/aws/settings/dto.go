@@ -28,6 +28,9 @@ type AccountView struct {
 	APIUse            APIUseView    `json:"api_use"`
 	RoleARN           string        `json:"role_arn,omitempty"`
 	Conflict          bool          `json:"conflict,omitempty"`
+	// Sync is collection freshness and first-sync progress. It is always
+	// present; State is "off" when collection is turned off.
+	Sync AccountSyncView `json:"sync"`
 }
 
 // RegionsView reports the account's selection against what AWS said is

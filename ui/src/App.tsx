@@ -59,6 +59,18 @@ const AwsSettingsPage = lazyPage(
   () => import("./pages/aws/AwsSettingsPage"),
   "AwsSettingsPage",
 );
+const AwsFinOpsPage = lazyPage(
+  () => import("./pages/aws/finops/AwsFinOpsPage"),
+  "AwsFinOpsPage",
+);
+const FinOpsIncreasePage = lazyPage(
+  () => import("./pages/aws/finops/IncreaseDetail"),
+  "IncreaseDetailPage",
+);
+const FinOpsReportPage = lazyPage(
+  () => import("./pages/aws/finops/FinOpsReportPage"),
+  "FinOpsReportPage",
+);
 const MetricsPage = lazyPage(
   () => import("./pages/LearnedSignalsView"),
   "MetricsPage",
@@ -111,6 +123,8 @@ export default function App() {
   return (
     <AuthGate>
       <Routes>
+        {/* Print layout: no app shell, light only. */}
+        <Route path="/aws/finops/report" element={<FinOpsReportPage />} />
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/now" replace />} />
 
@@ -130,6 +144,8 @@ export default function App() {
           <Route path="/agent/tools" element={<AgentToolsPage />} />
           <Route path="/agent/kubernetes" element={<KubernetesPage />} />
           <Route path="/aws/settings" element={<AwsSettingsPage />} />
+          <Route path="/aws/finops" element={<AwsFinOpsPage />} />
+          <Route path="/aws/finops/increases/:id" element={<FinOpsIncreasePage />} />
           <Route path="/aws" element={<Navigate to="/aws/settings" replace />} />
           <Route path="/agent/logs" element={<AgentRequiredRoute title="Logs"><PatternsPage /></AgentRequiredRoute>} />
           <Route path="/agent/logs/:id" element={<AgentRequiredRoute title="Log Pattern"><PatternDetailPage /></AgentRequiredRoute>} />

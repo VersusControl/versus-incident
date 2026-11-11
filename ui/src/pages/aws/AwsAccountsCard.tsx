@@ -16,15 +16,19 @@ import { Pill } from "@/components/Pill";
 import { useToast } from "@/components/toastContext";
 import {
   api,
-  awsErrorFrom,
+  awsAccountErrorFrom,
   type AwsAccount,
   type AwsSettings,
 } from "@/lib/api";
 import {
   accountRow,
+  firstSyncRunning,
+  gapWords,
   optionalDataSummary,
+  serviceLabel,
   type AwsAccountRow,
 } from "@/lib/awsSettings";
+import { AwsFirstSync } from "./AwsFirstSync";
 
 // AwsAccountsCard — every connected account as one row: who it is, whether the
 // last check worked, what it can read, which regions it covers and how much of
@@ -57,7 +61,7 @@ export function AwsAccountsCard({
       await invalidate();
     },
     onError: (e) => {
-      const info = awsErrorFrom(e);
+      const info = awsAccountErrorFrom(e);
       toast.push({ tone: "error", title: info.title, description: info.detail });
     },
   });
@@ -71,20 +75,24 @@ export function AwsAccountsCard({
       await invalidate();
     },
     onError: (e) => {
-      const info = awsErrorFrom(e);
+      const info = awsAccountErrorFrom(e);
       toast.push({ tone: "error", title: info.title, description: info.detail });
     },
   });
 
   const remove = useMutation({
     mutationFn: (accountId: string) => api.deleteAwsAccount(accountId),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       setRemoving(null);
-      toast.push({ tone: "ok", title: "Account removed" });
+      toast.push({
+        tone: "ok",
+        title: "Account removed",
+        ...(result?.purge === "pending" ? { description: "Cost data clears at the next refresh." } : {}),
+      });
       await invalidate();
     },
     onError: (e) => {
-      const info = awsErrorFrom(e);
+      const info = awsAccountErrorFrom(e);
       toast.push({ tone: "error", title: info.title, description: info.detail });
     },
   });
@@ -375,6 +383,19 @@ function AccountRow({
           </div>
         </div>
       </div>
+      {account.sync && firstSyncRunning(account) ? (
+        <AwsFirstSync sync={account.sync} name={row.name} />
+      ) : (
+        account.sync &&
+        (account.sync.state === "partial" || account.sync.state === "failed") && (
+          <p className="mt-1.5 text-2xs text-ink-200">
+            {account.sync.services
+              .filter((sv) => sv.gaps.length > 0)
+              .map((sv) => `${serviceLabel(sv.service)}: ${sv.gaps.map(gapWords).join(", ")}`)
+              .join(" · ")}
+          </p>
+        )
+      )}
     </li>
   );
 }

@@ -17,6 +17,7 @@ import {
   MessageSquare,
   Route,
   ScrollText,
+  CircleDollarSign,
   Search,
   Settings,
   ShieldCheck,
@@ -269,7 +270,10 @@ export function SidebarContent({
         {
           label: "AWS",
           icon: Cloud,
-          children: [{ to: "/aws/settings", label: "Settings", icon: Settings }],
+          children: [
+            { to: "/aws/finops", label: "FinOps", icon: CircleDollarSign },
+            { to: "/aws/settings", label: "Settings", icon: Settings },
+          ],
         },
       ],
     },

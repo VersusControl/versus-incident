@@ -125,3 +125,35 @@ func TestLifecycle_UnknownDomain(t *testing.T) {
 		t.Fatalf("DeleteByID unknown domain = %v, want ErrUnknownDomain", err)
 	}
 }
+
+func TestDeleteBlobUsesTheBackendDeleteOrReportsUnsupported(t *testing.T) {
+	memory := storage.NewMemory()
+	defer memory.Close()
+	if err := memory.WriteBlob("aws/default/accounts/1", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DeleteBlob(memory, "aws/default/accounts/1"); err != nil {
+		t.Fatalf("memory delete: %v", err)
+	}
+	if blobs, _ := memory.ListBlobs("aws/default/"); len(blobs) != 0 {
+		t.Fatalf("memory kept %+v", blobs)
+	}
+	if err := storage.DeleteBlob(memory, "aws/default/accounts/1"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("second memory delete = %v, want ErrNotFound", err)
+	}
+
+	file, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := file.WriteBlob("aws/default/accounts/1", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.DeleteBlob(file, "aws/default/accounts/1"); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("file delete = %v, want ErrUnsupported", err)
+	}
+	if data, _ := file.ReadBlob("aws/default/accounts/1"); string(data) != "x" {
+		t.Fatalf("unsupported delete changed the blob: %q", data)
+	}
+}

@@ -2,6 +2,7 @@ tmp
 tmp.txt
 *.sh
 !scripts/*.sh
+!scripts/aws/cli/*.sh
 !helm/**/*.sh
 .air.conf
 book
@@ -19,7 +20,8 @@ EINO_PATTERNS.md
 runbook-
 # ui/tests/
 testdata
-runbook-ingest
+# The runbook-ingest binary built at the module root, not its source in cmd/.
+/runbook-ingest
 _drafts
 !helm/versus-incident/tests
 

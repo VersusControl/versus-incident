@@ -2,10 +2,12 @@ package controllers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 
 	awslimit "github.com/VersusControl/versus-incident/pkg/aws/limit"
 	awssettings "github.com/VersusControl/versus-incident/pkg/aws/settings"
+	awssnapshot "github.com/VersusControl/versus-incident/pkg/aws/snapshot"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
@@ -138,6 +141,64 @@ func TestAWSSettingsViewerIsReadOnly(t *testing.T) {
 		if event.Action == "aws.settings.changed" {
 			t.Fatalf("refused viewer write was audited as a change: %+v", event)
 		}
+	}
+}
+
+// inventorylessProvider hides a provider's typed inventory store, standing
+// in for a deployment without the inventory tables.
+type inventorylessProvider struct{ storage.Provider }
+
+// awsNoStorageService builds a settings service whose snapshot store cannot
+// reach its inventory tables, over a shared provider and settings store.
+func awsNoStorageService(t *testing.T, provider storage.Provider) (*awssettings.Service, *awssettings.Store) {
+	t.Helper()
+	store := awssettings.NewStore(provider, tenancy.DefaultOrgScope())
+	snapshots := awssnapshot.New(inventorylessProvider{provider}, tenancy.DefaultOrgScope())
+	return awssettings.NewService(store, awssettings.WithSnapshots(snapshots)), store
+}
+
+func awsWriteApp(t *testing.T, service *awssettings.Service) *fiber.App {
+	t.Helper()
+	app, _ := awsTestApp(t, service, map[string]bool{
+		string(core.PermissionInfrastructureView):          true,
+		string(core.PermissionInfrastructureSettingsWrite): true,
+	})
+	return app
+}
+
+// TestAWSSettingsWriteAnswersNoStorage proves a write that must purge
+// inventory answers 503 storage_unavailable when the inventory tables are
+// missing, not an internal failure.
+func TestAWSSettingsWriteAnswersNoStorage(t *testing.T) {
+	provider := storage.NewMemory()
+	service, store := awsNoStorageService(t, provider)
+	if err := store.SaveAccount("default", awssettings.AccountRecord{AccountID: "111122223333", DisplayName: "Prod",
+		Regions: []string{"us-east-1", "us-west-2"}, Source: awssettings.SourceWizard, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	app := awsWriteApp(t, service)
+	response, body := awsTestRequest(t, app, http.MethodPatch, "/api/admin/aws/accounts/111122223333", `{"regions":["us-east-1"]}`)
+	if response.StatusCode != fiber.StatusServiceUnavailable || !bytes.Contains(body, []byte(`"error":"storage_unavailable"`)) {
+		t.Fatalf("regions write = %d %s, want 503 storage_unavailable", response.StatusCode, body)
+	}
+}
+
+// TestAWSSettingsDeleteAnswersNoStorageAndKeepsRecord proves the delete path
+// answers the same closed code and leaves the record retryable.
+func TestAWSSettingsDeleteAnswersNoStorageAndKeepsRecord(t *testing.T) {
+	provider := storage.NewMemory()
+	service, store := awsNoStorageService(t, provider)
+	if err := store.SaveAccount("default", awssettings.AccountRecord{AccountID: "111122223333", DisplayName: "Prod",
+		Regions: []string{"us-east-1"}, Source: awssettings.SourceWizard, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	app := awsWriteApp(t, service)
+	response, body := awsTestRequest(t, app, http.MethodDelete, "/api/admin/aws/accounts/111122223333", "")
+	if response.StatusCode != fiber.StatusServiceUnavailable || !bytes.Contains(body, []byte(`"error":"storage_unavailable"`)) {
+		t.Fatalf("delete = %d %s, want 503 storage_unavailable", response.StatusCode, body)
+	}
+	if accounts, err := store.ListAccounts("default"); err != nil || len(accounts) != 1 {
+		t.Fatalf("settings record did not survive the failed delete: %+v %v", accounts, err)
 	}
 }
 
@@ -385,7 +446,7 @@ func TestAWSSettingsEndpointContract(t *testing.T) {
 		t.Fatalf("privacy = %d %s", response.StatusCode, body)
 	}
 	response, body = awsTestRequest(t, app, http.MethodDelete, "/api/admin/aws/accounts/444455556666", "")
-	if response.StatusCode != fiber.StatusNoContent {
+	if response.StatusCode != fiber.StatusOK || string(body) != `{}` {
 		t.Fatalf("delete = %d %s", response.StatusCode, body)
 	}
 
@@ -576,5 +637,82 @@ func TestAWSSettingsOptionsAcceptsNestedBody(t *testing.T) {
 		if response.StatusCode != fiber.StatusBadRequest {
 			t.Fatalf("unknown key %s = %d %s", unknown, response.StatusCode, body)
 		}
+	}
+}
+
+// deferringRemover stands in for the cost adapter: it marks payers removed
+// and purges them unless purges are deferred, as when a cost refresh holds
+// the cost lock past the bound.
+type deferringRemover struct{ deferred atomic.Bool }
+
+func (r *deferringRemover) MarkPayerRemoved(context.Context, string, uint64) error { return nil }
+
+func (r *deferringRemover) PurgePayer(context.Context, string, time.Duration) (bool, error) {
+	return !r.deferred.Load(), nil
+}
+
+// TestAWSSettingsDeleteAnswersThePurgeOutcome: removing an account answers
+// 200. The body is empty when its cost data was purged at once, and carries
+// purge "pending" when a running cost refresh left the purge to itself.
+func TestAWSSettingsDeleteAnswersThePurgeOutcome(t *testing.T) {
+	store := awssettings.NewStore(storage.NewMemory(), tenancy.DefaultOrgScope())
+	remover := &deferringRemover{}
+	service := awssettings.NewService(store,
+		awssettings.WithConfig(func() config.AWSConnectorConfig { return config.AWSConnectorConfig{Enable: true} }),
+		awssettings.WithPayerRemover(remover))
+	for _, id := range []string{"111122223333", "444455556666"} {
+		if err := store.SaveAccount("default", awssettings.AccountRecord{AccountID: id, Source: awssettings.SourceWizard, CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app := awsWriteApp(t, service)
+	response, body := awsTestRequest(t, app, http.MethodDelete, "/api/admin/aws/accounts/111122223333", "")
+	if response.StatusCode != fiber.StatusOK || string(body) != `{}` {
+		t.Fatalf("delete with the purge done = %d %s, want 200 {}", response.StatusCode, body)
+	}
+	remover.deferred.Store(true)
+	response, body = awsTestRequest(t, app, http.MethodDelete, "/api/admin/aws/accounts/444455556666", "")
+	if response.StatusCode != fiber.StatusOK || string(body) != `{"purge":"pending"}` {
+		t.Fatalf("delete with the purge deferred = %d %s, want 200 {\"purge\":\"pending\"}", response.StatusCode, body)
+	}
+	if accounts, err := store.ListAccounts("default"); err != nil || len(accounts) != 0 {
+		t.Fatalf("accounts after both deletes = %+v %v", accounts, err)
+	}
+}
+
+// contendedRevisionProvider makes every compare-and-swap of the account
+// settings revision lose while contend is set, standing in for writers on
+// other replicas that keep raising it.
+type contendedRevisionProvider struct {
+	storage.Provider
+	key     string
+	contend atomic.Bool
+}
+
+func (p *contendedRevisionProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	if p.contend.Load() && name == p.key {
+		return false, nil
+	}
+	return p.Provider.(storage.BlobCAS).CompareAndSwapBlob(name, expected, replacement)
+}
+
+// TestAWSSettingsBusyWriteAnswersRefreshInProgress: a settings write that
+// cannot complete because other writers keep moving the account revision
+// answers the same code as a busy cost refresh: 409 refresh_in_progress
+// with Retry-After 5.
+func TestAWSSettingsBusyWriteAnswersRefreshInProgress(t *testing.T) {
+	provider := &contendedRevisionProvider{Provider: storage.NewMemory(), key: awssettings.AccountsRevisionKey("default")}
+	store := awssettings.NewStore(provider, tenancy.DefaultOrgScope())
+	service := awssettings.NewService(store,
+		awssettings.WithConfig(func() config.AWSConnectorConfig { return config.AWSConnectorConfig{Enable: true} }))
+	if err := store.SaveAccount("default", awssettings.AccountRecord{AccountID: "111122223333", DisplayName: "Prod", Source: awssettings.SourceWizard, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	provider.contend.Store(true)
+	app := awsWriteApp(t, service)
+	response, body := awsTestRequest(t, app, http.MethodPatch, "/api/admin/aws/accounts/111122223333", `{"display_name":"Production"}`)
+	if response.StatusCode != fiber.StatusConflict || string(body) != `{"error":"refresh_in_progress"}` || response.Header.Get(fiber.HeaderRetryAfter) != "5" {
+		t.Fatalf("busy settings write = %d %s Retry-After %q, want 409 refresh_in_progress with Retry-After 5",
+			response.StatusCode, body, response.Header.Get(fiber.HeaderRetryAfter))
 	}
 }

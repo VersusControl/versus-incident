@@ -1,13 +1,17 @@
 package prompt
 
 import (
-	"embed"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
-//go:embed testdata/*.md
-var testFS embed.FS
+// testFS holds two prompt fragments, built in code so the test reads no
+// file from disk.
+var testFS = fstest.MapFS{
+	"testdata/A.md": {Data: []byte("A-content\n")},
+	"testdata/B.md": {Data: []byte("B-content\n")},
+}
 
 func TestAssemble_OrderAndSeparator(t *testing.T) {
 	got, err := Assemble(testFS, []string{

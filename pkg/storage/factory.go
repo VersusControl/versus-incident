@@ -16,6 +16,28 @@ type Config struct {
 	Postgres PostgresOptions
 }
 
+// The Postgres, file and memory backends expose the AWS inventory and FinOps
+// tables; callers discover them with AWSInventory and FinOps.
+var (
+	_ AWSInventoryStore = (*postgresProvider)(nil)
+	_ AWSInventoryStore = (*fileProvider)(nil)
+	_ AWSInventoryStore = (*memoryProvider)(nil)
+	_ FinOpsStore       = (*postgresProvider)(nil)
+	_ FinOpsStore       = (*fileProvider)(nil)
+	_ FinOpsStore       = (*memoryProvider)(nil)
+
+	_ FinOpsSavingDecisionStore = (*postgresProvider)(nil)
+	_ FinOpsSavingDecisionStore = (*fileProvider)(nil)
+	_ FinOpsSavingDecisionStore = (*memoryProvider)(nil)
+
+	_ FinOpsSavingDecisionSubjects = (*postgresProvider)(nil)
+	_ FinOpsSavingDecisionSubjects = (*fileProvider)(nil)
+	_ FinOpsSavingDecisionSubjects = (*memoryProvider)(nil)
+
+	_ SessionLocker       = (*postgresProvider)(nil)
+	_ SessionLockVerifier = (*postgresProvider)(nil)
+)
+
 // New constructs the configured backend. The postgres backend stores
 // incidents, analyses, and blobs in a single database; the file and redis
 // backends keep blobs alongside their other records.

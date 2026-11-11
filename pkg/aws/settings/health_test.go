@@ -302,7 +302,7 @@ func TestConfigAccountWithAutoRegionsDiscoversOnFirstCheck(t *testing.T) {
 	if len(health.Regions) == 0 {
 		t.Fatalf("auto regions were not discovered: %+v", health)
 	}
-	view, err := connector.View(context.Background(), "default", false)
+	view, err := connector.Connection(context.Background(), Principal{Org: "default", CanWrite: false})
 	if err != nil {
 		t.Fatal(err)
 	}

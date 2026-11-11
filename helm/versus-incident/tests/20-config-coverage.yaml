@@ -178,3 +178,16 @@ connectors:
       config: false
       trustedAdvisor: false
     healthCheckInterval: "5m"
+    collect:
+      enable: false
+      intervals:
+        inventory: "30m"
+        health: "1m"
+        changes: "10m"
+      history:
+        maxGenerations: 12
+        maxAge: "48h"
+        changeRetention: "72h"
+    applications:
+      sources: [tags, cloudformation]
+      tagKeys: [app]

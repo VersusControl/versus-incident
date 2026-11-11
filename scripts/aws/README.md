@@ -6,6 +6,10 @@ CloudFormation template for the console, a Terraform module for pipelines, and a
 for terminals (`cli/`). All three produce the same role, trust condition and
 permissions; the lint test fails if they drift.
 
+For the management (payer) account of an AWS Organization there is a second,
+cost-only role, `versus-cost-reader`; see
+[Cost-only role for a management account](#cost-only-role-for-a-management-account).
+
 What the role can do:
 
 - **Read metadata** with an explicit allow list of `Describe*`, `List*` and
@@ -14,7 +18,8 @@ What the role can do:
   recorders, DynamoDB tables, EC2, ECS, EKS, ElastiCache, Elastic Load
   Balancing, EventBridge, IAM roles, Kinesis, Lambda configuration, RDS,
   Route 53, S3 bucket metadata and security flags, SNS, SQS, Step Functions,
-  Resource Explorer, Service Catalog applications and the resource tag API.
+  Resource Explorer, Service Catalog AppRegistry applications and their
+  associated resources, and the resource tag API.
 - **Nothing else.** No `Put`, `Create`, `Update`, `Delete`, `Run` or
   `Invoke` action is allowed anywhere, and the deny list below wins over any
   allow.
@@ -78,14 +83,18 @@ a Terraform state file you share more widely than the credentials.
 
 | What | Actions |
 |---|---|
-| Cost Explorer (global, billed per request) | `ce:GetCostAndUsage`, `ce:GetAnomalies` |
+| Cost Explorer (global, billed per request) | `ce:GetCostAndUsage`, `ce:GetCostAndUsageWithResources`, `ce:GetCostForecast`, `ce:GetSavingsPlansCoverage` |
+| Cost allocation tags (free) | `ce:ListCostAllocationTags` |
+| AWS Budgets definitions | `budgets:ViewBudget` |
+| Rightsizing and idle advice | `cost-optimization-hub:ListRecommendations`, `compute-optimizer:GetEC2InstanceRecommendations` |
 | Security Hub findings | `securityhub:GetFindings` |
 | AWS Config advanced query | `config:SelectResourceConfig` |
 | Trusted Advisor checks | `trustedadvisor:Describe*` |
 
 Turn it on only for the FinOps and posture features. Cost Explorer charges
 about $0.01 per request, so enabling it means Versus polling cost data on your
-account's bill. In Terraform the same switch is `optional_data = true`.
+account's bill (Versus caps this at 20 paid requests a day per deployment by
+default). In Terraform the same switch is `optional_data = true`.
 
 ## What each deny protects
 
@@ -103,9 +112,53 @@ policy that later grants a broader action on the same role.
 | `ec2:GetConsoleOutput` | Reading instance console output, which can contain boot-time secrets |
 | `logs:GetLogEvents` | Reading log bodies |
 
-A second deny keeps the billing account surfaces out:
-`aws-portal:*`, `billing:*`, `invoicing:*`, `payments:*`. Cost figures come
-from Cost Explorer only, never from invoices or payment data.
+A second deny keeps the billing account surfaces out: `account:*`,
+`aws-portal:*`, `billing:*`, `consolidatedbilling:*`, `invoicing:*`,
+`payments:*`, `purchase-orders:*` and `tax:*`. Cost figures come from Cost
+Explorer only, never from billing account details, invoices, payment methods,
+tax registrations or account settings.
+
+## Cost-only role for a management account
+
+When the cost source is the management (payer) account of an Organization,
+create `versus-cost-reader` there instead of `versus-reader`. The management
+account controls the whole Organization, so this role reads cost for every
+linked account and nothing else:
+
+- **Allowed:** exactly the cost reads in the OptionalData table above —
+  `ce:GetCostAndUsage`, `ce:GetCostAndUsageWithResources`,
+  `ce:GetCostForecast`, `ce:GetSavingsPlansCoverage`,
+  `ce:ListCostAllocationTags`, `budgets:ViewBudget`,
+  `cost-optimization-hub:ListRecommendations` and
+  `compute-optimizer:GetEC2InstanceRecommendations`. They are always on; there is no
+  OptionalData switch.
+- **Denied:** every other action, through a `Deny` with `NotAction` set to the
+  cost reads, so a broader policy attached later cannot add inventory, change
+  history or anything else. The billing deny above is repeated as its own
+  statement.
+- **Not included:** inventory, CloudTrail and other `versus-reader` reads.
+  Connect member accounts with `versus-reader` to get the *Why* for their
+  cost.
+
+The trust policy and parameters are the same as `versus-reader`: the exact
+Versus role ARN (not the account root) and the ExternalId.
+
+CloudFormation: create a stack in the management account from
+`versus-cost-reader.yaml` with **VersusPrincipalArn** and **ExternalId**, then
+copy **RoleArn** from the Outputs tab into the Versus connect wizard as the
+cost source. Terraform:
+
+```bash
+cd terraform/versus-cost-reader
+terraform init
+terraform apply \
+  -var 'versus_principal_arn=arn:aws:iam::123456789012:role/versus-app' \
+  -var 'external_id=<from the Versus wizard>'
+terraform output -raw role_arn
+```
+
+Remove it with `terraform destroy` or by deleting the stack. There is no CLI
+script for this role.
 
 ## CLI
 
@@ -141,10 +194,12 @@ in an encrypted backend.
 
 ## Drift check
 
-`validate_test.go` in this directory parses both artifacts and fails on any
-allow action outside the catalog list, any missing deny, a trust policy
-without `sts:ExternalId`, or optional actions that are not gated by
-`OptionalData`:
+`validate_test.go` in this directory parses the templates, the Terraform
+modules and the CLI policy files of both roles. It fails on any allow action
+outside the catalog or cost list, any action that is not a read, any missing
+deny, a trust policy without `sts:ExternalId`, optional actions that are not
+gated by `OptionalData`, or a `versus-cost-reader` action outside the cost
+list (allow or `NotAction`):
 
 ```bash
 cd scripts/aws && go test ./... -count=1

@@ -13,7 +13,7 @@ import { SkCard } from "@/components/Skeleton";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
 import { ApiError, api, type AwsAccount, type AwsSettings } from "@/lib/api";
-import { awsSettingsAnswer, type AwsAnswerTone } from "@/lib/awsSettings";
+import { awsSettingsAnswer, settingsPollMs, type AwsAnswerTone } from "@/lib/awsSettings";
 import { AwsAccountsCard } from "./AwsAccountsCard";
 import { AwsPrivacyCard } from "./AwsPrivacyCard";
 import { AwsAdvanced } from "./AwsAdvanced";
@@ -86,7 +86,9 @@ export function AwsSettingsPage() {
   const settings = useQuery({
     queryKey: ["aws", "settings"],
     queryFn: api.awsSettings,
-    refetchInterval: 15_000,
+    // Every second while a first sync fills in, so services appear as they
+    // land; every 15 s otherwise.
+    refetchInterval: (query) => settingsPollMs(query.state.data),
     retry: 1,
   });
   const wide = useMinWidth("(min-width: 1280px)");

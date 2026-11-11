@@ -78,7 +78,7 @@ var services = []Service{
 		DisplayName: "CloudFormation",
 		Operation:   "DescribeStacks",
 		Scope:       ScopeRegion,
-		FixActions:  []string{"cloudformation:Describe*"},
+		FixActions:  []string{"cloudformation:Describe*", "cloudformation:ListStackResources"},
 		DenySafe:    true,
 	},
 	{
@@ -214,7 +214,7 @@ var services = []Service{
 		DisplayName: "S3",
 		Operation:   "ListBuckets",
 		Scope:       ScopeGlobalHome,
-		FixActions:  []string{"s3:ListAllMyBuckets", "s3:GetBucket*"},
+		FixActions:  []string{"s3:ListAllMyBuckets", "s3:GetBucketPolicyStatus", "s3:GetBucketPublicAccessBlock", "s3:GetEncryptionConfiguration"},
 		DenySafe:    true,
 	},
 	{

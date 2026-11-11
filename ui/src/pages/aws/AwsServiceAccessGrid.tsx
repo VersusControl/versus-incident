@@ -9,11 +9,11 @@ import {
 import type { AwsDraftService, AwsServiceStatus } from "@/lib/api";
 import {
   AWS_SERVICE_CATALOG,
-  SERVICE_STATUS_LABELS,
   SERVICE_STATUS_TONES,
   deriveDraftCounts,
   legendWords,
   notCheckedReason,
+  serviceStatusLabel,
   serviceStatusText,
   type AwsGridCounts,
   type AwsTone,
@@ -99,7 +99,7 @@ function ResultRow({
               : TONE_TEXT[SERVICE_STATUS_TONES[status]],
           )}
         >
-          {status === "checking" ? "Checking…" : SERVICE_STATUS_LABELS[status]}
+          {status === "checking" ? "Checking…" : serviceStatusLabel(status, errorCode)}
         </span>
       </span>
       {reason && <span className="text-2xs text-ink-300">{reason}</span>}

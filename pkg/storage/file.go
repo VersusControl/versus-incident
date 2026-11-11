@@ -34,6 +34,7 @@ type FileOptions struct {
 // queries. Kubernetes evidence uses a private transactional SQLite image/index;
 // other blob writes remain atomic (tmp + rename).
 type fileProvider struct {
+	*sqlTables
 	evidenceMu    sync.Mutex
 	localEvidence *localEvidence
 	dir           string
@@ -90,7 +91,14 @@ func NewFile(opts FileOptions) (Provider, error) {
 	if max <= 0 {
 		max = MaxIncidentsDefault
 	}
-	p := &fileProvider{dir: dir, maxIncidents: max}
+	p := &fileProvider{sqlTables: newSQLiteTables(filepath.Join(dir, localTablesFile)), dir: dir, maxIncidents: max}
+	if _, err := os.Stat(filepath.Join(dir, localTablesFile)); err == nil {
+		// The tables are opened lazily, so only an existing database is
+		// checked here; a fresh deployment creates it with the current schema.
+		if err := p.checkTablesSchema(); err != nil {
+			return nil, err
+		}
+	}
 	if err := p.loadIncidents(); err != nil {
 		return nil, err
 	}
@@ -105,6 +113,17 @@ func NewFile(opts FileOptions) (Provider, error) {
 		}
 	}
 	return p, nil
+}
+
+// checkTablesSchema opens an existing table database and asserts its schema,
+// so a file written by an older version fails closed at startup instead of
+// starting a store whose writes fail later with an unclassified SQL error.
+func (p *fileProvider) checkTablesSchema() error {
+	db, err := p.tablesDB()
+	if err != nil {
+		return err
+	}
+	return assertTableSchema(context.Background(), db, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -858,12 +877,13 @@ func (p *fileProvider) ListIncidentsPage(origin string, offset, limit int) ([]*I
 }
 
 func (p *fileProvider) Close() error {
+	tablesErr := p.closeTables()
 	p.evidenceMu.Lock()
 	defer p.evidenceMu.Unlock()
 	if p.localEvidence != nil {
-		return p.localEvidence.db.Close()
+		return errors.Join(p.localEvidence.db.Close(), tablesErr)
 	}
-	return nil
+	return tablesErr
 }
 
 // ---------------------------------------------------------------------------

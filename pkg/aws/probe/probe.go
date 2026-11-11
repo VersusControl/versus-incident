@@ -43,6 +43,9 @@ const (
 	CodeDenied = "denied"
 	// CodeNotOnPlan is the code for a service the account is not subscribed to.
 	CodeNotOnPlan = "not_on_plan"
+	// CodeNotInRegion is the code for a service with no endpoint in the
+	// region probed: nothing can be there, so it is not a failure.
+	CodeNotInRegion = "not_available_in_region"
 )
 
 // The remaining codes reuse the awsauth vocabulary so callers render one set
@@ -196,6 +199,9 @@ func notChecked(result Result, code string, retryable bool) Result {
 func classify(err error) (Status, string, bool) {
 	if err == nil {
 		return StatusNotChecked, CodeNetwork, false
+	}
+	if awsauth.ServiceNotInRegion(err) {
+		return StatusNotUsed, CodeNotInRegion, false
 	}
 
 	var apiError smithy.APIError

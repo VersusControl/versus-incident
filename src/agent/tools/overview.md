@@ -51,6 +51,36 @@ model tools: `get_cluster_overview`, `discover_k8s_resources`,
 `query_k8s_resources`, `get_k8s_resource`, `list_workloads`, `get_workload`,
 `list_k8s_events`, and `get_pod_logs`.
 
+## AWS tools
+
+_In development — not released yet._ See [AWS Harness](../../in-development/aws-harness.md)
+and the [AWS FinOps Agent](../../in-development/aws-finops-agent.md).
+
+The AWS connector provides two operator cards, **AWS** and **AWS FinOps**. Both
+need `infrastructure:view`. The tools read only what Versus already stores: the
+connection state and the cost data from the once-a-day refresh. They never call
+AWS and never spend a paid Cost Explorer request. If an answer needs data that
+has not been fetched, the tool says so and returns a link to the page. Web Chat
+and the `versus-devops` command line tool get the same tools and the same
+answers.
+
+| Tool | Card | What it returns |
+|---|---|---|
+| `get_aws_connection` | AWS | Each account's status, last check and sync freshness, denied services with the IAM actions that fix them, regions not enabled and sync gaps |
+| `cost_breakdown` | AWS FinOps | Total, change, forecast and spend by service, account, account group, region or team |
+| `cost_drivers` | AWS FinOps | What moved the cost between two periods, by cause, with owners; the drivers add up to the change |
+| `cost_increases` | AWS FinOps | Detected increases with start day, monthly impact, owner and status |
+| `cost_increase_detail` | AWS FinOps | One increase: where it came from, the change that likely started it, the owner rule and related savings |
+| `savings_opportunities` | AWS FinOps | Savings found with monthly saving, effort, risk and owner; read-only guides |
+| `budget_status` | AWS FinOps | Each budget against month-to-date cost and the forecast: on track, at risk or over budget |
+| `cost_accounts` | AWS FinOps | The accounts behind the cost source with status, group, cost, change, top driver and top team |
+
+The cost tools take an optional period (`YYYY-MM`, `mtd` or `last_30d`) and
+filters for accounts, regions and teams. Versus computes every number; the
+model only explains the result and cites the tool call. Actions such as
+marking an increase expected, dismissing a saving, budgets, the paid refresh
+and exports are not tools; they stay in the FinOps page.
+
 ## Common tools
 
 The `common` group connects AI investigations to operational data. Each tool is

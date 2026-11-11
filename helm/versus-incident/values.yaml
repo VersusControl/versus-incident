@@ -453,11 +453,58 @@ connectors:
     budgets:
       maxRequestsPerSecond: 2
     optionalData:
+      # Turns the FinOps page on (paid Cost Explorer reads, capped per day).
+      # Env override: VERSUS_CONNECTORS_AWS_OPTIONAL_DATA_COST_EXPLORER.
       costExplorer: false
       securityHub: false
       config: false
       trustedAdvisor: false
     healthCheckInterval: "5m"
+    # Background collectors that keep the committed AWS snapshots current.
+    # Env overrides: VERSUS_CONNECTORS_AWS_COLLECT_ENABLE and
+    # VERSUS_CONNECTORS_AWS_COLLECT_{INVENTORY,HEALTH,CHANGES}_INTERVAL,
+    # VERSUS_CONNECTORS_AWS_COLLECT_HISTORY_{MAX_GENERATIONS,MAX_AGE,CHANGE_RETENTION}.
+    collect:
+      enable: true
+      intervals:
+        inventory: "15m"
+        health: "2m"
+        changes: "5m"
+      # Bounds for the file store; Postgres keeps every generation.
+      history:
+        maxGenerations: 48
+        maxAge: "168h"
+        changeRetention: "336h"
+    # Application resolver: source order and the tag keys the tag source reads.
+    applications:
+      sources: [appregistry, cloudformation, tags]
+      tagKeys: [app, service]
+    # FinOps page. Cost is read only when optionalData.costExplorer is true.
+    # Env overrides: VERSUS_CONNECTORS_AWS_FINOPS_{TEAM_TAG_KEY,
+    # MIN_INCREASE_USD_PER_MONTH, MIN_DRIVER_USD, TARGET_COVERAGE,
+    # MAX_PAID_REQUESTS_PER_DAY, REFRESH_TIME, COST_SOURCE_ACCOUNT,
+    # REPORT_TIMEZONE, REPORT_SLACK_SUMMARY}.
+    finops:
+      teamTagKey: team
+      minIncreaseUsdPerMonth: 100
+      minDriverUsd: 50
+      targetCoverage: 0.8
+      # Paid Cost Explorer requests per day for the whole deployment ($0.01 each).
+      maxPaidRequestsPerDay: 20
+      refreshTime: "09:00"
+      # Payer (management) account that reads cost for every linked account;
+      # empty means each connected account reads its own cost.
+      costSourceAccount: ""
+      # Monthly budgets for the deployment, one account or one team:
+      #   - {name: AWS total, scope: deployment, monthlyUsd: 42000}
+      #   - {name: Checkout, scope: team, value: checkout, monthlyUsd: 5000}
+      budgets: []
+      # Account groups for "Spend by account group":
+      #   - {name: Production, accounts: ["111122223333"]}
+      accountGroups: []
+      report:
+        timezone: UTC
+        slackSummary: false
 
 # Extra environment variables for the container, appended after everything the
 # chart wires itself. Use these to supply values referenced as ${VAR} from

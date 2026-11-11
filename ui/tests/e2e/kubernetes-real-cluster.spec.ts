@@ -3775,7 +3775,7 @@ test.describe("Read-only external cluster acceptance", () => {
       await openApp(page, "/agent/kubernetes");
       // The authorized fresh-start handle creates one new run-owned volume;
       // the already attached browser and old volumes are retained.
-      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/scripts/eks-readonly.sh"), "--start"], {
+      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/tests/kubernetes/eks-readonly.sh"), "--start"], {
         timeout: 180_000,
         env: { ...process.env, HARNESS_EKS_FRESH_DATA: "1", HARNESS_EKS_BROWSER_HANDOFF: "1", HARNESS_EKS_SOURCE_RECEIPT: process.env.HARNESS_EKS_SOURCE_RECEIPT },
       });
@@ -3963,7 +3963,7 @@ test.describe("Read-only external cluster acceptance", () => {
           .finally(() => { sampling = false; });
       }, 250);
       restartStarted = true;
-      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/scripts/eks-readonly.sh"), "--restart"], { timeout: 60_000 });
+      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/tests/kubernetes/eks-readonly.sh"), "--restart"], { timeout: 60_000 });
       restartCompleted = true;
       await expect.poll(async () => {
         try { return (await context.request.get("/healthz", { timeout: 3000 })).status(); } catch { return 0; }

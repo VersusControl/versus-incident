@@ -1,0 +1,89 @@
+/* FinOps monthly report: two pages, light only, A4 and Letter.
+   The content fits the narrower A4 width and the shorter Letter height, so
+   the browser's paper choice decides the size. */
+
+/* On screen the route is its own scroll container over the whole window:
+   the app root clips overflow, and a fixed layer keeps the light theme
+   under the sheet however tall the window is. */
+.finops-report {
+  position: fixed;
+  inset: 0;
+  overflow: auto;
+  background: rgb(var(--surface-sunken));
+  padding: 24px 0;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.finops-page {
+  box-sizing: border-box;
+  width: 210mm;
+  min-height: 279mm;
+  margin: 0 auto 24px;
+  padding: 14mm 14mm 12mm;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.12);
+  display: flex;
+  flex-direction: column;
+}
+
+.finops-page-footer {
+  margin-top: auto;
+}
+
+.finops-block {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* A phone shows the sheet at the screen's width; the A4 layout is for paper. */
+@media screen and (max-width: 840px) {
+  .finops-report {
+    padding: 12px 0;
+  }
+
+  .finops-page {
+    width: auto;
+    min-height: 0;
+    margin: 0 12px 16px;
+    padding: 16px;
+  }
+}
+
+@page {
+  margin: 10mm;
+}
+
+@media print {
+  html,
+  body {
+    background: #fff !important;
+  }
+
+  .finops-report {
+    position: static;
+    overflow: visible;
+    padding: 0;
+    background: #fff;
+  }
+
+  .finops-page {
+    width: auto;
+    min-height: 0;
+    height: calc(279mm - 20mm);
+    margin: 0;
+    padding: 0;
+    box-shadow: none;
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .finops-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .finops-no-print {
+    display: none !important;
+  }
+}

@@ -2,9 +2,12 @@ package fakeaws
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"time"
 )
 
 // The newest AWS SDKs negotiate the rpc-v2-cbor protocol for some services.
@@ -14,6 +17,10 @@ import (
 const protocolCBOR = "cbor"
 
 const cborContentType = "application/cbor"
+
+// cborTime encodes as a CBOR epoch timestamp (tag 1), the shape the SDK's
+// rpc-v2-cbor decoder expects for a timestamp member.
+type cborTime struct{ time.Time }
 
 func writeCBORBody(writer http.ResponseWriter, status int, value any) {
 	var buffer bytes.Buffer
@@ -41,6 +48,21 @@ func encodeCBOR(writer io.Writer, value any) error {
 			return err
 		}
 		_, err := writer.Write([]byte{0xf4})
+		return err
+	case cborTime:
+		if err := writeCBORHead(writer, 6, 1); err != nil {
+			return err
+		}
+		seconds := typed.Unix()
+		if seconds < 0 {
+			return fmt.Errorf("negative CBOR timestamp")
+		}
+		return writeCBORHead(writer, 0, uint64(seconds))
+	case float64:
+		var head [9]byte
+		head[0] = 0xfb
+		binary.BigEndian.PutUint64(head[1:], math.Float64bits(typed))
+		_, err := writer.Write(head[:])
 		return err
 	case int:
 		if typed < 0 {

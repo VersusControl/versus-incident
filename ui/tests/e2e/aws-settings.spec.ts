@@ -230,7 +230,8 @@ async function installAws(page: Page, fixture: Fixture): Promise<Recorder> {
       const url = new URL(request.url());
       const method = request.method();
       const path = url.pathname;
-      let body: unknown;
+      // Shape of the wizard write bodies the stub reads (draft method, account name/regions).
+      let body: { method?: unknown; display_name?: unknown; regions?: string[] } | undefined;
       try {
         body = request.postData() ? JSON.parse(request.postData() as string) : undefined;
       } catch {
@@ -281,7 +282,7 @@ async function installAws(page: Page, fixture: Fixture): Promise<Recorder> {
           display_name: body?.display_name ?? "AWS account 123456789012",
           regions: { selected: body?.regions ?? [], enabled: (body?.regions ?? []).length, not_enabled: [] },
         });
-        current = { ...current, accounts: [...current.accounts, created] };
+        current = { ...current, accounts: [...(current.accounts as Array<Record<string, unknown>>), created] };
         return json(route, created, 201);
       }
       if (/^\/api\/admin\/aws\/accounts\/[^/]+\/recheck$/.test(path) && method === "POST") {

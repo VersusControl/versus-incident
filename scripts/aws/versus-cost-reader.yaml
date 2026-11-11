@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Creates the versus-cost-reader role for the management (payer) account of an
+  AWS Organization. Versus assumes it only to read cost: Cost Explorer, AWS
+  Budgets, Cost Optimization Hub and Compute Optimizer recommendations. It has
+  no inventory reads, because the management account controls the whole
+  Organization. Every other action is explicitly denied, including billing
+  account, invoice, payment, tax and account settings APIs. The role can only
+  be assumed by the Versus principal named in VersusPrincipalArn and only when
+  the caller presents the matching ExternalId. Nothing in this template allows
+  a write or a delete.
+
+Parameters:
+  VersusPrincipalArn:
+    Type: String
+    Description: >-
+      Exact ARN of the Versus IAM role that is allowed to assume this role,
+      copied from the Versus connect wizard, for example
+      arn:aws:iam::123456789012:role/versus-app. Do not use the account root
+      ARN: trusting an account root lets every principal in that account
+      assume this role.
+    AllowedPattern: '^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$'
+    ConstraintDescription: >-
+      Must be the exact Versus IAM role ARN in the aws, aws-cn or aws-us-gov
+      partition, for example arn:aws:iam::123456789012:role/versus-app.
+      Account root ARNs and other non-role principals are not accepted.
+
+  ExternalId:
+    Type: String
+    Description: >-
+      Secret shared with Versus to bind an assume-role call to this account.
+      It must match the ExternalId configured in Versus; a caller without it
+      cannot assume the role even with the correct principal ARN. CloudFormation
+      stores parameters, so treat this value as a credential.
+    NoEcho: true
+    MinLength: 16
+    MaxLength: 1224
+    AllowedPattern: '^[!-~]{16,1224}$'
+    ConstraintDescription: >-
+      16 to 1224 printable ASCII characters with no spaces, as required by
+      sts:ExternalId.
+
+Resources:
+  CostReaderRole:
+    Type: AWS::IAM::Role
+    Description: >-
+      versus-cost-reader is assumed only by the Versus principal in
+      VersusPrincipalArn, and only with the ExternalId above. It can read cost
+      and cost recommendations for the Organization and nothing else: every
+      action outside the cost reads is denied, so a broader policy attached
+      later cannot widen it.
+    Properties:
+      RoleName: versus-cost-reader
+      Description: >-
+        Versus cost reader for a management account: Cost Explorer, Budgets,
+        Cost Optimization Hub and Compute Optimizer reads only; every other
+        action is denied.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: VersusPrincipalWithExternalId
+            Effect: Allow
+            Principal:
+              AWS: !Ref VersusPrincipalArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: versus-cost-reader-cost-reads
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CostReads
+                Effect: Allow
+                Resource: '*'
+                Action:
+                  # Cost Explorer, billed per request by AWS
+                  - ce:GetCostAndUsage
+                  - ce:GetCostAndUsageWithResources
+                  - ce:GetCostForecast
+                  - ce:GetSavingsPlansCoverage
+                  # Cost Explorer, free
+                  - ce:ListCostAllocationTags
+                  # AWS Budgets definitions, read-only
+                  - budgets:ViewBudget
+                  # Rightsizing and idle advice
+                  - cost-optimization-hub:ListRecommendations
+                  - compute-optimizer:GetEC2InstanceRecommendations
+        - PolicyName: versus-cost-reader-deny
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DenyEverythingButCostReads
+                Effect: Deny
+                Resource: '*'
+                NotAction:
+                  - ce:GetCostAndUsage
+                  - ce:GetCostAndUsageWithResources
+                  - ce:GetCostForecast
+                  - ce:GetSavingsPlansCoverage
+                  - ce:ListCostAllocationTags
+                  - budgets:ViewBudget
+                  - cost-optimization-hub:ListRecommendations
+                  - compute-optimizer:GetEC2InstanceRecommendations
+              - Sid: DenyBillingAccountSurfaces
+                Effect: Deny
+                Resource: '*'
+                Action:
+                  - account:*
+                  - aws-portal:*
+                  - billing:*
+                  - consolidatedbilling:*
+                  - invoicing:*
+                  - payments:*
+                  - purchase-orders:*
+                  - tax:*
+
+Outputs:
+  RoleArn:
+    Description: ARN of the versus-cost-reader role; paste it into the Versus connect wizard as the cost source.
+    Value: !GetAtt CostReaderRole.Arn
+  RoleName:
+    Description: Name of the versus-cost-reader role created in this account.
+    Value: !Ref CostReaderRole

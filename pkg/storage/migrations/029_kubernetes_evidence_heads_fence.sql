@@ -2,7 +2,6 @@ SET LOCAL lock_timeout='2s';
 -- A scope counts as incomplete unless a writer that maintains heads marks it
 -- complete, so the column default stays 0 even where it was dropped before.
 ALTER TABLE kubernetes_evidence_scopes ALTER COLUMN heads_backfill SET DEFAULT 0;
-UPDATE kubernetes_evidence_scopes SET heads_backfill=0 WHERE heads_backfill IS NULL;
 
 -- A writer that maintains heads declares it for its transaction with
 -- SET LOCAL versus.evidence_heads='maintained'. Any other journal write, such
@@ -81,8 +80,6 @@ CREATE TRIGGER evidence_heads_guard_truncate AFTER TRUNCATE ON kubernetes_eviden
 -- overlap a range can start at the earlier of the range's start and this
 -- time, and skip the months before it. Every journal insert keeps it.
 ALTER TABLE kubernetes_evidence_scopes ADD COLUMN IF NOT EXISTS gap_reach TIMESTAMPTZ;
-UPDATE kubernetes_evidence_scopes s SET gap_reach=(SELECT MIN(e.event_at) FROM kubernetes_evidence_events e
- WHERE e.scope_key=s.scope_key AND e.event_type='coverage_gap' AND e.event_at<e.gap_to);
 CREATE OR REPLACE FUNCTION versus_evidence_gap_reach() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
  UPDATE kubernetes_evidence_scopes s SET gap_reach=LEAST(COALESCE(s.gap_reach,g.reach),g.reach)

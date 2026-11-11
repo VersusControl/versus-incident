@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/VersusControl/versus-incident/pkg/aws/cost"
 	"github.com/VersusControl/versus-incident/pkg/aws/settings"
 	"github.com/VersusControl/versus-incident/pkg/awsauth"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -51,6 +52,9 @@ func (controller *AWSSettingsController) Register(router fiber.Router) {
 // not audited; they carry no secret.
 func auditAWSSettings(ctx *fiber.Ctx) error {
 	path := strings.TrimSuffix(ctx.Path(), "/")
+	if strings.Contains(path, "/admin/aws/finops") {
+		return auditFinOpsRefusal(ctx)
+	}
 	reveal := ctx.Method() == fiber.MethodGet && strings.HasSuffix(path, "/external-id")
 	if ctx.Method() == fiber.MethodGet && !reveal {
 		return ctx.Next()
@@ -76,6 +80,28 @@ func auditAWSSettings(ctx *fiber.Ctx) error {
 		result = middleware.AdminAuditDenied
 	}
 	middleware.RecordAdminAudit(ctx, action, target, result)
+	return err
+}
+
+// auditFinOpsRefusal covers the FinOps writes refused before their own audit
+// step runs: the gateway (401) and the infrastructure view check (403 for a
+// caller without that permission) sit in front of it. Any other outcome,
+// including a missing settings-write permission, is recorded by the FinOps
+// route itself, so each request has exactly one audit record.
+func auditFinOpsRefusal(ctx *fiber.Ctx) error {
+	if ctx.Method() == fiber.MethodGet || ctx.Method() == fiber.MethodHead {
+		return ctx.Next()
+	}
+	err := ctx.Next()
+	status := ctx.Response().StatusCode()
+	if fiberErr, ok := err.(*fiber.Error); ok {
+		status = fiberErr.Code
+	}
+	canView, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureView))
+	refusedEarly := status == fiber.StatusUnauthorized || (status == fiber.StatusForbidden && (!explicit || !canView))
+	if refusedEarly {
+		middleware.RecordAdminAudit(ctx, "rbac.denied", "infrastructure:view", middleware.AdminAuditDenied)
+	}
 	return err
 }
 
@@ -111,7 +137,7 @@ func awsCanWrite(ctx *fiber.Ctx) bool {
 }
 
 func (controller *AWSSettingsController) settings(ctx *fiber.Ctx) error {
-	view, err := controller.service.View(ctx.UserContext(), awsOrg(ctx), awsCanWrite(ctx))
+	view, err := controller.service.Connection(ctx.UserContext(), settings.Principal{Org: awsOrg(ctx), CanWrite: awsCanWrite(ctx)})
 	if err != nil {
 		return writeAWSSettings(ctx, nil, err)
 	}
@@ -210,11 +236,22 @@ func (controller *AWSSettingsController) updateAccount(ctx *fiber.Ctx) error {
 	return ctx.JSON(view)
 }
 
+// awsAccountRemoval answers a removed account. Purge is "pending" when the
+// account's cost data is deleted by the next cost refresh rather than now.
+type awsAccountRemoval struct {
+	Purge string `json:"purge,omitempty"`
+}
+
 func (controller *AWSSettingsController) deleteAccount(ctx *fiber.Ctx) error {
-	if err := controller.service.DeleteAccount(awsOrg(ctx), strings.Clone(ctx.Params("account_id"))); err != nil {
+	removal, err := controller.service.DeleteAccount(ctx.UserContext(), awsOrg(ctx), strings.Clone(ctx.Params("account_id")))
+	if err != nil {
 		return writeAWSSettings(ctx, nil, err)
 	}
-	return ctx.SendStatus(fiber.StatusNoContent)
+	answer := awsAccountRemoval{}
+	if removal.PurgePending {
+		answer.Purge = "pending"
+	}
+	return ctx.JSON(answer)
 }
 
 func (controller *AWSSettingsController) recheck(ctx *fiber.Ctx) error {
@@ -384,6 +421,9 @@ func writeAWSSettings(ctx *fiber.Ctx, value any, err error) error {
 		status, code = fiber.StatusTooManyRequests, "rate_limited"
 	case errors.Is(err, settings.ErrNoStorage):
 		status, code = fiber.StatusServiceUnavailable, "storage_unavailable"
+	case errors.Is(err, cost.ErrBusy), errors.Is(err, cost.ErrLockLost), errors.Is(err, settings.ErrRevisionContended):
+		ctx.Set(fiber.HeaderRetryAfter, refreshInProgressRetryAfter)
+		status, code = fiber.StatusConflict, "refresh_in_progress"
 	case errors.Is(err, settings.ErrNoServerIdentity), errors.Is(err, awsauth.ErrNoServerIdentity):
 		status, code = fiber.StatusConflict, "no_server_identity"
 	default:

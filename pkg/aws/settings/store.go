@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -22,6 +23,7 @@ const (
 	selfTestName   = "privacy-selftest"
 	privacyName    = "privacy"
 	optionsName    = "options"
+	revisionName   = "accounts-revision"
 )
 
 // DraftTTL is how long an unfinished wizard draft survives.
@@ -37,6 +39,15 @@ var (
 	ErrNoStorage = errors.New("aws settings storage unavailable")
 	// ErrInvalidRecord means an identifier or stored payload is malformed.
 	ErrInvalidRecord = errors.New("invalid aws settings record")
+	// ErrUnreadableAccounts means at least one stored account record could
+	// not be decoded, so the account list is not complete.
+	ErrUnreadableAccounts = errors.New("unreadable_account_records")
+	// ErrRevisionContended means the account settings revision kept moving
+	// under concurrent writers and could not be raised. The account change
+	// itself is stored; options keep reading the older revision, so a
+	// removed account stays out of collection, until the next change raises
+	// it.
+	ErrRevisionContended = errors.New("aws settings revision contended")
 )
 
 var (
@@ -73,6 +84,11 @@ func PrivacyKey(org string) string { return orgPrefix(org) + privacyName }
 // OptionsKey is the storage key for one organization's saved options.
 func OptionsKey(org string) string { return orgPrefix(org) + optionsName }
 
+// AccountsRevisionKey is the storage key for one organization's account
+// settings revision. It sits beside the account records, not under their
+// prefix, so listing accounts never reads it.
+func AccountsRevisionKey(org string) string { return orgPrefix(org) + revisionName }
+
 // AccountKey is the storage key for one account.
 func AccountKey(org, accountID string) string { return AccountPrefix(org) + accountID }
 
@@ -89,6 +105,11 @@ type Store struct {
 	provider storage.Provider
 	scope    tenancy.OrgScope
 	now      func() time.Time
+
+	// accountsMu serializes account writes with the revision they raise,
+	// so each change gets its own revision and a removal holds the revision
+	// it read until its record is gone.
+	accountsMu sync.Mutex
 }
 
 // NewStore builds a store over provider. A nil provider is allowed so the API
@@ -144,8 +165,11 @@ func (store *Store) write(org, key string, value any) error {
 	return store.provider.WriteBlob(key, data)
 }
 
-// delete removes a record. A backend without exact-key deletion clears the
-// payload instead, which every reader already treats as absent.
+// delete removes a record. A backend that cannot remove the key (the file
+// store answers "unsupported" for everything outside model state) gets an
+// empty, non-null tombstone instead, which every backend accepts and every
+// reader treats as absent. Unsupported is never reported as a successful
+// delete.
 func (store *Store) delete(org, key string) error {
 	if store == nil || store.provider == nil {
 		return ErrNoStorage
@@ -153,39 +177,65 @@ func (store *Store) delete(org, key string) error {
 	if !store.canWrite(org) {
 		return ErrOutOfScope
 	}
-	if deleter, ok := store.provider.(storage.BlobDeleter); ok {
-		err := deleter.DeleteBlob(key)
-		if err == nil || errors.Is(err, storage.ErrUnsupported) {
-			return nil
-		}
+	err := storage.DeleteBlob(store.provider, key)
+	if err == nil || errors.Is(err, storage.ErrNotFound) {
+		return nil
+	}
+	if !errors.Is(err, storage.ErrUnsupported) {
 		return err
 	}
-	return store.provider.WriteBlob(key, nil)
+	return store.provider.WriteBlob(key, []byte{})
 }
 
 // ListAccounts returns every stored wizard account, sorted by account ID.
 func (store *Store) ListAccounts(org string) ([]AccountRecord, error) {
-	if store == nil || store.provider == nil {
-		return nil, ErrNoStorage
-	}
-	if !store.canRead(org) {
-		return nil, ErrOutOfScope
-	}
-	blobs, err := store.provider.ListBlobs(AccountPrefix(org))
+	accounts, _, err := store.listAccounts(org)
+	return accounts, err
+}
+
+// ListAccountsStrict is ListAccounts that fails with ErrUnreadableAccounts
+// when a stored record cannot be decoded, for callers that act on absence:
+// an account whose record is unreadable is not a removed account.
+func (store *Store) ListAccountsStrict(org string) ([]AccountRecord, error) {
+	accounts, unreadable, err := store.listAccounts(org)
 	if err != nil {
 		return nil, err
 	}
+	if unreadable > 0 {
+		return nil, ErrUnreadableAccounts
+	}
+	return accounts, nil
+}
+
+// listAccounts decodes every stored account and counts the records it could
+// not read. An empty blob is a deleted record, not an unreadable one.
+func (store *Store) listAccounts(org string) ([]AccountRecord, int, error) {
+	if store == nil || store.provider == nil {
+		return nil, 0, ErrNoStorage
+	}
+	if !store.canRead(org) {
+		return nil, 0, ErrOutOfScope
+	}
+	blobs, err := store.provider.ListBlobs(AccountPrefix(org))
+	if err != nil {
+		return nil, 0, err
+	}
 	accounts := make([]AccountRecord, 0, len(blobs))
+	unreadable := 0
 	for _, blob := range blobs {
+		if len(blob.Data) == 0 {
+			continue
+		}
 		var record AccountRecord
 		if json.Unmarshal(blob.Data, &record) != nil || !ValidAccountID(record.AccountID) {
+			unreadable++
 			continue
 		}
 		record.Source = SourceWizard
 		accounts = append(accounts, record)
 	}
 	sortAccounts(accounts)
-	return accounts, nil
+	return accounts, unreadable, nil
 }
 
 // GetAccount returns one stored wizard account.
@@ -208,27 +258,157 @@ func (store *Store) GetAccount(org, accountID string) (AccountRecord, error) {
 	return record, nil
 }
 
-// SaveAccount writes one wizard account.
+// SaveAccount writes one wizard account and raises the account settings
+// revision after it.
 func (store *Store) SaveAccount(org string, record AccountRecord) error {
 	if !ValidAccountID(record.AccountID) {
 		return ErrInvalidRecord
+	}
+	if store == nil {
+		return ErrNoStorage
 	}
 	record.Source = SourceWizard
 	if record.CreatedAt.IsZero() {
 		record.CreatedAt = store.now().UTC()
 	}
-	return store.write(org, AccountKey(org, record.AccountID), record)
+	store.accountsMu.Lock()
+	defer store.accountsMu.Unlock()
+	if err := store.write(org, AccountKey(org, record.AccountID), record); err != nil {
+		return err
+	}
+	_, err := store.raiseRevision(org)
+	return err
 }
 
 // DeleteAccount removes one wizard account and its health record.
 func (store *Store) DeleteAccount(org, accountID string) error {
+	return store.RemoveAccount(org, accountID, nil)
+}
+
+// RemoveAccount removes one wizard account and its health record, then
+// raises the account settings revision. purge, when set, runs first with
+// the revision read before the removal; no other account write in this
+// process can move the revision until the record is gone, so options read at
+// a newer revision were read after the removal. A purge error leaves the
+// record in place.
+//
+// Another replica sharing the storage can still raise the revision while the
+// record is being removed, and options read at that revision may list the
+// account. When that happened, purge runs again with the revision just below
+// the one this removal raised, so only options read after the record was
+// gone can collect the account again.
+func (store *Store) RemoveAccount(org, accountID string, purge func(revision uint64) error) error {
 	if !ValidAccountID(accountID) {
 		return ErrInvalidRecord
+	}
+	if store == nil {
+		return ErrNoStorage
+	}
+	store.accountsMu.Lock()
+	defer store.accountsMu.Unlock()
+	var before uint64
+	if purge != nil {
+		revision, err := store.AccountsRevision(org)
+		if err != nil {
+			return err
+		}
+		if err := purge(revision); err != nil {
+			return err
+		}
+		before = revision
 	}
 	if err := store.delete(org, AccountKey(org, accountID)); err != nil {
 		return err
 	}
-	return store.delete(org, HealthKey(org, accountID))
+	if err := store.delete(org, HealthKey(org, accountID)); err != nil {
+		return err
+	}
+	after, err := store.raiseRevision(org)
+	if err != nil {
+		return err
+	}
+	if purge != nil && after-1 > before {
+		return purge(after - 1)
+	}
+	return nil
+}
+
+// accountsRevision is the stored account settings revision.
+type accountsRevision struct {
+	Revision uint64 `json:"revision"`
+}
+
+// AccountsRevision returns the account settings revision: a counter raised
+// after every account save or removal and kept with the account records, so
+// it only grows across restarts and is independent of any clock. Read it
+// before listing the accounts it describes. A missing record is zero.
+func (store *Store) AccountsRevision(org string) (uint64, error) {
+	data, err := store.read(org, AccountsRevisionKey(org))
+	if err != nil {
+		return 0, err
+	}
+	if len(data) == 0 {
+		return 0, nil
+	}
+	var record accountsRevision
+	if json.Unmarshal(data, &record) != nil {
+		return 0, ErrInvalidRecord
+	}
+	return record.Revision, nil
+}
+
+// revisionRaiseAttempts bounds the compare-and-swap retries of one raise.
+// Each lost attempt means another writer raised the revision, so running
+// out takes that many concurrent account changes.
+const revisionRaiseAttempts = 64
+
+// raiseRevision adds one to the account settings revision and returns the
+// new value. The caller holds accountsMu, which orders the raises of this
+// process. Replicas sharing the storage each hold their own lock, so on a
+// backend with compare-and-swap the raise only succeeds against the value it
+// read, and a lost race reads again: two raisers never store or return the
+// same revision. A backend without it serves a single process, where the
+// lock is enough.
+func (store *Store) raiseRevision(org string) (uint64, error) {
+	if store == nil || store.provider == nil {
+		return 0, ErrNoStorage
+	}
+	if !store.canWrite(org) {
+		return 0, ErrOutOfScope
+	}
+	cas, ok := store.provider.(storage.BlobCAS)
+	if !ok {
+		current, err := store.AccountsRevision(org)
+		if err != nil {
+			return 0, err
+		}
+		next := current + 1
+		return next, store.write(org, AccountsRevisionKey(org), accountsRevision{Revision: next})
+	}
+	key := AccountsRevisionKey(org)
+	for range revisionRaiseAttempts {
+		stored, err := store.provider.ReadBlob(key)
+		if err != nil {
+			return 0, err
+		}
+		var current accountsRevision
+		if len(stored) > 0 && json.Unmarshal(stored, &current) != nil {
+			return 0, ErrInvalidRecord
+		}
+		next := current.Revision + 1
+		data, err := json.Marshal(accountsRevision{Revision: next})
+		if err != nil {
+			return 0, ErrInvalidRecord
+		}
+		swapped, err := cas.CompareAndSwapBlob(key, stored, data)
+		if err != nil {
+			return 0, err
+		}
+		if swapped {
+			return next, nil
+		}
+	}
+	return 0, ErrRevisionContended
 }
 
 // GetDraft returns a live draft. An expired draft answers ErrNotFound and is
@@ -382,13 +562,15 @@ func (store *Store) SaveOptions(org string, options Options) error {
 	return store.write(org, OptionsKey(org), options)
 }
 
-// SanitizeAllowlist trims, lowercases, de-duplicates and bounds the tag keys
-// whose values may reach the model. It returns a stable order.
+// SanitizeAllowlist trims, de-duplicates and bounds the tag keys whose
+// values may reach the model. It returns a stable order. AWS tag keys are
+// case-sensitive, so a key keeps its case and is matched exactly: "Name"
+// and "name" are two keys.
 func SanitizeAllowlist(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	clean := make([]string, 0, len(values))
 	for _, value := range values {
-		value = strings.ToLower(strings.TrimSpace(value))
+		value = strings.TrimSpace(value)
 		if value == "" || len(value) > 63 {
 			continue
 		}

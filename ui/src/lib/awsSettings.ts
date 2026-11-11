@@ -7,6 +7,7 @@
 
 import { format } from "date-fns";
 import type {
+  AwsAccountSync,
   AwsAccount,
   AwsAccountStatus,
   AwsApiUse,
@@ -113,6 +114,20 @@ export function notCheckedReason(errorCode: string | null | undefined): string {
   }
 }
 
+// The service has no endpoint in the account's region. The probe settles as
+// not used, but the cause is known, so the grid names it.
+const NOT_IN_REGION_CODE = "not_available_in_region";
+const NOT_IN_REGION_WORDS = "Not in this region";
+
+/** Status word for one probe result, naming a known cause over the plain status. */
+export function serviceStatusLabel(
+  status: AwsServiceStatus,
+  errorCode?: string | null,
+): string {
+  if (status === "not_used" && errorCode === NOT_IN_REGION_CODE) return NOT_IN_REGION_WORDS;
+  return SERVICE_STATUS_LABELS[status];
+}
+
 /** Accessible one-liner for a service result: "ElastiCache: Denied". */
 export function serviceStatusText(
   service: string,
@@ -123,7 +138,7 @@ export function serviceStatusText(
   if (status === "not_checked") {
     return `${label}: Not checked: ${notCheckedReason(errorCode)}`;
   }
-  return `${label}: ${SERVICE_STATUS_LABELS[status]}`;
+  return `${label}: ${serviceStatusLabel(status, errorCode)}`;
 }
 
 // ---------- Regions ----------
@@ -258,6 +273,7 @@ export type AwsAnswerKind =
   | "disconnected"
   | "denied"
   | "regions"
+  | "checking"
   | "ok";
 
 export type AwsAnswerTone = "plain" | AwsTone;
@@ -379,6 +395,23 @@ export function awsSettingsAnswer(
     };
   }
 
+  // Before the first health check the counts are not known yet: never
+  // "All good" over zero counts.
+  const unchecked = accounts.filter(awaitingFirstCheck).length;
+  if (unchecked > 0) {
+    return {
+      kind: "checking",
+      blocked: false,
+      segments: [
+        { text: `${countedAccounts(accounts.length)} connected`, tone: "plain" },
+        {
+          text: `; waiting for the first check${unchecked > 1 ? ` of ${unchecked} accounts` : ""}`,
+          tone: "plain",
+        },
+      ],
+    };
+  }
+
   return {
     kind: "ok",
     blocked: false,
@@ -386,6 +419,15 @@ export function awsSettingsAnswer(
       { text: `All good across ${countedAccounts(accounts.length)}`, tone: "ok" },
     ],
   };
+}
+
+/**
+ * A connected account whose first health check has not run: its services
+ * and regions are not counted yet, so the page shows waiting words instead
+ * of zeros.
+ */
+export function awaitingFirstCheck(account: AwsAccount): boolean {
+  return account.status !== "disconnected" && !account.checked_at && !account.sync?.synced_at;
 }
 
 /** The only segment the answer line colours (plain text is never coloured). */
@@ -431,12 +473,96 @@ export function accountStatusWords(
       connected: false,
     };
   }
+  // Once collection has committed data the row reports data freshness
+  // ("Synced 12 s ago") instead of the health check's age.
+  const synced = account.sync && account.sync.state !== "off" ? ageWords(account.sync.synced_at, now) : undefined;
+  if (synced) {
+    return { label: ACCOUNT_STATUS_LABELS.connected, detail: `Synced ${synced}`, connected: true };
+  }
+  if (awaitingFirstCheck(account)) {
+    return { label: ACCOUNT_STATUS_LABELS.connected, detail: "Waiting for first check", connected: true };
+  }
   const age = ageWords(account.checked_at, now);
   return {
     label: ACCOUNT_STATUS_LABELS.connected,
     detail: age ? `checked ${age}` : "checked",
     connected: true,
   };
+}
+
+// ---------- First sync ----------
+
+export type SyncWordKind = "ready" | "loading" | "waiting" | "failed";
+
+export interface SyncServiceRow {
+  service: string;
+  label: string;
+  kind: SyncWordKind;
+  /** Ready / Loading / Waiting / Failed. */
+  word: string;
+  /** "2 of 3 regions" while loading; never "0 of N". */
+  detail?: string;
+  /** Each gap named in words. */
+  gaps: string[];
+}
+
+export interface SyncProgress {
+  ready: number;
+  total: number;
+  rows: SyncServiceRow[];
+  /** "3 of 9 ready". */
+  label: string;
+}
+
+const GAP_WORDS: Record<string, string> = {
+  throttled: "Not checked: AWS throttled, retrying",
+  denied: "Denied",
+  not_checked: "Not checked",
+  not_enabled: "Not enabled",
+  [NOT_IN_REGION_CODE]: NOT_IN_REGION_WORDS,
+};
+
+export function gapWords(reason: string): string {
+  return GAP_WORDS[reason] ?? reason.replace(/_/g, " ");
+}
+
+/** The first sync is running: show progress and poll fast. */
+export function firstSyncRunning(account: AwsAccount): boolean {
+  const sync = account.sync;
+  if (!sync || sync.state === "off" || account.status === "disconnected") return false;
+  return sync.first_sync && (sync.state === "pending" || sync.state === "syncing");
+}
+
+/** Settings poll: every second while a first sync fills in, else 15 s. */
+export function settingsPollMs(settings: { accounts: AwsAccount[] } | undefined): number {
+  return settings?.accounts.some(firstSyncRunning) ? 1_000 : 15_000;
+}
+
+/**
+ * Per-service first-sync rows. A service with nothing committed yet is
+ * Waiting or Loading, never a zero count. `peakTotal` keeps the "of M"
+ * from shrinking between polls.
+ */
+export function syncProgress(sync: AwsAccountSync, peakTotal = 0): SyncProgress {
+  const rows = sync.services.map((sv): SyncServiceRow => {
+    const label = serviceLabel(sv.service);
+    const gaps = sv.gaps.map(gapWords);
+    if (sv.state === "failed" || sv.state === "partial") {
+      return { service: sv.service, label, kind: "failed", word: gaps[0] ?? "Failed", gaps: gaps.slice(gaps[0] ? 1 : 0) };
+    }
+    if (sv.state === "ok") return { service: sv.service, label, kind: "ready", word: "Ready", gaps };
+    if (sv.units_done > 0 && sv.units_done < sv.units_total) {
+      return { service: sv.service, label, kind: "loading", word: "Loading", detail: `${sv.units_done} of ${sv.units_total} regions`, gaps };
+    }
+    if (sv.state === "syncing") return { service: sv.service, label, kind: "loading", word: "Loading", gaps };
+    return { service: sv.service, label, kind: "waiting", word: "Waiting", gaps };
+  });
+  const order: Record<SyncWordKind, number> = { ready: 0, failed: 1, loading: 2, waiting: 3 };
+  rows.sort((a, b) => order[a.kind] - order[b.kind] || a.label.localeCompare(b.label));
+  const ready = rows.filter((r) => r.kind === "ready").length;
+  const total = Math.max(rows.length, peakTotal);
+  // Nothing listed yet is a wait, never "0 of 0".
+  return { ready, total, rows, label: total === 0 ? "Waiting" : `${ready} of ${total} ready` };
 }
 
 /** Row view model: every number the table prints, derived in one place. */
@@ -448,6 +574,7 @@ export function accountRow(account: AwsAccount, now: Date = new Date()): AwsAcco
   const notEnabled = account.regions.not_enabled.length;
   const apiBudget = account.api_use.budget_rps;
   const apiUsed = account.api_use.used_rps;
+  const waiting = awaitingFirstCheck(account);
 
   return {
     accountId: account.account_id,
@@ -457,16 +584,17 @@ export function accountRow(account: AwsAccount, now: Date = new Date()): AwsAcco
     connected: status.connected,
     statusLabel: status.label,
     statusDetail: status.detail,
-    servicesLabel: `${services.readable} of ${services.total} readable`,
+    servicesLabel: waiting ? "Waiting" : `${services.readable} of ${services.total} readable`,
     deniedLabel:
       denied > 0
         ? deniedName
           ? `${deniedName}: Denied`
           : "Permission denied"
         : undefined,
-    regionsLabel: `${account.regions.enabled} of ${account.regions.selected.length}`,
-    regionsDetail:
-      notEnabled > 0
+    regionsLabel: waiting ? "Waiting" : `${account.regions.enabled} of ${account.regions.selected.length}`,
+    regionsDetail: waiting
+      ? ""
+      : notEnabled > 0
         ? `${notEnabled} not enabled`
         : account.regions.selected.length === 0
           ? "none selected"

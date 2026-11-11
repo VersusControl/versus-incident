@@ -119,3 +119,5 @@
 - In Development
   - [AWS Harness](/in-development/aws-harness)
   - [AWS FinOps Agent](/in-development/aws-finops-agent)
+  - [Read your FinOps report](/in-development/aws-finops-report)
+  - [Tag your AWS cost for ownership](/in-development/aws-finops-tagging)

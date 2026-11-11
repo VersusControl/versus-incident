@@ -423,6 +423,12 @@ data:
       {{- $awsTags := $aws.tags | default dict }}
       {{- $awsBudgets := $aws.budgets | default dict }}
       {{- $awsOptional := $aws.optionalData | default dict }}
+      {{- $awsCollect := $aws.collect | default dict }}
+      {{- $awsIntervals := $awsCollect.intervals | default dict }}
+      {{- $awsHistory := $awsCollect.history | default dict }}
+      {{- $awsApplications := $aws.applications | default dict }}
+      {{- $awsFinOps := $aws.finops | default dict }}
+      {{- $awsFinOpsReport := $awsFinOps.report | default dict }}
       aws:
         enable: {{ dig "enable" false $aws }}
         accounts:
@@ -431,6 +437,9 @@ data:
         {{- $accountAuth := $account.auth | default dict }}
           - account_id: {{ $account.accountId | quote }}
             display_name: {{ $account.displayName | default "" | quote }}
+            {{- if $account.owner }}
+            owner: {{ $account.owner | quote }}
+            {{- end }}
             {{- if and $account.regions (ne (toString $account.regions) "auto") }}
             regions: {{ $account.regions | toJson }}
             {{- else }}
@@ -458,6 +467,52 @@ data:
           config: {{ dig "config" false $awsOptional }}
           trusted_advisor: {{ dig "trustedAdvisor" false $awsOptional }}
         health_check_interval: {{ $aws.healthCheckInterval | default "5m" | quote }}
+        collect:
+          enable: {{ dig "enable" true $awsCollect }}
+          intervals:
+            inventory: {{ $awsIntervals.inventory | default "15m" | quote }}
+            health: {{ $awsIntervals.health | default "2m" | quote }}
+            changes: {{ $awsIntervals.changes | default "5m" | quote }}
+          history:
+            max_generations: {{ $awsHistory.maxGenerations | default 48 }}
+            max_age: {{ $awsHistory.maxAge | default "168h" | quote }}
+            change_retention: {{ $awsHistory.changeRetention | default "336h" | quote }}
+        applications:
+          sources: {{ $awsApplications.sources | default (list "appregistry" "cloudformation" "tags") | toJson }}
+          tag_keys: {{ $awsApplications.tagKeys | default (list "app" "service") | toJson }}
+        finops:
+          team_tag_key: {{ $awsFinOps.teamTagKey | default "team" | quote }}
+          min_increase_usd_per_month: {{ $awsFinOps.minIncreaseUsdPerMonth | default 100 }}
+          min_driver_usd: {{ $awsFinOps.minDriverUsd | default 50 }}
+          target_coverage: {{ $awsFinOps.targetCoverage | default 0.8 }}
+          max_paid_requests_per_day: {{ $awsFinOps.maxPaidRequestsPerDay | default 20 }}
+          refresh_time: {{ $awsFinOps.refreshTime | default "09:00" | quote }}
+          cost_source_account: {{ $awsFinOps.costSourceAccount | default "" | toString | quote }}
+          budgets:
+          {{- if $awsFinOps.budgets }}
+          {{- range $budget := $awsFinOps.budgets }}
+            - name: {{ $budget.name | quote }}
+              scope: {{ $budget.scope | default "deployment" | quote }}
+              {{- if $budget.value }}
+              value: {{ $budget.value | toString | quote }}
+              {{- end }}
+              monthly_usd: {{ $budget.monthlyUsd | int }}
+          {{- end }}
+          {{- else }}
+            []
+          {{- end }}
+          account_groups:
+          {{- if $awsFinOps.accountGroups }}
+          {{- range $group := $awsFinOps.accountGroups }}
+            - name: {{ $group.name | quote }}
+              accounts: {{ $group.accounts | default list | toJson }}
+          {{- end }}
+          {{- else }}
+            []
+          {{- end }}
+          report:
+            timezone: {{ $awsFinOpsReport.timezone | default "UTC" | quote }}
+            slack_summary: {{ dig "slackSummary" false $awsFinOpsReport }}
   {{- if .Values.agent.enable }}
   {{- $tools := .Values.agent.tools | default dict }}
   {{- $recentChanges := $tools.recentChanges | default dict }}

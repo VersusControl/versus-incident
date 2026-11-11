@@ -50,6 +50,43 @@ fixture rejects every other value, including a missing one, with
 | `region-disabled` | `DescribeRegions` lists `ap-southeast-1`, but EC2, Lambda, ECS and RDS calls there answer `400 AuthFailure` |
 | `secret-canary` | Plants canary tag values, Lambda environment strings, an access key and CloudTrail `requestParameters`. `CanarySecrets()` lists them so a redaction test asserts none surfaced |
 
+| `bad-deploy` | Collector world where task definition `checkout:42` is registered (CloudTrail `RegisterTaskDefinition`, then `UpdateService` 20 s later, by a CI role); four minutes later the ALB 5xx alarm `checkout-5xx` (and composite `checkout-health`) is in ALARM and 3 of 4 targets in `versus-web` are unhealthy; the ECS rollout is in progress |
+| `health-event` | Collector world plus an upcoming AWS Health event that affects `i-0123456789abcdef0` and a scheduled instance reboot |
+| `access-denied-burst` | Collector world where Lambda, SQS, SNS, EventBridge, Step Functions, Kinesis and the tagging API are denied, plus single detail calls (`DescribeTargetHealth`, `ListStackResources`, `GetBucketEncryption`, `ListAssociatedResources`) |
+| `load-5k` | Collector world plus 5,000 generated resources (instances, functions, queues, tables, topics) served in pages of at most 100. `SetLoadSize(n)` or `FAKEAWS_LOAD_SIZE=50000` for the large-account run |
+| `cost-nat-spike` | Cost Explorer, Budgets, Cost Optimization Hub and Compute Optimizer answer from `awsfix.CostNatSpike` (the NAT step after the checkout-api :41 -> :42 release) |
+| `cost-credits` | Billing calls from `awsfix.SingleAccount`: credit, tax, Savings Plan fee, budgets |
+| `cost-one-off-fee`, `cost-organization` | Billing calls from `awsfix.Organization`: management account `999999999999` sees every account (incl. cost-only `333333333333`) and the one-off support fee; any other caller sees only its own lines |
+| `cost-denied-account` | `organization.json`; every billing call signed by `333333333333` answers `AccessDeniedException` |
+| `cost-throttled` | `cost-nat-spike.json`; every Cost Explorer call answers `LimitExceededException` until `SetCostThrottled(false)` |
+| `cost-cap-reached` | `awsfix.LargeOrganization`: 60 linked accounts in pages of 50 groups |
+| `cost-nat-spike-two-nats` | `awsfix.CostNatSpikeTwoNATs` (a second NAT gateway behind the inventory app); `GetCostAndUsageWithResources` answers `AccessDeniedException`, so the NAT line cannot be narrowed |
+| `cost-new-untagged-db` | `awsfix.CostNewUntaggedDB`: a full September, then an untagged database instance from Oct 20 |
+| `cost-unavailable` | `cost-nat-spike.json`; every Cost Explorer call answers `AccessDeniedException: User not enabled for cost explorer access` |
+
+### Collector world
+
+Every collector operation (`CollectorOperations()` lists them) is answered from
+one coherent account: VPC, subnet, route table, gateways, two security groups
+(one with SSH open to the internet), four web instances behind the `versus-web`
+target group and the `versus` ALB, ECS service `checkout` in cluster `versus`,
+Lambda `versus-worker` fed by queue `versus-jobs`, stack `versus-stack` and the
+AppRegistry application `checkout`, alarms, buckets (one public and
+unencrypted), CloudFront, Route 53, IAM roles and a CloudTrail history that
+`LookupEvents` filters by `StartTime`/`EndTime`. The four collector scenarios
+serve the probe calls from the world too; the probe scenarios keep their
+one-item probe pages and use the world only for collector-only calls.
+`SetClock` pins the time events and alarms are relative to.
+
+### Pointing the server binary at the fixture
+
+Build the server with `-tags harness_fakeaws` and set
+`VERSUS_HARNESS_FAKEAWS_URL` to the fixture's URL (for example the
+`tests/fakeaws/cmd/fakeaws` binary). Every AWS call the settings probes and
+the collectors make is then rewritten to that URL. A build without the tag
+has neither the variable nor the redirect.
+The FinOps cost refresh (Cost Explorer, Budgets, Cost Optimization Hub, Compute Optimizer) is redirected the same way.
+
 Per-request overrides (useful when one test needs two fixtures):
 
 - `X-FakeAWS-Scenario` selects a scenario for that request.
@@ -57,6 +94,16 @@ Per-request overrides (useful when one test needs two fixtures):
 
 An empty scenario argument falls back to `FAKEAWS_SCENARIO`, then to
 `new-account-connect`.
+
+### Cost scenarios
+
+Data is built in Go by `tests/fixtures/awsfix`, the same builders the cost
+package's unit tests use; no data file is read. Amounts are summed in micro-units and
+rounded like the product. Every day of the open month, by the fixture clock
+(`SetClock`), is marked `Estimated`, like real AWS. `PaidCostRequests()` counts
+every Cost Explorer request except `ListCostAllocationTags`; `CostCalls()`
+counts billing calls per `service:Action`. Billing calls are answered only in a
+cost scenario.
 
 ## Budget assertions
 

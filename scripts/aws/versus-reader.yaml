@@ -40,9 +40,11 @@ Parameters:
   OptionalData:
     Type: String
     Description: >-
-      off keeps the role on metadata reads only. on adds Cost Explorer, Security
-      Hub findings, AWS Config advanced queries and Trusted Advisor reads, which
-      expose cost, posture and check data. Cost Explorer is billed per request.
+      off keeps the role on metadata reads only. on adds cost reads (Cost
+      Explorer, AWS Budgets, Cost Optimization Hub and Compute Optimizer),
+      Security Hub findings, AWS Config advanced queries and Trusted Advisor
+      reads, which expose cost, posture and check data. Cost Explorer is billed
+      per request.
     Default: 'off'
     AllowedValues:
       - 'off'
@@ -61,7 +63,8 @@ Resources:
       VersusPrincipalArn, and only with the ExternalId above. It can read
       resource metadata across the service catalog, and is explicitly denied
       object bodies, secret values, parameter values, decrypted blobs, table
-      items, function code, instance console output and log events.
+      items, function code, instance console output and log events, and
+      every billing account, invoice, payment, tax and account settings API.
     Properties:
       RoleName: versus-reader
       Description: >-
@@ -96,6 +99,7 @@ Resources:
                   - health:Describe*
                   # CloudFormation
                   - cloudformation:Describe*
+                  - cloudformation:ListStackResources
                   # CloudFront
                   - cloudfront:List*
                   # CloudTrail
@@ -154,6 +158,7 @@ Resources:
                   # Shared inventory helpers
                   - resource-explorer-2:Search
                   - servicecatalog:ListApplications
+                  - servicecatalog:ListAssociatedResources
                   - tag:GetResources
               - !If
                 - IncludeOptionalData
@@ -162,8 +167,17 @@ Resources:
                   Resource: '*'
                   Action:
                     # Cost Explorer, billed per request by AWS
-                    - ce:GetAnomalies
                     - ce:GetCostAndUsage
+                    - ce:GetCostAndUsageWithResources
+                    - ce:GetCostForecast
+                    - ce:GetSavingsPlansCoverage
+                    # Cost Explorer, free
+                    - ce:ListCostAllocationTags
+                    # AWS Budgets definitions, read-only
+                    - budgets:ViewBudget
+                    # Rightsizing and idle advice
+                    - cost-optimization-hub:ListRecommendations
+                    - compute-optimizer:GetEC2InstanceRecommendations
                     # Security Hub findings
                     - securityhub:GetFindings
                     # AWS Config advanced query
@@ -189,10 +203,14 @@ Resources:
                 Effect: Deny
                 Resource: '*'
                 Action:
+                  - account:*
                   - aws-portal:*
                   - billing:*
+                  - consolidatedbilling:*
                   - invoicing:*
                   - payments:*
+                  - purchase-orders:*
+                  - tax:*
 
 Outputs:
   RoleArn:

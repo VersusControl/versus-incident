@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AwsAccount, AwsDraftService, AwsOptionalData } from "@/lib/api";
+import { ApiError, awsErrorFrom, awsErrorText } from "@/lib/api";
 import {
   AWS_SERVICE_CATALOG,
   AWS_SERVICE_TOTAL,
@@ -13,6 +14,7 @@ import {
   defaultAccountName,
   deniedFixes,
   deriveDraftCounts,
+  gapWords,
   draftIsRunning,
   legendWords,
   notCheckedReason,
@@ -23,6 +25,7 @@ import {
   selfTestLine,
   serviceFixText,
   serviceLabel,
+  serviceStatusLabel,
   serviceStatusText,
 } from "@/lib/awsSettings";
 
@@ -365,6 +368,18 @@ describe("label maps", () => {
     );
   });
 
+  it("words a sync gap for a service missing in the region", () => {
+    expect(gapWords("not_available_in_region")).toBe("Not in this region");
+  });
+
+  it("names a not-used probe with a known regional cause instead of Not used", () => {
+    expect(serviceStatusLabel("not_used", "not_available_in_region")).toBe("Not in this region");
+    expect(serviceStatusText("eks", "not_used", "not_available_in_region")).toBe(
+      "EKS: Not in this region",
+    );
+    expect(serviceStatusLabel("not_used")).toBe("Not used");
+  });
+
   it("names known regions and falls back to the code", () => {
     expect(regionLabel("us-east-1")).toBe("US East (N. Virginia)");
     expect(regionLabel("me-south-1")).toBe("me-south-1");
@@ -488,5 +503,50 @@ describe("connect wizard derivations", () => {
     expect(assumeWords({ ok: false, error_code: "external_id_mismatch" })).toBe(
       "Role could not be assumed",
     );
+  });
+});
+
+describe("refresh in progress wording", () => {
+  it("puts refresh_in_progress into short plain words", () => {
+    const info = awsErrorText("refresh_in_progress");
+    expect(`${info.title}. ${info.detail}`).toBe("A cost refresh is running. Try again in a few seconds.");
+    expect(awsErrorFrom(new ApiError(409, "refresh_in_progress", { error: "refresh_in_progress" }))).toBe(info);
+    expect(awsErrorText("busy").code).toBe("unknown");
+  });
+});
+
+describe("before the first health check", () => {
+  // A config account with regions "auto" right after boot: no check has run,
+  // so the server still reports zero counts and no regions.
+  function unchecked(): AwsAccount {
+    return healthy("Harness", "123456789012");
+  }
+  const fresh = (): AwsAccount => ({
+    ...unchecked(),
+    source: "config",
+    checked_at: null,
+    services: { total: 24, readable: 0, not_used: 0, not_checked: 0 },
+    regions: { selected: [], enabled: 0, not_enabled: [] },
+  });
+
+  it("waits instead of saying all good over zero counts", () => {
+    const answer = awsSettingsAnswer({ enabled: true, accounts: [fresh()] }, NOW);
+    expect(answer.kind).toBe("checking");
+    expect(answer.segments.map((s) => s.text).join("")).toBe("1 account connected; waiting for the first check");
+    expect(kinds(answer.segments)).toEqual([]);
+  });
+
+  it("shows waiting words in the row, never 0 of 24 or 0 of 0", () => {
+    const row = accountRow(fresh(), NOW);
+    expect(row.statusDetail).toBe("Waiting for first check");
+    expect(row.servicesLabel).toBe("Waiting");
+    expect(row.regionsLabel).toBe("Waiting");
+    expect(row.regionsDetail).toBe("");
+  });
+
+  it("counts again once the check has run", () => {
+    const row = accountRow({ ...fresh(), checked_at: "2026-11-04T14:20:48Z" }, NOW);
+    expect(row.servicesLabel).toBe("0 of 24 readable");
+    expect(awsSettingsAnswer({ enabled: true, accounts: [unchecked()] }, NOW).kind).toBe("ok");
   });
 });

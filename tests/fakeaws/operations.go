@@ -11,6 +11,12 @@ func (s *Server) writeOperation(writer http.ResponseWriter, request awsRequest) 
 		s.writeSTS(writer, request)
 		return
 	}
+	if s.writeCostOperation(writer, request) {
+		return
+	}
+	if s.writeWorldOperation(writer, request) {
+		return
+	}
 	if request.protocol == protocolCBOR {
 		s.writeCBOROperation(writer, request)
 		return

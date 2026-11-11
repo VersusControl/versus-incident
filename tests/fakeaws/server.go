@@ -53,11 +53,25 @@ const (
 const requestID = "00000000-0000-0000-0000-000000000001"
 
 var knownScenarios = map[string]bool{
-	"new-account-connect": true,
-	"assume-denied":       true,
-	"throttled-api":       true,
-	"region-disabled":     true,
-	"secret-canary":       true,
+	"new-account-connect":       true,
+	"assume-denied":             true,
+	"throttled-api":             true,
+	"region-disabled":           true,
+	"secret-canary":             true,
+	ScenarioBadDeploy:           true,
+	ScenarioHealthEvent:         true,
+	ScenarioAccessDeniedBurst:   true,
+	ScenarioLoad5k:              true,
+	ScenarioCostNatSpike:        true,
+	ScenarioCostCredits:         true,
+	ScenarioCostOneOffFee:       true,
+	ScenarioCostOrganization:    true,
+	ScenarioCostDeniedAccount:   true,
+	ScenarioCostThrottled:       true,
+	ScenarioCostCapReached:      true,
+	ScenarioCostUnavailable:     true,
+	ScenarioCostNatSpikeTwoNATs: true,
+	ScenarioCostNewUntaggedDB:   true,
 }
 
 // Account is one fixture account. Services in Denied answer AccessDenied;
@@ -89,9 +103,19 @@ type Server struct {
 	opCounts      map[string]int64
 	probeRequests int64
 	throttleEvery int
+	// expiredToken answers every call as AWS does once the caller's
+	// temporary credentials have expired.
+	expiredToken bool
 
 	externalID      string
 	disabledRegions map[string]bool
+
+	loadSize   int
+	now        func() time.Time
+	lateEvents []trailEvent
+
+	cost          costCounters
+	costThrottled bool
 }
 
 // New starts a fake AWS endpoint for the given scenario and stops it when the
@@ -129,6 +153,8 @@ func NewServer(scenario string) (*Server, error) {
 		server.throttleEvery = 3
 	case "region-disabled":
 		server.disabledRegions["ap-southeast-1"] = true
+	case ScenarioCostThrottled:
+		server.costThrottled = true
 	}
 	server.http = httptest.NewServer(server)
 	return server, nil
@@ -182,6 +208,15 @@ func (s *Server) SetThrottle(every int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.throttleEvery = every
+}
+
+// SetExpiredToken makes every call fail as with expired temporary
+// credentials: ExpiredToken on query and XML APIs, ExpiredTokenException on
+// JSON APIs.
+func (s *Server) SetExpiredToken(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expiredToken = on
 }
 
 // DisabledRegions lists the regions the region-disabled fixture rejects.
@@ -263,6 +298,8 @@ type awsRequest struct {
 	params   url.Values
 	path     string
 	scenario string
+	method   string
+	body     []byte
 }
 
 func (r awsRequest) operation() string {
@@ -278,12 +315,23 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	parsed.scenario = s.scenarioFor(request)
 	s.record(request.URL.Path, parsed.operation())
 
+	s.mu.Lock()
+	expired := s.expiredToken
+	s.mu.Unlock()
+	if expired {
+		code := "ExpiredToken"
+		if parsed.protocol == protocolJSON || (restJSONServices[parsed.service] && parsed.protocol == protocolREST) {
+			code = "ExpiredTokenException"
+		}
+		writeErrorFor(writer, parsed, http.StatusForbidden, code, "The security token included in the request is expired")
+		return
+	}
 	if s.shouldThrottle(parsed) {
-		s.writeError(writer, parsed.protocol, http.StatusBadRequest, "ThrottlingException", "Rate exceeded")
+		writeErrorFor(writer, parsed, http.StatusBadRequest, "ThrottlingException", "Rate exceeded")
 		return
 	}
 	if s.isRegionDisabled(parsed) {
-		s.writeError(writer, parsed.protocol, http.StatusBadRequest, "AuthFailure", "AWS was not able to validate the provided access credentials")
+		writeErrorFor(writer, parsed, http.StatusBadRequest, "AuthFailure", "AWS was not able to validate the provided access credentials")
 		return
 	}
 	s.serve(writer, parsed)
@@ -322,6 +370,8 @@ func regionScoped(service string) bool {
 func parseRequest(request *http.Request, body []byte) awsRequest {
 	parsed := awsRequest{
 		path:    request.URL.Path,
+		method:  request.Method,
+		body:    body,
 		params:  url.Values{},
 		region:  request.Header.Get(RegionHeader),
 		account: accountForRequest(request),
@@ -570,6 +620,29 @@ func (s *Server) writeError(writer http.ResponseWriter, protocol string, status 
 		writeBody(writer, "application/xml", status, xmlErrorBody(code, message))
 	default:
 		writeBody(writer, "text/xml", status, xmlErrorBody(code, message))
+	}
+}
+
+// restJSONServices answer errors as REST-JSON: the code in the
+// X-Amzn-Errortype header and the body.
+var restJSONServices = map[string]bool{"lambda": true, "eks": true, "apigateway": true, "servicecatalog": true}
+
+// writeErrorFor answers an error in the exact shape the calling service's
+// SDK parses: EC2's query errors, S3's bare <Error>, REST-JSON's header and
+// body, and the shared query, JSON and CBOR shapes for the rest.
+func writeErrorFor(writer http.ResponseWriter, request awsRequest, status int, code, message string) {
+	switch {
+	case request.service == "ec2":
+		writeBody(writer, "text/xml", status, `<Response><Errors><Error><Code>`+xmlEscape(code)+`</Code><Message>`+
+			xmlEscape(message)+`</Message></Error></Errors><RequestID>`+requestID+`</RequestID></Response>`)
+	case request.service == "s3":
+		writeBody(writer, "application/xml", status, `<Error><Code>`+xmlEscape(code)+`</Code><Message>`+
+			xmlEscape(message)+`</Message><RequestId>`+requestID+`</RequestId></Error>`)
+	case restJSONServices[request.service] && request.protocol == protocolREST:
+		writer.Header().Set("X-Amzn-Errortype", code)
+		writeBody(writer, "application/json", status, `{"__type":`+strconv.Quote(code)+`,"message":`+strconv.Quote(message)+`}`)
+	default:
+		(&Server{}).writeError(writer, request.protocol, status, code, message)
 	}
 }
 

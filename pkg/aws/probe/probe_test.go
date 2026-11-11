@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -94,7 +96,7 @@ func TestProbeReportsDeniedWithFixActions(t *testing.T) {
 	if result.Status != StatusDenied || result.ErrorCode != CodeDenied || result.Retryable {
 		t.Fatalf("unexpected denied result: %#v", result)
 	}
-	if len(result.FixActions) != 2 || result.FixActions[0] != "s3:ListAllMyBuckets" {
+	if len(result.FixActions) != 4 || result.FixActions[0] != "s3:ListAllMyBuckets" {
 		t.Fatalf("denied result lost its fix actions: %#v", result.FixActions)
 	}
 }
@@ -151,6 +153,11 @@ func TestClassify(t *testing.T) {
 		{"transport", awsauth.ErrNetwork, StatusNotChecked, CodeNetwork, true},
 		{"no server identity", awsauth.ErrNoServerIdentity, StatusNotChecked, awsauth.ErrNoServerIdentity.Error(), false},
 		{"unknown", errors.New("opaque provider text"), StatusNotChecked, CodeNetwork, true},
+		{"no endpoint in the region", &url.Error{Op: "Post", URL: "https://servicecatalog-appregistry.ap-southeast-5.amazonaws.com",
+			Err: &net.DNSError{Err: "no such host", Name: "servicecatalog-appregistry.ap-southeast-5.amazonaws.com", IsNotFound: true}},
+			StatusNotUsed, CodeNotInRegion, false},
+		{"region not supported", &smithy.GenericAPIError{Code: "UnsupportedAPIEndpointException"}, StatusNotUsed, CodeNotInRegion, false},
+		{"resolver cannot answer", &net.DNSError{Err: "server misbehaving", IsTemporary: true}, StatusNotChecked, CodeNetwork, true},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -197,7 +204,7 @@ func TestBuildFixPolicy(t *testing.T) {
 	if statement.Effect != "Allow" || statement.Resource != "*" {
 		t.Fatalf("unexpected statement: %#v", statement)
 	}
-	expected := []string{"dynamodb:DescribeTable", "dynamodb:ListTables", "s3:GetBucket*", "s3:ListAllMyBuckets"}
+	expected := []string{"dynamodb:DescribeTable", "dynamodb:ListTables", "s3:GetBucketPolicyStatus", "s3:GetBucketPublicAccessBlock", "s3:GetEncryptionConfiguration", "s3:ListAllMyBuckets"}
 	if len(statement.Action) != len(expected) {
 		t.Fatalf("expected %v, got %v", expected, statement.Action)
 	}
