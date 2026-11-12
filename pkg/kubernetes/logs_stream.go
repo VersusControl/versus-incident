@@ -508,8 +508,9 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 	// say a gap may exist between what it holds and what this read can return.
 	replayUncertain := false
 	query := url.Values{"follow": {strconv.FormatBool(!options.Previous && !options.finite)}, "previous": {strconv.FormatBool(options.Previous)}, "timestamps": {"true"}}
-	if options.Container != "" {
-		query.Set("container", options.Container)
+	container := options.Container
+	if container != "" {
+		query.Set("container", container)
 	}
 	if !options.SinceTime.IsZero() {
 		// Resuming by timestamp, the way kubectl logs -f does: the boundary lines
@@ -557,7 +558,20 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 		query.Set("sinceSeconds", strconv.Itoa(since))
 		query.Set("tailLines", strconv.Itoa(tail))
 	}
-	body, err := service.client.openPodLogStream(ctx, "/api/v1/namespaces/"+url.PathEscape(options.Namespace)+"/pods/"+url.PathEscape(options.Pod)+"/log?"+query.Encode(), options.Previous)
+	logPath := "/api/v1/namespaces/" + url.PathEscape(options.Namespace) + "/pods/" + url.PathEscape(options.Pod) + "/log?"
+	body, err := service.client.openPodLogStream(ctx, logPath+query.Encode(), options.Previous)
+	if err != nil && container == "" && errors.Is(err, ErrInvalidArguments) {
+		// Kubernetes refuses a container-less read of a Pod with several
+		// containers. The read is retried once against the container kubectl
+		// logs would choose. That container goes upstream and onto each line,
+		// while the resume cursor stays bound to what the viewer asked for, so a
+		// viewer that resumes without a container still matches it.
+		if resolved := service.resolveLogContainer(ctx, options.Namespace, options.Pod); resolved != "" {
+			container = resolved
+			query.Set("container", container)
+			body, err = service.client.openPodLogStream(ctx, logPath+query.Encode(), options.Previous)
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -788,7 +802,7 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 				if result.oversized {
 					replayUncertain = true
 					sequence++
-					event := PodLogStreamEvent{Event: "line", Text: "[oversized log line omitted]", Container: options.Container, Sequence: sequence, ReplayUncertain: true}
+					event := PodLogStreamEvent{Event: "line", Text: "[oversized log line omitted]", Container: container, Sequence: sequence, ReplayUncertain: true}
 					if sequence == 1 || sequence%logCursorCheckpoint == 0 {
 						event.Cursor = lastCursor
 					}
@@ -867,7 +881,7 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 			if len(nextCursor) > cursorBudget {
 				nextCursor = ""
 			}
-			event := PodLogStreamEvent{Event: "line", Text: text, Container: options.Container, Timestamp: timestampText, Sequence: sequence, Ordinal: ordinal, ReplayUncertain: replayUncertain}
+			event := PodLogStreamEvent{Event: "line", Text: text, Container: container, Timestamp: timestampText, Sequence: sequence, Ordinal: ordinal, ReplayUncertain: replayUncertain}
 			if nextCursor != "" && (options.checkpointEveryLine || sequence == 1 || sequence%logCursorCheckpoint == 0) {
 				event.Cursor = nextCursor
 			}

@@ -113,6 +113,7 @@ func projectLogContainerSummary(metadata, spec, status, summary map[string]any) 
 		states[container.Name] = container
 	}
 	logContainers := []kubeindex.ContainerState{}
+	regular := []string{}
 	for _, group := range []struct {
 		field string
 		init  bool
@@ -129,17 +130,13 @@ func projectLogContainerSummary(metadata, spec, status, summary map[string]any) 
 			state := states[name]
 			state.Name, state.Init = name, group.init
 			logContainers = append(logContainers, state)
-			if !group.init && summary["main_container"] == nil {
-				summary["main_container"] = name
+			if !group.init {
+				regular = append(regular, name)
 			}
 		}
 	}
-	if preferred := stringValue(annotations["kubectl.kubernetes.io/default-container"]); preferred != "" {
-		for _, container := range logContainers {
-			if !container.Init && container.Name == preferred {
-				summary["main_container"] = preferred
-			}
-		}
+	if main := preferredLogContainer(stringValue(annotations[defaultContainerAnnotation]), regular); main != "" {
+		summary["main_container"] = main
 	}
 	summary["log_container_states"] = logContainers
 }

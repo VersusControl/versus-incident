@@ -61,6 +61,9 @@
   );
 
   --sev-critical: 248 113 113;
+  /* Status words set directly on the page surface (not on a tinted pill). */
+  --sev-critical-text: 248 113 113;
+  --sev-warn-text: 251 191 36;
   --sev-critical-solid: 220 38 38;
   --sev-high: 251 146 60;
   --sev-high-solid: 234 88 12;
@@ -104,6 +107,10 @@
 
   /* Severity text needs 600-700-level tones for AA on white tints. */
   --sev-critical: 220 38 38;
+  /* Status words set directly on the page surface need 700/800 tones: the
+     600 tone is 4.27:1 on the sunken background, below AA for small text. */
+  --sev-critical-text: 185 28 28; /* red-700, 5.7:1 on surface-sunken */
+  --sev-warn-text: 146 64 14; /* amber-800, 6.3:1 on surface-sunken */
   --sev-critical-solid: 220 38 38;
   --sev-high: 194 65 12;
   --sev-high-solid: 234 88 12;

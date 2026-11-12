@@ -356,12 +356,13 @@ func workloadAllPodsCapacity(records []kubeindex.Record, selection string, maxFo
 		}
 		main := record.MainContainer
 		if main == "" {
+			regular := []string{}
 			for _, container := range containers {
 				if !container.Init {
-					main = container.Name
-					break
+					regular = append(regular, container.Name)
 				}
 			}
+			main = preferredLogContainer("", regular)
 		}
 		count := 0
 		for _, container := range containers {
@@ -525,10 +526,10 @@ func (session *WorkloadLogSession) reconcile(records []kubeindex.Record) error {
 				pod.InitContainers = append(pod.InitContainers, container.Name)
 			} else {
 				pod.Containers = append(pod.Containers, container.Name)
-				if pod.MainContainer == "" {
-					pod.MainContainer = container.Name
-				}
 			}
+		}
+		if pod.MainContainer == "" {
+			pod.MainContainer = preferredLogContainer("", pod.Containers)
 		}
 		selected := len(focus) == 0 || focus[record.UID]
 		if !selected {
