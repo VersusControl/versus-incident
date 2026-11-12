@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import type { KubernetesPodLogEvent, KubernetesWorkloadLogEvent } from "@/lib/api";
 import { PodLogViewer } from "./PodLogViewer";
 
@@ -57,7 +58,8 @@ describe("Pod log viewer", () => {
     fireEvent.change(screen.getByLabelText("Log filter"), { target: { value: "missing" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
     const output = screen.getByLabelText("Pod log output");
-    expect(output.textContent).toContain("previous_unavailable Previous container logs are unavailable. Select current container logs.");
+    expect(output.textContent).toContain("Previous container logs are unavailable. Select current container logs.");
+    expect(output.textContent).not.toContain("previous_unavailable");
     expect(output.textContent).not.toMatch(/resumed after reconnect|No log lines match|Connecting/);
     expect(output.querySelectorAll("[data-log-key]")).toHaveLength(0);
     expect((screen.getByLabelText("Download scrubbed logs") as HTMLButtonElement).disabled).toBe(true);
@@ -195,7 +197,8 @@ describe("Pod log viewer", () => {
     expect(output.textContent).toBe("No log lines match this filter.");
     fireEvent.click(screen.getByLabelText("Reload logs"));
     act(() => emit({ event: "error", text: "", container: "app", code: "forbidden", message: "Access denied", action: "Check RBAC" }));
-    expect(output.textContent).toContain("forbidden Access denied Check RBAC");
+    expect(output.textContent).toContain("Access denied Check RBAC");
+    expect(output.textContent).not.toContain("forbidden");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(document.body.textContent).not.toContain("No log lines in the selected time");
   });
@@ -497,7 +500,8 @@ describe("Pod log viewer", () => {
     act(() => emit({ event: "error", text: "", container: "app", code: "forbidden", message: "Access denied" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
     expect(screen.getByLabelText("Log connection status").textContent).toBe("Unavailable");
-    expect(screen.getByLabelText("Pod logs").textContent).toContain("forbidden Access denied");
+    expect(screen.getByLabelText("Pod logs").textContent).toContain("Access denied");
+    expect(screen.getByLabelText("Pod log output").textContent).not.toContain("forbidden");
   });
 
   it("names a sixty-three character container in full in the selector", async () => {
@@ -653,6 +657,63 @@ describe("Pod log viewer", () => {
     await waitFor(() => expect([...select.options].map((option) => option.value)).toEqual([longContainer]));
     expect(select.value).toBe(longContainer);
     expect(stream).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits instead of failing while a row-opened multi-container Pod's resource read is pending, then reads the known container", async () => {
+    vi.useFakeTimers();
+    const rowPod = { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "api", summary: { phase: "Running" } };
+    const stream = vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, options, emit, signal) => {
+      // A multi-container Pod refuses a read that names no container.
+      if (!options.container) throw new ApiError(400, "The Kubernetes request is missing a container name.", { error: { code: "invalid_arguments" } });
+      emit({ event: "line", text: "app ready", container: options.container, ordinal: 1, timestamp: "2026-10-26T07:00:00Z" });
+      return new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+    // The probe records what each commit shows, before the container-adopting
+    // effect runs, so a one-frame error cannot hide.
+    const frames: string[] = [];
+    function Probe() {
+      useLayoutEffect(() => {
+        frames.push(`${screen.getByLabelText("Log connection status").textContent} | ${screen.getByLabelText("Pod log output").textContent}`);
+      });
+      return null;
+    }
+    const { rerender } = render(<><PodLogViewer resource={rowPod} compact resourcePending /><Probe /></>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(stream).toHaveBeenCalledTimes(1);
+    const output = screen.getByLabelText("Pod log output");
+    expect(output.textContent).toBe("Waiting for logs…");
+    expect(screen.getByLabelText("Log connection status").textContent).toBe("Connecting");
+    expect(screen.getByLabelText("Pod logs").textContent).not.toMatch(/invalid_arguments|Unavailable|missing a container/);
+    // The resource read lands and names the containers: the read starts again on one.
+    frames.length = 0;
+    rerender(<><PodLogViewer resource={{ ...rowPod, summary: { phase: "Running", main_container: "app", log_containers: [{ name: "app", type: "regular" }, { name: "proxy", type: "regular" }] } }} compact resourcePending={false} /><Probe /></>);
+    expect(frames[0]).toBe("Connecting | Waiting for logs…");
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(stream).toHaveBeenCalledTimes(2);
+    expect(stream.mock.calls[1][2].container).toBe("app");
+    expect(output.textContent).toContain("app ready");
+    expect(screen.getByLabelText("Log connection status").textContent).toBe("Live");
+  });
+
+  it("shows a plain sentence and Unavailable only once the refused read is a real failure", async () => {
+    vi.useFakeTimers();
+    const rowPod = { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "api", summary: { phase: "Running" } };
+    vi.spyOn(api, "kubernetesPodLogStream").mockRejectedValue(new ApiError(400, "", { error: { code: "invalid_arguments" } }));
+    // The resource read finished without naming any container: nothing will fix the read.
+    render(<PodLogViewer resource={rowPod} compact resourcePending={false} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    const output = screen.getByLabelText("Pod log output");
+    expect(screen.getByLabelText("Log connection status").textContent).toBe("Unavailable");
+    expect(output.textContent).toBe("The log request did not name a container this Pod accepts. Pick a container and retry.");
+    expect(output.textContent).not.toContain("invalid_arguments");
+  });
+
+  it("says it is waiting for logs while the resource read is pending and the read has not answered", () => {
+    const rowPod = { resource_id: "core~v1~pods", kind: "Pod", namespace: "shop", name: "api", summary: { phase: "Running" } };
+    vi.spyOn(api, "kubernetesPodLogStream").mockImplementation((_namespace, _pod, _options, _emit, signal) => new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })));
+    render(<PodLogViewer resource={rowPod} compact resourcePending />);
+    expect(screen.getByLabelText("Pod log output").textContent).toBe("Waiting for logs…");
+    expect(screen.getByLabelText("Log connection status").textContent).toBe("Connecting");
   });
 
   it("keeps the described container list instead of the one container the read reported", async () => {

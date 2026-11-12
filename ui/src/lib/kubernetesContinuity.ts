@@ -117,6 +117,16 @@ export function hasKubernetesPublication(value: unknown, firstReadyAt?: string):
     const firstReady = Date.parse(firstReadyAt ?? "");
     const counts = object(projection?.counts);
     const workloadKinds = new Set(["Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"]);
+    // An overview of a cluster that has published before carries its own
+    // observation time and the counts that observation found. A cycle error
+    // does not unmake that publication, so the first answer is shown at once
+    // instead of waiting for a second identical answer. Zero counts, or a
+    // projection the connector was refused, still prove nothing.
+    const observedAt = typeof projection?.observed_at === "string" ? Date.parse(projection.observed_at) : NaN;
+    if (Number.isFinite(firstReady) && projection && !("items" in projection)
+      && Number.isFinite(observedAt) && new Date(observedAt).getUTCFullYear() > 1
+      && [projection.nodes, projection.pods, projection.workloads].some((count) => typeof count === "number" && count > 0)
+      && !snapshot.partial_failures?.some((failure) => ["forbidden", "unauthorized", "namespace_scope", "credential_unavailable"].includes(failure.class ?? ""))) return true;
     const knownCount = (kind: string) => typeof counts?.[kind] === "number"
       && Number.isSafeInteger(counts[kind]) && counts[kind] >= 0;
     // Workloads has no observation timestamp. Its count keys are emitted only

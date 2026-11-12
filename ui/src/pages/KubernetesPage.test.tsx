@@ -54,6 +54,12 @@ async function browserClick(element: HTMLElement) {
 		scope.IS_REACT_ACT_ENVIRONMENT = previous;
 	}
 }
+// The top-bar sync status opens its details on hover, the way a reader reaches it.
+async function openSyncDetails() {
+	fireEvent.mouseEnter(await screen.findByRole("button", { name: /^Sync (failed|degraded)/ }));
+	return screen.getByRole("region", { name: "Sync status details" });
+}
+
 async function settle() {
 	const scope = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
 	const previous = scope.IS_REACT_ACT_ENVIRONMENT;
@@ -2338,7 +2344,7 @@ describe("KubernetesPage", () => {
 			expect(found).toBeTruthy();
 			return found!;
 		});
-		expect(block.textContent).toContain("The last cluster snapshot is 7 minutes old, so cluster data stays hidden until a fresh sync lands.");
+		expect(block.textContent).toContain("The last cluster snapshot is 7 minutes old. Cluster data appears here after a fresh sync lands.");
 		expect(screen.queryByText(/Loading \d+ more resource types?/)).toBeNull();
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
 		expect(screen.queryByRole("heading", { name: "CPU capacity" })).toBeNull();
@@ -2449,7 +2455,7 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
 		blockWith("error", { Node: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "forbidden" } }, { failing: 1 });
 		const { container } = renderPage();
-		await screen.findByRole("heading", { name: "Cluster sync failed" });
+		await screen.findByRole("heading", { name: "Cannot connect to this cluster" });
 		expect(container.querySelectorAll("[data-sync-health]")).toHaveLength(1);
 		expect(container.querySelector('[data-sync-health="failed"]')).toBeTruthy();
 		// No cluster data anywhere: no counts, charts or graph for this view.
@@ -2475,7 +2481,7 @@ describe("KubernetesPage sync gate", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
 		await waitFor(() => expect(client.getQueryData(["kubernetes", "_", "kubernetes-overview"])).toMatchObject({ nodes: 3, pods: 4, allocatable_cpu: "8", observed_at: healthyOverview.observed_at, sync: { state: "syncing" } }));
 		expect(within(screen.getByRole("region", { name: "Cluster health" })).getByText(snapshot)).toBeTruthy();
-		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, nodes: 0, pods: 0, sync });
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
 		await waitFor(() => expect(client.getQueryData(["kubernetes", "_", "kubernetes-overview"])).toMatchObject({ nodes: 0, pods: 0 }));
@@ -2502,7 +2508,7 @@ describe("KubernetesPage sync gate", () => {
 			await act(async () => { finishReport(warmingReport); await vi.advanceTimersByTimeAsync(50); });
 			await act(async () => { await vi.advanceTimersByTimeAsync(20); });
 			expect(screen.queryByRole("alert")).toBeNull();
-			expect(rendered.container.querySelector("[data-sync-strip]")).toBeNull();
+			if (alreadyPublished) expect(rendered.container.querySelector("[data-sync-health]")).toBeNull();
 			expect(rendered.container.querySelector("[data-sync-state]")?.textContent).toBe(alreadyPublished ? "Syncing" : "Preparing");
 			if (alreadyPublished) {
 				expect(rendered.container.querySelector("[data-preparing-panel]")).toBeNull();
@@ -2537,7 +2543,7 @@ describe("KubernetesPage sync gate", () => {
 		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Syncing"));
 		expect(client.getQueryData(["kubernetes", "_", "kubernetes-overview"])).toMatchObject({ nodes: 3, pods: 4, allocatable_cpu: "8", observed_at: healthyOverview.observed_at });
 		expect(screen.getByRole("region", { name: "Cluster health" })).toBeTruthy();
-		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 		expect(screen.queryByRole("alert")).toBeNull();
 	});
 
@@ -2558,7 +2564,7 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, sync: { state: "ready", age_s: 1, partial: false } });
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(502, "Cluster credentials unavailable", { code: "credential_unavailable", first_ready_at: published }));
 		const { container } = renderPage();
-		await waitFor(() => expect(container.querySelector("[data-sync-state=failed]")?.textContent).toBe("Failed"));
+		await waitFor(() => expect(container.querySelector("[data-sync-state=failed]")?.textContent).toBe("Sync failed"));
 		await settle();
 		expect(vi.mocked(api.kubernetesSyncHealth)).toHaveBeenCalledTimes(1);
 		expect(vi.mocked(api.kubernetesOverview).mock.calls.length).toBeLessThanOrEqual(2);
@@ -2573,14 +2579,36 @@ describe("KubernetesPage sync gate", () => {
 		await screen.findByRole("region", { name: "Cluster health" });
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(502, "Cluster credentials unavailable", { code: "credential_unavailable", first_ready_at: published }));
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
-		await waitFor(() => expect(container.querySelector("[data-sync-state=failed]")?.textContent).toBe("Failed"));
+		await waitFor(() => expect(container.querySelector("[data-sync-state=failed]")?.textContent).toBe("Sync failed"));
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
 		expect(screen.queryByText("No broken workloads")).toBeNull();
 		expect(container.querySelector("[data-preparing-panel]")).toBeNull();
-		expect(container.querySelector("[data-sync-strip]")?.textContent).toMatch(/credentials are unavailable or rejected/);
+		expect((await openSyncDetails()).textContent).toMatch(/credentials are unavailable or rejected/);
 	});
 
-	it.each(["partial", "stale", "error"])("keeps every view open and reports %s as a strip after the first publication", async (state) => {
+	// Access lost after the first sync takes the data off screen, so there is no
+	// data for the top bar to date: the full panel names the failure instead of
+	// an overview skeleton that would never finish.
+	it.each(["overview", "resources"])("replaces the endless %s skeleton with the failure panel when a synced cluster loses access", async (view) => {
+		window.history.replaceState(null, "", `/agent/kubernetes${view === "overview" ? "" : `?view=${view}`}`);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, sync: { state: "ready", age_s: 1, partial: false } });
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("ready", { Pod: readyKind }), first_ready_at: published });
+		const { container } = renderPage();
+		await waitFor(() => expect(container.querySelector('[data-sync-state="ready"]')).toBeTruthy());
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(502, "Cluster credentials unavailable", { code: "credential_unavailable", first_ready_at: published }));
+		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
+		const panel = await screen.findByRole("heading", { name: "Cannot read this cluster right now" });
+		const block = panel.closest("[data-sync-health]")!;
+		expect(block.getAttribute("data-sync-health")).toBe("failed");
+		expect(block.textContent).toContain("This cluster synced before, but Versus cannot read it now. Cluster data appears again after the next successful sync.");
+		expect(block.textContent).toMatch(/credentials are unavailable or rejected/);
+		expect(within(block as HTMLElement).getByRole("button", { name: "Retry sync" })).toBeTruthy();
+		await settle();
+		expect(screen.queryByLabelText("Loading Kubernetes overview")).toBeNull();
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Sync failed");
+	});
+
+	it.each(["partial", "stale", "error"])("keeps every view open and reports %s only in the top bar after the first publication", async (state) => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
 		const kinds = state === "error"
 			? { Node: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "forbidden" } }
@@ -2589,45 +2617,74 @@ describe("KubernetesPage sync gate", () => {
 				: { Node: readyKind, Pod: readyKind };
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({
 			...report(state, kinds, { failing: state === "error" || state === "partial" ? 1 : 0 }),
-			// Two minutes of data on screen: the strip has to say so.
 			age_s: 120,
 			first_ready_at: published,
 		});
 		const { container } = renderPage();
-		const strip = await waitFor(() => {
-			const found = container.querySelector("[data-sync-strip]");
-			expect(found).toBeTruthy();
-			return found!;
-		});
-		// The blocking surfaces never come back, and the views are open.
+		const head = state === "error" ? "Sync failed" : "Sync degraded";
+		const time = new Date(healthyOverview.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+		// The top bar names the state and dates the data on screen.
+		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toBe(`${head} — showing data from ${time}`));
+		// No in-page failure section, no blocking surface, and the views are open.
 		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(screen.queryByRole("region", { name: "Cluster sync status" })).toBeNull();
 		expect(screen.queryByRole("region", { name: "Preparing your cluster" })).toBeNull();
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
 		expect(screen.queryByRole("heading", { name: "CPU capacity" })).toBeTruthy();
-		// The strip names the state and says how old what is on screen is.
-		expect(strip.textContent).toMatch(/Cluster sync failed|Cluster sync degraded|Cluster sync running/);
-		expect(strip.querySelector("[data-sync-age]")?.textContent).toContain("Showing data from 2 minutes ago.");
-		expect(within(strip as HTMLElement).getByRole("button", { name: "Retry sync" })).toBeTruthy();
+		// The overview card uses the same words as the top bar.
+		expect(within(screen.getByRole("region", { name: "Cluster health" })).getByText(`${head} — showing data from ${time}`)).toBeTruthy();
+		// Retry moved into the top-bar details.
+		expect(screen.queryByRole("button", { name: "Retry sync" })).toBeNull();
+		const details = await openSyncDetails();
+		expect(within(details).getByText(head)).toBeTruthy();
+		expect(within(details).getByRole("button", { name: "Retry sync" })).toBeTruthy();
 	});
 
-	it("names a revoked credential as a failure in the strip instead of hiding it", async () => {
+	// The server always sends the overview's own sync envelope, and on a failing
+	// cycle that envelope reads error. The first answer must still be shown.
+	it.each(["error", "partial"])("shows a synced cluster's first overview answer at once when its envelope and report read %s", async (state) => {
+		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, sync: { state: "error", age_s: 420, partial: true } });
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({
+			...report(state, { Node: state === "error" ? { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "timeout" } : { ...readyKind, partial: true, error: "record_rejected", skipped: 1 }, Pod: readyKind }, { failing: 1 }),
+			first_ready_at: published,
+		});
+		const { container } = renderPage();
+		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
+		expect(vi.mocked(api.kubernetesOverview)).toHaveBeenCalledTimes(1);
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(screen.queryByLabelText("Loading Kubernetes overview")).toBeNull();
+		expect(container.querySelector("[data-sync-state]")?.textContent).toMatch(/^Sync (failed|degraded) — showing data from \d{2}:\d{2}$/);
+	});
+
+	// Every read failing at once is one failure: the panel, not a second overview card.
+	it("shows one failure surface when the overview and the report both lose access", async () => {
+		const lost = new ApiError(502, "Cluster credentials unavailable", { error: "Cluster credentials unavailable", code: "credential_unavailable", first_ready_at: published });
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(lost);
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(lost);
+		const { container } = renderPage();
+		const heading = await screen.findByRole("heading", { name: "Cannot read this cluster right now" });
+		await settle();
+		expect(screen.queryByText("Couldn't load Kubernetes overview")).toBeNull();
+		expect(screen.getAllByRole("button", { name: "Retry sync" })).toHaveLength(1);
+		expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+		const badge = heading.parentElement!.querySelector(".pill-bad")!;
+		expect(badge.className.split(/\s+/)).toContain("pill");
+		expect(container.querySelectorAll("[data-sync-health]")).toHaveLength(1);
+	});
+
+	it("names a revoked credential as a failure in the top-bar details instead of hiding it", async () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({
 			...report("error", { Secret: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "forbidden" } }, { failing: 1 }),
 			first_ready_at: published,
 		});
 		const { container } = renderPage();
-		const strip = await waitFor(() => {
-			const found = container.querySelector("[data-sync-strip]");
-			expect(found).toBeTruthy();
-			return found!;
-		});
-		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
-		expect(strip.textContent).toContain("Cluster sync failed");
-		expect(strip.querySelector('[data-sync-problem="Secret"]')?.textContent).toContain("permission denied");
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
-		// The data is still readable behind the strip.
+		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toMatch(/^Sync failed — showing data from /));
+		const details = await openSyncDetails();
+		expect(details.querySelector('[data-sync-problem="Secret"]')?.textContent).toContain("permission denied");
+		// The data is still readable, with no failure section over it.
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
 	});
 
 	it("shows data and only the existing top-bar indicator when reloaded mid-resync", async () => {
@@ -2641,7 +2698,7 @@ describe("KubernetesPage sync gate", () => {
 		const { container } = renderPage();
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
 		await waitFor(() => expect(container.querySelector('[data-sync-state="preparing"]')?.textContent).toBe("Syncing"));
-		expect(container.querySelector("[data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
 		expect(screen.queryByRole("region", { name: "Preparing your cluster" })).toBeNull();
 	});
 
@@ -2651,11 +2708,11 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesSyncHealth).mockReturnValue(new Promise(done => { resolve = done; }));
 		const { container } = renderPage();
 		await screen.findByRole("status", { name: "Loading cluster sync status" });
-		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 		expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Loading");
 		await act(async () => { resolve({ ...report("syncing", { Node: readyKind }), first_ready_at: published }); });
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
-		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 		expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Syncing");
 	});
 
@@ -2674,7 +2731,7 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(ready);
 		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-sync-health"], ready); });
 		expect(await screen.findByText("restored-api")).toBeTruthy();
-		expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 	});
 
 	it("settles late warming responses after readiness without overlapping or cross-scope refreshes", async () => {
@@ -2720,7 +2777,7 @@ describe("KubernetesPage sync gate", () => {
 			expect(client.getQueryState(otherKey)?.isInvalidated).toBe(false);
 			expect(otherFetch).not.toHaveBeenCalled();
 			expect(client.getQueryState(inactiveKey)?.isInvalidated).toBe(false);
-			expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+			expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 		} finally {
 			stopOther();
 			vi.useRealTimers();
@@ -2742,7 +2799,7 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesWorkloads).mockReturnValueOnce(new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
 		const { container } = renderPage();
 		await waitFor(() => expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(1));
-		if (state !== "ready") expect(container.querySelector(`[data-sync-strip="${state}"]`)).toBeTruthy();
+		if (state !== "ready") expect(container.querySelector(`[data-sync-state="${state}"]`)?.textContent).toMatch(/^Sync (failed|degraded)/);
 		vi.useFakeTimers();
 		try {
 			const error = new ApiError(503, "warming", { code: "inventory_not_ready", retryable: true });
@@ -2842,7 +2899,7 @@ describe("KubernetesPage sync gate", () => {
 			const settledReads = vi.mocked(api.kubernetesWorkloads).mock.calls.length;
 			await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
 			expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(settledReads);
-			expect(container.querySelector("[data-preparing-panel], [data-sync-strip]")).toBeNull();
+			expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 		} finally {
 			vi.useRealTimers();
 		}
@@ -2883,7 +2940,7 @@ describe("KubernetesPage sync gate", () => {
 		const denied = { ...report("error", { Pod: deniedKind, Deployment: deniedKind }), first_ready_at: published, failing: [{ kind: "Pod", class: "forbidden" }, { kind: "Deployment", class: "forbidden" }] };
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(denied);
 		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-sync-health"], denied); });
-		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Failed"));
+		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toMatch(/^Sync failed/));
 		expect(screen.queryByText("protected-api")).toBeNull();
 		expect(screen.queryByRole("dialog", { name: "Details panel" })).toBeNull();
 		expect(screen.queryByText("1 total")).toBeNull();
@@ -2892,7 +2949,7 @@ describe("KubernetesPage sync gate", () => {
 		expect(client.getQueryData(graphKey)).toBeUndefined();
 		expect(client.getQueryData(namespaceKey)).toBeUndefined();
 		expect(client.getQueryData(otherClusterKey)).toEqual({ items: [row] });
-		expect(container.querySelector("[data-sync-strip]")?.textContent).toContain("permission denied");
+		expect((await openSyncDetails()).textContent).toContain("permission denied");
 		await act(async () => {
 			emitLog({ event: "line", container: "app", text: "retired synthetic output" });
 			oldStream[0]({ event: "sync", data: JSON.stringify({ state: "ready", age_s: 0, partial: false }) });
@@ -2959,7 +3016,7 @@ describe("KubernetesPage sync gate", () => {
 				await vi.advanceTimersByTimeAsync(20);
 			});
 			await act(async () => { denyOverview(new ApiError(403, "Upstream permission denied", { code: "cluster_permission_denied", retryable: false })); finishReport(denied); await vi.advanceTimersByTimeAsync(20); });
-			expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Failed");
+			expect(container.querySelector("[data-sync-state]")?.textContent).toMatch(/^Sync failed/);
 			expect(screen.queryByText(row.name)).toBeNull();
 			const overviewReads = vi.mocked(api.kubernetesOverview).mock.calls.length;
 			const inventoryReads = vi.mocked(api.kubernetesWorkloads).mock.calls.length;
@@ -3032,7 +3089,7 @@ describe("KubernetesPage sync gate", () => {
 		const failed = { ...report("error", { Pod: { ...readyKind, state: "error" as const, error, partial: true, cycle_failure: true } }), first_ready_at: published, class: error };
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(failed);
 		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-sync-health"], failed); });
-		await screen.findByText("Cluster sync failed");
+		await screen.findByRole("button", { name: /^Sync failed/ });
 		expect(screen.getByText("retained-api")).toBe(row);
 		expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(1);
 	});
@@ -3088,7 +3145,6 @@ describe("KubernetesPage sync gate", () => {
 		const { container } = renderPage();
 		await waitFor(() => expect(container.querySelector('[data-sync-health="preparing"]')).toBeTruthy());
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
-		expect(container.querySelector("[data-sync-strip]")).toBeNull();
 		expect(vi.mocked(api.kubernetesWorkloads)).not.toHaveBeenCalled();
 	});
 
@@ -3105,8 +3161,8 @@ describe("KubernetesPage sync gate", () => {
 			expect(found).toBeTruthy();
 			return found!;
 		});
-		expect(block.textContent).toContain("Cluster sync degraded");
-		expect(block.textContent).toContain("Some resource types did not finish syncing, so cluster data stays hidden until they do.");
+		expect(block.textContent).toContain("Cannot finish syncing this cluster");
+		expect(block.textContent).toContain("Some resource types did not finish their first sync. Cluster data appears here once they do.");
 		const problem = block.querySelector('[data-sync-problem="Node"]')!;
 		expect(problem.textContent).toContain("some objects could not be indexed, everything else is current");
 		expect(problem.textContent).toContain("3 objects skipped");
@@ -3114,7 +3170,7 @@ describe("KubernetesPage sync gate", () => {
 		expect(block.textContent).not.toMatch(/loading/i);
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
 		// The top bar reports the same state instead of reading as connectivity.
-		expect(container.querySelector('[data-sync-state="degraded"]')?.textContent).toBe("Degraded");
+		expect(container.querySelector('[data-sync-state="degraded"]')?.textContent).toBe("Sync degraded");
 		expect(screen.queryByText("Live")).toBeNull();
 		const before = vi.mocked(api.kubernetesSyncHealth).mock.calls.length;
 		const overviewBefore = vi.mocked(api.kubernetesOverview).mock.calls.length;
@@ -3137,10 +3193,10 @@ describe("KubernetesPage sync gate", () => {
 			expect(found).toBeTruthy();
 			return found!;
 		});
-		expect(block.textContent).toContain("Cluster sync failed");
+		expect(block.textContent).toContain("Cannot connect to this cluster");
 		expect(block.querySelector('[data-sync-problem="Node"]')?.textContent).toContain("permission denied");
 		expect(block.textContent).not.toContain("0001");
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Sync failed");
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
 	});
 
@@ -3150,7 +3206,7 @@ describe("KubernetesPage sync gate", () => {
 		blockWith("error", { Node: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "forbidden" } }, { failing: 1 });
 		renderPage();
 		const drawer = await screen.findByRole("dialog", { name: "Details panel" });
-		expect(within(drawer).getByRole("heading", { name: "Cluster sync failed" })).toBeTruthy();
+		expect(within(drawer).getByRole("heading", { name: "Cannot connect to this cluster" })).toBeTruthy();
 		expect(within(drawer).queryByRole("tablist", { name: "Resource detail views" })).toBeNull();
 		expect(new URLSearchParams(window.location.search).get("r")).toBe("apps~v1~deployments/default/checkout");
 		expect(vi.mocked(api.kubernetesDescribe)).not.toHaveBeenCalled();
@@ -3162,7 +3218,7 @@ describe("KubernetesPage sync gate", () => {
 			.mockResolvedValueOnce(report("error", { Node: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "forbidden" } }, { failing: 1 }))
 			.mockResolvedValue(report("ready", { Node: readyKind, Pod: readyKind }));
 		const { container } = renderPage();
-		await screen.findByRole("heading", { name: "Cluster sync failed" });
+		await screen.findByRole("heading", { name: "Cannot connect to this cluster" });
 		await waitFor(() => expect(container.querySelector("[data-sync-health]")).toBeNull(), { timeout: 7000 });
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
 	}, 10_000);
@@ -3195,7 +3251,7 @@ describe("KubernetesPage sync gate", () => {
 		// The ready envelope of the view does not open the gate.
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
 		for (const query of [api.kubernetesWorkloads, api.kubernetesNodes, api.kubernetesIssues, api.kubernetesUsage]) expect(vi.mocked(query)).not.toHaveBeenCalled();
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Sync failed");
 	});
 
 	it("names a held kind with the class the index recorded instead of claiming no kind failed", async () => {
@@ -3364,10 +3420,11 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(502, "credential revoked", { error: "credential revoked", first_ready_at: published, age_s: 300 }));
 		vi.mocked(api.kubernetesWorkloads).mockRejectedValue(new ApiError(502, "credential revoked"));
 		const { container } = renderPage();
-		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
-		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
-		expect(strip.querySelector("[data-sync-age]")).toBeNull();
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		// Nothing was loaded, so the label dates no data.
+		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Sync failed"));
+		// No data reached the screen, so the failure panel stands in for it.
+		expect(await screen.findByRole("heading", { name: "Cannot read this cluster right now" })).toBeTruthy();
+		expect(screen.queryByLabelText("Loading Kubernetes overview")).toBeNull();
 		// Nothing is blank: the inventory names its own failure.
 		expect(await screen.findByText("Resource inventory is unavailable.")).toBeTruthy();
 	});
@@ -3385,7 +3442,7 @@ describe("KubernetesPage sync gate", () => {
 		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Syncing"));
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(504, "Kubernetes read timed out", { error: { code: "request_timeout" } }));
 		act(() => emit(progress));
-		const expected = `Cluster unreachable — showing data from ${new Date(observed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+		const expected = `Sync failed — showing data from ${new Date(observed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
 		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe(expected));
 		expect(screen.getByRole("region", { name: "Cluster health" })).toBe(loaded);
 	});
@@ -3400,17 +3457,17 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValueOnce({ ...report("ready", { Node: readyKind, Pod: readyKind }), first_ready_at: published });
 		const { container } = renderPage();
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
-		expect(container.querySelector("[data-sync-strip]")).toBeNull();
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
 		expect(container.querySelector('[data-sync-state="ready"]')).toBeTruthy();
 
 		// The credential is revoked while the page is open: the cached report keeps
 		// saying ready, and it must not be believed over the failure.
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(502, "credential revoked", { error: "credential revoked", first_ready_at: published, age_s: 120 }));
 		act(() => emit({ event: "committed", data: JSON.stringify({ revision: 1, cluster_id: "east", kinds: ["Pod"] }) }));
-		await waitFor(() => expect(container.querySelector('[data-sync-strip="failed"]')).toBeTruthy(), { timeout: 6000 });
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
-		expect(screen.queryByRole("heading", { name: "Cluster sync failed" })).toBeNull();
-		// The data the operator was reading is still there, under the strip.
+		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toMatch(/^Sync failed/), { timeout: 6000 });
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(screen.queryByRole("heading", { name: "Cannot connect to this cluster" })).toBeNull();
+		// The data the operator was reading is still there.
 		expect(screen.getByRole("region", { name: "Cluster health" })).toBeTruthy();
 	}, 15_000);
 
@@ -3432,12 +3489,9 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("error", deadCredentialKinds, { failing: 1 }), first_ready_at: published, age_s: 180 });
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
 
-		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
-		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
-		expect(strip.textContent).toContain("Cluster sync failed");
-		expect(within(strip).getByRole("button", { name: "Retry sync" })).toBeTruthy();
-		expect(strip.querySelector("[data-sync-age]")?.textContent).toContain("Showing data from 3 minutes ago.");
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toMatch(/^Sync failed — showing data from /));
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(within(await openSyncDetails()).getByRole("button", { name: "Retry sync" })).toBeTruthy();
 		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
 		expect(screen.getByRole("tablist", { name: "Kubernetes views" })).toBeTruthy();
 		// Every view keeps the data it had.
@@ -3455,15 +3509,11 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("error", deadCredentialKinds, { failing: 1 }), first_ready_at: published, age_s: 240 });
 		vi.mocked(api.kubernetesWorkloads).mockRejectedValue(new ApiError(502, "credential revoked"));
 		const { container } = renderPage();
-		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
-		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		// Nothing is on screen, so the label claims no age for it: a snapshot age
+		// is not a claim about data this page never loaded.
+		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Sync failed"));
 		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
 		expect(screen.getByRole("tablist", { name: "Kubernetes views" })).toBeTruthy();
-		// Nothing is on screen, so the strip claims no age for it: a snapshot age is
-		// not a claim about data this page never loaded.
-		expect(strip.querySelector("[data-sync-age]")).toBeNull();
-		expect(strip.textContent).not.toContain("Showing data");
 		// The view names its own failure rather than going blank.
 		expect(await screen.findByText("Resource inventory is unavailable.")).toBeTruthy();
 	});
@@ -3473,9 +3523,9 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, fault.error, fault));
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(503, fault.error, fault));
 		const { container } = renderPage();
-		expect(await screen.findByRole("heading", { name: "Cluster sync failed" })).toBeTruthy();
+		expect(await screen.findByRole("heading", { name: "Cannot connect to this cluster" })).toBeTruthy();
 		expect(container.querySelector('[data-sync-health="failed"]')).toBeTruthy();
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Sync failed");
 		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
 	});
 
@@ -3489,9 +3539,7 @@ describe("KubernetesPage sync gate", () => {
 		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, "Kubernetes connector is not configured"));
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("error", deadCredentialKinds, { failing: 1 }), first_ready_at: published, age_s: 90 });
 		const { container } = renderPage(undefined, false);
-		const strip = await screen.findByRole("region", { name: "Cluster sync status" });
-		expect(strip.getAttribute("data-sync-strip")).toBe("failed");
-		expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Failed");
+		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe("Sync failed"));
 		expect(screen.queryByText(/Couldn't load clusters/)).toBeNull();
 		expect(screen.queryByRole("article", { name: "Kubernetes connector" })).toBeNull();
 	});
@@ -3541,7 +3589,7 @@ describe("Kubernetes unreadable kinds", () => {
 			unreadable: [{ kind: "Secret", state: "error", class: "forbidden", records: 0, since: "2026-10-26T10:49:24Z" }],
 		});
 		const { container } = renderPage();
-		await screen.findByRole("heading", { name: "Cluster sync failed" });
+		await screen.findByRole("heading", { name: "Cannot connect to this cluster" });
 		// The real sync fault still closes the views; the unreadable kind is not it.
 		expect(container.querySelectorAll("[data-sync-problem]")).toHaveLength(1);
 		expect(container.querySelector('[data-sync-problem="Secret"]')).toBeNull();

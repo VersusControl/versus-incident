@@ -1496,7 +1496,18 @@ func (service *Service) podLogs(ctx context.Context, namespace, pod, container s
 		return PodLogs{}, err
 	}
 	defer release()
-	payload, truncated, err := service.client.getBounded(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods/"+url.PathEscape(pod)+"/log?"+query.Encode(), "*/*", int64(byteLimit))
+	logPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods/" + url.PathEscape(pod) + "/log?"
+	payload, truncated, err := service.client.getBounded(ctx, logPath+query.Encode(), "*/*", int64(byteLimit))
+	if err != nil && container == "" && errors.Is(err, ErrInvalidArguments) {
+		// Kubernetes refuses a container-less read of a Pod with several
+		// containers. The read is retried once against the container kubectl
+		// logs would choose; when none can be chosen the refusal stands.
+		if resolved := service.resolveLogContainer(ctx, namespace, pod); resolved != "" {
+			container = resolved
+			query.Set("container", container)
+			payload, truncated, err = service.client.getBounded(ctx, logPath+query.Encode(), "*/*", int64(byteLimit))
+		}
+	}
 	if err != nil {
 		return PodLogs{}, err
 	}

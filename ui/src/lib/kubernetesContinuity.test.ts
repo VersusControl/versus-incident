@@ -312,6 +312,17 @@ describe("Kubernetes publication continuity", () => {
     expect(hasKubernetesPublication({ ...overview, sync: { state: "ready", age_s: 30, partial: true }, partial_failures: refused.slice(0, 1) }, committed.observed_at)).toBe(true);
   });
 
+  it("admits a published cluster's first overview answer even while its cycle reports an error", () => {
+    const overview = { connector: "kubernetes", cluster_id: "east", observed_at: committed.observed_at, nodes: 3, pods: 12, namespaces: 2, workloads: 4,
+      sync: { state: "error", age_s: 420, partial: true } };
+    expect(hasKubernetesPublication(overview, committed.observed_at)).toBe(true);
+    // Without a first publication, zero counts, a zero time or a refusal, it still proves nothing.
+    expect(hasKubernetesPublication(overview)).toBe(false);
+    expect(hasKubernetesPublication({ ...overview, nodes: 0, pods: 0, workloads: 0 }, committed.observed_at)).toBe(false);
+    expect(hasKubernetesPublication({ ...overview, observed_at: "0001-01-01T00:00:00Z" }, committed.observed_at)).toBe(false);
+    expect(hasKubernetesPublication({ ...overview, partial_failures: [{ resource_id: "core~v1~pods", class: "forbidden" }] }, committed.observed_at)).toBe(false);
+  });
+
   it("admits only the currently scoped first partial response and hides permission denial", async () => {
     const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const partial = { items: [{ kind: "Deployment", namespace: "shop", name: "checkout" }], counts: { Deployment: 1, Job: 0 }, sync: { state: "error", partial: true },

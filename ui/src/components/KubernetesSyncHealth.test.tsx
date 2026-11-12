@@ -49,9 +49,10 @@ describe("Sync health surface", () => {
     });
     render(<KubernetesSyncHealthSurface health={health} onRetry={onRetry} cluster="vikki-mobile-dev-cluster" />);
     const block = document.querySelector('[data-sync-health="degraded"]')!;
-    expect(block.textContent).toContain("Cluster sync degraded");
+    expect(screen.getByRole("heading", { name: "Cannot finish syncing this cluster" })).toBeTruthy();
     expect(block.textContent).toContain("Degraded");
-    expect(block.textContent).toContain("Some resource types did not finish syncing, so cluster data stays hidden until they do.");
+    expect(block.textContent).toContain("Some resource types did not finish their first sync. Cluster data appears here once they do.");
+    expect(block.textContent).not.toContain("stays hidden");
     const problem = block.querySelector('[data-sync-problem]')!;
     expect(problem.getAttribute("data-sync-problem")).toBe("Node");
     expect(problem.textContent).toContain("some objects could not be indexed, everything else is current");
@@ -73,9 +74,11 @@ describe("Sync health surface", () => {
     });
     render(<KubernetesSyncHealthSurface health={health} onRetry={vi.fn()} />);
     const block = document.querySelector('[data-sync-health="failed"]')!;
-    expect(block.textContent).toContain("Cluster sync failed");
+    expect(screen.getByRole("heading", { name: "Cannot connect to this cluster" })).toBeTruthy();
     expect(block.textContent).toContain("Failed");
-    expect(block.textContent).toContain("The cluster sync cannot run, so cluster data stays hidden until it can.");
+    expect(block.textContent).toContain("Versus could not read this cluster yet. Cluster data appears here after the first successful sync.");
+    expect(block.textContent).not.toContain("stays hidden");
+    expect(screen.getByRole("button", { name: "Retry sync" })).toBeTruthy();
     expect(block.querySelectorAll("[data-sync-problem]")).toHaveLength(2);
     expect(block.textContent).toContain("permission denied");
     // The zero time is never rendered as a date.
@@ -87,85 +90,45 @@ describe("Sync health surface", () => {
     const health = syncHealth({ sync: { state: "stale", age_s: 420, partial: true } });
     render(<KubernetesSyncHealthSurface health={health} />);
     const block = document.querySelector('[data-sync-health="degraded"]')!;
-    expect(block.textContent).toContain("The last cluster snapshot is 7 minutes old, so cluster data stays hidden until a fresh sync lands.");
+    expect(block.textContent).toContain("The last cluster snapshot is 7 minutes old. Cluster data appears here after a fresh sync lands.");
     expect(block.querySelectorAll("[data-sync-problem]")).toHaveLength(0);
   });
 
-  // Published failures stay visible over the existing data.
+  // A cluster that has synced before keeps its pages and their data with no
+  // failure section: the top-bar status owns the state, reasons and Retry.
   const published = "2026-10-26T08:00:00Z";
   it.each([
-    ["degraded", { state: "partial", age_s: 90, partial: true }, "Cluster sync degraded"],
-    ["failed", { state: "error", age_s: 600, partial: true }, "Cluster sync failed"],
-  ])("reports %s as a strip once the cluster has published", (state, sync, headline) => {
+    ["degraded", { state: "partial", age_s: 90, partial: true }],
+    ["failed", { state: "error", age_s: 600, partial: true }],
+    ["degraded", { state: "stale", age_s: 900, partial: true }],
+  ])("renders no in-page section for a published %s sync", (state, sync) => {
     const health = syncHealth({
       sync,
       kinds: state === "failed"
         ? { Secret: { state: "error", error: "forbidden", records: 0, partial: true, observed_at: zero, last_attempt_at: minutesAgo(2) } }
-        : state === "degraded"
-          ? { Node: { state: "partial", records: 12, partial: true, error: "record_rejected", skipped: 2, observed_at: minutesAgo(3) } }
-          : undefined,
+        : { Node: { state: "partial", records: 12, partial: true, error: "record_rejected", skipped: 2, observed_at: minutesAgo(3) } },
       firstReadyAt: published,
     });
-    expect(health.firstReadyAt).toBe(published);
-    render(<KubernetesSyncHealthSurface health={health} onRetry={vi.fn()} />);
-    // No blocking block, no Preparing panel: a strip instead.
-    expect(document.querySelector("[data-sync-health]")).toBeNull();
-    expect(screen.queryByRole("region", { name: "Preparing your cluster" })).toBeNull();
-    const strip = document.querySelector(`[data-sync-strip="${state}"]`)!;
-    expect(strip.textContent).toContain(headline);
-    // The age of what is on screen is stated in plain words.
-    expect(strip.querySelector("[data-sync-age]")!.textContent).toContain("Showing data from");
-    expect(screen.getByRole("button", { name: "Retry sync" })).toBeTruthy();
+    expect(health.state).toBe(state);
+    const { container } = render(<KubernetesSyncHealthSurface health={health} onRetry={vi.fn()} />);
+    expect(container.innerHTML).toBe("");
+    expect(screen.queryByRole("button", { name: "Retry sync" })).toBeNull();
   });
 
-  it("names a revoked credential in the strip rather than dropping it", () => {
+  it("renders the failure panel for a published cluster with nothing on screen", () => {
     const health = syncHealth({
-      sync: { state: "error", age_s: 120, partial: true },
-      kinds: { Secret: { state: "error", error: "forbidden", records: 0, partial: true, observed_at: zero, last_attempt_at: minutesAgo(1) } },
+      sync: { state: "error", age_s: 0, partial: true },
+      kinds: { Secret: { state: "error", error: "unauthorized", records: 0, partial: true, observed_at: zero, last_attempt_at: minutesAgo(1) } },
       firstReadyAt: published,
     });
-    render(<KubernetesSyncHealthSurface health={health} />);
-    const strip = document.querySelector('[data-sync-strip="failed"]')!;
-    expect(strip.querySelector('[data-sync-problem="Secret"]')!.textContent).toContain("permission denied");
-    expect(strip.textContent).toContain("Showing data from 2 minutes ago.");
-    // Nothing in the strip claims the cluster is loading.
-    expect(strip.textContent).not.toMatch(/Preparing/);
-  });
-
-  it("leaves a snapshot seconds old unlabelled instead of claiming freshness it cannot measure", () => {
-    const health = syncHealth({ sync: { state: "partial", age_s: 2, partial: true }, kinds: { Node: { state: "partial", records: 1, partial: true, error: "record_rejected", observed_at: minutesAgo(1) } }, firstReadyAt: published });
-    render(<KubernetesSyncHealthSurface health={health} />);
-    expect(document.querySelector("[data-sync-age]")).toBeNull();
-  });
-
-  it("states no age for a failed report, whose zero is a placeholder rather than a measurement", () => {
-    const health = syncHealth({ sync: { state: "error", age_s: 0, partial: true }, kinds: { Secret: { state: "error", error: "unauthorized", records: 0, partial: true, observed_at: zero, last_attempt_at: minutesAgo(1) } }, firstReadyAt: published });
-    render(<KubernetesSyncHealthSurface health={health} />);
-    const strip = document.querySelector('[data-sync-strip="failed"]')!;
-    expect(strip.querySelector("[data-sync-age]")).toBeNull();
-    // The failure is still named; only the freshness claim is withheld.
-    expect(strip.textContent).toContain("Cluster sync failed");
-    expect(strip.textContent).not.toMatch(/Showing data|just now/);
-  });
-
-  it("states no age when there is no data on screen for it to describe", () => {
-    const health = syncHealth({ sync: { state: "error", age_s: 300, partial: true }, kinds: { Secret: { state: "error", error: "unauthorized", records: 0, partial: true, observed_at: zero, last_attempt_at: minutesAgo(1) } }, firstReadyAt: published });
-    render(<KubernetesSyncHealthSurface health={health} dataOnScreen={false} />);
-    const strip = document.querySelector('[data-sync-strip="failed"]')!;
-    expect(strip.querySelector("[data-sync-age]")).toBeNull();
-    expect(strip.textContent).not.toContain("Showing data");
-  });
-
-  it("counts the resource types a strip leaves out instead of hiding them", () => {
-    const health = syncHealth({
-      sync: { state: "partial", age_s: 60, partial: true },
-      kinds: Object.fromEntries(["A", "B", "C", "D", "E"].map((kind) => [kind, { state: "partial", records: 1, partial: true, error: "record_rejected", observed_at: minutesAgo(1) }])),
-      firstReadyAt: published,
-    });
-    render(<KubernetesSyncHealthSurface health={health} />);
-    const strip = document.querySelector("[data-sync-strip]")!;
-    expect(strip.querySelectorAll("[data-sync-problem]")).toHaveLength(3);
-    expect(strip.textContent).toContain("2 more resource types");
+    const onRetry = vi.fn();
+    render(<KubernetesSyncHealthSurface health={health} onRetry={onRetry} dataOnScreen={false} />);
+    expect(screen.getByRole("heading", { name: "Cannot read this cluster right now" })).toBeTruthy();
+    const block = document.querySelector('[data-sync-health="failed"]')!;
+    expect(block.textContent).toContain("This cluster synced before, but Versus cannot read it now.");
+    expect(block.querySelector('[data-sync-problem="Secret"]')?.textContent).toContain("credentials are unavailable or rejected");
+    fireEvent.click(screen.getByRole("button", { name: "Retry sync" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
   });
 });
 

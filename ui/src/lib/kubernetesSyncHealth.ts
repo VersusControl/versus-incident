@@ -370,6 +370,47 @@ export function syncHealthStateLabel(state: KubernetesSyncHealthState): string {
   }
 }
 
+/** An elapsed time in the largest whole unit an operator reads at a glance. */
+export function syncDuration(seconds: number): string {
+  const value = Math.max(0, Math.round(seconds));
+  if (value < 60) return `${value}${value === 1 ? " second" : " seconds"}`;
+  const count = Math.round(value / 60);
+  if (count < 60) return `${count} ${count === 1 ? "minute" : "minutes"}`;
+  const hours = Math.round(count / 60);
+  return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+}
+
+/** When a failure started, as an ISO time and an age, or nothing for an unreported time. */
+export function syncSince(value?: string): { iso: string; age: string } | undefined {
+  if (!value) return undefined;
+  const at = new Date(value);
+  if (!Number.isFinite(at.getTime()) || at.getUTCFullYear() <= 1) return undefined;
+  return { iso: at.toISOString(), age: syncDuration((Date.now() - at.getTime()) / 1000) };
+}
+
+/**
+ * The wall-clock time of the data on screen, as 24-hour HH:MM: the snapshot's own
+ * time when it was reported, else now minus the reported age.
+ */
+export function syncDataTime(observedAt?: string | null, ageSeconds?: number): string | undefined {
+  // A 24-hour clock, like the snapshot time and log timestamps beside it.
+  const format = (at: Date) => at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  if (!isZeroTime(observedAt)) return format(new Date(observedAt!));
+  if (ageSeconds !== undefined && Number.isFinite(ageSeconds) && ageSeconds >= 0) return format(new Date(Date.now() - ageSeconds * 1000));
+  return undefined;
+}
+
+/**
+ * The one wording for a failed or degraded sync, shared by the top bar and the
+ * overview card. A cluster with data on screen says how old that data is; one
+ * without names only the state, because there is nothing to date.
+ */
+export function syncFailureLabel(state: "failed" | "degraded", data: { onScreen: boolean; time?: string }): string {
+  const head = state === "failed" ? "Sync failed" : "Sync degraded";
+  if (!data.onScreen) return head;
+  return `${head} — ${data.time ? `showing data from ${data.time}` : "showing last saved data"}`;
+}
+
 /**
  * A history read that succeeded while the latest capture could not be saved.
  * The data on screen is real and stays shown; it only ends at `savedThrough`.
