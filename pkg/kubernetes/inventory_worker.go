@@ -1336,9 +1336,9 @@ func withInventoryKind(view *kubeindex.Snapshot, fresh kubeindex.Snapshot, kind 
 			records = append(records, record)
 		}
 	}
-	kinds := make(map[string]kubeindex.KindStatus, len(view.Kinds)+1)
-	for name, current := range view.Kinds {
-		kinds[name] = current
+	kinds := maps.Clone(view.Kinds)
+	if kinds == nil {
+		kinds = map[string]kubeindex.KindStatus{}
 	}
 	kinds[kind] = state
 	view.Records, view.Kinds = records, kinds

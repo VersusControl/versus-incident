@@ -56,8 +56,11 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # Coverage run without the race detector: plain instrumentation keeps
+      # wall-clock waits in tests realistic. The race detector runs in the
+      # sharded race job below; atomic covermode is only needed under -race.
       - name: Test
-        run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -short -count=1 -timeout 15m -coverprofile=coverage.out -covermode=set ./...
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
@@ -67,10 +70,67 @@ jobs:
           path: coverage.out
           retention-days: 7
 
+  # Race detector run, split into shards that run in parallel so each one
+  # finishes well inside its timeout on a default hosted runner. The slowest
+  # packages under -race get their own shard; "rest" is every other package.
+  race:
+    name: Race (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [kubernetes, storage-controllers, rest]
+    env:
+      GORACE: halt_on_error=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      - name: Race test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          case "$SHARD" in
+            kubernetes)
+              packages="./pkg/kubernetes/..."
+              ;;
+            storage-controllers)
+              packages="./pkg/storage/... ./pkg/controllers/..."
+              ;;
+            rest)
+              packages=$(go list ./... | grep -v -E '/pkg/(kubernetes|storage|controllers)(/|$)')
+              ;;
+            *)
+              echo "::error::Unknown race shard: $SHARD"
+              exit 1
+              ;;
+          esac
+          if [ -z "$packages" ]; then
+            echo "::error::Race shard $SHARD selected no packages"
+            exit 1
+          fi
+          # Word splitting of the package list is intended.
+          # shellcheck disable=SC2086
+          go test -short -race -count=1 -timeout 20m $packages
+
   build-and-push-dev:
     name: Build & push dev image
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, race]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

@@ -405,7 +405,7 @@ func inventoryDeltas(previous, current kubeindex.Snapshot, kinds []string) <-cha
 	for _, record := range previous.Records {
 		old[record.UID] = record
 	}
-	deltas := make(chan kubeindex.Delta, len(previous.Records)+len(current.Records))
+	var pending []kubeindex.Delta
 	for _, record := range current.Records {
 		before, exists := old[record.UID]
 		delete(old, record.UID)
@@ -418,13 +418,17 @@ func inventoryDeltas(previous, current kubeindex.Snapshot, kinds []string) <-cha
 			copy := before
 			delta.Old = &copy
 		}
-		deltas <- delta
+		pending = append(pending, delta)
 	}
 	for _, record := range old {
 		if requested[record.Kind] {
 			before := record
-			deltas <- kubeindex.Delta{Kind: record.Kind, Op: "delete", Old: &before}
+			pending = append(pending, kubeindex.Delta{Kind: record.Kind, Op: "delete", Old: &before})
 		}
+	}
+	deltas := make(chan kubeindex.Delta, len(pending))
+	for _, delta := range pending {
+		deltas <- delta
 	}
 	close(deltas)
 	return deltas

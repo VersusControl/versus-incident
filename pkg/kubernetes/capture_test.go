@@ -939,15 +939,18 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 	}
 	started := make(chan struct{})
 	canceled := make(chan struct{})
+	// Background inventory and the explicit snapshot can both list Pods, so
+	// each signal closes once for the first read rather than once per request.
+	var startedOnce, canceledOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer principal-a-canary" {
 			http.Error(writer, "CANARY_DENIED", http.StatusForbidden)
 			return
 		}
 		if request.URL.Path == "/api/v1/pods" {
-			close(started)
+			startedOnce.Do(func() { close(started) })
 			<-request.Context().Done()
-			close(canceled)
+			canceledOnce.Do(func() { close(canceled) })
 			return
 		}
 		switch request.URL.Path {

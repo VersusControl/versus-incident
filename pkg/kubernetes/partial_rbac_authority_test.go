@@ -315,7 +315,7 @@ func (cluster *partialRoleCluster) start() {
 	t := cluster.t
 	t.Helper()
 	cluster.registry.StartCapture(t.Context())
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(scaledTimeout(15 * time.Second))
 	for {
 		report, err := cluster.service.SyncHealth(t.Context())
 		// A role that reads Pods only inside namespaces never reports the
@@ -413,7 +413,7 @@ func (cluster *partialRoleCluster) cycle(due map[string]bool, witness string) {
 	t.Helper()
 	for attempt := 0; ; attempt++ {
 		forced := cluster.force(due)
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(scaledTimeout(5 * time.Second))
 		published := false
 		for time.Now().Before(deadline) {
 			if cluster.committed().View.Kinds[witness].LastAttemptAt.After(forced) {

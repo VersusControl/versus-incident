@@ -130,7 +130,7 @@ func Merge(current *State, incoming []Snapshot, gaps []Gap, job string, now time
 			gaps = append(gaps, *gap)
 		}
 	}
-	kept := make([]Snapshot, 0, len(current.Snapshots)+len(incoming))
+	kept := []Snapshot{}
 	seen := map[string]bool{}
 	for _, item := range append(append([]Snapshot(nil), current.Snapshots...), incoming...) {
 		if item.ID != Identity(item) || item.CapturedAt.IsZero() || item.CapturedAt.After(now.Add(ClockTolerance)) || item.From.IsZero() || item.To.Before(item.From) || len(item.Lines) > 500 || item.Slot != "previous" && item.Slot != "current" || item.RootUID == "" || item.PodUID == "" || item.Container == "" {

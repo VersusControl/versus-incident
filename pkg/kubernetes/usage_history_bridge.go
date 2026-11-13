@@ -175,7 +175,7 @@ func readUsageBridgeRecord(provider storage.Provider, scope, namespace, pod stri
 }
 
 func mergeUsageSamples(old, new []UsageSample, now time.Time) []UsageSample {
-	points := make(map[time.Time]UsageSample, len(old)+len(new))
+	points := map[time.Time]UsageSample{}
 	for _, samples := range [][]UsageSample{old, new} {
 		for _, sample := range samples {
 			if !sample.Timestamp.Before(now.Add(-usageHistoryRetention)) {
