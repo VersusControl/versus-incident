@@ -567,9 +567,9 @@ func TestFileModelPagingMalformedProgressAndIndexedPurge(t *testing.T) {
 	}
 }
 
-const (
-	fileModelStateWorkloadDeadline = 90 * time.Second
-	fileModelStateProgressDeadline = 15 * time.Second
+var (
+	fileModelStateWorkloadDeadline = scaledTimeout(90 * time.Second)
+	fileModelStateProgressDeadline = scaledTimeout(15 * time.Second)
 )
 
 func runFileModelStateConcurrentOps(t *testing.T, operationCount, workerCount int, action func(index int) error) {

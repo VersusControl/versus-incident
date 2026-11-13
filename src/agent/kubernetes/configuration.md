@@ -277,7 +277,7 @@ uncaptured or file-pruned evidence.
 | Symptom | What to check |
 | --- | --- |
 | Configured continuous capture reports effective Demand | Check the reported reason. Projected ServiceAccount tokens must be verifiable against the cluster API server. Unverified rotating or cloud identities, and unsupported storage, fall back to demand; selecting continuous alone does not guarantee coverage. |
-| History has gaps or is unavailable | Check capture mode, runtime uptime, current reader permissions, and the backend's history policy above. Revoked credentials stop capture; missing permissions leave incomplete history. Expand the history warnings rather than assuming nothing changed. |
+| History has gaps or is unavailable | Check capture mode, runtime uptime, current reader permissions, and the backend's history policy above. Revoked credentials stop capture. A namespace-only reader role saves no history; see [Least privilege](/agent/kubernetes/configuration#least-privilege). Expand the history warnings rather than assuming nothing changed. |
 | Multiple replicas need continuous history | Use shared PostgreSQL storage and the same connector configuration on current versions. Duplicate-free capture is verified for static readers and verified projected ServiceAccount readers, not every cloud identity. Confirm effective continuous capture on each replica. v1.4.34 and v1.4.35 replicas can run together during a rolling update; see [What happens on first start](/migration/migration-v1.4.35.md#what-happens-on-first-start). When upgrading from a version before v1.4.34, stop all old capture instances first. |
 | A large cluster responds slowly | Large inventories, including around 50,000 resources, can still be slow. Retry the read. Temporarily switching to demand may help reduce background work, but is not a guaranteed fix and can leave idle history gaps. |
 
@@ -348,18 +348,37 @@ roleRef:
   name: versus-kubernetes-reader
 ```
 
-The shipped role reads Secret metadata only. Resource reports project Secret
-names, labels, and referenced key names; Secret values are never projected. The
-grant is part of the role above, so remove `secrets` from your own role or
-binding if you want Secrets invisible to Versus. Gateway API reads are also
-optional: add `get,list` for `gateway.networking.k8s.io` `gateways` and
-`httproutes`, or set `kubernetesReaderRBAC.gatewayAPI=true` in the chart, only on
-clusters where those CRDs are installed.
+### Least privilege
 
-For least privilege, replace `ClusterRole`/`ClusterRoleBinding` with a `Role`
-and `RoleBinding` in each observed namespace, remove nodes/namespaces and node
-metrics, and accept a partial cluster overview. API discovery itself may
-still be visible, while forbidden resource reads are reported as partial.
+Versus shows Secret names, labels, and referenced key names, never Secret
+values. The role itself is wider: RBAC cannot limit a LIST to metadata, so
+granting `list` on `secrets` lets the connector identity read Secret values.
+For least privilege, remove `secrets` from your own role. Versus then shows:
+
+> Not readable with this connector identity: Secret (permission denied). Everything else is shown.
+
+The rest of the view and the Kubernetes history stay fully available, and
+history is saved on every cycle.
+
+Gateway API reads are optional. To read `gateway.networking.k8s.io` `gateways`
+and `httproutes`, add `get,list` for them to your own role, or set
+`kubernetesReaderRBAC.gatewayAPI=true` in the chart (default `false`). Leaving
+the grant out is supported whether or not the Gateway API CRDs are installed:
+Gateway and HTTPRoute show as not readable, and everything else is shown.
+
+A namespace-only role, a `Role` and `RoleBinding` in each observed namespace
+with no cluster-wide grant, gives a live, partial view of those namespaces
+only. It saves **no Kubernetes history**: history needs a cluster-wide read of
+Namespaces so Versus can identify the cluster. Cluster-scoped data such as
+Nodes is not shown, and Workloads and Issues may need a namespace selected.
+When you need history, use the cluster-wide reader role without `secrets`.
+
+| Reader role | What you see | History |
+| --- | --- | --- |
+| Shipped role (`kubernetesReaderRBAC.enabled: true`) | Everything. Gateway and HTTPRoute need `kubernetesReaderRBAC.gatewayAPI: true`. | Saved every cycle |
+| Without `secrets` | Everything except Secrets, which show as not readable | Saved every cycle |
+| Without the Gateway API grant | Everything except Gateway and HTTPRoute, which show as not readable | Saved every cycle |
+| Namespace-only `Role`/`RoleBinding` | Live, partial view of the granted namespaces only | Not saved |
 
 ## Connection options
 
@@ -401,8 +420,8 @@ kubernetesReaderRBAC:
 
 The chart defaults include `clusterID: default`, `timeout: 10s`,
 `discoveryTTL: 5m`, `actions.enable: false`, `actions.maxReplicas: 20`, and
-`actions.timeout: 15s`. Secret reads are metadata-only and already part of the
-shipped reader role; remove the `secrets` grant to exclude them. Gateway API
+`actions.timeout: 15s`. The shipped reader role grants `secrets`; remove that
+grant for least privilege (see [Least privilege](/agent/kubernetes/configuration#least-privilege)). Gateway API
 grants use `kubernetesReaderRBAC.gatewayAPI: true` and must be enabled
 deliberately. Keep credential values in Secrets or mounted files, not committed
 values files. See

@@ -12,7 +12,8 @@ import (
 // They are indexed by canonical resource ID, so equal kind names in different
 // API groups do not overwrite each other.
 func (service *Service) loadAdditionalInventory(ctx context.Context, definition ResourceDefinition, namespaces ...string) (recordsResult []ProjectedResource, resultErr error) {
-	defer func() { recordInventoryMaterialResult(ctx, resultErr) }()
+	credential := service.credentialGeneration()
+	defer func() { recordInventoryMaterialResult(ctx, definition.ID, credential, resultErr) }()
 	ctx, cancel := context.WithTimeout(ctx, inventoryLoadTimeout)
 	defer cancel()
 	namespace := ""

@@ -405,7 +405,7 @@ func inventoryDeltas(previous, current kubeindex.Snapshot, kinds []string) <-cha
 	for _, record := range previous.Records {
 		old[record.UID] = record
 	}
-	deltas := make(chan kubeindex.Delta, len(previous.Records)+len(current.Records))
+	var pending []kubeindex.Delta
 	for _, record := range current.Records {
 		before, exists := old[record.UID]
 		delete(old, record.UID)
@@ -418,13 +418,17 @@ func inventoryDeltas(previous, current kubeindex.Snapshot, kinds []string) <-cha
 			copy := before
 			delta.Old = &copy
 		}
-		deltas <- delta
+		pending = append(pending, delta)
 	}
 	for _, record := range old {
 		if requested[record.Kind] {
 			before := record
-			deltas <- kubeindex.Delta{Kind: record.Kind, Op: "delete", Old: &before}
+			pending = append(pending, kubeindex.Delta{Kind: record.Kind, Op: "delete", Old: &before})
 		}
+	}
+	deltas := make(chan kubeindex.Delta, len(pending))
+	for _, delta := range pending {
+		deltas <- delta
 	}
 	close(deltas)
 	return deltas
@@ -481,9 +485,10 @@ func scopedIndexStatus(status kubeindex.Status, requested []string) kubeindex.St
 }
 
 func (service *Service) loadIndexKind(ctx context.Context, kind string, namespaces ...string) (recordsResult []kubeindex.Record, completeResult bool, resultErr error) {
+	credential := service.credentialGeneration()
 	defer func() {
 		if resultErr != nil || completeResult {
-			recordInventoryMaterialResult(ctx, resultErr)
+			recordInventoryMaterialResult(ctx, kind, credential, resultErr)
 		}
 	}()
 	if kind == "Pod" {
@@ -532,10 +537,27 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 	if err != nil {
 		if errors.Is(err, ErrNotFound) && kind != "Pod" && kind != "Node" && kind != "Namespace" {
 			discovery, _ := ctx.Value(inventoryDiscoveryContextKey{}).(Discovery)
-			if discoveryVersionFailed(discovery, indexedResourceIDs[kind]) || discoveryVersionFailed(resolved, indexedResourceIDs[kind]) {
+			class, failed := discoveryVersionFailure(discovery, indexedResourceIDs[kind])
+			if !failed {
+				class, failed = discoveryVersionFailure(resolved, indexedResourceIDs[kind])
+			}
+			if failed {
 				// The API version this kind is pinned to could not be read, so
-				// its absence is unproven: a failure, never an empty kind.
-				return nil, false, err
+				// its absence is unproven. A denied or rejected discovery read
+				// is this credential's answer for the kind and is recorded as
+				// such, so the withhold and the authority proof see it. A
+				// transient failure means the kind was not read at all: it
+				// keeps what it last reported, so a denied kind stays denied,
+				// and a kind never read yet fails with the discovery's class.
+				switch class = inventoryCycleClass(class); {
+				case class == "forbidden":
+					return nil, false, ErrForbidden
+				case class == "unauthorized":
+					return nil, false, ErrUnauthorized
+				case transientInventoryClass(class):
+					return nil, false, indexReadError{error: kubeindex.ErrNotAttempted, class: class}
+				}
+				return nil, false, indexReadError{error: inventorySyncError(), class: class}
 			}
 			return nil, false, kubeindex.ErrKindNotServed
 		}

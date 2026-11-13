@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"maps"
 	"net/url"
 	"sort"
 	"strconv"
@@ -204,6 +205,9 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			} else if err == nil {
 				cache.mu.Lock()
 				cache.generation, cache.failed = generation, false
+				// Another replica collects this scope; no proof of this
+				// replica is pending against its generation.
+				cache.authorityQuestioned = inventoryQuestionedKinds{}
 				cache.mu.Unlock()
 			}
 		}
@@ -346,6 +350,8 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 		service.inventoryRestore.prove(committed.Revision)
 		cache.generation, cache.failed = committed, false
 		cache.authorityFailure = nil
+		cache.authorityBinding = service.inventoryAuthorityBinding(committed.EvidenceScope.ClusterUID)
+		cache.authorityQuestioned = inventoryQuestionedKinds{}
 		*destination = committed
 		service.recovery.published(*current, service.scope.OrgID)
 		cache.mu.Unlock()
@@ -368,6 +374,8 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 	service.inventoryRestore.prove(generation.Revision)
 	cache.generation, cache.failed = *generation, false
 	cache.authorityFailure = nil
+	cache.authorityBinding = service.inventoryAuthorityBinding(generation.EvidenceScope.ClusterUID)
+	cache.authorityQuestioned = inventoryQuestionedKinds{}
 	*destination = *generation
 	service.recovery.published(*generation, service.scope.OrgID)
 	cache.mu.Unlock()
@@ -407,6 +415,12 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	now := time.Now().UTC()
 	ctx = context.WithValue(ctx, inventoryCollectionAuthorityKey{}, &inventoryCollectionAuthority{})
 	discovered, _ := ctx.Value(inventoryNamespacePromotedContextKey{}).(bool)
+	// A denial is new only against what this same binding last committed.
+	cache.mu.RLock()
+	committedBinding := cache.authorityBinding
+	cache.mu.RUnlock()
+	baseline := newInventoryAuthorityBaseline(committedBinding, service.inventoryAuthorityBinding(generation.EvidenceScope.ClusterUID), *generation)
+	committedKinds := maps.Clone(generation.View.Kinds)
 	var err error
 	kinds := []string{}
 	cache.mu.Lock()
@@ -478,7 +492,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	var discovery Discovery
 	discoveryStarted := time.Now()
 	degradedDiscovery := false
-	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 10*time.Second)
+	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, discoveryWalkBound)
 	if cold {
 		discovery, err = service.coreDiscovery(discoveryCtx)
 	} else {
@@ -529,12 +543,12 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		progress.complete("connected", time.Now().UTC())
 		progress.advance("listing", time.Now().UTC())
 	}
-	if cold || degradedDiscovery {
-		// Resolve core kinds against core discovery only: a core kind whose
-		// group the cluster does not serve is absent, not a reason to walk
-		// every API group before the first publication.
-		ctx = context.WithValue(ctx, discoveryContextKey{}, discovery)
-	}
+	// Every kind of this cycle resolves against this cycle's discovery. On a
+	// cold or degraded cycle that is core discovery only: a core kind whose
+	// group the cluster does not serve is absent, not a reason to walk every
+	// API group before the first publication. On a full cycle it keeps a kind
+	// from walking discovery a second time when the cached copy expires.
+	ctx = context.WithValue(ctx, discoveryContextKey{}, discovery)
 	ctx = context.WithValue(ctx, indexDefinitionContextKey{}, preferred)
 	ctx = context.WithValue(ctx, inventoryDiscoveryContextKey{}, discovery)
 	generation.DiscoveryPartial = append([]PartialFailure(nil), discovery.Partial...)
@@ -583,10 +597,42 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	// candidate is cloned by the publisher, so later stages cannot mutate it.
 	indexedPublished := false
 	generation.View = index.Snapshot()
+	if widensNamespaceScope(committedKinds, generation.View.Kinds, now) {
+		// A kind read only inside namespaces was just read cluster-wide: the
+		// grant was widened. Every other kind read only inside namespaces, or
+		// denied cluster-wide, is listed cluster-wide on the next cycle
+		// rather than waiting for its own cadence. A remembered cluster-wide
+		// denial of a metadata-only kind predates the widened grant, so it is
+		// asked again instead of replayed.
+		cache.mu.Lock()
+		cache.scopePending = true
+		cache.mu.Unlock()
+		scope := service.indexScope()
+		for kind := range metadataOnlyIndexKinds {
+			service.client.clearMetadataDenial(metadataDenyKey{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID, Kind: kind})
+		}
+	}
 	if currentCollectionIdentityVerified(*generation, now) {
 		generation.liveAuthorityOnly = false
 	}
-	materialDenied := currentMaterialDenied(*generation, now)
+	// The identity read proves the cluster binding of this cycle. When a new
+	// denial needs proof and Namespace was not due, read it now so a passed
+	// proof leaves a capture this cycle can save.
+	readIdentity := func() {
+		if state := generation.View.Kinds["Namespace"]; state.LastAttemptAt.Equal(now) {
+			return
+		}
+		_ = index.RefreshGuarded(ctx, "Namespace", 0, now, func(ctx context.Context) ([]kubeindex.Record, bool, error) {
+			records, complete, err := service.loadIndexKind(ctx, "Namespace")
+			if err == nil && !complete {
+				err = ErrIncompleteInventory
+			}
+			return records, complete, err
+		}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+		withInventoryKind(&generation.View, index.Snapshot(), "Namespace")
+	}
+	questioned := newlyDeniedInventory(baseline, *generation, now)
+	materialDenied := !questioned.empty()
 	if inventoryCollectionValidationError(ctx) != nil {
 		generation.liveAuthorityOnly = true
 	}
@@ -594,6 +640,11 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		return false, err
 	}
 	if materialDenied && generation.EvidenceScope.ClusterUID != "" {
+		questionInventoryAuthority(cache, questioned)
+		readIdentity()
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		if err := service.verifyCurrentInventoryAuthority(ctx, cache, *generation, now); err != nil {
 			return false, err
 		}
@@ -602,7 +653,22 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	cache.mu.RLock()
 	authorityUnverified := cache.authorityFailure != nil
 	cache.mu.RUnlock()
-	if !materialDenied && !authorityUnverified && !cold && !generation.FirstReadyAt.IsZero() && len(kinds) > 0 && len(publishCore) > 0 {
+	// Without a baseline, a cycle that has read nothing so far is not
+	// published early: the namespace stage may still read, and if it does
+	// not, the proof decides.
+	unreadKinds := inventoryQuestionedKinds{}
+	if baseline.binding == "" && !hasCurrentInventoryRead(ctx) {
+		unreadKinds = unreadInventory(*generation, now)
+	}
+	unread := !unreadKinds.empty()
+	// Those denials are in question from now on: readers must not keep
+	// serving what an earlier binding read while the remaining stages and the
+	// proof run.
+	questionInventoryAuthority(cache, unreadKinds)
+	// The indexed view holds only cluster-wide LISTs. A kind read inside
+	// namespaces is denied there, so publishing the view before the namespace
+	// stage would show that kind as not readable until the stage ends.
+	if !materialDenied && !unread && !authorityUnverified && !cold && !generation.FirstReadyAt.IsZero() && len(kinds) > 0 && len(publishCore) > 0 && !dropsNamespaceScope(committedKinds, generation.View.Kinds) && inventoryOutage(ctx, *generation, now) == nil {
 		generation.Pending, generation.PendingDiscovery = pendingInventoryKinds(generation.View), degradedDiscovery
 		if err := publishCore[0](generation); err != nil {
 			return false, err
@@ -610,15 +676,38 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		indexedPublished = true
 	}
 	additionalStarted := time.Now()
+	// The optional stage starts reads for ten seconds. A read that started
+	// finishes under its own bound; a kind whose read did not start in time
+	// keeps its last state and, being the oldest attempt, goes first next
+	// cycle. Reads are paced, so a cluster with many optional kinds spreads
+	// them over cycles instead of failing the ones at the end of the list.
 	optionalCtx, cancelOptional := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelOptional()
-	additional := canonicalInventoryResources(discovery.Resources)
-	if cold {
-		additional = nil
+	additional := []ResourceDefinition{}
+	if !cold {
+		for _, definition := range canonicalInventoryResources(discovery.Resources) {
+			if inventoryDue(states[definition.ID], service.collectionCadence(5*time.Minute), now) {
+				additional = append(additional, definition)
+			}
+		}
 	}
-	for _, definition := range additional {
-		if !inventoryDue(states[definition.ID], service.collectionCadence(5*time.Minute), now) {
-			continue
+	sort.SliceStable(additional, func(left, right int) bool {
+		return states[additional[left].ID].LastAttemptAt.Before(states[additional[right].ID].LastAttemptAt)
+	})
+	deferred := 0
+	for position, definition := range additional {
+		acquired := false
+		select {
+		case sem <- struct{}{}:
+			acquired = true
+		case <-optionalCtx.Done():
+		}
+		if optionalCtx.Err() != nil {
+			if acquired {
+				<-sem
+			}
+			deferred = len(additional) - position
+			break
 		}
 		dirty = true
 		inventoryChanged = true
@@ -626,19 +715,8 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			select {
-			case sem <- struct{}{}:
-			case <-optionalCtx.Done():
-				resultMu.Lock()
-				state := states[definition.ID]
-				state.State, state.Partial, state.Error = "error", true, "timeout"
-				state.LastAttemptAt = now
-				states[definition.ID] = state
-				resultMu.Unlock()
-				return
-			}
 			defer func() { <-sem }()
-			items, err := service.loadAdditionalInventory(optionalCtx, definition)
+			items, err := service.loadAdditionalInventory(ctx, definition)
 			resultMu.Lock()
 			defer resultMu.Unlock()
 			state := states[definition.ID]
@@ -653,7 +731,11 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		}()
 	}
 	workers.Wait()
-	service.recovery.stage("additional", additionalStarted, optionalCtx.Err())
+	var additionalErr error
+	if deferred > 0 {
+		additionalErr = context.DeadlineExceeded
+	}
+	service.recovery.stage("additional", additionalStarted, additionalErr)
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -698,15 +780,29 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	if inventoryCollectionValidationError(ctx) != nil {
 		generation.liveAuthorityOnly = true
 	}
-	if err := collectionEnvelopeAuthorityError(ctx, cache, materialDenied || currentMaterialDenied(*generation, now)); err != nil {
+	scopedQuestioned := newlyDeniedInventory(baseline, *generation, now)
+	if baseline.binding == "" && !hasCurrentInventoryRead(ctx) {
+		// No baseline tells a steady gap from lost authority, and the cycle
+		// read nothing that proves its identity, so every denial is in
+		// question. With a baseline, steady gaps stay gaps.
+		scopedQuestioned = scopedQuestioned.merge(unreadInventory(*generation, now))
+	}
+	scopedMaterial := materialDenied || !scopedQuestioned.empty()
+	if err := collectionEnvelopeAuthorityError(ctx, cache, scopedMaterial); err != nil {
 		return false, err
 	}
-	if materialDenied || currentMaterialDenied(*generation, now) {
+	if scopedMaterial {
+		questionInventoryAuthority(cache, scopedQuestioned)
+		readIdentity()
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		if err := service.verifyCurrentInventoryAuthority(ctx, cache, *generation, now); err != nil {
 			return false, err
 		}
 		generation.liveAuthorityOnly = inventoryCollectionValidationError(ctx) != nil || !currentCollectionIdentityVerified(*generation, now)
 	}
+	markInventoryOutage(ctx, generation, committedKinds, now)
 	if crashes.attempted && crashes.read {
 		events, _, _ := crashes.resolve(generation.View, time.Now().UTC())
 		generation.Crashes, generation.PodSampledAt = events, now
@@ -878,7 +974,7 @@ func (service *Service) coreDiscovery(ctx context.Context) (result Discovery, re
 			result, resultErr = Discovery{}, err
 		}
 	}()
-	ctx, cancel := withOperationBudget(ctx, defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
+	ctx, cancel := withOperationBudget(discoveryRead(ctx), defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
 	defer cancel()
 	// Reuse a fresh or in-flight full discovery rather than reading the same
 	// API versions twice.
@@ -1132,3 +1228,118 @@ func (service *Service) clearInventoryCycleLog() {
 }
 
 type inventoryNamespacePromotedContextKey struct{}
+
+// markInventoryOutage marks the kinds of an outage cycle as a cycle failure,
+// so the cluster reports an error with that class rather than a partial
+// cluster carried by kinds that were simply not due. A kind keeps the mark
+// while no read succeeds and it is not attempted again, so a later cycle that
+// does not list it cannot turn a running outage back into a partial report;
+// the first successful read ends the outage and clears every mark.
+func markInventoryOutage(ctx context.Context, generation *inventoryGeneration, committed map[string]kubeindex.KindStatus, attempt time.Time) {
+	outage := inventoryOutage(ctx, *generation, attempt) != nil
+	read := hasCurrentInventoryRead(ctx)
+	var kinds map[string]kubeindex.KindStatus
+	for kind, state := range generation.View.Kinds {
+		previous := committed[kind]
+		carried := !read && previous.CycleFailure && !state.LastAttemptAt.Equal(attempt) && state.LastAttemptAt.Equal(previous.LastAttemptAt) && state.Error == previous.Error
+		if !(outage && state.LastAttemptAt.Equal(attempt)) && !carried {
+			continue
+		}
+		if kinds == nil {
+			kinds = maps.Clone(generation.View.Kinds)
+		}
+		state.CycleFailure = true
+		kinds[kind] = state
+	}
+	if kinds != nil {
+		generation.View.Kinds = kinds
+	}
+}
+
+// inventoryOutage reports an API server outage: a cycle that read nothing,
+// attempted a core kind (Namespace or Pod), and failed every core kind it
+// attempted with a transient class. A cycle that attempted only other kinds is
+// never an outage: a kind such as one behind a broken conversion webhook fails
+// on its own, whichever kinds happen to be due with it.
+func inventoryOutage(ctx context.Context, generation inventoryGeneration, attempt time.Time) error {
+	if hasCurrentInventoryRead(ctx) {
+		return nil
+	}
+	class := ""
+	for _, kind := range []string{"Namespace", "Pod"} {
+		state := generation.View.Kinds[kind]
+		if !state.LastAttemptAt.Equal(attempt) {
+			continue
+		}
+		if state.State != "error" || !transientInventoryClass(state.Error) {
+			return nil
+		}
+		class = state.Error
+	}
+	if class == "" {
+		return nil
+	}
+	return indexReadError{error: inventorySyncError(), class: class}
+}
+
+// widensNamespaceScope reports whether a kind committed as read only inside
+// namespaces was read cluster-wide in this attempt.
+func widensNamespaceScope(committed, current map[string]kubeindex.KindStatus, attempt time.Time) bool {
+	for kind, state := range committed {
+		now := current[kind]
+		if state.Error == "namespace_scope" && now.LastAttemptAt.Equal(attempt) && now.State == "ready" && now.Error == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// dropsNamespaceScope reports whether current lacks a namespace-scoped read
+// that committed holds: a kind the identity reads only inside namespaces that
+// current reports from its cluster-wide LIST alone.
+func dropsNamespaceScope(committed, current map[string]kubeindex.KindStatus) bool {
+	for kind, state := range committed {
+		if state.Error == "namespace_scope" && current[kind].Error != "namespace_scope" {
+			return true
+		}
+	}
+	return false
+}
+
+// questionInventoryAuthority withholds newly denied kinds from readers while
+// their authority proof runs. Readers keep every other kind of the committed
+// generation; the next publication clears the marks.
+func questionInventoryAuthority(cache *inventoryCache, questioned inventoryQuestionedKinds) {
+	if questioned.empty() {
+		return
+	}
+	cache.mu.Lock()
+	cache.authorityQuestioned = cache.authorityQuestioned.merge(questioned)
+	cache.mu.Unlock()
+}
+
+// withInventoryKind replaces one kind's state and records in view with those
+// of fresh, leaving every other kind as it was.
+func withInventoryKind(view *kubeindex.Snapshot, fresh kubeindex.Snapshot, kind string) {
+	state, ok := fresh.Kinds[kind]
+	if !ok {
+		return
+	}
+	records := make([]kubeindex.Record, 0, len(view.Records))
+	for _, record := range view.Records {
+		if record.Kind != kind {
+			records = append(records, record)
+		}
+	}
+	for _, record := range fresh.Records {
+		if record.Kind == kind {
+			records = append(records, record)
+		}
+	}
+	kinds := maps.Clone(view.Kinds)
+	if kinds == nil {
+		kinds = map[string]kubeindex.KindStatus{}
+	}
+	kinds[kind] = state
+	view.Records, view.Kinds = records, kinds
+}

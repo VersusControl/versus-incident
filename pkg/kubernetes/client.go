@@ -78,23 +78,26 @@ type contextDialer interface {
 
 // Client is a read-only, bounded Kubernetes API transport.
 type Client struct {
-	namespace      string
-	base           *url.URL
-	credentials    CredentialSource
-	timeout        time.Duration
-	maxBodyBytes   int64
-	http           *http.Client
-	streamHTTP     *http.Client
-	indexLimiter   *rate.Limiter
-	metadataMu     sync.Mutex
-	metadataDenied map[metadataDenyKey]metadataDenyMemo
-	now            func() time.Time
-	backoffMu      sync.Mutex
-	backoffUntil   time.Time
-	authMu         sync.Mutex
-	authGeneration atomic.Uint64
-	authContext    context.Context
-	authCancel     context.CancelFunc
+	namespace    string
+	base         *url.URL
+	credentials  CredentialSource
+	timeout      time.Duration
+	maxBodyBytes int64
+	http         *http.Client
+	streamHTTP   *http.Client
+	indexLimiter *rate.Limiter
+	// discoveryLimiter paces background discovery reads apart from inventory
+	// LISTs, so a discovery walk never waits behind the LIST pace.
+	discoveryLimiter *rate.Limiter
+	metadataMu       sync.Mutex
+	metadataDenied   map[metadataDenyKey]metadataDenyMemo
+	now              func() time.Time
+	backoffMu        sync.Mutex
+	backoffUntil     time.Time
+	authMu           sync.Mutex
+	authGeneration   atomic.Uint64
+	authContext      context.Context
+	authCancel       context.CancelFunc
 }
 
 func (client *Client) credentialEpochContext() (context.Context, context.CancelFunc) {
@@ -143,6 +146,27 @@ type captureReadContextKey struct{}
 func captureReadContext(ctx context.Context, owner string) context.Context {
 	return context.WithValue(ctx, captureReadContextKey{}, owner)
 }
+
+type discoveryReadContextKey struct{}
+
+// discoveryRead marks the reads of a discovery walk. In the background they
+// take the discovery pace instead of the inventory LIST pace. Discovery is a
+// bounded set of small metadata documents, cached between cycles; sharing the
+// LIST pace made a full walk of a cluster with many API groups outlast its
+// own time bound, so the groups listed last (installed CRD groups such as the
+// Gateway API) were never read and their kinds looked unserved.
+func discoveryRead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, discoveryReadContextKey{}, true)
+}
+
+// newDiscoveryLimiter fits the largest walk discovery may make within the
+// time bound a collection cycle gives it.
+func newDiscoveryLimiter() *rate.Limiter {
+	return rate.NewLimiter(rate.Limit(float64(discoveryRequests)/discoveryWalkBound.Seconds()), 16)
+}
+
+// discoveryWalkBound is the time a collection cycle gives one discovery walk.
+const discoveryWalkBound = 10 * time.Second
 
 // NewClient validates transport policy and constructs a read-only API client.
 func NewClient(config Config) (*Client, error) {
@@ -208,7 +232,7 @@ func NewClient(config Config) (*Client, error) {
 	client := &Client{
 		namespace: config.Namespace,
 		base:      base, credentials: credentials, timeout: timeout, maxBodyBytes: maxBodyBytes,
-		indexLimiter: rate.NewLimiter(2, 4), metadataDenied: map[metadataDenyKey]metadataDenyMemo{},
+		indexLimiter: rate.NewLimiter(2, 4), discoveryLimiter: newDiscoveryLimiter(), metadataDenied: map[metadataDenyKey]metadataDenyMemo{},
 		http:       &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
 		streamHTTP: &http.Client{Transport: streamTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
 	}
@@ -294,9 +318,15 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 	if err := client.waitBackoff(ctx); err != nil {
 		return nil, false, err
 	}
-	if _, background := ctx.Value(captureReadContextKey{}).(string); background && client.indexLimiter != nil {
-		if err := client.indexLimiter.Wait(ctx); err != nil {
-			return nil, false, err
+	if _, background := ctx.Value(captureReadContextKey{}).(string); background {
+		limiter := client.indexLimiter
+		if discovery, _ := ctx.Value(discoveryReadContextKey{}).(bool); discovery {
+			limiter = client.discoveryLimiter
+		}
+		if limiter != nil {
+			if err := limiter.Wait(ctx); err != nil {
+				return nil, false, err
+			}
 		}
 	}
 	budget := operationBudgetFrom(ctx)

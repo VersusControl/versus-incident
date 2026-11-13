@@ -12,6 +12,11 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
+// persistedHistoryReadTimeout bounds one read of persisted cluster history, its
+// committed checkpoint, or the authority-denial overlay. A read that cannot
+// finish within it fails as a history timeout instead of holding a request.
+var persistedHistoryReadTimeout = 2 * time.Second
+
 var errHistoryUnavailable = errors.New("kubernetes: persisted history store unavailable")
 var errHistoryTimeout = errors.New("kubernetes: persisted history store timed out")
 var errHistoryUpgrading = errors.New("kubernetes: persisted history read models are converting")
@@ -223,7 +228,7 @@ func historyStoreError(err error) error {
 }
 
 func (service *Service) persistedHistoryQuery(ctx context.Context, query storage.EvidenceQuery) (storage.EvidencePage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, persistedHistoryReadTimeout)
 	defer cancel()
 	scope, checkpoint, err := service.persistedHistoryScope(ctx)
 	if err != nil {
@@ -357,7 +362,7 @@ func (service *Service) notifyEvidenceCommit() {
 // CommitStatus reads only the committed checkpoint. It is also used to recover
 // dropped notifications and commits made by another process.
 func (service *Service) CommitStatus(ctx context.Context) (CommitEvent, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, persistedHistoryReadTimeout)
 	defer cancel()
 	_, cp, err := service.persistedHistoryScope(ctx)
 	if err != nil {
@@ -499,7 +504,7 @@ func (service *Service) denyHistoryAuthority(ctx context.Context, path string, u
 	}
 	scope := storage.EvidenceScope{OrgID: service.scope.OrgID, ClusterID: service.scope.ClusterID}
 	service.rememberHistoryDenials(scope, principal, proofs)
-	denialCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	denialCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistedHistoryReadTimeout)
 	defer cancel()
 	service.changes.mu.Lock()
 	cache := service.changes.inventories[service.indexScope()]

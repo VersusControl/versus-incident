@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -823,9 +824,9 @@ func (service *Service) readPodLogs(parent context.Context, options PodLogStream
 			if ordinal <= cursor.Occurrences[timestampText] {
 				continue
 			}
-			nextIdentities := make(map[string]uint64, len(identities)+1)
-			for key, count := range identities {
-				nextIdentities[key] = count
+			nextIdentities := maps.Clone(identities)
+			if nextIdentities == nil {
+				nextIdentities = map[string]uint64{}
 			}
 			nextIdentities[timestampText] = ordinal
 			nextTimestamp := lastTimestamp

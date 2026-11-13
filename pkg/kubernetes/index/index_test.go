@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -580,6 +581,47 @@ func TestRefreshNamesTheClassOfEveryFailure(t *testing.T) {
 		})
 	}
 }
+
+// A read that did not happen keeps what the kind last reported: a denied kind
+// stays denied and a listed kind keeps its records. A kind with no status yet
+// records the failure under the loader's class.
+func TestRefreshNotAttemptedKeepsTheLastStatus(t *testing.T) {
+	notAttempted := func(context.Context) ([]Record, bool, error) {
+		return nil, false, notAttemptedFailure{}
+	}
+	index := New(10)
+	at := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	if err := index.Refresh(context.Background(), "Gateway", 0, at, func(context.Context) ([]Record, bool, error) {
+		return nil, false, classifiedFailure("forbidden")
+	}); err == nil {
+		t.Fatal("denied refresh reported success")
+	}
+	if err := index.Ingest("Pod", []Record{pod("uid-a", "a")}, true, at); err != nil {
+		t.Fatal(err)
+	}
+	denied, _ := index.KindStatus("Gateway")
+	listed, _ := index.KindStatus("Pod")
+	for _, kind := range []string{"Gateway", "Pod", "HTTPRoute"} {
+		if err := index.Refresh(context.Background(), kind, 0, at.Add(time.Minute), notAttempted); !errors.Is(err, ErrNotAttempted) {
+			t.Fatalf("%s: refresh error = %v", kind, err)
+		}
+	}
+	if got, _ := index.KindStatus("Gateway"); !reflect.DeepEqual(got, denied) {
+		t.Fatalf("denied kind changed by a read that did not happen: %+v, was %+v", got, denied)
+	}
+	if got, _ := index.KindStatus("Pod"); !reflect.DeepEqual(got, listed) || len(index.Snapshot().Records) != 1 {
+		t.Fatalf("listed kind changed by a read that did not happen: %+v, was %+v", got, listed)
+	}
+	if got, _ := index.KindStatus("HTTPRoute"); got.State != "error" || got.Error != "timeout" {
+		t.Fatalf("kind never read did not record the failure: %+v", got)
+	}
+}
+
+type notAttemptedFailure struct{}
+
+func (notAttemptedFailure) Error() string { return "not attempted" }
+func (notAttemptedFailure) Class() string { return "timeout" }
+func (notAttemptedFailure) Unwrap() error { return ErrNotAttempted }
 
 type classifiedFailure string
 

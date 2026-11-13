@@ -247,9 +247,15 @@ func TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood(
 			}
 			mode.Store(2)
 			forceCycle(map[string]bool{"Secret": true})
+			// Readers see the new denial while its proof runs, before the
+			// collection that carries it is published, so wait for both.
 			waitUntil(t, 8*time.Second, "published isolated Secret capability gap", func() bool {
 				report, err := service.SyncHealth(t.Context())
-				return err == nil && report.Kinds["Secret"].Error == "forbidden"
+				if err != nil || report.Kinds["Secret"].Error != "forbidden" {
+					return false
+				}
+				_, published, err := readInventoryGeneration(provider, originalScope, "")
+				return err == nil && published.Revision != priorSecret.Revision
 			})
 			limited, err := service.SyncHealth(t.Context())
 			if err != nil || limited.State != "ready" || limited.FailingKinds != 0 || limited.UnreadableKinds != 1 || limited.Kinds["Secret"].CycleFailure {

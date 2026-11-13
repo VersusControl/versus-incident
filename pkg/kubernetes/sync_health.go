@@ -263,8 +263,13 @@ func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt time.Time
 // serve cannot hold the aggregate back, and any failing kind keeps it out of
 // ready — that is the whole point of a cluster-wide answer. Ready also requires
 // at least one kind to be ready, so an empty published set is loading.
+//
+// A failure is scoped to what failed. One kind that failed on its own, while
+// others are ready, makes the cluster partial, not failed. The whole cluster
+// is an error only when the failure is the cluster's own: a cycle that failed
+// as a whole, a credential the cluster rejects, or nothing readable at all.
 func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, float64, int, int) {
-	failed, degraded, stale, loading := false, false, false, false
+	failed, clusterFailed, degraded, stale, loading := false, false, false, false, false
 	ready, pending, unreadable := 0, 0, 0
 	oldest := time.Time{}
 	for kind, state := range kinds {
@@ -290,6 +295,7 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 		if isFailingSyncKind(state) {
 			if state.State == "error" {
 				failed = true
+				clusterFailed = clusterFailed || state.CycleFailure || state.Error == "unauthorized"
 			} else {
 				degraded = true
 			}
@@ -311,9 +317,9 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 		}
 	}
 	switch {
-	case failed:
+	case clusterFailed || failed && ready == 0:
 		return "error", true, ageSeconds, ready, pending
-	case degraded:
+	case failed || degraded:
 		return "partial", true, ageSeconds, ready, pending
 	case stale:
 		return "stale", true, ageSeconds, ready, pending

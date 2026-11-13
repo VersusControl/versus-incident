@@ -5,7 +5,7 @@ import { createElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "./api";
 import { hasKubernetesPublication, kubernetesAccessLost, kubernetesReadNeedsRecovery, kubernetesReportAuthorityLost, kubernetesQueryUsesKinds, kubernetesInventoryNotReady, retainKubernetesPublication } from "./kubernetesContinuity";
-import { commitStreamRetryCapMs, commitStreamRetryDelay, useKubernetesCommitEvents, useKubernetesQuery } from "./useKubernetesCluster";
+import { commitStreamGraceMs, commitStreamRetryCapMs, commitStreamRetryDelay, useKubernetesCommitEvents, useKubernetesQuery } from "./useKubernetesCluster";
 
 const committed = { items: ["checkout"], broken: { total: 3 }, allocatable_cpu: "8", observed_at: "2026-10-28T00:00:00Z", sync: { state: "ready", age_s: 20, partial: false } };
 const warming = { items: [], broken: { total: 0 }, allocatable_cpu: undefined, observed_at: "2026-10-28T00:13:00Z", sync: { state: "syncing", age_s: 800, partial: false } };
@@ -197,6 +197,101 @@ describe("Kubernetes commit refresh", () => {
     expect(result.current.feed.streamState).toBe("live");
     unmount();
     cache.clear();
+  });
+
+  describe("feed state across stream ends", () => {
+    // Each call to the mocked stream is answered by the next entry: "live"
+    // sends the opening snapshot and stays open until closed, "fail" rejects,
+    // and "silent" stays open without sending anything.
+    function streamScript(script: Array<"live" | "fail" | "silent">) {
+      const closers: Array<() => void> = [];
+      let revision = 0;
+      const stream = vi.spyOn(api, "kubernetesCommitStream").mockImplementation(emit => {
+        const step = script.shift() ?? "silent";
+        if (step === "fail") return Promise.reject(new Error("offline"));
+        if (step === "live") emit(event(++revision));
+        return new Promise<void>(resolve => { closers.push(resolve); });
+      });
+      return { stream, close: async () => { await act(async () => closers.shift()?.()); } };
+    }
+    function mountFeed() {
+      const { cache, wrapper } = setup();
+      const seen: string[] = [];
+      const view = renderHook(() => {
+        const feed = useKubernetesCommitEvents(true);
+        if (seen.at(-1) !== feed.streamState) seen.push(feed.streamState);
+        return feed;
+      }, { wrapper });
+      return { ...view, cache, seen };
+    }
+
+    it("stays live through a planned stream end and an immediate reconnect", async () => {
+      vi.useFakeTimers();
+      const { stream, close } = streamScript(["live", "live", "live"]);
+      const { result, unmount, cache, seen } = mountFeed();
+      await advance();
+      expect(result.current.streamState).toBe("live");
+      for (let lease = 1; lease <= 2; lease++) {
+        await advance(30_000);
+        await close();
+        await advance();
+        expect(stream).toHaveBeenCalledTimes(lease + 1);
+        expect(result.current.streamState).toBe("live");
+      }
+      await advance(commitStreamGraceMs * 2);
+      expect(seen).toEqual(["connecting", "live"]);
+      unmount();
+      cache.clear();
+    });
+
+    it("shows the notice as soon as the reconnect after a stream end fails", async () => {
+      vi.useFakeTimers();
+      const { stream, close } = streamScript(["live", "fail"]);
+      const { result, unmount, cache } = mountFeed();
+      await advance(30_000);
+      await close();
+      await advance();
+      expect(stream).toHaveBeenCalledTimes(2);
+      expect(result.current.streamState).toBe("reconnecting");
+      unmount();
+      cache.clear();
+    });
+
+    it("shows the notice when a reconnect stays silent past the grace period", async () => {
+      vi.useFakeTimers();
+      const { stream, close } = streamScript(["live", "silent"]);
+      const { result, unmount, cache } = mountFeed();
+      await advance(30_000);
+      await close();
+      await advance(commitStreamGraceMs - 10);
+      expect(stream).toHaveBeenCalledTimes(2);
+      expect(result.current.streamState).toBe("live");
+      await advance(20);
+      expect(result.current.streamState).toBe("reconnecting");
+      act(() => stream.mock.calls[1][0](event(7)));
+      expect(result.current.streamState).toBe("live");
+      unmount();
+      cache.clear();
+    });
+
+    it("returns to live once the stream recovers after an outage", async () => {
+      vi.useFakeTimers();
+      const { stream, close } = streamScript(["live", "fail", "fail", "live"]);
+      const { result, unmount, cache, seen } = mountFeed();
+      await advance(30_000);
+      await close();
+      await advance();
+      expect(result.current.streamState).toBe("reconnecting");
+      await advance(commitStreamRetryDelay(0));
+      expect(stream).toHaveBeenCalledTimes(3);
+      expect(result.current.streamState).toBe("reconnecting");
+      await advance(commitStreamRetryDelay(1));
+      expect(stream).toHaveBeenCalledTimes(4);
+      expect(result.current.streamState).toBe("live");
+      expect(seen).toEqual(["connecting", "live", "reconnecting", "live"]);
+      unmount();
+      cache.clear();
+    });
   });
 
   it("wipes protected cache on a real stream denial, without fallback replay", async () => {

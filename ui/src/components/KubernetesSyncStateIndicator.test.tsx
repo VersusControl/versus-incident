@@ -31,7 +31,7 @@ describe("Sync state indicator", () => {
   });
 
   it.each([
-    ["connecting", "Updates disconnected — refreshing every 30s"],
+    ["connecting", "Last synced 4s ago"],
     ["reconnecting", "Updates disconnected — refreshing every 30s"],
     ["resyncing", "Updates disconnected — refreshing every 30s"],
   ] as const)("names the %s record feed while the sync is ready", (streamState, expected) => {

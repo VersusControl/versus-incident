@@ -137,7 +137,7 @@ func mergeCrashes(current *snapshot, incoming []CrashEvent, gaps []Gap, podRead 
 	if podRead && current.CrashStartedAt.IsZero() {
 		current.CrashStartedAt = now
 	}
-	kept := make([]CrashEvent, 0, len(current.Crashes)+len(incoming))
+	kept := []CrashEvent{}
 	seen := map[string]bool{}
 	for _, event := range current.Crashes {
 		if !event.ObservedAt.Before(now.Add(-retention)) {

@@ -18,8 +18,21 @@ export function failureWarnings(failures?: Array<{ resource_id?: string; scope?:
   };
   return (failures ?? []).filter((failure) => !["item_limit", "request_limit", "budget", "page_limit", "syncing"].includes(failure.class)).map((failure) => ({
     id: `failure:${failure.resource_id ?? ""}:${failure.scope ?? ""}:${failure.class}`,
-    content: `${failureSources[failure.resource_id ?? ""] ?? (failure.resource_id?.split("~").at(-1) || failure.scope || "Kubernetes resources")}: ${reasons[failure.class] ?? knownFailureReason(failure.class) ?? "could not be read"}`,
+    content: !failure.resource_id && failure.scope === "discovery" ? discoveryWarning(failure.class) : `${failureSources[failure.resource_id ?? ""] ?? (failure.resource_id?.split("~").at(-1) || failure.scope || "Kubernetes resources")}: ${reasons[failure.class] ?? knownFailureReason(failure.class) ?? "could not be read"}`,
   }));
+}
+
+/**
+ * The server reports a failed API discovery under the scope "discovery". That
+ * is an internal stage name, so it is written out as a sentence instead.
+ */
+function discoveryWarning(failureClass: string): string {
+  switch (failureClass) {
+    case "timeout": return "The cluster did not list its resource types in time";
+    case "forbidden":
+    case "unauthorized": return "The cluster's resource types could not be listed: access denied";
+    default: return "The cluster's resource types could not be listed";
+  }
 }
 
 export function issueWarnings(issue?: KubernetesIssue): KubernetesWarning[] {

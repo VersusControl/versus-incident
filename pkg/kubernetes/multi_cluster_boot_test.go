@@ -634,7 +634,7 @@ func (fleet *bootFleet) resolve(cluster *bootedCluster) *Service {
 // can compare one cluster before and after another cluster changes.
 func (fleet *bootFleet) settle(cluster *bootedCluster, quiet time.Duration, budget time.Duration) {
 	fleet.t.Helper()
-	deadline := time.Now().Add(budget)
+	deadline := time.Now().Add(scaledTimeout(budget))
 	for {
 		last, ok := fleet.broker.lastPublished(cluster.key)
 		if ok && time.Since(last) >= quiet {
@@ -649,7 +649,7 @@ func (fleet *bootFleet) settle(cluster *bootedCluster, quiet time.Duration, budg
 
 func waitUntil(t *testing.T, budget time.Duration, describe string, check func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(budget)
+	deadline := time.Now().Add(scaledTimeout(budget))
 	for {
 		if check() {
 			return

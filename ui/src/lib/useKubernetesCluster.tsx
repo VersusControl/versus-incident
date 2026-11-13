@@ -152,6 +152,18 @@ export function useKubernetesCommitEvents(enabled: boolean) {
     let denied = false;
     let recoveryOnly = false;
     let controller: AbortController | undefined;
+    // The visible feed state follows the stream only through `show`. While the
+    // stream is between connections a grace timer holds the current state; it
+    // turns into "reconnecting" only when no event has arrived before it fires.
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const hold = () => {
+      if (grace) return;
+      grace = setTimeout(() => {
+        grace = undefined;
+        if (!disposed && !connected) setState("reconnecting");
+      }, commitStreamGraceMs);
+    };
+    const release = () => { clearTimeout(grace); grace = undefined; };
     const families = new Set([
       "kubernetes-overview", "kubernetes-sync-health", "kubernetes-graph", "kubernetes-overview-topology",
       "kubernetes-namespaces", "kubernetes-workloads", "kubernetes-nodes", "kubernetes-node-pods",
@@ -190,9 +202,17 @@ export function useKubernetesCommitEvents(enabled: boolean) {
       const currentController = new AbortController();
       controller = currentController;
       let active = true;
+      let delivered = false;
+      const openedAt = Date.now();
       connected = false;
-      setState(failures ? "reconnecting" : "connecting");
+      if (failures) {
+        release();
+        setState("reconnecting");
+      } else {
+        hold();
+      }
       const seen = new Set<string>();
+      let cleanEnd = true;
       try {
         await client.kubernetesCommitStream(event => {
           if (disposed || !active || currentController.signal.aborted || !["committed", "sync"].includes(event.event)) return;
@@ -207,7 +227,9 @@ export function useKubernetesCommitEvents(enabled: boolean) {
           denied = false;
           recoveryOnly = false;
           connected = true;
+          delivered = true;
           failures = 0;
+          release();
           setState("live");
           const identity = event.id || (event.event === "committed" ? String(payload.revision) : undefined);
           if (event.event === "committed") {
@@ -221,6 +243,7 @@ export function useKubernetesCommitEvents(enabled: boolean) {
           else void cache.invalidateQueries({ queryKey: key("kubernetes-sync-health") }, { cancelRefetch: false });
         }, currentController.signal, lastID);
       } catch (error) {
+        cleanEnd = false;
         if (disposed) return;
         if (kubernetesAccessLost(error)) {
           const historyDenied = error instanceof ApiError && error.status === 403
@@ -243,6 +266,7 @@ export function useKubernetesCommitEvents(enabled: boolean) {
           for (const query of cache.getQueryCache().findAll(filters)) {
             query.setState({ data: undefined, error: error as Error, status: "error", fetchStatus: "idle" });
           }
+          release();
           setState("reconnecting");
           if (!historyDenied) return;
           // Persisted evidence denial is not an application/session denial.
@@ -253,6 +277,17 @@ export function useKubernetesCommitEvents(enabled: boolean) {
       } finally { active = false; }
       if (disposed) return;
       connected = false;
+      if (delivered && !denied) {
+        // The stream was live and has ended: the server closes every stream
+        // after a short lease by design. Keep the current state through the
+        // grace period while the next connection opens; only a reconnect that
+        // fails or stays silent past the grace period shows the notice.
+        hold();
+        const planned = cleanEnd && Date.now() - openedAt >= commitStreamGraceMs;
+        retry = setTimeout(() => void run(), planned ? 0 : commitStreamRetryDelay(0));
+        return;
+      }
+      release();
       setState("reconnecting");
       retry = setTimeout(() => void run(), commitStreamRetryDelay(failures++));
     };
@@ -267,11 +302,20 @@ export function useKubernetesCommitEvents(enabled: boolean) {
       controller?.abort();
       clearTimeout(retry);
       clearTimeout(flush);
+      release();
       clearInterval(fallback);
     };
   }, [enabled, client, key, cluster, cache]);
   return { streamState: state, sync };
 }
+
+/**
+ * How long the commit feed may be between connections before the top bar says
+ * updates are disconnected. A healthy reconnect sends its first event within
+ * about a second, so a planned stream end never reaches this; a stream that is
+ * still silent after five seconds is treated as down.
+ */
+export const commitStreamGraceMs = 5_000;
 
 /** Longest wait between commit-stream reconnects while the server keeps failing. */
 export const commitStreamRetryCapMs = 60_000;
