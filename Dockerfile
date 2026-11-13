@@ -7,7 +7,7 @@ COPY ui/ ./
 RUN npm run build
 
 # --- Build stage: cross-compile natively (no QEMU) ---
-FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
 
