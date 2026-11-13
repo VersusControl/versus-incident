@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
@@ -69,16 +70,27 @@ type inventoryCache struct {
 	failed           bool
 	failedClass      string
 	authorityFailure error
+	// authorityBinding is the binding the committed generation was collected
+	// or restored under; it decides whether that generation is the baseline
+	// for telling a new denial from a steady capability gap.
+	authorityBinding string
+	// authorityQuestioned holds the kinds whose new denial waits for the
+	// authority proof. Readers keep the committed generation with only these
+	// kinds withheld; the next publication clears it.
+	authorityQuestioned inventoryQuestionedKinds
 	// keptStoredLogged is when the worker last logged keeping the stored
 	// generation because the cluster could not answer its restore proof.
 	keptStoredLogged time.Time
 	authorityProof   inventoryAuthorityProofState
-	started          bool
-	namespaces       map[string]bool
-	wake             chan struct{}
-	scopePending     bool
-	candidates       namespaceCandidateManifest
-	progress         inventoryProgress
+	// authorityChecks counts the authority checks collection has run, so a
+	// steady permission gap can be shown never to trigger one.
+	authorityChecks atomic.Int64
+	started         bool
+	namespaces      map[string]bool
+	wake            chan struct{}
+	scopePending    bool
+	candidates      namespaceCandidateManifest
+	progress        inventoryProgress
 	// abandonedSave is the published capture whose history save the store
 	// rejected for good. It is not retried; the next capture records the gap.
 	abandonedSave string
@@ -157,10 +169,12 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 		}
 		cache.mu.RLock()
 		generation, failed, failedClass, authorityFailure := cache.generation, cache.failed, cache.failedClass, cache.authorityFailure
+		questioned := cache.authorityQuestioned
 		cache.mu.RUnlock()
 		if authorityFailure != nil {
 			return inventoryGeneration{}, true, authorityFailure
 		}
+		generation = questionInventoryKinds(generation, questioned)
 		if len(generation.View.Kinds) > 0 {
 			if failed {
 				generation.View.Kinds = failedInventoryKinds(generation.View.Kinds, failedClass)

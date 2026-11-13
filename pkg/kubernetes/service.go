@@ -781,7 +781,7 @@ func (service *Service) Discover(ctx context.Context) (result Discovery, resultE
 			result, resultErr = Discovery{}, err
 		}
 	}()
-	ctx, cancel := withOperationBudget(ctx, defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
+	ctx, cancel := withOperationBudget(discoveryRead(ctx), defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
 	defer cancel()
 	key := service.cacheKey()
 	service.mu.Lock()
@@ -2479,13 +2479,41 @@ func retainUnreadableVersions(discovery *Discovery, from int) {
 // group-version, or for /apis itself, leaves the group-version's contents
 // unknown, so a caller must report an error instead of an absent resource.
 func discoveryVersionFailed(discovery Discovery, resourceID string) bool {
+	_, failed := discoveryVersionFailure(discovery, resourceID)
+	return failed
+}
+
+// discoveryVersionFailure reports whether discovery could not read the API
+// version resourceID is pinned to, and the class of that failure. A failure
+// that names no group-version (the group list itself) covers only groups
+// discovery returned nothing for: a group it did return was read, so that
+// failure cannot leave its contents unknown.
+func discoveryVersionFailure(discovery Discovery, resourceID string) (string, bool) {
 	pinned := pinnedGroupVersion(resourceID)
+	group, _, _ := strings.Cut(pinned, "~")
+	if group == "core" {
+		group = ""
+	}
+	returned := false
+	for _, resource := range discovery.Resources {
+		returned = returned || resource.Group == group
+	}
 	for _, failures := range [][]PartialFailure{discovery.Partial, discovery.unlisted} {
 		for _, failure := range failures {
-			if failure.GroupVersion == "" || failure.GroupVersion == pinned {
-				return true
+			if failure.GroupVersion == pinned || failure.GroupVersion == "" && !returned {
+				return failure.Class, true
 			}
 		}
+	}
+	return "", false
+}
+
+// transientInventoryClass reports a failure that says nothing about what the
+// credential may read: the cluster did not answer in time or at all.
+func transientInventoryClass(class string) bool {
+	switch class {
+	case "timeout", "unavailable", "throttled", "budget_exhausted":
+		return true
 	}
 	return false
 }

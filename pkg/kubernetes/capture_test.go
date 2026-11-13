@@ -1487,11 +1487,14 @@ func TestCaptureIndexRefreshThrottlesActualUpstreamReads(t *testing.T) {
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
-	service.client.indexLimiter = rate.NewLimiter(0, 4)
+	// Discovery takes its own pace and the LIST takes the inventory pace, so
+	// a discovery walk never waits behind LISTs; both stay bounded.
+	service.client.discoveryLimiter = rate.NewLimiter(0, 3)
+	service.client.indexLimiter = rate.NewLimiter(0, 1)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	snapshot, status, err := service.IndexSnapshot(captureReadContext(ctx, "owner"), "Pod")
-	if err != nil || status.State != "ready" || len(snapshot.Records) != 1 || reads.Load() != 4 || service.client.indexLimiter.Allow() {
+	if err != nil || status.State != "ready" || len(snapshot.Records) != 1 || reads.Load() != 4 || service.client.indexLimiter.Allow() || service.client.discoveryLimiter.Allow() {
 		t.Fatalf("capture discovery/list did not consume actual read budget: %+v %v reads=%d", status, err, reads.Load())
 	}
 	var output any

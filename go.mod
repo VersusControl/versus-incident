@@ -1,6 +1,6 @@
 module github.com/VersusControl/versus-incident
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.88.0

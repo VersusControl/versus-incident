@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3999,3 +3999,351 @@ test.describe("Read-only external cluster acceptance", () => {
     }
   });
 });
+
+// Watches the Kubernetes Overview on the running kind stack the way a user with
+// a reduced reader role leaves it open: opened from the navigation, refreshed,
+// reloaded, moved between views, back and forward, a second tab, the tab hidden
+// for three minutes and then shown again. A capture every 30 s at 1440 px dark,
+// a 390 px light pass at the start and the end, and a DOM probe every 250 ms in
+// every tab record anything that appears or disappears. Every failure state, a
+// raw error code, a console error or a 4xx/5xx is a violation with its time.
+//   run.sh exec <task> visual --k8s kind -- \
+//     bash plans/harness-run/tests/kubernetes/kubernetes-overview-watch.sh <profile> [minutes]
+test.describe("Kubernetes Overview watched over time on the harness kind cluster", () => {
+  const minutes = Number(process.env.E2E_KUBERNETES_WATCH_MINUTES || 0);
+  const expectedUnreadable = (process.env.E2E_KUBERNETES_WATCH_UNREADABLE ?? "").split(",").map((kind) => kind.trim()).filter(Boolean).sort();
+  test.skip(backend !== "kind" || !(minutes > 0), "requires the kind stack and E2E_KUBERNETES_WATCH_MINUTES");
+
+  interface DomState {
+    path: string; visibility: string; tab: string | null; syncState: string | null; syncLabel: string | null;
+    unreadable: string | null; coverageMarker: boolean; clusterHealth: boolean; loading: string[]; alerts: string[];
+    failureText: string[]; rawCodes: string[];
+  }
+  interface WatchEvent { at: string; t: number; tab: string; kind: string; detail: unknown }
+
+  test("overview stays truthful while the user refreshes, navigates, opens a second tab and idles", async ({ browser }) => {
+    test.setTimeout((minutes * 60 + 300) * 1000);
+    const results = process.env.HARNESS_RESULTS_DIR ?? captureDir();
+    const begun = Date.now();
+    const seconds = () => Math.round((Date.now() - begun) / 100) / 10;
+    const events: WatchEvent[] = [];
+    const labels = new Map<Page, string>();
+    const lastDom = new Map<string, DomState>();
+    const captures: Array<Record<string, unknown>> = [];
+    const apiCounts: Record<string, number> = {};
+    const apiLast = new Map<string, string>();
+    const note = (tab: string, kind: string, detail: unknown) => events.push({ at: new Date().toISOString(), t: seconds(), tab, kind, detail });
+    const probe = () => {
+      let last = "";
+      const norm = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+      const read = () => {
+        const indicator = document.querySelector("[data-sync-state]");
+        const text = document.body?.innerText ?? "";
+        return {
+          path: location.pathname + location.search,
+          visibility: document.visibilityState,
+          tab: norm(document.querySelector('[aria-label="Kubernetes views"] [aria-selected="true"]')?.textContent) || null,
+          syncState: indicator?.getAttribute("data-sync-state") ?? null,
+          syncLabel: norm(indicator?.textContent).replace(/\d+s ago/, "Ns ago") || null,
+          unreadable: norm(document.querySelector("[data-unreadable-note]")?.textContent) || null,
+          coverageMarker: Boolean(document.querySelector('[aria-label="Resource coverage"]')),
+          clusterHealth: Boolean(document.querySelector('[aria-label="Cluster health"]')),
+          loading: [...document.querySelectorAll('[aria-label^="Loading"],[aria-label^="Checking"]')].map((element) => element.getAttribute("aria-label") ?? ""),
+          alerts: [...document.querySelectorAll('[role="alert"]')].map((element) => norm(element.textContent).slice(0, 200)).filter(Boolean),
+          failureText: [...new Set(text.match(/Cluster sync failed|Sync failed|Sync degraded|cannot be read right now|cluster read failed|Couldn't load[^\n]{0,60}|Something went wrong|is not configured|no longer available|Updates disconnected/gi) ?? [])],
+          rawCodes: [...new Set(text.match(/\b(?:[a-z]+_){1,4}[a-z]+\b|\bErr[A-Z]\w+|\bHTTP [45]\d\d\b|\bstatus [45]\d\d\b/g) ?? [])].slice(0, 10),
+        };
+      };
+      const tick = () => {
+        if (!document.body) return;
+        const state = read();
+        const key = JSON.stringify(state);
+        if (key === last) return;
+        last = key;
+        (window as unknown as { __watchReport?: (state: unknown) => void }).__watchReport?.(state);
+      };
+      setInterval(tick, 250);
+      document.addEventListener("DOMContentLoaded", tick);
+    };
+    const instrument = async (context: BrowserContext, label: string) => {
+      let pages = 0;
+      await context.exposeBinding("__watchReport", (source, state: DomState) => {
+        const tab = labels.get(source.page) ?? label;
+        lastDom.set(tab, state);
+        note(tab, "dom", state);
+      });
+      await context.addInitScript(probe);
+      context.on("page", (page) => {
+        const tab = pages++ === 0 ? label : `${label}-tab${pages}`;
+        labels.set(page, tab);
+        page.on("console", (message) => { if (["error", "warning"].includes(message.type())) note(tab, `console-${message.type()}`, { text: message.text().slice(0, 400), url: message.location().url }); });
+        page.on("pageerror", (error) => note(tab, "pageerror", error.message.slice(0, 400)));
+        page.on("response", (response) => {
+          const url = new URL(response.url());
+          if (url.pathname.startsWith("/api/")) apiCounts[`${response.request().method()} ${url.pathname}`] = (apiCounts[`${response.request().method()} ${url.pathname}`] ?? 0) + 1;
+          if (response.status() >= 400) note(tab, "http-error", { status: response.status(), method: response.request().method(), path: url.pathname + url.search });
+          // What the page itself was told, so a screen state can be matched to
+          // the answer behind it: only changes are recorded.
+          const name = { "/api/admin/kubernetes/overview": "overview", "/api/admin/kubernetes/sync": "sync", "/api/admin/kubernetes/usage": "usage" }[url.pathname];
+          if (name && response.request().method() === "GET") void response.json().then((json: Record<string, any>) => {
+            const digest = name === "overview" ? { status: response.status(), sync: json.sync?.state, observed_at: json.observed_at, pods: json.pods, nodes: json.nodes, metrics: json.metrics_status, partial: (json.partial_failures ?? []).map((row: Record<string, unknown>) => `${row.scope ?? row.resource_id ?? ""}:${row.class ?? ""}`) }
+              : name === "sync" ? { status: response.status(), state: json.state, failing: json.failing_kinds, unreadable: (json.unreadable ?? []).map((row: Record<string, unknown>) => row.kind), pending: json.pending_kinds }
+                : { status: response.status(), availability: json.availability, pods: json.pod_metrics?.availability, nodes: json.node_metrics?.availability };
+            const key = `${tab}:${name}`;
+            const value = JSON.stringify(digest);
+            if (apiLast.get(key) !== value) { apiLast.set(key, value); note(tab, `api-${name}`, digest); }
+          }).catch(() => undefined);
+        });
+        page.on("requestfailed", (request) => {
+          const url = new URL(request.url());
+          const failure = request.failure()?.errorText ?? "";
+          note(tab, failure.includes("ERR_ABORTED") ? "request-aborted" : "request-failed", { method: request.method(), path: url.pathname, failure });
+        });
+      });
+    };
+    const shot = async (page: Page, viewport: number, theme: string, state: string, fullPage = false) => {
+      const tab = labels.get(page) ?? "unknown";
+      // The reader profile is part of the name, so captures of different rows never share a file name.
+      const label = (process.env.E2E_KUBERNETES_WATCH_LABEL ?? "").trim();
+      const file = capturePath(label ? `overview-watch-${label}` : "overview-watch", viewport, theme, state);
+      const at = new Date().toISOString();
+      const health = await page.getByRole("region", { name: "Cluster health", exact: true }).innerText({ timeout: 1_000 }).catch(() => null);
+      const image = await page.screenshot({ path: file, animations: "disabled", fullPage });
+      captures.push({ file: path.basename(file), at, t: seconds(), tab, dom: lastDom.get(tab) ?? null, clusterHealth: health?.replace(/\s+/g, " ").slice(0, 400) ?? null, sha256: createHash("sha256").update(image).digest("hex") });
+    };
+    const waitOverview = async (page: Page) => {
+      await expect(page.getByRole("heading", { name: "Kubernetes", exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible({ timeout: 30_000 });
+      if (expectedUnreadable.length) await expect(page.locator("[data-unreadable-note]")).toBeVisible({ timeout: 30_000 });
+    };
+    const setHidden = (page: Page, hidden: boolean) => page.evaluate((value) => {
+      // Headless pages are always visible; tell the app what a real browser
+      // tells it when the user switches tabs away and back.
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (value ? "hidden" : "visible") });
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => value });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event(value ? "blur" : "focus"));
+    }, hidden);
+    const checkCoverage = async (page: Page, viewport: number, theme: string, state: string) => {
+      const marker = page.getByRole("button", { name: "Resource coverage", exact: true });
+      const present = await marker.count() > 0;
+      let popover: string | null = null;
+      if (present) {
+        await marker.click();
+        const details = page.getByRole("region", { name: "Resource coverage details", exact: true });
+        await expect(details).toBeVisible();
+        popover = (await details.innerText()).replace(/\s+/g, " ");
+        await shot(page, viewport, theme, `${state}-coverage-popover`);
+        await page.keyboard.press("Escape");
+        await page.mouse.move(2, (page.viewportSize()?.height ?? 800) - 2);
+      }
+      const unreadable = await page.locator("[data-unreadable-note]").innerText().catch(() => null);
+      note(labels.get(page) ?? "unknown", "coverage", { marker: present, popover, unreadable });
+    };
+    const mobilePass = async (label: string) => {
+      const context = await browser.newContext({ baseURL: env.baseURL, viewport: { width: 390, height: 844 }, colorScheme: "light" });
+      try {
+        await instrument(context, label);
+        await context.addInitScript(() => { try { localStorage.setItem("versus.theme", "light"); } catch { /* about:blank has no storage */ } });
+        const page = await context.newPage();
+        await openApp(page, "/now");
+        await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+        await page.getByRole("link", { name: "Kubernetes", exact: true }).click();
+        // What the user sees first, before the overview has answered.
+        await page.waitForTimeout(1_000);
+        await shot(page, 390, "light", `${label}-arrival`);
+        await waitOverview(page);
+        note(label, "theme", await page.locator("html").getAttribute("data-theme"));
+        await shot(page, 390, "light", `${label}-overview`);
+        await shot(page, 390, "light", `${label}-overview-full`, true);
+        await checkCoverage(page, 390, "light", label);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      } finally {
+        await context.close();
+      }
+    };
+
+    let failure: unknown;
+    const context = await browser.newContext({ baseURL: env.baseURL, viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
+    try {
+      await mobilePass("mobile-start");
+      await instrument(context, "main");
+      await context.addInitScript(() => { try { localStorage.setItem("versus.theme", "dark"); } catch { /* about:blank has no storage */ } });
+      const main = await context.newPage();
+      await openApp(main, "/now");
+      const link = primaryNavKubernetes(main);
+      if (!(await link.isVisible())) await main.getByRole("button", { name: "Connectors" }).click();
+      await link.click();
+      await waitOverview(main);
+      note("main", "opened-from-navigation", main.url());
+      let second: Page | undefined;
+      const ticks = minutes * 2;
+      // A ten-minute watch idles from 2:30 to 6:00; a shorter one returns two
+      // ticks before the end so the return, coverage and keyboard steps still run.
+      const returnAt = Math.min(12, ticks - 2);
+      const coverageAt = Math.min(14, ticks - 1);
+      const keyboardAt = Math.min(15, ticks);
+      const watchStart = Date.now();
+      const act = async (k: number) => {
+        const step = async (name: string, run: () => Promise<void>) => { note("main", "action", name); await run(); };
+        if (k === 1) await step("in-app refresh", async () => {
+          await main.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
+          await main.waitForTimeout(3_000);
+          await shot(main, 1440, "dark", "after-refresh");
+        });
+        if (k === 2) await step("browser reload", async () => {
+          await main.reload();
+          await waitOverview(main);
+          await shot(main, 1440, "dark", "after-reload");
+        });
+        if (k === 3) await step("workloads, issues, overview", async () => {
+          await main.getByRole("tab", { name: "Workloads", exact: true }).click();
+          await expect(main.getByLabel("Workload namespace")).toBeVisible();
+          await main.waitForTimeout(2_000);
+          await shot(main, 1440, "dark", "workloads");
+          await main.getByRole("tab", { name: "Issues", exact: true }).click();
+          await main.waitForTimeout(3_000);
+          await shot(main, 1440, "dark", "issues");
+          await main.getByRole("tab", { name: "Timeline", exact: true }).click();
+          await main.waitForTimeout(3_000);
+          await shot(main, 1440, "dark", "timeline");
+          await main.getByRole("tab", { name: "Overview", exact: true }).click();
+          await waitOverview(main);
+          await shot(main, 1440, "dark", "overview-returned");
+        });
+        if (k === 4) await step("back and forward", async () => {
+          await main.goBack();
+          await main.waitForTimeout(2_000);
+          note("main", "url", main.url());
+          await shot(main, 1440, "dark", "back-1");
+          await main.goBack();
+          await main.waitForTimeout(2_000);
+          note("main", "url", main.url());
+          await shot(main, 1440, "dark", "back-2");
+          await main.goForward();
+          await main.goForward();
+          await waitOverview(main);
+          note("main", "url", main.url());
+          await shot(main, 1440, "dark", "forward-2");
+        });
+        if (k === 5) await step("second tab, then hide the first", async () => {
+          second = await context.newPage();
+          await second.goto("/agent/kubernetes");
+          await waitOverview(second);
+          await shot(second, 1440, "dark", "second-tab-open");
+          await second.bringToFront();
+          await setHidden(main, true);
+          note("main", "idle-start", null);
+        });
+        if (k === 8 && second) await shot(second, 1440, "dark", "second-tab-mid-idle");
+        if (k === returnAt) await step("return to the first tab", async () => {
+          await main.bringToFront();
+          await setHidden(main, false);
+          note("main", "idle-end", null);
+          await main.waitForTimeout(1_000);
+          await shot(main, 1440, "dark", "returned-from-idle");
+        });
+        if (k === coverageAt) await step("coverage and unreadable note", async () => checkCoverage(main, 1440, "dark", "main"));
+        if (k === keyboardAt) await step("keyboard tabs", async () => {
+          const overviewTab = main.getByRole("tab", { name: "Overview", exact: true });
+          await overviewTab.focus();
+          await main.keyboard.press("ArrowRight");
+          await expect(main.getByRole("tab", { name: "Workloads", exact: true })).toHaveAttribute("aria-selected", "true");
+          await expect(main.getByRole("tab", { name: "Workloads", exact: true })).toBeFocused();
+          await main.keyboard.press("ArrowLeft");
+          await expect(overviewTab).toHaveAttribute("aria-selected", "true");
+          await waitOverview(main);
+          // Move the pointer off the coverage trigger so its hover popover does
+          // not stay open over later captures.
+          await main.mouse.move(5, 895);
+        });
+        if (k === ticks && second) await shot(second, 1440, "dark", "second-tab-end");
+      };
+      for (let k = 0; k <= ticks; k += 1) {
+        const wait = watchStart + k * 30_000 - Date.now();
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        else note("main", "late-tick", { k, late_ms: -wait });
+        await shot(main, 1440, "dark", `t${String(k * 30).padStart(3, "0")}s`);
+        await act(k);
+      }
+      await mobilePass("mobile-end");
+    } catch (error) {
+      failure = error;
+    } finally {
+      await context.close();
+    }
+
+    // Judge the whole window, not the end state.
+    const dom = events.filter((event) => event.kind === "dom") as Array<WatchEvent & { detail: DomState }>;
+    const violations: Array<{ at: string; t: number; tab: string; rule: string; detail: unknown }> = [];
+    const flag = (event: WatchEvent, rule: string, detail: unknown) => violations.push({ at: event.at, t: event.t, tab: event.tab, rule, detail });
+    for (const event of dom) {
+      const state = event.detail;
+      if (state.failureText.length) flag(event, "failure-text", state.failureText);
+      if (state.syncState === "failed" || state.syncState === "degraded") flag(event, "sync-state", `${state.syncState}: ${state.syncLabel}`);
+      if (state.alerts.length) flag(event, "alert", state.alerts);
+      // public_host is the config key the Issues alert settings ask the user to set.
+      const codes = state.rawCodes.filter((code) => code !== "public_host");
+      if (codes.length) flag(event, "raw-code", codes);
+      if (state.path.startsWith("/agent/kubernetes") && (state.syncState === "ready" || state.unreadable)) {
+        const shown = (state.unreadable?.match(/connector identity: (.*?) \(/)?.[1] ?? "").split(",").map((kind) => kind.trim()).filter(Boolean).sort();
+        if (shown.join() !== expectedUnreadable.join()) flag(event, "unreadable-set", { shown, expected: expectedUnreadable, text: state.unreadable });
+      }
+    }
+    // A state that lasts: loading longer than 15 s, or an Overview with neither
+    // data nor a loading state (an empty flash) for any time at all.
+    for (const tab of [...new Set(dom.map((event) => event.tab))]) {
+      const series = dom.filter((event) => event.tab === tab);
+      series.forEach((event, index) => {
+        const until = series[index + 1]?.t ?? event.t;
+        const state = event.detail;
+        if (state.loading.length && until - event.t > 15) flag(event, "loading-over-15s", { loading: state.loading, seconds: until - event.t });
+        const onOverview = state.path.startsWith("/agent/kubernetes") && (state.tab === "Overview" || state.tab === null) && state.syncLabel !== null;
+        if (onOverview && !state.clusterHealth && !state.loading.length && until - event.t > 0) flag(event, "overview-without-data-or-loading", { seconds: until - event.t, state });
+      });
+    }
+    // App-shell capability probes of the OSS binary, answered and handled by
+    // design on every page load: the Enterprise SSO deployment probe (404 on
+    // OSS, lib/useDeploymentOrg.ts), the Enterprise baselines probe (404 on OSS
+    // renders the locked state, lib/api.ts listBaselines), and the agent config
+    // read before the gateway sign-in completes (401). They are counted and
+    // reported, not judged as Kubernetes view failures.
+    const explained = (status: number, target: string) => status === 404 && /\/enterprise\/api\/sso\/deployment$/.test(target)
+      || status === 404 && /\/api\/agent\/baselines(\?|$)/.test(target)
+      || status === 401 && /\/api\/admin\/config\/agent$/.test(target);
+    const explainedEvents: WatchEvent[] = [];
+    for (const event of events) {
+      const detail = event.detail as { status?: number; path?: string; text?: string; url?: string };
+      if (event.kind === "http-error" && explained(detail.status ?? 0, detail.path ?? "")) { explainedEvents.push(event); continue; }
+      if (event.kind === "console-error" && /Failed to load resource: the server responded with a status of (\d+)/.test(detail.text ?? "")
+        && explained(Number(/status of (\d+)/.exec(detail.text ?? "")![1]), new URL(detail.url || "http://x/").pathname + new URL(detail.url || "http://x/").search)) { explainedEvents.push(event); continue; }
+      if (["console-error", "pageerror", "http-error", "request-failed"].includes(event.kind)) flag(event, event.kind, event.detail);
+    }
+    const appeared: Array<{ at: string; t: number; tab: string; field: string; from: unknown; to: unknown }> = [];
+    const previous = new Map<string, DomState>();
+    for (const event of dom) {
+      const before = previous.get(event.tab);
+      if (before) for (const field of ["path", "visibility", "tab", "syncState", "syncLabel", "unreadable", "coverageMarker", "clusterHealth", "loading", "alerts", "failureText", "rawCodes"] as const) {
+        if (JSON.stringify(before[field]) !== JSON.stringify(event.detail[field])) appeared.push({ at: event.at, t: event.t, tab: event.tab, field, from: before[field], to: event.detail[field] });
+      }
+      previous.set(event.tab, event.detail);
+    }
+    const receipt = {
+      classification: "live: real harness kind stack, no browser routes or API mocks; tab hiding is emulated through document.visibilityState",
+      minutes, expectedUnreadable, started_at: new Date(begun).toISOString(), ended_at: new Date().toISOString(),
+      failure: failure ? String((failure as Error).message ?? failure).slice(0, 2000) : null,
+      captures, violations, changes: appeared, apiCounts,
+      explained: explainedEvents.map((event) => ({ at: event.at, t: event.t, tab: event.tab, kind: event.kind, detail: event.detail })),
+      counts: Object.fromEntries([...new Set(events.map((event) => event.kind))].map((kind) => [kind, events.filter((event) => event.kind === kind).length])),
+      events,
+    };
+    fs.mkdirSync(results, { recursive: true });
+    fs.writeFileSync(path.join(results, "overview-watch.json"), JSON.stringify(receipt, null, 2), { mode: 0o600 });
+    if (failure) throw failure;
+    expect(violations, "no failure state, flash, endless loading, raw code, console error or unexplained 4xx/5xx over the window").toEqual([]);
+  });
+});
+
+function primaryNavKubernetes(page: Page) {
+  return page.locator('nav[aria-label="Primary"]').getByRole("link", { name: "Kubernetes", exact: true });
+}

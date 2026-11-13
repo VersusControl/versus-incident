@@ -358,19 +358,27 @@ kubectl apply -f versus-kubernetes-rbac.yaml
 The role grants only `get` and `list`, plus `get` on `pods/log`. It grants no
 create, update, patch, delete, exec, proxy, rollout, or Helm permission.
 
-Secrets are included in the role above and read as metadata only: Versus
-projects names, labels, and referenced key names, never values. Remove the
-`secrets` grant from your own role or binding if you want Secrets invisible.
-Add Gateway API `gateways` and `httproutes` only when those CRDs are installed.
+Versus shows Secret names, labels, and referenced key names, never values.
+RBAC cannot limit a LIST to metadata, though, so the `secrets` grant above lets
+the IAM role read Secret values. For least privilege, remove `secrets` from your
+role. Versus then shows "Not readable with this connector identity: Secret
+(permission denied). Everything else is shown." The rest of the view and the
+Kubernetes history stay fully available.
+
+Gateway API `gateways` and `httproutes` are optional. Without that grant,
+Gateway and HTTPRoute show as not readable and everything else is shown.
 
 For namespace-only access, replace the ClusterRoleBinding with RoleBindings in
-approved namespaces and remove cluster-scoped resources. Versus reports denied
-cluster-wide reads as partial evidence instead of treating them as an empty
-healthy result.
+approved namespaces and remove cluster-scoped resources. You get a live,
+partial view of those namespaces only, and **no Kubernetes history is saved**:
+history needs a cluster-wide read of Namespaces. When you need history, keep the
+cluster-wide role without `secrets`. See
+[Least privilege](/agent/kubernetes/configuration#least-privilege) for what
+each reader role shows.
 
 Verify the custom binding by refreshing `/agent/kubernetes`. Normal resources
-should remain visible; anything intentionally excluded should appear as partial
-or forbidden evidence.
+should remain visible; anything you left out is reported as not readable
+instead of as empty.
 
 ## Same-cluster alternative
 

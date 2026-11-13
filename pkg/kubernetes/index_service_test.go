@@ -779,6 +779,10 @@ func TestKindPinnedToAnUnreadableDiscoveryVersionFailsInsteadOfReadingEmpty(t *t
 	ctx = context.WithValue(ctx, indexDefinitionContextKey{}, map[string]ResourceDefinition{})
 	if _, _, err := service.loadIndexKind(ctx, "Ingress"); err == nil || errors.Is(err, kubeindex.ErrKindNotServed) {
 		t.Fatalf("a kind pinned to an unreadable API version read as an absent kind: %v", err)
+	} else if !errors.Is(err, kubeindex.ErrNotAttempted) || errors.Is(err, ErrNotFound) || errorClass(err) != "unavailable" {
+		// The kind was not read: it keeps what it last reported, and a kind
+		// never read fails with the discovery's class, never as unsupported.
+		t.Fatalf("a kind discovery could not reach was not reported as not read: %v class=%s", err, errorClass(err))
 	}
 	if requests.Load() != 0 {
 		t.Fatalf("the loader issued %d requests for a version discovery could not read", requests.Load())

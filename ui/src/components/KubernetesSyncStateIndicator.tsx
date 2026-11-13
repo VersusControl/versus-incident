@@ -43,11 +43,13 @@ export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, t
   const renewing = (syncState === "refreshing" || syncState === "syncing") && syncReason?.includes("credential");
   const failing = state === "failed" || state === "degraded";
   // The current health read outranks progress cached from an older stream.
+  // A feed that is still opening is not a disconnection: the hook reports
+  // "reconnecting" once a connection attempt fails or stays silent too long.
   const label = failing ? syncFailureLabel(state, { onScreen: Boolean(firstReadyAt) && dataOnScreen, time: syncDataTime(lastSyncedAt, ageSeconds) })
     : state === "loading" ? "Loading" : renewing ? "Refreshing credentials…"
     : syncState === "refreshing" || syncState === "syncing" && firstReadyAt ? "Syncing"
     : state === "ready"
-    ? streamState === "live" ? ageSeconds !== undefined ? `Last synced ${Math.round(ageSeconds)}s ago` : "Last sync time unavailable" : "Updates disconnected — refreshing every 30s"
+    ? streamState === "live" || streamState === "connecting" ? ageSeconds !== undefined ? `Last synced ${Math.round(ageSeconds)}s ago` : "Last sync time unavailable" : "Updates disconnected — refreshing every 30s"
     : firstReadyAt ? "Syncing" : "Preparing";
   const ink = state === "failed" ? "text-sev-critical-text"
     : state === "degraded" ? "text-sev-warning-text"
