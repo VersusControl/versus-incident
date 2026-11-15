@@ -47,9 +47,11 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		// distinguishes partial authority from total revocation without
 		// requiring unsupported or still-loading correlation kinds. Positive
 		// per-kind collection denials remain enforced below.
-		if err := service.authorizeWorkloadRead(ctx, options.Namespace); err != nil {
+		proved, err := service.authorizeWorkloadScope(ctx, options.Namespace)
+		if err != nil {
 			return IssuePage{}, err
 		}
+		snapshot.Records = keepProvedNamespaces(snapshot.Records, proved)
 	}
 	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: status.State, AgeSeconds: status.AgeSeconds, Progress: status.Progress, Pending: status.Pending, PendingKinds: status.PendingKinds}}
 	// failed tracks real coverage failures; kinds still loading keep the page

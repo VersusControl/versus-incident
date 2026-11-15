@@ -65,6 +65,9 @@ change_capture: {{ .changeCapture | default "continuous" | quote }}
 allow_loopback: {{ .allowLoopback | default false }}
 allow_private_networks: {{ .allowPrivateNetworks | default false }}
 endpoint_cidrs: {{ .endpointCIDRs | default list | toJson }}
+{{- include "versus-incident.validateExcludeResources" (.excludeResources | default list) }}
+exclude_resources: {{ .excludeResources | default list | toJson }}
+namespaces: {{ .namespaces | default list | toJson }}
 auth:
   {{- include "versus-incident.connectorAuth" (dict "auth" $auth "prefix" $prefix) | nindent 2 }}
 {{- $actions := .actions | default dict }}
@@ -79,7 +82,11 @@ actions:
 {{- define "versus-incident.validateClusters" -}}
 {{- if and .changeCapture (ne .changeCapture "continuous") }}{{ fail "connectors.kubernetes: configure changeCapture for each cluster under clusters" }}{{ end -}}
 {{- if or (lt (len (.clusters | default list)) 1) (gt (len (.clusters | default list)) 16) }}{{ fail "connectors.kubernetes.clusters must contain 1 to 16 entries" }}{{ end -}}
-{{- if or .endpoint .tokenFile .caFile .caData .serverName .credentialID .credentialId .clusterId .allowLoopback .allowPrivateNetworks .endpointCIDRs (include "versus-incident.connectorHasValues" (.auth | default dict)) (include "versus-incident.connectorHasValues" ((.actions | default dict).auth | default dict)) (.actions | default dict).enable }}{{ fail "connectors.kubernetes: configure each cluster under clusters" }}{{ end -}}
+{{- /* The top-level auth.mode defaults to in_cluster for the single-cluster
+       form; that default is not a setting to move under clusters. */ -}}
+{{- $topAuth := .auth | default dict -}}
+{{- if eq ($topAuth.mode | default "") "in_cluster" }}{{ $topAuth = omit $topAuth "mode" }}{{ end -}}
+{{- if or .endpoint .tokenFile .caFile .caData .serverName .credentialID .credentialId .clusterId .allowLoopback .allowPrivateNetworks .endpointCIDRs (include "versus-incident.connectorHasValues" $topAuth) (include "versus-incident.connectorHasValues" ((.actions | default dict).auth | default dict)) (.actions | default dict).enable }}{{ fail "connectors.kubernetes: configure each cluster under clusters" }}{{ end -}}
 {{- if or (and .clusterID (ne .clusterID "default")) (and .timeout (ne .timeout "10s")) (and .discoveryTTL (ne .discoveryTTL "5m")) (and (.actions | default dict).timeout (ne (.actions | default dict).timeout "15s")) (and (.actions | default dict).maxReplicas (ne (int (.actions | default dict).maxReplicas) 20)) }}{{ fail "connectors.kubernetes: configure each cluster under clusters" }}{{ end -}}
 {{- $ids := dict -}}{{- $endpoints := dict -}}{{- $inCluster := false -}}
 {{- range $index, $cluster := .clusters -}}

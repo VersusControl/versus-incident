@@ -94,7 +94,7 @@ See [`values-ha.yaml`](values-ha.yaml) for the full HA value set, and the raw
 | Key | Default | Description |
 |---|---|---|
 | `ha.enabled` | `false` | Render the StatefulSet HA path (enterprise). |
-| `replicaCount` | `2` | Replicas; becomes `INSTANCE_COUNT`. |
+| `replicaCount` | `1` (`3` in `values-ha.yaml`) | Replicas; becomes `INSTANCE_COUNT`. |
 | `ha.podManagementPolicy` | `Parallel` | StatefulSet pod start/stop ordering. |
 | `ha.updateStrategy.type` | `RollingUpdate` | StatefulSet update strategy. |
 | `ha.antiAffinity.enabled` / `.hard` | `true` / `false` | Spread replicas across nodes (soft by default). |
@@ -107,7 +107,7 @@ See [`values-ha.yaml`](values-ha.yaml) for the full HA value set, and the raw
 
 ```yaml
 # values.yaml
-replicaCount: 2
+replicaCount: 1
 
 # Proxy configuration (for networks that block messaging services)
 proxy:
@@ -152,9 +152,15 @@ alert:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `replicaCount` | Number of replicas for the deployment | `2` |
+| `replicaCount` | Number of replicas. More than one needs `storage.type=postgres`; the install fails on the file backend. | `1` |
 | `config.publicHost` | Canonical external HTTP(S) origin for links, secure cookies, and exact-origin CSRF behind rewriting or TLS-terminating proxies | `""` |
-| `gatewaySecret` | Shared secret for `/api/admin/*` and `/api/agent/*`. Empty value leaves admin routes unregistered. | `""` |
+| `gatewaySecret` | Sign-in secret for the UI and `/api/admin/*`, `/api/agent/*`. Empty generates a random 32-byte secret on first install and keeps it on upgrades; the install notes print how to read it. | `""` |
+| `gatewaySecretExistingSecret` / `gatewaySecretExistingSecretKey` | Read the sign-in secret from a Secret you create; the app refuses to start until it exists. | `""` / `gateway_secret` |
+| `connectors.kubernetes.enabled` | Kubernetes connector on or off. On by default with `auth.mode: in_cluster`. | `true` |
+| `kubernetesReaderRBAC.enabled` | Empty creates the read-only reader ClusterRole when the connector uses `in_cluster`. `false` with `in_cluster` fails the install unless `external: true`. | empty |
+| `kubernetesReaderRBAC.external` | You bind the connector identity to your own role; the chart creates none. | `false` |
+| `kubernetesReaderRBAC.optionalKinds` | Read Gateway API, Argo CD Applications, Argo Rollouts and Flux Kustomizations/HelmReleases. | `true` |
+| `kubernetesReaderRBAC.secrets` | List Secrets so the Helm tab can show Helm releases. This also exposes Secret values to the connector identity. | `false` |
 | `storage.type` | Storage backend (`file` or `postgres`). HA derives `postgres`. | `"file"` |
 | `storage.postgres.dsn` | Postgres DSN (stored in chart Secret) when `storage.type=postgres` | `""` |
 | `storage.persistence.enabled` | Mount a PVC at the fixed `/app/data` path so agent state survives restarts | `false` |
@@ -545,9 +551,10 @@ config:
 This chart does NOT ship a HorizontalPodAutoscaler. The AI SRE Agent worker is
 a single writer to the pattern catalog and detect log, so the agent must run
 with `replicaCount: 1` — horizontal scaling would produce racing writes (the
-chart fails fast if `agent.enable=true` with more than one replica). For
-deployments that do not enable the agent you may raise `replicaCount`, but the
-number of pods is fixed by that value and is not autoscaled.
+chart fails fast if `agent.enable=true` with more than one replica). The file
+storage backend is single-replica too: more than one replica needs
+`storage.type=postgres`. The number of pods is fixed by `replicaCount` and is
+not autoscaled.
 
 ```yaml
 replicaCount: 1   # required when agent.enable=true

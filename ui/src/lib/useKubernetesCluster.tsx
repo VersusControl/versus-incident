@@ -4,6 +4,7 @@ import { api, ApiError, createKubernetesApi, retainKubernetesHistoryCounts, type
 import { useCursorPagination } from "./pagination";
 import { hasKubernetesPublication, kubernetesAccessLost, kubernetesCursorExpired, kubernetesFailureCode, retainKubernetesPublication } from "./kubernetesContinuity";
 import { focusedCrashes } from "./kubernetesFocusedHistory";
+import { historyOff } from "./kubernetesNamespaceAccess";
 
 export function kubernetesKey(cluster: string | undefined, ...parts: readonly unknown[]) {
   return ["kubernetes", cluster ?? "_", ...parts] as const;
@@ -136,10 +137,19 @@ export function useBrokenIssues(enabled = true) {
 }
 
 /** One commit feed per mounted explorer; missed commits converge by invalidation. */
-export function useKubernetesCommitEvents(enabled: boolean) {
+/**
+ * For an identity that reads only inside namespaces the server keeps no
+ * history, and the feed's first `committed` event says
+ * `history: "off_namespace_access"`. Live updates are then off by design: the
+ * state is "polling", never "reconnecting", and the views refresh on the
+ * fallback timer. `namespaceOnly` keeps an older server's refusal of the feed
+ * (403 `history_authority_denied`) in the same state rather than a lost-access
+ * event.
+ */
+export function useKubernetesCommitEvents(enabled: boolean, namespaceOnly = false) {
   const { client, key, cluster } = useKubernetesCluster();
   const cache = useQueryClient();
-  const [state, setState] = useState<"connecting" | "live" | "reconnecting">("connecting");
+  const [state, setState] = useState<"connecting" | "live" | "reconnecting" | "polling">("connecting");
   const [sync, setSync] = useState<{ state: string; reason?: string; age: number }>();
   useEffect(() => {
     if (!enabled) return;
@@ -151,6 +161,9 @@ export function useKubernetesCommitEvents(enabled: boolean) {
     let failures = 0;
     let denied = false;
     let recoveryOnly = false;
+    // The server says live updates are off for this identity: the feed stays
+    // open, and the periodic refresh is the source of truth.
+    let liveOff = false;
     let controller: AbortController | undefined;
     // The visible feed state follows the stream only through `show`. While the
     // stream is between connections a grace timer holds the current state; it
@@ -193,8 +206,10 @@ export function useKubernetesCommitEvents(enabled: boolean) {
         }
         // Do not cancel a slow persisted read on every commit. Mark it stale
         // and schedule one trailing refresh when its current request settles.
+        // A history page that says history is off for this identity cannot
+        // change with a commit; the page asks again when the access changes.
         void cache.invalidateQueries({ queryKey: key(), predicate: query =>
-          families.has(String(query.queryKey[2])),
+          families.has(String(query.queryKey[2])) && !historyOff(query.state.data),
         }, { cancelRefetch: false });
       }, 100);
     };
@@ -230,7 +245,8 @@ export function useKubernetesCommitEvents(enabled: boolean) {
           delivered = true;
           failures = 0;
           release();
-          setState("live");
+          if (event.event === "committed" && payload.history === "off_namespace_access") liveOff = true;
+          setState(liveOff ? "polling" : "live");
           const identity = event.id || (event.event === "committed" ? String(payload.revision) : undefined);
           if (event.event === "committed") {
             if (identity && seen.has(identity)) return;
@@ -245,6 +261,11 @@ export function useKubernetesCommitEvents(enabled: boolean) {
       } catch (error) {
         cleanEnd = false;
         if (disposed) return;
+        if (namespaceOnly && error instanceof ApiError && error.status === 403 && kubernetesFailureCode(error) === "history_authority_denied") {
+          release();
+          setState("polling");
+          return;
+        }
         if (kubernetesAccessLost(error)) {
           const historyDenied = error instanceof ApiError && error.status === 403
             && kubernetesFailureCode(error) === "history_authority_denied";
@@ -293,7 +314,7 @@ export function useKubernetesCommitEvents(enabled: boolean) {
     };
     const fallback = setInterval(() => {
       if (denied && recoveryOnly) recover();
-      else if (!connected && !denied) invalidate();
+      else if ((!connected || liveOff) && !denied) invalidate();
     }, 30000);
     void run();
     return () => {
@@ -305,7 +326,7 @@ export function useKubernetesCommitEvents(enabled: boolean) {
       release();
       clearInterval(fallback);
     };
-  }, [enabled, client, key, cluster, cache]);
+  }, [enabled, client, key, cluster, cache, namespaceOnly]);
   return { streamState: state, sync };
 }
 

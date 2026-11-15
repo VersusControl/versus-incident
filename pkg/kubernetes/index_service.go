@@ -499,6 +499,11 @@ func (service *Service) loadIndexKind(ctx context.Context, kind string, namespac
 	if err := service.validateCredential(ctx); err != nil {
 		return nil, false, err
 	}
+	if service.resourceExcluded(kind) {
+		// Configured never to be listed: known and empty, like a kind the
+		// cluster does not serve, and never asked of the cluster.
+		return nil, false, kubeindex.ErrKindNotServed
+	}
 	ctx, cancelIdentity := service.credentialContext(ctx)
 	defer cancelIdentity()
 	ctx, cancelLoad := context.WithTimeout(ctx, inventoryLoadTimeout)

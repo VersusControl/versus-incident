@@ -137,6 +137,8 @@ type TopPage struct {
 	Fresh        bool             `json:"fresh"`
 	Partial      []PartialFailure `json:"partial_failures,omitempty"`
 	Sync         SyncStatus       `json:"sync"`
+	// Metrics is the same one-word Metrics API state the usage answer carries.
+	Metrics string `json:"metrics"`
 }
 
 // Issues returns bounded findings from projected cluster resources.
@@ -172,7 +174,13 @@ func (service *Service) Issues(ctx context.Context, options IssueOptions) (Issue
 	page, err := service.issuesSnapshot(ctx, options)
 	if err == nil && !options.captureOnly {
 		if err = service.pinOpenOccurrences(ctx, &page); err != nil {
-			return IssuePage{}, err
+			if !service.historyOffForNamespaceAccess(ctx, err) {
+				return IssuePage{}, err
+			}
+			// No history is kept for an identity that reads only inside
+			// namespaces, so there is no saved occurrence to pin; the live
+			// issues stand on their own.
+			err = nil
 		}
 	}
 	return page, err
@@ -249,7 +257,7 @@ func (service *Service) Top(ctx context.Context, options TopOptions) (TopPage, e
 		items = usage.Nodes
 		status = usage.NodeMetrics
 	}
-	result := TopPage{Availability: status.Availability, Fresh: status.Fresh, Partial: append([]PartialFailure(nil), usage.Partial...), Sync: SyncStatus{State: "direct", Partial: !status.Fresh || len(usage.Partial) > 0}}
+	result := TopPage{Availability: status.Availability, Fresh: status.Fresh, Partial: append([]PartialFailure(nil), usage.Partial...), Sync: SyncStatus{State: "direct", Partial: !status.Fresh || len(usage.Partial) > 0}, Metrics: usage.Metrics}
 	if usage.Availability == "syncing" {
 		result.Availability, result.Sync = "syncing", service.withSyncProgress(SyncStatus{State: "syncing"})
 		return result, nil

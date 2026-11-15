@@ -1,0 +1,13 @@
+# A non-in_cluster identity gets no reader role unless asked for, and turning
+# the role off is not an error.
+kubernetesReaderRBAC:
+  enabled: false
+connectors:
+  kubernetes:
+    enabled: true
+    endpoint: https://cluster.example
+    auth:
+      mode: eks
+      eks:
+        clusterName: production
+        region: us-east-1

@@ -1,11 +1,14 @@
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Loader2, RefreshCw } from "lucide-react";
-import { syncDataTime, syncDuration, syncFailureLabel, syncSince, type KubernetesKindProblem, type KubernetesSyncHealthState } from "@/lib/kubernetesSyncHealth";
+import { ExternalLink, Info, Loader2, RefreshCw } from "lucide-react";
+import { syncDataTime, syncDuration, syncFailureLabel, syncSince, type KubernetesKindProblem, type KubernetesSyncHealthState, type KubernetesUnreadableSummary } from "@/lib/kubernetesSyncHealth";
+import { KubernetesReadCoverage } from "@/components/KubernetesUnreadableNote";
 import { useAnchoredPopover } from "@/lib/useAnchoredPopover";
+import { namespaceAccessDocsUrl, namespaceAccessLabel } from "@/lib/kubernetesNamespaceAccess";
 
 /** How the index record feed is doing, which only matters once the sync is ready. */
-export type KubernetesStreamState = "connecting" | "live" | "reconnecting" | "resyncing";
+/** "polling": live updates are unavailable by design for this identity; views refresh on a timer. */
+export type KubernetesStreamState = "connecting" | "live" | "reconnecting" | "resyncing" | "polling";
 
 /**
  * The cluster sync state in the top bar.
@@ -19,7 +22,7 @@ export type KubernetesStreamState = "connecting" | "live" | "reconnecting" | "re
  * a details popover — on hover, focus or press — names each failing resource
  * type with its reason and carries Retry sync.
  */
-export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, title, firstReadyAt, syncReason, syncState, lastSyncedAt, dataOnScreen = true, problems = [], staleSeconds, onRetry, retrying }: {
+export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, title, firstReadyAt, syncReason, syncState, lastSyncedAt, dataOnScreen = true, problems = [], staleSeconds, onRetry, retrying, readableNamespaces, unreadable = [], notCollected = [], namespaceScoped = [] }: {
   lastSyncedAt?: string;
   syncReason?: string;
   syncState?: string;
@@ -39,7 +42,21 @@ export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, t
   staleSeconds?: number;
   onRetry?: () => void;
   retrying?: boolean;
+  /**
+   * The namespaces a namespace-only identity reads. A ready sync then says so
+   * steadily instead of a freshness line, because reading only those namespaces
+   * is the expected state of that role and not a degraded sync.
+   */
+  readableNamespaces?: string[];
+  /** Kinds the connector identity may not read; named in the details, never as a fault. */
+  unreadable?: KubernetesUnreadableSummary[];
+  /** Kinds the configuration excludes; named in the details in a muted line. */
+  notCollected?: string[];
+  /** Kinds read only inside some namespaces; named calmly in the details. */
+  namespaceScoped?: KubernetesUnreadableSummary[];
 }) {
+  const coverage = <KubernetesReadCoverage unreadable={unreadable} notCollected={notCollected} namespaceScoped={namespaceScoped} className="mt-3 border-t border-ink-700 pt-3" />;
+  const coverageSummary = readCoverageSummary(unreadable, notCollected, namespaceScoped);
   const renewing = (syncState === "refreshing" || syncState === "syncing") && syncReason?.includes("credential");
   const failing = state === "failed" || state === "degraded";
   // The current health read outranks progress cached from an older stream.
@@ -49,7 +66,8 @@ export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, t
     : state === "loading" ? "Loading" : renewing ? "Refreshing credentials…"
     : syncState === "refreshing" || syncState === "syncing" && firstReadyAt ? "Syncing"
     : state === "ready"
-    ? streamState === "live" || streamState === "connecting" ? ageSeconds !== undefined ? `Last synced ${Math.round(ageSeconds)}s ago` : "Last sync time unavailable" : "Updates disconnected — refreshing every 30s"
+    ? streamState === "polling" ? "Live updates off — refreshing every 30s"
+    : streamState === "live" || streamState === "connecting" ? ageSeconds !== undefined ? `Last synced ${Math.round(ageSeconds)}s ago` : "Last sync time unavailable" : "Updates disconnected — refreshing every 30s"
     : firstReadyAt ? "Syncing" : "Preparing";
   const ink = state === "failed" ? "text-sev-critical-text"
     : state === "degraded" ? "text-sev-warning-text"
@@ -64,14 +82,75 @@ export function KubernetesSyncStateIndicator({ state, streamState, ageSeconds, t
     : <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${dot}`} />;
   // The live region is the label: a change of state is announced, and the
   // details trigger inside it carries no extra words to read out.
-  return <span role="status" aria-live="polite" data-sync-state={state} title={failing ? undefined : title} className={`inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-2xs font-medium ${ink}`}>
+  // A disconnected record feed still reads as such: that line is about
+  // freshness, which namespace access does not change.
+  const namespaceView = state === "ready" && readableNamespaces !== undefined && !renewing
+    && (streamState === "live" || streamState === "connecting" || streamState === "polling") && syncState !== "refreshing";
+  return <><span role="status" aria-live="polite" data-sync-state={state} data-namespace-access={namespaceView ? "" : undefined} title={failing || namespaceView ? undefined : title} className={`inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-2xs font-medium ${ink}`}>
     {failing
-      ? <SyncFailureDetails state={state} label={label} marker={marker} problems={problems} staleSeconds={staleSeconds} onRetry={onRetry} retrying={retrying} />
-      : <>{marker}{label}</>}
-  </span>;
+      ? <SyncFailureDetails state={state} label={label} marker={marker} problems={problems} staleSeconds={staleSeconds} onRetry={onRetry} retrying={retrying} coverage={coverageSummary && coverage} />
+      : namespaceView
+        ? <NamespaceAccessDetails namespaces={readableNamespaces} marker={marker} freshness={streamState === "polling" ? "Live updates are off for namespace access; this view refreshes every 30 seconds." : label} coverage={coverageSummary && coverage} />
+        : <>{marker}{label}</>}
+  </span>{!failing && !namespaceView && state !== "loading" && coverageSummary && <ReadCoverageDetails summary={coverageSummary}>{coverage}</ReadCoverageDetails>}</>;
 }
 
-function SyncFailureDetails({ state, label, marker, problems, staleSeconds, onRetry, retrying }: {
+/**
+ * A calm marker beside a healthy status when some kinds are not shown. Hover,
+ * focus or press opens the same anchored details as the sync status.
+ */
+function ReadCoverageDetails({ summary, children }: { summary: { text: string; label: string }; children: ReactNode }) {
+  const { open, triggerProps, panelProps } = useAnchoredPopover({ bridgeFocus: true });
+  return <>
+    <button {...triggerProps} type="button" aria-label={summary.label} data-read-coverage-trigger
+      className="inline-flex min-h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-control px-1.5 text-2xs font-medium text-ink-400 hover:bg-ink-700 hover:text-ink-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+      <Info size={12} aria-hidden="true" /><span aria-hidden="true" className="hidden sm:inline">{summary.text}</span>
+    </button>
+    {open && createPortal(<div {...panelProps} role="region" aria-label="Sync status details" data-sync-details="coverage"
+      className="fixed overflow-auto whitespace-normal rounded-control border border-ink-600 bg-surface-raised p-3 text-xs text-ink-200 shadow-overlay">
+      <p className="font-medium">Resource types not shown</p>
+      {children}
+    </div>, document.body)}
+  </>;
+}
+
+/** How many kinds the top-bar marker counts, and its short words. */
+function readCoverageSummary(unreadable: readonly KubernetesUnreadableSummary[], notCollected: readonly string[], namespaceScoped: readonly KubernetesUnreadableSummary[]): { count: number; text: string; label: string } | undefined {
+  const excluded = new Set(notCollected);
+  const refused = unreadable.filter((kind) => !excluded.has(kind.kind)).length;
+  const scoped = namespaceScoped.filter((kind) => !excluded.has(kind.kind)).length;
+  const skipped = notCollected.length;
+  if (!refused && !skipped && !scoped) return undefined;
+  const parts = [refused ? `${refused} not readable` : "", scoped ? `${scoped} readable only in some namespaces` : "", skipped ? `${skipped} not collected` : ""].filter(Boolean);
+  const total = refused + scoped + skipped;
+  return { count: total, text: parts.length > 1 ? `${total} limited` : scoped ? `${scoped} partly readable` : parts[0], label: `Resource types not fully shown: ${parts.join(", ")}` };
+}
+
+
+/**
+ * The steady status of a namespace-only identity: which namespaces are shown,
+ * with a popover saying what that role leaves out and linking to the docs.
+ */
+function NamespaceAccessDetails({ namespaces, marker, freshness, coverage }: { namespaces: string[]; marker: ReactNode; freshness: string; coverage?: ReactNode }) {
+  const { open, triggerProps, panelProps } = useAnchoredPopover({ bridgeFocus: true });
+  const label = namespaceAccessLabel(namespaces);
+  return <>
+    <button {...triggerProps} type="button" data-namespace-access-trigger
+      className="inline-flex min-h-8 min-w-0 max-w-[14rem] items-center gap-1.5 rounded-control px-1.5 hover:bg-ink-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent sm:max-w-md">
+      {marker}<span className="min-w-0 truncate">{label}</span>
+    </button>
+    {open && createPortal(<div {...panelProps} role="region" aria-label="Namespace access details" data-namespace-access-details
+      className="fixed overflow-auto whitespace-normal rounded-control border border-ink-600 bg-surface-raised p-3 text-xs text-ink-200 shadow-overlay">
+      <p className="font-medium">Namespace access</p>
+      <p className="mt-2">This connector reads only {namespaces.length === 1 ? "the namespace" : "the namespaces"} it was granted{namespaces.length ? <>: <span className="text-ink-100">{namespaces.join(", ")}</span></> : ""}. Cluster-wide resources such as Nodes are not shown, and history is not saved for this role.</p>
+      <p data-namespace-freshness className="mt-2 text-ink-300">{freshness}</p>
+      <a className="text-link mt-2 inline-flex items-center gap-1" href={namespaceAccessDocsUrl} target="_blank" rel="noopener noreferrer">About namespace-only access <ExternalLink size={12} aria-hidden="true" /></a>
+      {coverage}
+    </div>, document.body)}
+  </>;
+}
+
+function SyncFailureDetails({ state, label, marker, problems, staleSeconds, onRetry, retrying, coverage }: {
   state: "failed" | "degraded";
   label: string;
   marker: ReactNode;
@@ -79,6 +158,8 @@ function SyncFailureDetails({ state, label, marker, problems, staleSeconds, onRe
   staleSeconds?: number;
   onRetry?: () => void;
   retrying?: boolean;
+  /** What the connector does not read, added below the failure. */
+  coverage?: ReactNode;
 }) {
   const { open, triggerProps, panelProps } = useAnchoredPopover({ bridgeFocus: true });
   const failed = state === "failed";
@@ -101,7 +182,7 @@ function SyncFailureDetails({ state, label, marker, problems, staleSeconds, onRe
             const seen = syncSince(problem.since);
             return <li key={problem.kind} data-sync-problem={problem.kind}>
               <span className="font-medium text-ink-100">{problem.kind}</span>
-              <span>: {problem.reason}</span>
+              <span>: {problem.reason}{problem.namespaces?.length ? ` in ${problem.namespaces.join(", ")}` : ""}</span>
               {problem.skipped > 0 && <span className="tabular-nums text-ink-300"> ({problem.skipped} {problem.skipped === 1 ? "object" : "objects"} skipped)</span>}
               {seen && <> <time dateTime={seen.iso} title={new Date(seen.iso).toLocaleString()} className="whitespace-nowrap text-ink-300">· {problem.sinceBasis === "attempt" ? "last tried" : "since"} {seen.age} ago</time></>}
             </li>;
@@ -111,6 +192,7 @@ function SyncFailureDetails({ state, label, marker, problems, staleSeconds, onRe
       {onRetry && <button type="button" className="btn mt-3" onClick={onRetry} disabled={retrying} data-sync-retry>
         <RefreshCw size={13} aria-hidden="true" className={retrying ? "animate-spin motion-reduce:animate-none" : undefined} />Retry sync
       </button>}
+      {coverage}
     </div>, document.body)}
   </>;
 }

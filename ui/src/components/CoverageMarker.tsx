@@ -15,7 +15,7 @@ export function CoverageMarker({ reasons }: { reasons: ReactNode[] }) {
     {open && createPortal(<div {...panelProps} role="region" aria-label="Resource coverage details"
       className="fixed overflow-auto rounded-control border border-ink-600 bg-surface-raised p-3 text-xs text-ink-200 shadow-overlay">
       <p className="font-medium">Some data is incomplete</p>
-      <ul tabIndex={unique.length > 3 ? 0 : undefined} aria-label="Coverage reasons" className="mt-2 max-h-14 space-y-1 overflow-y-auto break-words">{unique.map((reason, index) => <li key={typeof reason === "string" ? reason : index}>{reason}</li>)}</ul>
+      <ul tabIndex={unique.length > 6 ? 0 : undefined} aria-label="Coverage reasons" className="mt-2 space-y-1 break-words">{unique.map((reason, index) => <li key={typeof reason === "string" ? reason : index}>{reason}</li>)}</ul>
     </div>, document.body)}
   </>;
 }

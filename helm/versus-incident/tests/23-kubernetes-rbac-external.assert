@@ -1,0 +1,3 @@
+mode: "in_cluster"
+!kind: ClusterRole
+!kind: ClusterRoleBinding

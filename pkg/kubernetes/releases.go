@@ -37,6 +37,14 @@ type HelmReleasePage struct {
 	Next      string           `json:"next,omitempty"`
 	Truncated bool             `json:"truncated"`
 	Partial   []PartialFailure `json:"partial_failures,omitempty"`
+	// Access is set when releases could not be read at all, so an empty Items
+	// is never mistaken for a cluster without releases. The only value is
+	// "needs_secret_list": Helm stores releases in Secrets and the connector
+	// identity may not list them. AccessMessage says so in a sentence and
+	// DocsURL links the setup docs.
+	Access        string `json:"access,omitempty"`
+	AccessMessage string `json:"access_message,omitempty"`
+	DocsURL       string `json:"docs_url,omitempty"`
 	// Total and Limit size the pager: Total counts every item the filters
 	// match, and a non-zero Limit marks Total as present.
 	Total int `json:"total,omitempty"`
@@ -72,10 +80,21 @@ func (service *Service) Releases(ctx context.Context, options HelmReleaseOptions
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
 	result := HelmReleasePage{Items: []HelmRelease{}}
+	if service.resourceExcluded("core~v1~secrets") {
+		// Secrets are not collected by configuration, so they are never read.
+		result.Access, result.AccessMessage, result.DocsURL = HelmAccessNeedsSecretList, helmSecretAccessMessage, HelmSecretAccessDocsURL
+		result.Total, result.Limit = 0, normalizePageLimit(options.Limit)
+		return result, nil
+	}
 	metadata, incomplete, err := service.readHelmMetadataPages(ctx, options.Namespace)
 	if err != nil {
 		result.Truncated = true
 		result.Partial = append(result.Partial, PartialFailure{ResourceID: "core~v1~secrets", Class: errorClass(err)})
+		if errors.Is(err, ErrForbidden) && len(metadata.Items) == 0 {
+			// Listing Secret metadata needs list on secrets; no narrower read
+			// exists. Say so instead of answering an empty list.
+			result.Access, result.AccessMessage, result.DocsURL = HelmAccessNeedsSecretList, helmSecretAccessMessage, HelmSecretAccessDocsURL
+		}
 	}
 	releases, err := groupHelmMetadata(metadata)
 	if err != nil {
@@ -125,7 +144,13 @@ func (service *Service) Release(ctx context.Context, namespace, name string) (He
 	if !safeSegment(namespace) || !safeSegment(name) {
 		return HelmRelease{}, ErrInvalidArguments
 	}
+	if service.resourceExcluded("core~v1~secrets") {
+		return HelmRelease{}, errHelmNeedsSecretList
+	}
 	metadata, err := service.readHelmMetadata(ctx, namespace, name)
+	if errors.Is(err, ErrForbidden) {
+		return HelmRelease{}, errHelmNeedsSecretList
+	}
 	if err != nil {
 		return HelmRelease{}, err
 	}

@@ -1,0 +1,6 @@
+# The Kubernetes connector turned on with no other values: it reads the
+# cluster it runs in with the pod ServiceAccount, and the chart creates the
+# read-only reader role.
+connectors:
+  kubernetes:
+    enabled: true

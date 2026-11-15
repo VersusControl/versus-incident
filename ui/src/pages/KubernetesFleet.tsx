@@ -103,7 +103,9 @@ export function KubernetesFleet({ clusters, reports = {}, notice, retry, retryin
                 </div>
                 <div data-health-cell className="pointer-events-none relative min-w-0 space-y-2">
                   <span data-sync-state-label className={stateInfo.pill}>{stateInfo.label}</span>
-                  {cluster.health === "unreachable" && <p className="text-2xs text-sev-warning">The cluster did not respond.</p>}
+                  {cluster.health === "unreachable" && (connectorExplained(cluster.error)
+                    ? <div data-connector-detail={cluster.error.code} className="space-y-0.5 text-2xs"><p className="text-sev-warning">{cluster.error.message}</p>{cluster.error.action && <p className="text-ink-300">{cluster.error.action}</p>}</div>
+                    : <p className="text-2xs text-sev-warning">The cluster did not respond.</p>)}
                 </div>
                 <div className="pointer-events-none relative"><FleetRatio label="Ready nodes" part={cluster.ready_nodes} total={cluster.nodes} state={ratioState} /></div>
                 <div className="pointer-events-none relative"><FleetRatio label="Running pods" part={cluster.running_pods} total={cluster.pods} state={ratioState} /></div>
@@ -142,6 +144,15 @@ function FirstSyncLine({ progress }: { progress?: KubernetesSyncProgress }) {
     {parts?.counts.map((count) => <span key={count} aria-hidden="true" data-first-sync-count className="shrink-0">{count}</span>)}
     <span id={labelID} className="sr-only">{readable}</span>
   </div>;
+}
+
+/**
+ * A connector that could not be built, or whose address was refused, is
+ * explained by the server in words an operator can act on; every other fault
+ * keeps the generic line.
+ */
+function connectorExplained(error: KubernetesClusterSummary["error"]): error is { code: string; message: string; action?: string } {
+  return Boolean(error?.message) && ["connector_configuration_invalid", "connector_endpoint_refused"].includes(error?.code ?? "");
 }
 
 type FleetRatioState = "measured" | "loading" | "unavailable" | "not-ready";

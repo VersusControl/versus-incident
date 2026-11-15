@@ -562,7 +562,7 @@ describe("KubernetesPage", () => {
 		expect(screen.getAllByRole("button", { name: "Resource coverage" })).toHaveLength(1);
 		fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
 		const details = screen.getByRole("region", { name: "Resource coverage details" });
-		for (const reason of ["nodes: permission denied", "Change capture does not cover the whole range", "Secret history is not tracked", "ConfigMap history is not tracked", "Some crash evidence could not be captured", "Change activity is stale."]) expect(details.textContent).toContain(reason);
+		for (const reason of ["Node is not readable with this connector's permissions.", "Change capture does not cover the whole range", "Secret history is not tracked", "ConfigMap history is not tracked", "Some crash evidence could not be captured", "Change activity is stale."]) expect(details.textContent).toContain(reason);
 		expect(within(details).getAllByRole("listitem").length).toBeGreaterThan(3);
 	});
 	it("opens aggregate workload logs directly in the resource drawer without a coverage header", async () => {
@@ -715,7 +715,7 @@ describe("KubernetesPage", () => {
 		const toggle = screen.getByRole("button", { name: "Resource coverage" });
 		fireEvent.click(toggle);
 		toggle.focus();
-		expect(screen.getByText("ConfigMap: permission denied")).toBeTruthy();
+		expect(screen.getByText("ConfigMap is not readable with this connector's permissions.")).toBeTruthy();
 		expect(screen.queryByText(/Overview inventory is bounded/)).toBeNull();
 		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-overview"], { ...overview, observed_at: "2026-10-14T12:00:30Z" }); });
 		expect(screen.getByRole("button", { name: "Resource coverage" })).toBe(toggle);
@@ -987,11 +987,13 @@ describe("KubernetesPage", () => {
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 		const invalidate = vi.spyOn(client, "invalidateQueries");
 		renderPage(client);
-		const queries = [api.kubernetesOverview, api.kubernetesWorkloads, api.kubernetesNodes, api.kubernetesIssues, api.kubernetesTop, api.kubernetesChanges];
+		const queries = [api.kubernetesOverview, api.kubernetesWorkloads, api.kubernetesNodes, api.kubernetesTop, api.kubernetesChanges];
+		// Issues is read twice per refresh: broken issues, and the warning count.
 		await waitFor(() => {
 			expect(api.kubernetesOverviewGraph).not.toHaveBeenCalled();
 			expect(client.isFetching()).toBe(0);
 			queries.forEach((query) => expect(query).toHaveBeenCalledTimes(1));
+			expect(api.kubernetesIssues).toHaveBeenCalledTimes(2);
 		});
 		const onEvent = vi.mocked(api.kubernetesCommitStream).mock.calls[0][0];
 		vi.useFakeTimers();
@@ -1005,6 +1007,7 @@ describe("KubernetesPage", () => {
 				["kubernetes", "_"],
 			]);
 			queries.forEach((query) => expect(query).toHaveBeenCalledTimes(index + 2));
+			expect(api.kubernetesIssues).toHaveBeenCalledTimes(2 * (index + 2));
 			expect(api.kubernetesOverviewGraph).not.toHaveBeenCalled();
 		}
 		vi.useRealTimers();
@@ -1434,7 +1437,7 @@ describe("KubernetesPage", () => {
 		const disclosure = await within(workloads).findByRole("button", { name: "Resource coverage" });
 		expect(disclosure.getAttribute("aria-expanded")).toBe("false");
 		fireEvent.click(disclosure);
-		expect(screen.getByText("cronjobs: permission denied")).toBeTruthy();
+		expect(screen.getByText("CronJob is not readable with this connector's permissions.")).toBeTruthy();
 	});
 
 	it("formats rational pod CPU and fractional windows for the top usage summary", async () => {
@@ -1595,7 +1598,7 @@ describe("KubernetesPage", () => {
 		fireEvent.change(screen.getByRole("combobox", { name: "Topology namespace" }), { target: { value: "shop" } });
 		expect(await screen.findByLabelText("Scrollable topology graph")).toBeTruthy();
 		fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
-		expect(screen.getByText("secrets: permission denied")).toBeTruthy();
+		expect(screen.getByText("Secret is not readable with this connector's permissions.")).toBeTruthy();
 	});
 
 	it("hides cached graph data after a forbidden complete read", async () => {
@@ -1837,7 +1840,7 @@ describe("KubernetesPage", () => {
 		expect(screen.getByRole("region", { name: "Cluster health" }).querySelector("article")).toBeNull();
 		const warningButton = screen.getByRole("button", { name: "Resource coverage" });
 		fireEvent.click(warningButton);
-		expect(screen.getByRole("region", { name: "Resource coverage details" }).textContent).toContain("nodes: permission denied");
+		expect(screen.getByRole("region", { name: "Resource coverage details" }).textContent).toContain("Node is not readable with this connector's permissions.");
 		expect(view.container.querySelector("main")?.className).toContain("overflow-x-hidden");
 		expect(screen.queryByText(/kubernetes - production/i)).toBeNull();
 		expect(screen.queryByLabelText("Namespace")).toBeNull();
@@ -2177,7 +2180,7 @@ describe("KubernetesPage", () => {
 		fireEvent.click(screen.getByRole("tab", { name: "Nodes" }));
 		expect(screen.getByText("No nodes in this cluster.")).toBeTruthy();
 		fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
-		expect(screen.getByText("Kubernetes resources: permission denied")).toBeTruthy();
+		expect(screen.getByText("A Kubernetes resource is not readable with this connector's permissions.")).toBeTruthy();
 		expect(api.kubernetesEvents).not.toHaveBeenCalled();
 		expect(screen.queryByText("Couldn't render this page")).toBeNull();
 	});
@@ -3115,7 +3118,7 @@ describe("KubernetesPage sync gate", () => {
 		const gap = { ...ready, unreadable_kinds: 1, kinds: { Pod: readyKind, Secret: { ...readyKind, state: "error" as const, error: "forbidden", partial: true } }, unreadable: [{ kind: "Secret", class: "forbidden" }] };
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(gap);
 		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-sync-health"], gap); });
-		await waitFor(() => expect(document.querySelector("[data-unreadable-note]")?.textContent).toContain("Secret"));
+		await screen.findByRole("button", { name: "Resource types not fully shown: 1 not readable" });
 		expect(screen.getByText("readable-api")).toBe(row);
 		expect(api.kubernetesWorkloads).toHaveBeenCalledTimes(1);
 		expect(client.getQueryData(secretKey)).toBeUndefined();
@@ -3568,17 +3571,18 @@ describe("Kubernetes unreadable kinds", () => {
 		// No blocking surface: the sync itself is healthy.
 		expect(container.querySelector("[data-sync-health]")).toBeNull();
 		expect(container.querySelectorAll("[data-sync-problem]")).toHaveLength(0);
-		const note = container.querySelector<HTMLElement>("[data-unreadable-note]")!;
-		expect(note.textContent).toBe("Not readable with this connector identity: Secret, ServiceAccount (permission denied). Everything else is shown.");
-		// Each kind is named once, and no dot separator sneaks in.
+		// The page body carries no note; the top-bar sync details name the kinds.
+		expect(container.querySelector("[data-unreadable-note]")).toBeNull();
+		fireEvent.mouseEnter(await screen.findByRole("button", { name: "Resource types not fully shown: 2 not readable" }));
+		const note = screen.getByRole("region", { name: "Sync status details" }).querySelector<HTMLElement>("[data-unreadable-note]")!;
+		expect(note.textContent).toBe("Not readable with this connector identity:Secret — permission deniedServiceAccount — permission deniedEverything else is shown.");
+		// Each kind is named once.
 		expect(note.textContent!.match(/Secret/g)).toHaveLength(1);
 		expect(note.textContent!.match(/ServiceAccount/g)).toHaveLength(1);
-		expect(note.textContent).not.toMatch(/[·•|]/);
-		expect(note.className).not.toMatch(/sev-warn|sev-critical|amber/);
-		expect(note.getAttribute("role")).toBe("status");
+		expect(note.outerHTML).not.toMatch(/sev-warn|sev-critical|amber/);
 	});
 
-	it("shows the note on a view that is not Overview, and when another kind blocks the sync", async () => {
+	it("names unreadable kinds on a view that is not Overview, and when another kind blocks the sync", async () => {
 		window.history.replaceState(null, "", "/agent/kubernetes?view=nodes");
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, sync: { state: "requesting", age_s: 0, partial: false } });
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({
@@ -3597,7 +3601,9 @@ describe("Kubernetes unreadable kinds", () => {
 		// The stable first-failure time is what "since" prints, never a zero time.
 		expect(container.querySelector('[data-sync-problem="Node"]')?.textContent).toContain("since");
 		expect(container.querySelector('[data-sync-problem="Node"]')?.textContent).not.toContain("0001");
-		expect(container.querySelector("[data-unreadable-note]")?.textContent).toContain("Secret");
+		expect(container.querySelector("[data-unreadable-note]")).toBeNull();
+		const details = await openSyncDetails();
+		expect(details.querySelector("[data-unreadable-note]")?.textContent).toContain("Secret");
 		expect(screen.queryByRole("region", { name: "Nodes" })).toBeNull();
 	});
 
@@ -3635,8 +3641,8 @@ describe("Kubernetes unreadable kinds", () => {
 		expect(screen.getAllByRole("button", { name: "Resource coverage" })).toHaveLength(1);
 		fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
 		const details = screen.getByRole("region", { name: "Resource coverage details" });
-		expect(details.textContent).toContain("nodes: permission denied");
-		expect(details.textContent).toContain("Broken issues: permission denied");
+		expect(details.textContent).toContain("Node is not readable with this connector's permissions.");
+		expect(details.textContent).toContain("Broken issues are not readable with this connector's permissions.");
 	});
 
 	// error+partial means none of the overview's kinds could be read, so its
@@ -3655,8 +3661,9 @@ describe("Kubernetes unreadable kinds", () => {
 			],
 		});
 		const { container } = renderPage();
-		await waitFor(() => expect(container.querySelector("[data-unreadable-note]")).not.toBeNull());
+		await screen.findByRole("button", { name: "Resource types not fully shown: 2 not readable" });
 		await settle();
+		expect(container.querySelector("[data-unreadable-note]")).toBeNull();
 		expect(screen.queryByRole("region", { name: "Cluster health" })).toBeNull();
 		expect(screen.queryByRole("heading", { name: "CPU capacity" })).toBeNull();
 		expect(screen.queryByRole("region", { name: "Overview topology" })).toBeNull();
@@ -3668,6 +3675,7 @@ describe("Kubernetes unreadable kinds", () => {
 		const { container } = renderPage();
 		await screen.findByRole("region", { name: "Cluster health" });
 		expect(container.querySelector("[data-unreadable-note]")).toBeNull();
+		expect(screen.queryByRole("button", { name: /^Resource types not fully shown/ })).toBeNull();
 	});
 });
 

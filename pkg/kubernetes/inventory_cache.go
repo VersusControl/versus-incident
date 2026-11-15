@@ -87,10 +87,23 @@ type inventoryCache struct {
 	authorityChecks atomic.Int64
 	started         bool
 	namespaces      map[string]bool
-	wake            chan struct{}
-	scopePending    bool
-	candidates      namespaceCandidateManifest
-	progress        inventoryProgress
+	// namespacesSeeded is set once this process has probed the namespaces it
+	// remembers, after the identity was found unable to list namespaces.
+	namespacesSeeded bool
+	// relist holds denied discovered APIs a live list has since read in full,
+	// so the next cycle lists them again instead of waiting out their retry.
+	relist map[string]bool
+	// rechecked holds, per kind, the credential generation under which a
+	// cluster-wide denial was asked again after a namespace read succeeded,
+	// so a stable role is asked once rather than on every cycle.
+	rechecked map[string]uint64
+	// exclusionsChecked is set once configured exclusions were compared with
+	// what the cluster serves.
+	exclusionsChecked bool
+	wake              chan struct{}
+	scopePending      bool
+	candidates        namespaceCandidateManifest
+	progress          inventoryProgress
 	// abandonedSave is the published capture whose history save the store
 	// rejected for good. It is not retried; the next capture records the gap.
 	abandonedSave string
@@ -138,6 +151,11 @@ func (service *Service) startInventory(parent context.Context) {
 		namespace = "default"
 	}
 	cache.namespaces[namespace] = true
+	// Configured namespaces are read from the first sync on, so an identity
+	// that may read only inside them never waits for a view to ask.
+	for _, configured := range service.namespaces {
+		cache.namespaces[configured] = true
+	}
 	service.changes.inventories[scope] = cache
 	service.changes.mu.Unlock()
 	go service.runInventory(ctx, cache)
@@ -236,6 +254,14 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 					}
 					return inventoryGeneration{}, restoreProofUnanswered{ErrInventoryNotReady}
 				}
+				if err != nil && caller == restoreByCoveredOnly && storedGenerationSuperseded(err) {
+					// The stored generation is never served to this identity,
+					// and the worker is collecting the cluster afresh: until
+					// its first cycle ends the answer is the cache's own,
+					// which says syncing, not a refusal of data nobody asked
+					// to serve.
+					break
+				}
 				if err != nil {
 					return inventoryGeneration{}, err
 				}
@@ -276,6 +302,15 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 		}
 	}
 	return generation, nil
+}
+
+// storedGenerationSuperseded reports a stored generation the worker refused
+// to restore for a reason that makes it collect the cluster again: the current
+// identity may not read the cluster's identity, or the generation carries no
+// cluster identity to prove at all.
+func storedGenerationSuperseded(err error) bool {
+	var payload inventoryPayloadError
+	return errors.As(err, &payload) && (errors.Is(err, ErrForbidden) || errors.Is(err, errStoredGenerationUnbound))
 }
 
 // readerProofWait bounds a read's own proof of a stored generation, which runs
@@ -780,4 +815,52 @@ func (service *Service) cachedList(ctx context.Context, options ListOptions) (Re
 		return result.Items[i].Name < result.Items[j].Name
 	})
 	return result, nil
+}
+
+// relistRequested reports whether a live list asked for id to be listed again.
+func (cache *inventoryCache) relistRequested(id string) bool {
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return cache.relist[id]
+}
+
+// takeRelist reports and clears a live list's request to list id again.
+func (cache *inventoryCache) takeRelist(id string) bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	requested := cache.relist[id]
+	delete(cache.relist, id)
+	return requested
+}
+
+// noteLiveListRead records that a cluster-wide live list of a discovered API
+// succeeded. When the published inventory still calls that API denied, the
+// grant has changed: the worker is woken to list it again now rather than
+// after its retry, so the coverage report agrees with the page that listed it.
+func (service *Service) noteLiveListRead(id string) {
+	if service == nil || service.changes == nil || indexedKind(id) != "" {
+		return
+	}
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	if cache == nil {
+		return
+	}
+	cache.mu.Lock()
+	state, known := cache.generation.ResourceStatus[id]
+	denied := known && state.Error == "forbidden"
+	if denied && len(cache.relist) < 256 {
+		if cache.relist == nil {
+			cache.relist = map[string]bool{}
+		}
+		cache.relist[id] = true
+	}
+	cache.mu.Unlock()
+	if denied {
+		select {
+		case cache.wake <- struct{}{}:
+		default:
+		}
+	}
 }

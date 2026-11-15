@@ -14,9 +14,10 @@ import { useBreakLogs } from "@/lib/useKubernetesBreakLogs";
 import { evidenceLoading, settledSync } from "@/lib/kubernetesPending";
 import { KubernetesPendingNote } from "@/components/KubernetesPendingNote";
 import { KubernetesHistorySaveNotice } from "@/components/KubernetesHistorySaveNotice";
+import { KubernetesHistoryOffNotice } from "@/components/KubernetesAccessNotices";
+import { countsKnown, useKubernetesNamespaceAccess } from "@/lib/kubernetesNamespaceAccess";
 import { ResourceLogsButton } from "@/components/ResourceLogsButton";
 import { useQueryClient } from "@tanstack/react-query";
-import { incompleteKubernetesSnapshot } from "@/lib/kubernetesContinuity";
 
 function breakRule(issue: KubernetesIssue) {
   const names: Record<string, string> = { "pod.crash_loop": "CrashLoopBackOff", "pod.image_pull": "ImagePullBackOff", "pod.config_error": "Container config error", "pod.evicted": "Evicted", "pod.unschedulable": "Unschedulable", "pod.failed": "Pod failed", "workload.rollout_stalled": "Rollout stalled (ProgressDeadlineExceeded)", "workload.unavailable": "Pods unavailable", "job.failed": "Job failed", "node.not_ready": "NotReady" };
@@ -355,13 +356,16 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
   </article>;
 }
 
-export function TimelineCard({ changes, changesAsOf, windowEnd, clusterId, onSelectView, onSelectResource, resourceFor, warningsOwned = false }: { changes?: KubernetesChangesPage; changesAsOf?: number; windowEnd: number; clusterId: string; onSelectView: (view: "issues" | "timeline") => void; onSelectResource: (resource: KubernetesResource) => void; resourceFor: (issue: KubernetesIssue) => KubernetesResource | null; warningsOwned?: boolean }) {
+export function TimelineCard({ changes, changesAsOf, windowEnd, clusterId, onSelectView, onSelectResource, resourceFor, warningsOwned = false, historyOff = false }: { changes?: KubernetesChangesPage; changesAsOf?: number; windowEnd: number; clusterId: string; onSelectView: (view: "issues" | "timeline") => void; onSelectResource: (resource: KubernetesResource) => void; resourceFor: (issue: KubernetesIssue) => KubernetesResource | null; warningsOwned?: boolean; /** No history is kept for this connector identity. */ historyOff?: boolean }) {
   const { cluster: scope } = useKubernetesCluster();
   const issues = useBrokenIssues();
   const blocked = issues.error instanceof ApiError && [401, 403].includes(issues.error.status);
   const data = blocked || !issues.data ? undefined : { ...issues.data, sync: settledSync(issues.data.sync, issues.data.partial_failures) ?? issues.data.sync };
   const lastGoodTotal = useRef<{ scope?: string; value: number }>();
-  const countPublished = data && (data.authority === "current" || data.authority === "stale" || !incompleteKubernetesSnapshot(data));
+  // A partial answer caused only by this identity's by-design namespace gap
+  // still counts what it read; "Unknown" is kept for data that is unavailable.
+  const access = useKubernetesNamespaceAccess();
+  const countPublished = data && countsKnown(access, data);
   if (blocked) lastGoodTotal.current = undefined;
   else if (countPublished && data.broken?.total !== undefined) lastGoodTotal.current = { scope, value: data.broken.total };
   const brokenTotal = countPublished ? data.broken?.total
@@ -380,12 +384,13 @@ export function TimelineCard({ changes, changesAsOf, windowEnd, clusterId, onSel
     {asOf && <p role="status" className="px-4 py-2 text-xs text-sev-warning">Couldn't refresh — showing data as of {new Date(asOf).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</p>}
     <KubernetesHistorySaveNotice pages={[changes]} className="px-4 py-2" />
     <header className="card-header !py-2 sm:!py-3"><h2 className="card-title flex items-center gap-2"><History size={15} aria-hidden="true" />Timeline</h2><button type="button" className="flex items-center gap-2 text-xs text-link" onClick={() => onSelectView("timeline")}>Full timeline<ArrowRight size={13} aria-hidden="true" /></button></header>
+    {historyOff && <KubernetesHistoryOffNotice className="border-b border-ink-700 px-4 py-2 !text-xs" />}
     {issues.isPending && <div role="status" aria-label="Loading break timeline" className="space-y-2 p-4"><div className="sk h-14" /><div className="sk h-20" /></div>}
     {!data && !issues.isPending && !issues.isError && <p role="status" className="p-4 text-xs text-ink-400">Break timeline unavailable.</p>}
-    {issues.isError && <p role="status" className="p-4 text-xs text-ink-400">Break timeline unavailable.{data && " Showing earlier evidence."}<button type="button" className="ml-2 text-link underline" onClick={() => void issues.refetch()}>Retry</button></p>}
+    {issues.isError && <p role="status" className="p-4 text-xs text-ink-400">Break timeline unavailable.{data && " Showing earlier evidence."}{/* A by-design limit of this access is not retried. */}{!historyOff && <button type="button" className="ml-2 text-link underline" onClick={() => void issues.refetch()}>Retry</button>}</p>}
     {data && <><div className="grid grid-cols-2 gap-2 border-b border-ink-700 px-2 py-1 sm:p-3 [&>button]:py-1.5 sm:[&>button]:py-2 [&_strong]:leading-none sm:[&_strong]:leading-7 [&_button>span:nth-child(2)]:mt-0 sm:[&_button>span:nth-child(2)]:mt-1">
       <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("issues")}><span className="flex items-center justify-between text-2xs text-ink-400 sm:block">Broken<strong className="text-xl tabular-nums text-ink-50 sm:hidden">{brokenTotal === undefined ? "Unknown" : historyCount(brokenTotal, data.count_capped)}</strong></span><span className="mt-1 flex flex-wrap items-center gap-1 sm:gap-2"><strong className="hidden text-xl tabular-nums text-ink-50 sm:inline">{brokenTotal === undefined ? "Unknown" : historyCount(brokenTotal, data.count_capped)}</strong>{Object.entries(data.broken?.by_severity ?? {}).filter(([, count]) => count > 0).map(([severity, count]) => <span key={severity} className={`pill ${severity === "critical" ? "pill-bad" : "pill-warn"}`}>{historyCount(count, data.count_capped)} {severity}</span>)}</span>{brokenTotal === 0 && !data.count_capped && <span className="text-xs text-ink-400">{data.sync.state === "stale" || data.sync.partial || data.truncated || data.partial_failures?.length || issues.isError ? "No broken workloads in available evidence" : "No broken workloads"}</span>}</button>
-      <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("timeline")}><span className="block text-2xs text-ink-400">Changes in 60 min</span><span className="mt-1 flex items-end justify-between gap-2"><strong className="text-xl tabular-nums text-ink-50">{changes ? historyCount(changes.total ?? changes.items.length, changes.count_capped || Boolean(changes.next || changes.truncated)) : "Unknown"}</strong><span role="img" aria-label="Change activity in twelve five-minute intervals" className="flex h-7 w-1/2 items-end gap-1">{buckets.map((count, index) => <span key={index} className={`min-w-0 flex-1 rounded-t-sm ${count ? "bg-accent" : "bg-ink-600"}`} style={{ height: `${count ? Math.max(12, count / peak * 100) : 8}%` }} />)}</span></span></button>
+      <button type="button" className="min-w-0 rounded-control border border-ink-500/50 bg-surface-raised/60 px-3 py-2 text-left" onClick={() => onSelectView("timeline")}><span className="block text-2xs text-ink-400">Changes in 60 min</span><span className="mt-1 flex items-end justify-between gap-2"><strong className="text-xl tabular-nums text-ink-50">{historyOff ? "Off" : changes ? historyCount(changes.total ?? changes.items.length, changes.count_capped || Boolean(changes.next || changes.truncated)) : "Unknown"}</strong><span role="img" aria-label="Change activity in twelve five-minute intervals" className="flex h-7 w-1/2 items-end gap-1">{buckets.map((count, index) => <span key={index} className={`min-w-0 flex-1 rounded-t-sm ${count ? "bg-accent" : "bg-ink-600"}`} style={{ height: `${count ? Math.max(12, count / peak * 100) : 8}%` }} />)}</span></span></button>
     </div><div className="divide-y divide-ink-700">{data.items.slice(0, 5).map((issue) => <BreakRow key={issue.root.uid ?? issue.root.name} issue={issue} resource={resourceFor(issue)} onSelectResource={onSelectResource} clusterId={clusterId} sourceSync={issues.isError ? undefined : data.sync} sourceFailures={data.partial_failures} warningsOwned />)}</div>{(data.broken?.total ?? 0) > data.items.length && <button type="button" className="flex w-full items-center gap-2 border-t border-ink-700 px-4 py-2 text-xs text-link" onClick={() => onSelectView("issues")}>{data.broken!.total - data.items.length} more<ArrowRight size={12} aria-hidden="true" />Issues</button>}
     </>}
     {data && !warningsOwned && <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([clusterId, blocked])} /></div>}

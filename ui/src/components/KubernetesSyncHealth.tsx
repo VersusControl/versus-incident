@@ -2,6 +2,7 @@ import { useId } from "react";
 import { AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
 import { syncDuration, syncHealthStateLabel, syncSince, type KubernetesSyncHealth as Health } from "@/lib/kubernetesSyncHealth";
 import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
+import type { KubernetesConnectorDetail } from "@/lib/kubernetesNamespaceAccess";
 
 const stateTone: Record<Health["state"], string> = {
   ready: "pill pill-good",
@@ -26,8 +27,14 @@ const stateTone: Record<Health["state"], string> = {
  * was lost, or no read answered — has nothing to keep on screen, so the same
  * panel names the failure instead of leaving an empty or loading page.
  */
-export function KubernetesSyncHealthSurface({ health, onRetry, retrying, cluster, dataOnScreen = true }: {
+export function KubernetesSyncHealthSurface({ health, onRetry, retrying, cluster, dataOnScreen = true, connectorDetail }: {
   health: Health;
+  /**
+   * The server's own explanation of why the connector could not be built or
+   * why its address was refused. It replaces the per-kind list, which can only
+   * name the class of a fault the operator fixes in configuration.
+   */
+  connectorDetail?: KubernetesConnectorDetail;
   onRetry?: () => void;
   retrying?: boolean;
   cluster?: string;
@@ -72,13 +79,18 @@ export function KubernetesSyncHealthSurface({ health, onRetry, retrying, cluster
         <RefreshCw size={13} aria-hidden="true" className={retrying ? "animate-spin motion-reduce:animate-none" : undefined} />Retry sync
       </button>}
     </div>
-    {health.problems.length > 0
+    {connectorDetail && failed
+      ? <div data-connector-detail={connectorDetail.code} className="space-y-1 px-4 py-3 text-xs sm:px-6">
+        <p className="text-ink-100">{connectorDetail.message}</p>
+        {connectorDetail.action && <p className="text-ink-300">{connectorDetail.action}</p>}
+      </div>
+      : health.problems.length > 0
       ? <ul aria-label="Resource types that could not sync" className="divide-y divide-ink-700">
         {health.problems.map((problem) => {
           const seen = syncSince(problem.since);
           return <li key={problem.kind} data-sync-problem={problem.kind} className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 px-4 py-2.5 text-xs sm:px-6">
             <span className="font-medium text-ink-100">{problem.kind}</span>
-            <span className="min-w-0 text-ink-300">{problem.reason}</span>
+            <span className="min-w-0 text-ink-300">{problem.reason}{problem.namespaces?.length ? ` in ${problem.namespaces.join(", ")}` : ""}</span>
             {problem.skipped > 0 && <span className="tabular-nums text-ink-400">{problem.skipped} {problem.skipped === 1 ? "object" : "objects"} skipped</span>}
             {seen && <time dateTime={seen.iso} title={new Date(seen.iso).toLocaleString()} className="text-ink-400">{problem.sinceBasis === "attempt" ? "last tried" : "since"} {seen.age} ago</time>}
           </li>;

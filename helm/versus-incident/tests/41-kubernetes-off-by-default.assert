@@ -1,0 +1,6 @@
+The Kubernetes connector is off
+!connectors:
+!mode: "in_cluster"
+!exclude_resources
+!kind: ClusterRole
+!kind: ClusterRoleBinding

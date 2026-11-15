@@ -6,6 +6,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: {{ include "versus-incident.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 spec:

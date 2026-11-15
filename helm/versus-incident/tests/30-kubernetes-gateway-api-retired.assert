@@ -1,0 +1,3 @@
+# EXPECT_FAIL: the retired key is rejected and the replacement is named.
+kubernetesReaderRBAC.gatewayAPI was replaced by kubernetesReaderRBAC.optionalKinds
+Remove gatewayAPI and set optionalKinds

@@ -35,7 +35,7 @@ jobs:
         run: |
           cd helm/versus-incident
           helm repo add bitnami https://charts.bitnami.com/bitnami
-          helm dependency update
+          helm dependency build
 
       - name: Set version variable
         id: version

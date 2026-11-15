@@ -1,0 +1,3 @@
+# EXPECT_FAIL: more than one replica needs Postgres.
+storage.type=file with 2 replicas
+Use storage.type=postgres

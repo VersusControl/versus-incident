@@ -127,10 +127,74 @@ jobs:
           # shellcheck disable=SC2086
           go test -short -race -count=1 -timeout 20m $packages
 
+  # Helm chart checks that run on every change, not only on chart edits: the
+  # chart version must follow the release version, the committed one-file
+  # kubectl manifest must match a fresh render of the chart, and the chart
+  # must lint and pass its template scenarios.
+  chart:
+    name: Chart & manifest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Same Helm version the committed manifest is rendered with, so the
+      # freshness check compares like with like.
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.15.3
+
+      # The scenario runner ends with a Go test that compares the rendered
+      # chart config with the application's default config.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      # Chart version and appVersion move together with the release. The
+      # release tag itself is checked in the release workflow.
+      - name: Chart version matches appVersion
+        run: |
+          chart=helm/versus-incident/Chart.yaml
+          version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$chart")
+          app_version=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$chart")
+          if [ -z "$version" ] || [ -z "$app_version" ]; then
+            echo "::error file=$chart::Could not read version and appVersion"
+            exit 1
+          fi
+          if [ "$version" != "$app_version" ]; then
+            echo "::error file=$chart::Chart version $version differs from appVersion $app_version"
+            exit 1
+          fi
+          echo "Chart version and appVersion are both $version"
+
+      # charts/ is not committed; fetch the redis subchart at the version and
+      # digest pinned in Chart.lock.
+      - name: Build chart dependencies
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm dependency build helm/versus-incident
+
+      - name: One-file manifest is up to date
+        run: scripts/render_kubernetes_manifest.sh --check
+
+      - name: helm lint
+        run: helm lint helm/versus-incident
+
+      - name: Chart template scenarios
+        run: ./helm/versus-incident/tests/run.sh
+
   build-and-push-dev:
     name: Build & push dev image
     runs-on: ubuntu-latest
-    needs: [test, race]
+    needs: [test, race, chart]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

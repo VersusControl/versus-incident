@@ -3,6 +3,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ include "versus-incident.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 spec:
@@ -24,6 +25,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "versus-incident.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 spec:
@@ -84,12 +86,24 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
-            {{- /* Gateway secret — always wired. Empty value leaves admin endpoints unregistered. */}}
+            {{- /* Sign-in secret. A user-supplied Secret is read as optional
+                   so the pod starts and the app logs which Secret is missing,
+                   instead of a bare CreateContainerConfigError. */}}
             - name: GATEWAY_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
-                  key: gateway_secret
+                  name: {{ include "versus-incident.gatewaySecretName" . }}
+                  key: {{ include "versus-incident.gatewaySecretKey" . }}
+                  {{- if .Values.gatewaySecretExistingSecret }}
+                  optional: true
+                  {{- end }}
+            - name: GATEWAY_SECRET_REQUIRED
+              value: "true"
+            {{- if .Values.gatewaySecretExistingSecret }}
+            {{- /* "$$" is how Kubernetes writes a literal "$" in an env value. */}}
+            - name: GATEWAY_SECRET_HINT
+              value: {{ printf "create it with: kubectl -n %s create secret generic %s --from-literal=%s=$$(openssl rand -hex 32), then restart the pod" .Release.Namespace (include "versus-incident.gatewaySecretName" .) (include "versus-incident.gatewaySecretKey" .) | quote }}
+            {{- end }}
 
             {{- /* HA / multi-instance identity. On a StatefulSet the
                    POD_NAME trailing ordinal (Downward API) is the authoritative
@@ -173,6 +187,7 @@ spec:
             {{- end }}
                 {{- end }}
             {{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict }}
+            {{- if include "versus-incident.kubernetesConnectorEnabled" . }}
             {{- if $kubernetes.multiple }}
             {{- range $cluster := $kubernetes.clusters }}
             {{- $id := $cluster.clusterId | default $cluster.clusterID }}
@@ -218,6 +233,7 @@ spec:
                   key: kubernetes_actor_{{ $key }}
             {{- end }}
                 {{- end }}
+            {{- end }}
 
             {{- if .Values.alert.slack.enable }}
             - name: SLACK_ENABLE

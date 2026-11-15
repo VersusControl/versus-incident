@@ -1,0 +1,4 @@
+# The connector is off in this chart but the reader role is asked for
+# explicitly, for a connector configured elsewhere: the role is created.
+kubernetesReaderRBAC:
+  enabled: true

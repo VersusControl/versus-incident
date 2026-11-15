@@ -55,6 +55,59 @@ func inventoryDue(state kubeindex.KindStatus, cadence time.Duration, now time.Ti
 	return at.IsZero() || now.Sub(at) >= cadence
 }
 
+// deniedOptionalRetry is how long a discovered API the identity may not list
+// waits before it is listed again. A steady denial is a capability gap of the
+// reader role, not a fault: listing it every cycle only fills the API server's
+// audit log. A changed discovery or a widened grant lists it sooner.
+const deniedOptionalRetry = time.Hour
+
+// deniedShownRetry is the retry for a denied API whose kinds the product
+// shows. A grant for such a kind must reach the coverage report within
+// minutes, as it reaches the page that lists the kind live.
+const deniedShownRetry = 5 * time.Minute
+
+// optionalInventoryDue reports whether the discovered API id outside the
+// indexed kinds is due. A denied one waits for deniedOptionalRetry, or
+// deniedShownRetry when the product shows its kinds, unless recheck is set;
+// every other state keeps the optional cadence.
+func (service *Service) optionalInventoryDue(id string, state kubeindex.KindStatus, now time.Time, recheck bool) bool {
+	if state.State == "error" && state.Error == "forbidden" && !state.LastAttemptAt.IsZero() {
+		retry := deniedOptionalRetry
+		if productAPIGroups[apiGroupOf(id)] {
+			retry = deniedShownRetry
+		}
+		return recheck || now.Sub(state.LastAttemptAt) >= service.collectionCadence(retry)
+	}
+	return inventoryDue(state, service.collectionCadence(5*time.Minute), now)
+}
+
+// discoveryResourcesChanged reports whether discovery now serves a different
+// set of listable APIs than before, as when a CRD is installed or removed.
+func discoveryResourcesChanged(previous *Discovery, current Discovery) bool {
+	if previous == nil {
+		return false
+	}
+	ids := func(discovery Discovery) map[string]bool {
+		result := make(map[string]bool, len(discovery.Resources))
+		for _, definition := range discovery.Resources {
+			if definition.Available {
+				result[definition.ID] = true
+			}
+		}
+		return result
+	}
+	before, after := ids(*previous), ids(current)
+	if len(before) != len(after) {
+		return true
+	}
+	for id := range after {
+		if !before[id] {
+			return true
+		}
+	}
+	return false
+}
+
 func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCache) {
 	stopWorker := service.recovery.workerStarted()
 	defer stopWorker()
@@ -275,8 +328,8 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 	for kind, state := range generation.View.Kinds {
 		due = due || inventoryDue(state, service.collectionCadence(inventoryCadence(kind)), now)
 	}
-	for _, state := range generation.ResourceStatus {
-		due = due || inventoryDue(state, service.collectionCadence(5*time.Minute), now)
+	for id, state := range generation.ResourceStatus {
+		due = due || service.optionalInventoryDue(id, state, now, cache.relistRequested(id))
 	}
 	promoted := false
 	if !due {
@@ -443,8 +496,8 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	sortCoreKindsFirst(kinds)
 	metricsDue := generation.Usage.ObservedAt.IsZero() || now.Sub(generation.Usage.ObservedAt) >= service.collectionCadence(30*time.Second)
 	additionalDue := false
-	for _, state := range generation.ResourceStatus {
-		additionalDue = additionalDue || inventoryDue(state, service.collectionCadence(5*time.Minute), now)
+	for id, state := range generation.ResourceStatus {
+		additionalDue = additionalDue || service.optionalInventoryDue(id, state, now, cache.relistRequested(id))
 	}
 	if len(kinds) == 0 && !metricsDue && !additionalDue && !discovered {
 		discovered, err = service.discoverNamespaceCandidates(ctx, cache, generation, now)
@@ -517,6 +570,13 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		}
 		degradedDiscovery = true
 		discovery.Partial = append(discovery.Partial, PartialFailure{ResourceID: "kubernetes.discovery", Class: discoveryFailureClass})
+	}
+	// A denied optional API is listed again before its retry when discovery
+	// changed, a grant was widened or the credential changed, so a new
+	// permission shows up promptly.
+	recheckDenied := scopePending || baseline.binding == "" || !cold && !degradedDiscovery && discoveryResourcesChanged(generation.Discovery, discovery)
+	if !cold && !degradedDiscovery {
+		service.reportUnmatchedExclusions(cache, discovery)
 	}
 	storedDiscovery := cloneDiscovery(discovery)
 	generation.Discovery = &storedDiscovery
@@ -686,7 +746,10 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	additional := []ResourceDefinition{}
 	if !cold {
 		for _, definition := range canonicalInventoryResources(discovery.Resources) {
-			if inventoryDue(states[definition.ID], service.collectionCadence(5*time.Minute), now) {
+			if service.resourceExcluded(definition.ID) {
+				continue
+			}
+			if service.optionalInventoryDue(definition.ID, states[definition.ID], now, recheckDenied || cache.takeRelist(definition.ID)) {
 				additional = append(additional, definition)
 			}
 		}
@@ -750,6 +813,9 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	service.logInventoryKinds(generation.View.Kinds)
 	generation.Pending, generation.PendingDiscovery = pendingInventoryKinds(generation.View), cold || degradedDiscovery
 	recordNamespaceProofs(generation)
+	if generation.View.Kinds["Namespace"].Error == "forbidden" {
+		service.seedReadableNamespaces(ctx, cache)
+	}
 	promoted, err := service.discoverNamespaceCandidates(ctx, cache, generation, now)
 	if err != nil {
 		return false, err
@@ -926,24 +992,112 @@ func (service *Service) collectScopedInventory(ctx context.Context, cache *inven
 			records[record.UID] = record
 		}
 	}
+	clusterWidePods := generation.View.Kinds["Pod"].Error == "" && !generation.View.Kinds["Pod"].ObservedAt.IsZero()
+	credential := service.credentialGeneration()
+	recheck := false
+	cache.mu.Lock()
+	for kind, state := range generation.View.Kinds {
+		if state.Error == "" {
+			// Read cluster-wide again: a later denial and grant is a new
+			// change worth asking about.
+			delete(cache.rechecked, kind)
+		}
+	}
+	cache.mu.Unlock()
 	for _, snapshot := range scoped {
 		for kind, state := range snapshot.Kinds {
 			global := generation.View.Kinds[kind]
-			if (global.Error == "forbidden" || global.Error == "namespace_scope") && state.State == "ready" {
-				global.State, global.Partial, global.Error = "partial", true, "namespace_scope"
-				global.ObservedAt = state.ObservedAt
-				generation.View.Kinds[kind] = global
+			if global.Error == "forbidden" && state.State == "ready" && clusterWidePods {
+				// An identity that reads the cluster wide was allowed a kind
+				// inside a namespace that it was denied cluster-wide. The grant
+				// may just have widened while its cluster-wide denial is still
+				// remembered, so that denial is asked again on the next cycle,
+				// once per kind and credential: a role that grants the kind only
+				// inside namespaces keeps answering the same, and is not asked
+				// again until the kind's state changes.
+				cache.mu.Lock()
+				asked, seen := cache.rechecked[kind]
+				if !seen || asked != credential {
+					if cache.rechecked == nil {
+						cache.rechecked = map[string]uint64{}
+					}
+					cache.rechecked[kind] = credential
+					recheck = true
+					scope := service.indexScope()
+					service.client.clearMetadataDenial(metadataDenyKey{OrgID: scope.OrgID, ClusterID: scope.ClusterID, CredentialID: scope.CredentialID, Kind: kind})
+				}
+				cache.mu.Unlock()
+			}
+		}
+	}
+	// A kind read only inside namespaces is as fresh as its oldest namespace
+	// read, and a read that failed in any namespace for a reason other than a
+	// denial is that kind's failure, so a namespace that stopped answering is
+	// never reported as current through the others.
+	scopedNames := make([]string, 0, len(scoped))
+	for namespace := range scoped {
+		scopedNames = append(scopedNames, namespace)
+	}
+	sort.Strings(scopedNames)
+	type scopedKind struct {
+		oldest             time.Time
+		failure, failingIn string
+		failingSince       time.Time
+		read               bool
+	}
+	scopedKinds := map[string]*scopedKind{}
+	for _, namespace := range scopedNames {
+		snapshot := scoped[namespace]
+		for kind, state := range snapshot.Kinds {
+			global := generation.View.Kinds[kind]
+			if global.Error != "forbidden" && global.Error != "namespace_scope" {
+				continue
+			}
+			entry := scopedKinds[kind]
+			if entry == nil {
+				entry = &scopedKind{}
+				scopedKinds[kind] = entry
+			}
+			switch {
+			case state.State == "ready":
+				entry.read = true
+				if entry.oldest.IsZero() || state.ObservedAt.Before(entry.oldest) {
+					entry.oldest = state.ObservedAt
+				}
 				for _, record := range snapshot.Records {
 					if record.Kind == kind {
 						records[record.UID] = record
 					}
 				}
+			case state.Error != "" && state.Error != "forbidden" && state.Error != "namespace_scope" && entry.failure == "":
+				entry.failure, entry.failingIn, entry.failingSince = state.Error, namespace, state.FailingSince
+				if !state.ObservedAt.IsZero() && (entry.oldest.IsZero() || state.ObservedAt.Before(entry.oldest)) {
+					entry.oldest = state.ObservedAt
+				}
 			}
 		}
+	}
+	for kind, entry := range scopedKinds {
+		if !entry.read {
+			continue
+		}
+		global := generation.View.Kinds[kind]
+		global.State, global.Partial, global.Error = "partial", true, "namespace_scope"
+		global.ObservedAt = entry.oldest
+		global.ScopeError, global.ScopeNamespace = entry.failure, entry.failingIn
+		if entry.failure != "" && !entry.failingSince.IsZero() {
+			global.FailingSince = entry.failingSince
+		}
+		generation.View.Kinds[kind] = global
 	}
 	generation.View.Records = make([]kubeindex.Record, 0, len(records))
 	for _, record := range records {
 		generation.View.Records = append(generation.View.Records, record)
+	}
+	if recheck {
+		cache.mu.Lock()
+		cache.scopePending = true
+		cache.mu.Unlock()
 	}
 	return nil
 }

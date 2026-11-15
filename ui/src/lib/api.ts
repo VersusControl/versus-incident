@@ -1649,7 +1649,7 @@ export interface KubernetesClusterSummary {
   /** Same freshness envelope as every other Kubernetes view, including first-sync progress. */
   sync: KubernetesSync;
   observed_at: string;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; action?: string };
 }
 
 export interface KubernetesClusters {
@@ -2174,7 +2174,12 @@ export interface KubernetesOverview {
   metrics_fresh: boolean;
   truncated: boolean;
   omitted_categories?: string[] | null;
-  partial_failures?: { resource_id?: string; scope?: string; group_version?: string; class: string }[] | null;
+  /** Each entry names its subject (`kind`) and says what happened in a plain sentence (`message`), in a stable server order. */
+  partial_failures?: { resource_id?: string; scope?: string; group_version?: string; class: string; kind?: string; message?: string }[] | null;
+  /** False when the connector identity reads namespaced kinds only inside some namespaces. */
+  cluster_wide?: boolean;
+  /** The namespaces a namespace-only identity reads, sorted. */
+  readable_namespaces?: string[] | null;
 }
 
 export interface KubernetesResource {
@@ -2220,6 +2225,8 @@ export interface KubernetesMetricsSourceStatus {
 
 export interface KubernetesUsage {
   observed_at: string;
+  /** The Metrics API: "not_installed" (no metrics-server), "forbidden", "unavailable", "syncing" or "available". */
+  metrics?: "not_installed" | "forbidden" | "unavailable" | "syncing" | "available";
   availability: "available" | "stale" | "unavailable";
   fresh: boolean;
   pod_metrics: KubernetesMetricsSourceStatus;
@@ -2443,6 +2450,8 @@ export interface KubernetesCaptureStatus {
 
 export interface KubernetesCrashPage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
+  /** "off_namespace_access": no history is kept for a namespace-only identity, so the page is empty by design. */
+  history?: "off_namespace_access" | (string & {});
   crash_count?: number;
   items: KubernetesCrashEvent[];
   next?: string;
@@ -2461,6 +2470,8 @@ export interface KubernetesCrashPage extends KubernetesHistoryCounts {
 
 export interface KubernetesChangesPage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
+  /** "off_namespace_access": no history is kept for a namespace-only identity, so the page is empty by design. */
+  history?: "off_namespace_access" | (string & {});
   items: KubernetesChange[];
   next?: string;
   truncated?: boolean;
@@ -2478,6 +2489,8 @@ export type KubernetesTimelineEntry =
 
 export interface KubernetesTimelinePage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
+  /** "off_namespace_access": no history is kept for a namespace-only identity, so the page is empty by design. */
+  history?: "off_namespace_access" | (string & {});
   items: KubernetesTimelineEntry[];
   next?: string;
   sync: KubernetesSync;
@@ -2607,6 +2620,8 @@ export interface KubernetesFailingKind {
   /** When the failure began; the same time until the kind's state changes. */
   since?: string;
   observed_at?: string;
+  /** Set when the kind fails in this one namespace while others read fine. */
+  namespace?: string;
 }
 
 /**
@@ -2643,6 +2658,24 @@ export interface KubernetesSyncHealthReport {
    * the UI can tell a first boot from a background resync.
    */
   first_ready_at?: string;
+  /**
+   * False when the connector identity reads namespaced kinds only inside some
+   * namespaces; missing or true means cluster-wide.
+   */
+  cluster_wide?: boolean;
+  /** The namespaces a namespace-only identity reads, sorted. */
+  readable_namespaces?: string[] | null;
+  /**
+   * Kinds excluded by configuration (`connectors.kubernetes.exclude_resources`),
+   * sorted. Never part of `unreadable` or `failing`: nothing went wrong.
+   */
+  not_collected?: string[] | null;
+  /**
+   * Kinds the connector identity reads only inside some namespaces, same row
+   * shape as `unreadable`. A permission gap, never a failure.
+   */
+  namespace_scoped?: KubernetesUnreadableKind[] | null;
+  namespace_scoped_kinds?: number;
 }
 
 /**
@@ -2674,6 +2707,8 @@ export interface KubernetesTopPage {
   items_available?: boolean;
   total: number;
   truncated: boolean;
+  /** The Metrics API: "not_installed" (no metrics-server), "forbidden", "unavailable", "syncing" or "available". */
+  metrics?: "not_installed" | "forbidden" | "unavailable" | "syncing" | "available";
   availability: "available" | "stale" | "unavailable";
   fresh: boolean;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
@@ -2738,6 +2773,18 @@ export interface KubernetesHelmRelease {
   health: string;
 }
 
+export interface KubernetesHelmReleasePage extends KubernetesPageTotals {
+  items: KubernetesHelmRelease[];
+  next?: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  /** "needs_secret_list" when releases could not be read at all, so an empty list is never "no releases". */
+  access?: "needs_secret_list" | (string & {});
+  /** One sentence saying why releases could not be read. */
+  access_message?: string;
+  docs_url?: string;
+}
+
 export interface KubernetesGitOpsApp {
   tool: string;
   kind: string;
@@ -2756,6 +2803,9 @@ export interface KubernetesGitOpsPage extends KubernetesPageTotals {
   items: KubernetesGitOpsApp[];
   available: boolean;
   reason?: string;
+  /** "not_readable" when the kinds are installed but this identity may not list them. */
+  access?: "not_readable" | (string & {});
+  access_message?: string;
   next?: string;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   truncated: boolean;
@@ -2765,6 +2815,9 @@ export interface KubernetesRolloutPage {
   items: KubernetesRollout[];
   available: boolean;
   reason?: string;
+  /** "not_readable" when Rollouts are installed but this identity may not list them. */
+  access?: "not_readable" | (string & {});
+  access_message?: string;
   next?: string;
   truncated: boolean;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
@@ -3259,7 +3312,7 @@ export function createKubernetesApi(cluster?: string) {
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> } & KubernetesPageTotals>(`/api/admin/kubernetes/releases?${query}`);
+    return request<KubernetesHelmReleasePage>(`/api/admin/kubernetes/releases?${query}`);
   },
   kubernetesRelease: (namespace: string, name: string) =>
     request<KubernetesHelmRelease>(`/api/admin/kubernetes/releases/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),

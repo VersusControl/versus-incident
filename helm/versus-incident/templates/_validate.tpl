@@ -33,9 +33,8 @@ Two backends are supported end-to-end:
 Caught here:
   - unsupported storage.type
   - postgres without a DSN (no storage.postgres.dsn / dsnExistingSecret)
-  - file backend with persistence + replicaCount > 1 + RWO access mode
-    (PVC cannot be mounted on >1 pod simultaneously, and even with RWX
-    multiple writers race on the same JSON files)
+  - file backend with replicaCount > 1 (each pod would keep its own state;
+    with a shared volume, multiple writers race on the same JSON files)
   - existingClaim set without persistence.enabled
 */}}
 {{- define "versus-incident.validateStorage" -}}
@@ -50,11 +49,8 @@ Caught here:
 {{- end -}}
 {{- if eq $type "file" -}}
   {{- $replicas := int (default 1 .Values.replicaCount) -}}
-  {{- if and .Values.storage.persistence.enabled (gt $replicas 1) -}}
-    {{- $access := .Values.storage.persistence.accessMode | default "ReadWriteOnce" -}}
-    {{- if eq $access "ReadWriteOnce" -}}
-      {{- fail (printf "versus-incident: storage.persistence.enabled=true with %d replicas and accessMode=ReadWriteOnce. The PVC cannot be mounted on more than one pod. Set replicaCount=1, use accessMode=ReadWriteMany, or switch to storage.type=postgres (ha.enabled=true)." $replicas) -}}
-    {{- end -}}
+  {{- if gt $replicas 1 -}}
+    {{- fail (printf "versus-incident: storage.type=file with %d replicas. The file backend keeps state inside each pod, so pages and settings would disagree between pods. Use storage.type=postgres for more than one replica, or set replicaCount=1." $replicas) -}}
   {{- end -}}
   {{- if and .Values.storage.persistence.existingClaim (not .Values.storage.persistence.enabled) -}}
     {{- fail "versus-incident: storage.persistence.existingClaim is set but storage.persistence.enabled is false. Set persistence.enabled=true to bind the existing claim." -}}
@@ -116,5 +112,36 @@ Caught here:
   {{- if and (eq $mode "detect") (not .Values.agent.ai.enable) -}}
     {{/* Not fatal — detect mode without AI is a valid dry-run. Just a hint. */}}
   {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validate the Kubernetes reader role.
+
+With auth.mode=in_cluster the connector reads the cluster as the pod
+ServiceAccount, so it needs the reader role. Turning the role off without
+saying who grants that access leaves every page "permission denied".
+*/}}
+{{- define "versus-incident.validateKubernetesReaderRBAC" -}}
+{{- $rbac := .Values.kubernetesReaderRBAC | default dict -}}
+{{- if hasKey $rbac "gatewayAPI" -}}
+  {{- fail "versus-incident: kubernetesReaderRBAC.gatewayAPI was replaced by kubernetesReaderRBAC.optionalKinds (true by default: Gateway API, Argo CD, Argo Rollouts and Flux kinds). Remove gatewayAPI and set optionalKinds." -}}
+{{- end -}}
+{{- if and (include "versus-incident.kubernetesReaderRBACEnabled" .) (not .Values.serviceAccount.create) (not .Values.serviceAccount.name) -}}
+  {{- fail "versus-incident: the Kubernetes reader role is enabled but serviceAccount.create=false and serviceAccount.name is empty, so the role would be bound to the namespace's default ServiceAccount. Set serviceAccount.name to the ServiceAccount the pod uses, or set serviceAccount.create=true." -}}
+{{- end -}}
+{{- if and (include "versus-incident.kubernetesInCluster" .) (eq (include "versus-incident.kubernetesReaderRBACSetting" .) "false") (not $rbac.external) -}}
+  {{- fail "versus-incident: kubernetesReaderRBAC.enabled=false, but the Kubernetes connector uses auth.mode=in_cluster and needs read access to the cluster. Remove kubernetesReaderRBAC.enabled to let the chart create the read-only role, set kubernetesReaderRBAC.external=true if you bind the ServiceAccount to your own role, or set connectors.kubernetes.enabled=false to turn the connector off." -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Refuse excluding the kinds every Kubernetes view is built from.
+*/}}
+{{- define "versus-incident.validateExcludeResources" -}}
+{{- range $resource := . -}}
+{{- if has $resource (list "pods" "namespaces") -}}
+{{- fail (printf "versus-incident: connectors.kubernetes.excludeResources cannot exclude %q: every Kubernetes view is built from it." $resource) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

@@ -49,7 +49,7 @@ describe("Kubernetes presentation", () => {
     fireEvent.focus(trigger);
     const details = screen.getByRole("region", { name: "Resource coverage details" });
     expect(details.textContent).toContain("Some data is incomplete");
-    expect(details.textContent).toContain("secrets: permission denied");
+    expect(details.textContent).toContain("Secret is not readable with this connector's permissions.");
     expect(document.body.textContent).not.toContain("item_limit");
     fireEvent.keyDown(document, { key: "Escape" });
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
@@ -155,8 +155,8 @@ describe("Kubernetes presentation", () => {
     mount(<KubernetesExplorerTabContent tab="gitops" onSelectResource={vi.fn()} />);
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Resource coverage" })).toHaveLength(1));
     fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
-    expect(screen.getByText("applications: permission denied")).toBeTruthy();
-    expect(screen.getByText("rollouts: source did not respond")).toBeTruthy();
+    expect(screen.getByText("Application is not readable with this connector's permissions.")).toBeTruthy();
+    expect(screen.getByText("Rollout took too long to read; the next sync tries again.")).toBeTruthy();
   });
   it("preserves root deep links and requests server-filtered related changes", async () => {
     const retained: KubernetesIssue = { root: deployment, broke_at: "2026-10-23T07:55:00Z", rule: "pod.crash_loop", severity: "critical", count: 1 };

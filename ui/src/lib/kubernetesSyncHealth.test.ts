@@ -160,7 +160,7 @@ describe("Cluster sync health", () => {
     expect(kindFailureReason({ error: "throttled" })).toBe("the cluster is slow or rate-limiting reads");
     expect(kindFailureReason({ error: "unavailable" })).toBe("the cluster read failed");
     expect(kindFailureReason({ error: "budget_exhausted" })).toBe("the read budget for this sync ran out");
-    expect(kindFailureReason({ error: "namespace_scope" })).toBe("the namespace scope could not be read");
+    expect(kindFailureReason({ error: "namespace_scope" })).toBe("readable only in some namespaces");
     expect(kindFailureReason({ error: "unsupported" })).toBe("the cluster does not support this read");
     expect(kindFailureReason({ error: "not_a_class_this_build_knows" })).toBe("the last sync attempt at this resource type failed");
     expect(kindFailureReason({})).toBe("the last sync attempt at this resource type failed");

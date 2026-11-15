@@ -526,10 +526,14 @@ func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
 	out := src
 	out.Kubernetes.ChangeCapture = src.Kubernetes.ChangeCapture
 	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
+	out.Kubernetes.ExcludeResources = append([]string(nil), src.Kubernetes.ExcludeResources...)
+	out.Kubernetes.Namespaces = append([]string(nil), src.Kubernetes.Namespaces...)
 	out.Kubernetes.Clusters = append([]KubernetesClusterConfig(nil), src.Kubernetes.Clusters...)
 	for index := range out.Kubernetes.Clusters {
 		out.Kubernetes.Clusters[index].ChangeCapture = src.Kubernetes.Clusters[index].ChangeCapture
 		out.Kubernetes.Clusters[index].EndpointCIDRs = append([]string(nil), src.Kubernetes.Clusters[index].EndpointCIDRs...)
+		out.Kubernetes.Clusters[index].ExcludeResources = append([]string(nil), src.Kubernetes.Clusters[index].ExcludeResources...)
+		out.Kubernetes.Clusters[index].Namespaces = append([]string(nil), src.Kubernetes.Clusters[index].Namespaces...)
 	}
 	return out
 }

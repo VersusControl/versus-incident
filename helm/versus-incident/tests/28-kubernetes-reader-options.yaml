@@ -1,0 +1,7 @@
+# Optional kinds off, Secret listing on for Helm releases.
+kubernetesReaderRBAC:
+  optionalKinds: false
+  secrets: true
+connectors:
+  kubernetes:
+    enabled: true

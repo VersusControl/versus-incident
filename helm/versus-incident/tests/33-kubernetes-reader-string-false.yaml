@@ -1,0 +1,6 @@
+# A quoted "false" is read as false, so in_cluster without a role fails.
+kubernetesReaderRBAC:
+  enabled: "false"
+connectors:
+  kubernetes:
+    enabled: true

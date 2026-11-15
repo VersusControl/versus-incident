@@ -3,6 +3,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ include "versus-incident.fullname" . }}-data
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 spec:

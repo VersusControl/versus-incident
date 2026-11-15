@@ -1,0 +1,5 @@
+# Excluding Pods would empty every view, so the install fails.
+connectors:
+  kubernetes:
+    enabled: true
+    excludeResources: [pods]

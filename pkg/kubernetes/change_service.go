@@ -16,7 +16,11 @@ type ChangeType = kubechanges.Type
 type ChangeQuery = kubechanges.Query
 
 type ChangePage struct {
-	Authority   string            `json:"authority,omitempty"`
+	Authority string `json:"authority,omitempty"`
+	// History is "off_namespace_access" when the connector identity reads only
+	// inside namespaces: no history is kept for it, so the page is empty by
+	// design and retrying cannot fill it.
+	History     string            `json:"history,omitempty"`
 	CountCapped bool              `json:"count_capped,omitempty"`
 	Items       []Change          `json:"items"`
 	Next        string            `json:"next,omitempty"`
@@ -165,7 +169,11 @@ func (service *Service) changeStore() *kubechanges.Store {
 // Changes returns the bounded timeline for the service's org/cluster scope.
 func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangePage, error) {
 	if service.evidenceStore() != nil {
-		return service.evidenceChanges(ctx, query)
+		page, err := service.evidenceChanges(ctx, query)
+		if err != nil && service.historyOffForNamespaceAccess(ctx, err) {
+			return ChangePage{Items: []Change{}, Gaps: []kubechanges.Gap{}, History: HistoryOffNamespaceAccess, Sync: SyncStatus{State: "partial", Partial: true}}, nil
+		}
+		return page, err
 	}
 	if err := service.validateCredential(ctx); err != nil {
 		return ChangePage{}, err

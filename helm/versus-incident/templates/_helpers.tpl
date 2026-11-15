@@ -150,3 +150,116 @@ Optional BYOK master key (VERSUS_ENTERPRISE_SECRET_KEY) Secret reference.
 versus_enterprise_secret_key
 {{- end -}}
 {{- end -}}
+
+{{/*
+"true" when the Kubernetes connector is on. connectors.kubernetes.enabled
+defaults to false; true (or the string "true") turns it on.
+*/}}
+{{- define "versus-incident.kubernetesConnectorEnabled" -}}
+{{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict -}}
+{{- $enabled := $kubernetes.enabled -}}
+{{- if or (and (kindIs "bool" $enabled) $enabled) (and (kindIs "string" $enabled) (eq ($enabled | trim | lower) "true")) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when the enabled connector reads the cluster it runs in with the pod
+ServiceAccount (auth.mode=in_cluster, or any multi-cluster entry using it).
+*/}}
+{{- define "versus-incident.kubernetesInCluster" -}}
+{{- if include "versus-incident.kubernetesConnectorEnabled" . -}}
+{{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict -}}
+{{- if $kubernetes.multiple -}}
+{{- range $cluster := ($kubernetes.clusters | default list) -}}
+{{- if eq ((($cluster | default dict).auth | default dict).mode | default "") "in_cluster" -}}true{{- end -}}
+{{- end -}}
+{{- else if eq (($kubernetes.auth | default dict).mode | default "") "in_cluster" -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+"true" when the chart creates the Kubernetes reader ClusterRole. An empty
+kubernetesReaderRBAC.enabled follows the connector: on for in_cluster. An
+explicit true or false wins. external=true means the user manages the
+connector's RBAC, so the chart creates nothing.
+*/}}
+{{- define "versus-incident.kubernetesReaderRBACEnabled" -}}
+{{- $rbac := .Values.kubernetesReaderRBAC | default dict -}}
+{{- if not $rbac.external -}}
+{{- $enabled := include "versus-incident.kubernetesReaderRBACSetting" . -}}
+{{- if $enabled -}}
+{{- if eq $enabled "true" -}}true{{- end -}}
+{{- else if include "versus-incident.kubernetesInCluster" . -}}
+true
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+kubernetesReaderRBAC.enabled as "true", "false" or "" (empty: follow the
+connector). Booleans and the strings "true"/"false" (any case) are accepted;
+anything else fails, so a quoted "false" can never be read as on.
+*/}}
+{{- define "versus-incident.kubernetesReaderRBACSetting" -}}
+{{- $value := (.Values.kubernetesReaderRBAC | default dict).enabled -}}
+{{- if kindIs "bool" $value -}}
+{{- ternary "true" "false" $value -}}
+{{- else if kindIs "string" $value -}}
+{{- $text := $value | trim | lower -}}
+{{- if has $text (list "true" "false") -}}
+{{- $text -}}
+{{- else if $text -}}
+{{- fail (printf "versus-incident: kubernetesReaderRBAC.enabled must be true, false or empty, got %q." $value) -}}
+{{- end -}}
+{{- else if not (kindIs "invalid" $value) -}}
+{{- fail (printf "versus-incident: kubernetesReaderRBAC.enabled must be true, false or empty, got a %s." (kindOf $value)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Sign-in secret (GATEWAY_SECRET) reference. gatewaySecretExistingSecret points
+at a Secret the user creates; otherwise the chart-managed Secret holds it.
+*/}}
+{{- define "versus-incident.gatewaySecretName" -}}
+{{- if .Values.gatewaySecretExistingSecret -}}
+{{- .Values.gatewaySecretExistingSecret -}}
+{{- else -}}
+{{- printf "%s-secrets" (include "versus-incident.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+{{- define "versus-incident.gatewaySecretKey" -}}
+{{- if .Values.gatewaySecretExistingSecret -}}
+{{- .Values.gatewaySecretExistingSecretKey | default "gateway_secret" -}}
+{{- else -}}
+gateway_secret
+{{- end -}}
+{{- end -}}
+
+{{/*
+Base64 sign-in secret for the chart-managed Secret. A user-set gatewaySecret
+wins. Otherwise the value already stored in the release's Secret is reused, so
+upgrades keep the same secret; a first install generates 32 random bytes,
+hex-encoded. The value is memoised on the root context so the Secret and the
+pod checksum annotation see the same random value within one render.
+*/}}
+{{- define "versus-incident.gatewaySecretData" -}}
+{{- if .Values.gatewaySecret -}}
+{{- .Values.gatewaySecret | b64enc -}}
+{{- else -}}
+{{- if not (hasKey $.Values "__generatedGatewaySecret") -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (printf "%s-secrets" (include "versus-incident.fullname" .)) -}}
+{{- $stored := "" -}}
+{{- if $existing -}}
+{{- $stored = index ($existing.data | default dict) "gateway_secret" | default "" -}}
+{{- end -}}
+{{- if not $stored -}}
+{{- $stored = randAlphaNum 64 | sha256sum | trunc 64 | b64enc -}}
+{{- end -}}
+{{- $_ := set $.Values "__generatedGatewaySecret" $stored -}}
+{{- end -}}
+{{- index $.Values "__generatedGatewaySecret" -}}
+{{- end -}}
+{{- end -}}
