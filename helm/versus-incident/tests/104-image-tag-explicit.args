@@ -1,0 +1,3 @@
+# An explicit image tag is used verbatim, whatever the appVersion.
+--set
+image.tag=dev

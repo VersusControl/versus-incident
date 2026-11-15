@@ -57,21 +57,11 @@ func TestHelmChartVersionFollowsAppVersion(t *testing.T) {
 }
 
 // The default image tag must come from appVersion, not from a pinned tag or
-// from the chart version: the copied chart gets an appVersion that differs
-// from both, and the render must follow it.
+// from the chart version: chart scenario 103 renders a copy of the chart whose
+// appVersion differs from both, and every image must follow it. Scenario 104
+// checks that an explicit image.tag is used verbatim.
 func TestHelmDefaultImageTagFollowsAppVersion(t *testing.T) {
-	requireRenderableChart(t)
-	chart := copyChart(t)
-	chartFile := filepath.Join(chart, "Chart.yaml")
-	raw, err := os.ReadFile(chartFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	patched := chartAppVersionLine.ReplaceAll(raw, []byte(`appVersion: "97.98.99"`))
-	if err := os.WriteFile(chartFile, patched, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	images := renderedImages(helmTemplate(t, chart))
+	images := renderedImages(chartRender(t, "103-image-tag-follows-app-version"))
 	if len(images) == 0 {
 		t.Fatal("the default render has no versus-incident image")
 	}
@@ -79,10 +69,6 @@ func TestHelmDefaultImageTagFollowsAppVersion(t *testing.T) {
 		if image != "ghcr.io/versuscontrol/versus-incident:v97.98.99" {
 			t.Errorf("default image %q does not follow appVersion 97.98.99", image)
 		}
-	}
-	explicit := renderedImages(helmTemplate(t, chart, "--set", "image.tag=dev"))
-	if len(explicit) == 0 || explicit[0] != "ghcr.io/versuscontrol/versus-incident:dev" {
-		t.Errorf("an explicit image.tag must be used verbatim, got %v", explicit)
 	}
 }
 

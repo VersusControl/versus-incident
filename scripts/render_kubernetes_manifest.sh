@@ -42,7 +42,21 @@ helm_template() {
     --namespace "$NAMESPACE" \
     -f "$EXAMPLES_DIR/$1" \
     --set gatewaySecretExistingSecret="$SIGN_IN_SECRET" |
-    sed "s|^\( *image: \"[^\":]*\):v${APP_VERSION}\"\$|\1\"|"
+    sed "s|^\( *image: \"[^\":]*\):v${APP_VERSION}\"\$|\1\"|" |
+    without_document_trailing_blanks
+}
+
+# without_document_trailing_blanks: drop blank lines at the end of each
+# document. Newer Helm releases keep the newline a template ends with, which
+# prints an empty line before every "---"; older ones trim it. Dropping them
+# makes the file the same whichever Helm renders it. A blank line inside a
+# block scalar is kept: it is never directly followed by "---" at column 0.
+without_document_trailing_blanks() {
+  awk '
+    /^[[:space:]]*$/ { blanks = blanks $0 "\n"; next }
+    /^---$/ { blanks = "" }
+    { printf "%s%s\n", blanks, $0; blanks = "" }
+  '
 }
 
 # without_chart_secret: drop the chart's Secret document from a rendered

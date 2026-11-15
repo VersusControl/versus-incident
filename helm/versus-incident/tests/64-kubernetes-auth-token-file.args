@@ -1,0 +1,5 @@
+# The Kubernetes connector in token_file mode with every other auth field set.
+-f
+values/kubernetes-auth-fields.yaml
+--set-string
+connectors.kubernetes.auth.mode=token_file

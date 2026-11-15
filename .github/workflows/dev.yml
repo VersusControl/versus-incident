@@ -145,8 +145,9 @@ jobs:
         with:
           version: v3.15.3
 
-      # The scenario runner ends with a Go test that compares the rendered
-      # chart config with the application's default config.
+      # The scenario runner ends with Go checks that read its renders: the
+      # chart config through the application's config loader and key set, and
+      # the reader role against what the Kubernetes connector reads.
       - name: Set up Go
         uses: actions/setup-go@v6
         with:

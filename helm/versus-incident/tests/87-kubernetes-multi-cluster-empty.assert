@@ -1,0 +1,2 @@
+# EXPECT_FAIL: an invalid cluster catalog is rejected.
+clusters must contain 1 to 16 entries

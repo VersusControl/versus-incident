@@ -1,0 +1,5 @@
+# The Kubernetes connector in gke mode with every other auth field set.
+-f
+values/kubernetes-auth-fields.yaml
+--set-string
+connectors.kubernetes.auth.mode=gke

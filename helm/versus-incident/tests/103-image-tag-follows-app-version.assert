@@ -1,0 +1,2 @@
+# APP_VERSION: 97.98.99
+image: "ghcr\.io/versuscontrol/versus-incident:v97\.98\.99"

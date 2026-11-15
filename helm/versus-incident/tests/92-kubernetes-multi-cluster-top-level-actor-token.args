@@ -1,0 +1,11 @@
+# A top-level connector setting in multi-cluster mode must be refused, not ignored.
+--set
+agent.enable=false
+--set
+connectors.kubernetes.enabled=true
+--set
+connectors.kubernetes.multiple=true
+--set-json
+connectors.kubernetes.clusters=[{"clusterId":"east","displayName":"East","endpoint":"https://east.example","auth":{"mode":"token","token":"reader-east"},"actions":{"enable":true,"auth":{"mode":"token","token":"actor-east"}}},{"clusterId":"west","endpoint":"https://west.example","auth":{"mode":"token","token":"reader-west"}}]
+--set
+connectors.kubernetes.actions.auth.token=sensitive-value

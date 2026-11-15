@@ -1,0 +1,3 @@
+# EXPECT_FAIL: the error points at connectors.kubernetes and echoes no value.
+must use connectors.kubernetes
+!sensitive-value

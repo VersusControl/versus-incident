@@ -5,11 +5,15 @@ on:
     branches: [main]
     paths:
       - 'helm/versus-incident/**'
+      - 'examples/kubernetes/**'
+      - 'scripts/render_kubernetes_manifest.sh'
       - '.github/workflows/helm-ci.yml'
   pull_request:
     branches: [main]
     paths:
       - 'helm/versus-incident/**'
+      - 'examples/kubernetes/**'
+      - 'scripts/render_kubernetes_manifest.sh'
       - '.github/workflows/helm-ci.yml'
 
 permissions:
@@ -27,10 +31,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # Same Helm version as the chart job in dev.yml and the one the committed
+      # one-file manifests are rendered with.
       - name: Install Helm
         uses: azure/setup-helm@v5
         with:
-          version: v3.14.0
+          version: v3.15.3
+
+      # The scenario runner ends with Go checks that load the rendered chart
+      # config through the application's config loader.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      - name: One-file manifests are up to date
+        run: scripts/render_kubernetes_manifest.sh --check
 
       - name: helm lint
         run: |

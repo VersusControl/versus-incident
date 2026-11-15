@@ -3,8 +3,8 @@ package controllers
 import (
 	"encoding/json"
 	"io"
-	"os"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
