@@ -56,6 +56,7 @@ Whichever source raises it, an incident is templated, fanned out to every channe
 - [Webhook Alerts](#webhook-alerts)
 - [Admin Dashboard](https://docs.versusincident.com/#/configuration/admin-ui)
 - [Development Custom Templates](#development-custom-templates)
+- [One-click Deploy](#one-click-deploy)
 - [On-Call](#on-call)
 - [Configuration](#complete-configuration)
 - [Roadmap](#roadmap)
@@ -379,6 +380,10 @@ see [Deploy on Kubernetes](https://docs.versusincident.com/#/configuration/kuber
 
 For the packaged install, see [Helm Chart](https://docs.versusincident.com/#/configuration/helm)
 or the chart source under [helm/versus-incident](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident).
+
+## One-click Deploy
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Versus%20Incident/)
 
 ## On-Call
 
