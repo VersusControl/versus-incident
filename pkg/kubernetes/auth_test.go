@@ -729,6 +729,9 @@ func TestProjectedServiceAccountReplicasRotationAndReplacement(t *testing.T) {
 	if err != nil || replacement.indexScope() == first.indexScope() {
 		t.Fatal("different SA UID reused history scope")
 	}
+	if !replacement.registered {
+		t.Fatal("a replaced service lost its registry membership, so stored records could be served before capture proves them")
+	}
 	page, err = replacement.Changes(t.Context(), ChangeQuery{})
 	if err != nil || len(page.Items) != 0 {
 		t.Fatal("replacement exposed previous principal history")

@@ -366,6 +366,9 @@ func (service *Service) CommitStatus(ctx context.Context) (CommitEvent, error) {
 	defer cancel()
 	_, cp, err := service.persistedHistoryScope(ctx)
 	if err != nil {
+		if service.historyOffForNamespaceAccess(ctx, err) {
+			return CommitEvent{Kinds: []string{}, ClusterID: service.scope.ClusterID, History: HistoryOffNamespaceAccess}, nil
+		}
 		return CommitEvent{}, err
 	}
 	readable, denied := false, false
@@ -375,10 +378,14 @@ func (service *Service) CommitStatus(ctx context.Context) (CommitEvent, error) {
 		denied = denied || proof.State == "denied"
 	}
 	if !readable {
+		err := errHistoryNotEstablished
 		if denied {
-			return CommitEvent{}, errHistoryAuthority
+			err = errHistoryAuthority
 		}
-		return CommitEvent{}, errHistoryNotEstablished
+		if service.historyOffForNamespaceAccess(ctx, err) {
+			return CommitEvent{Kinds: []string{}, ClusterID: service.scope.ClusterID, History: HistoryOffNamespaceAccess}, nil
+		}
+		return CommitEvent{}, err
 	}
 	return CommitEvent{Revision: max(cp.CommitRevision, cp.OccurrenceRevision), EvidenceSequence: cp.HighSequence, Kinds: append([]string{}, cp.Kinds...), ClusterID: service.scope.ClusterID, At: cp.At}, nil
 }
@@ -389,6 +396,10 @@ type CommitEvent struct {
 	Kinds            []string  `json:"kinds"`
 	ClusterID        string    `json:"cluster_id"`
 	At               time.Time `json:"-"`
+	// History is "off_namespace_access" when the identity reads only inside
+	// namespaces: no history is kept, so no commit will ever arrive and the
+	// stream stays open only to say so.
+	History string `json:"history,omitempty"`
 }
 
 // persistedPodAuthority protects saved log excerpts without making a live LIST.

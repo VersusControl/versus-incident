@@ -1,24 +1,70 @@
 import type { KubernetesChangesPage, KubernetesIssue, KubernetesIssuePage } from "@/lib/api";
 import { settledSync } from "@/lib/kubernetesPending";
-import { knownFailureReason } from "@/lib/kubernetesSyncHealth";
+import { historyOff } from "@/lib/kubernetesNamespaceAccess";
+
+/** Display names for resource types, keyed by the plural in a resource id. */
+const kindNames: Record<string, string> = {
+  pods: "Pod", nodes: "Node", namespaces: "Namespace", events: "Event", services: "Service",
+  deployments: "Deployment", statefulsets: "StatefulSet", daemonsets: "DaemonSet", replicasets: "ReplicaSet",
+  controllerrevisions: "ControllerRevision", jobs: "Job", cronjobs: "CronJob", ingresses: "Ingress",
+  horizontalpodautoscalers: "HorizontalPodAutoscaler", persistentvolumeclaims: "PersistentVolumeClaim",
+  configmaps: "ConfigMap", secrets: "Secret", serviceaccounts: "ServiceAccount", httproutes: "HTTPRoute",
+  gateways: "Gateway", applications: "Application", rollouts: "Rollout", kustomizations: "Kustomization",
+  helmreleases: "HelmRelease",
+};
 
 /** Readable names for failure sources that are not Kubernetes resource ids. */
-const failureSources: Record<string, string> = { "kubernetes.history": "Change history" };
+const failureSources: Record<string, string> = {
+  "kubernetes.history": "Change history",
+  "kubernetes.discovery": "API discovery",
+  "kubernetes.inventory": "Inventory",
+  "metrics.k8s.io": "Usage metrics",
+  "metrics.k8s.io~v1beta1~pods": "Pod usage metrics",
+  "metrics.k8s.io~v1beta1~nodes": "Node usage metrics",
+};
 
 export type KubernetesWarning = { id: string; content: string };
 
-export function failureWarnings(failures?: Array<{ resource_id?: string; scope?: string; class: string }> | null): KubernetesWarning[] {
-  const reasons: Record<string, string> = {
-    forbidden: "permission denied",
-    unauthorized: "access denied",
-    unavailable: "not available",
-    not_found: "not installed or unavailable",
-    timeout: "source did not respond",
-    source_error: "source could not be read",
-  };
+type PartialFailure = { resource_id?: string; scope?: string; class: string; kind?: string; message?: string };
+
+/** What a partial failure is about, as a display name rather than a resource id. */
+function failureName(failure: PartialFailure): string {
+  if (failure.kind?.trim()) return failure.kind.trim();
+  const id = failure.resource_id ?? "";
+  if (failureSources[id]) return failureSources[id];
+  const plural = id.split("~").at(-1) ?? "";
+  if (plural) return kindNames[plural.toLowerCase()] ?? plural;
+  return failure.scope ? kindNames[failure.scope.toLowerCase()] ?? failure.scope : "A Kubernetes resource";
+}
+
+/** One read in plain words, worded like the server's own sentences. */
+function failureSentence(name: string, failureClass: string): string {
+  switch (failureClass) {
+    case "forbidden": return `${name} is not readable with this connector's permissions.`;
+    case "namespace_scope": return `${name} is read only in the namespaces this connector can access.`;
+    case "unauthorized":
+    case "credential_unavailable": return `${name} could not be read because the cluster rejected the connector's credential.`;
+    case "timeout": return `${name} took too long to read; the next sync tries again.`;
+    case "throttled": return `The cluster throttled the ${name} read; the next sync tries again.`;
+    case "unsupported": return `${name} is not served by this cluster.`;
+    case "not_found": return `${name} is not installed or unavailable.`;
+    case "budget_exhausted": case "record_limit": case "incomplete_pages": case "encoded_result_size": case "cursor_limit":
+      return `${name} was read only in part because it is larger than one read allows.`;
+  }
+  return `${name} could not be read; the next sync tries again.`;
+}
+
+/**
+ * One warning per partial failure, in the order the server sent them. A failure
+ * that carries the server's plain sentence (`message`) is shown as written; a
+ * failure from a read that sends none is worded the same way here.
+ */
+export function failureWarnings(failures?: Array<PartialFailure> | null): KubernetesWarning[] {
   return (failures ?? []).filter((failure) => !["item_limit", "request_limit", "budget", "page_limit", "syncing"].includes(failure.class)).map((failure) => ({
     id: `failure:${failure.resource_id ?? ""}:${failure.scope ?? ""}:${failure.class}`,
-    content: !failure.resource_id && failure.scope === "discovery" ? discoveryWarning(failure.class) : `${failureSources[failure.resource_id ?? ""] ?? (failure.resource_id?.split("~").at(-1) || failure.scope || "Kubernetes resources")}: ${reasons[failure.class] ?? knownFailureReason(failure.class) ?? "could not be read"}`,
+    content: typeof failure.message === "string" && failure.message.trim() ? failure.message.trim()
+      : !failure.resource_id && failure.scope === "discovery" ? discoveryWarning(failure.class)
+        : failureSentence(failureName(failure), failure.class),
   }));
 }
 
@@ -47,7 +93,9 @@ export function issueWarnings(issue?: KubernetesIssue): KubernetesWarning[] {
   return warnings;
 }
 
-export function timelineWarnings(issues?: KubernetesIssuePage, changes?: KubernetesChangesPage): KubernetesWarning[] {
+export function timelineWarnings(issues?: KubernetesIssuePage, history?: KubernetesChangesPage): KubernetesWarning[] {
+  // A page that says history is off is empty by design, not incomplete.
+  const changes = historyOff(history) ? undefined : history;
   const warnings = [
     ...failureWarnings(issues?.partial_failures),
     ...failureWarnings(changes?.partial_failures),

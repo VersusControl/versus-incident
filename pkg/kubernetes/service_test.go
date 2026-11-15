@@ -965,10 +965,12 @@ func TestOverviewMarksFailedPodCollectionUnavailableAndPreservesDiscoveryPartial
 		case "/api":
 			writeJSON(writer, map[string]any{"versions": []string{"v1"}})
 		case "/apis":
-			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "optional.example.io", "preferredVersion": map[string]any{"version": "v1"}}}})
+			// A denied discovery is kept only for an API group the product
+			// shows, as Argo CD's is.
+			writeJSON(writer, map[string]any{"groups": []any{map[string]any{"name": "argoproj.io", "preferredVersion": map[string]any{"version": "v1"}}}})
 		case "/api/v1":
 			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
-		case "/apis/optional.example.io/v1":
+		case "/apis/argoproj.io/v1":
 			http.Error(writer, "forbidden", http.StatusForbidden)
 		case "/api/v1/pods":
 			http.Error(writer, "response too large", http.StatusRequestEntityTooLarge)

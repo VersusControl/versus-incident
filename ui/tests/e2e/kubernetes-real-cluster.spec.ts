@@ -4012,14 +4012,29 @@ test.describe("Read-only external cluster acceptance", () => {
 test.describe("Kubernetes Overview watched over time on the harness kind cluster", () => {
   const minutes = Number(process.env.E2E_KUBERNETES_WATCH_MINUTES || 0);
   const expectedUnreadable = (process.env.E2E_KUBERNETES_WATCH_UNREADABLE ?? "").split(",").map((kind) => kind.trim()).filter(Boolean).sort();
+  // Unset means the not-readable set is recorded but not judged.
+  const judgeUnreadable = process.env.E2E_KUBERNETES_WATCH_UNREADABLE !== undefined;
+  // Kinds the configuration excludes, named on the muted "Not collected by configuration" line.
+  const expectedNotCollected = process.env.E2E_KUBERNETES_WATCH_NOT_COLLECTED;
+  // The steady top-bar status a namespace-only identity must show, e.g. "Namespace access — showing payments, shop".
+  const expectedStatus = process.env.E2E_KUBERNETES_WATCH_STATUS;
   test.skip(backend !== "kind" || !(minutes > 0), "requires the kind stack and E2E_KUBERNETES_WATCH_MINUTES");
 
   interface DomState {
     path: string; visibility: string; tab: string | null; syncState: string | null; syncLabel: string | null;
     unreadable: string | null; coverageMarker: boolean; clusterHealth: boolean; loading: string[]; alerts: string[];
-    failureText: string[]; rawCodes: string[];
+    failureText: string[]; rawCodes: string[]; notCollected: string | null; historyOff: boolean;
+    retry: string[]; brokenUnknown: boolean; namespacePickers: string[]; bodyNotes: string[]; chips: string[];
   }
   interface WatchEvent { at: string; t: number; tab: string; kind: string; detail: unknown }
+  // The fields of the overview, sync and usage answers the watch digests;
+  // values are only recorded, so their shapes stay unknown.
+  type WatchedRow = Record<string, unknown>;
+  interface WatchedAnswer {
+    sync?: { state?: unknown }; observed_at?: unknown; pods?: unknown; nodes?: unknown; metrics_status?: unknown;
+    partial_failures?: WatchedRow[]; state?: unknown; failing_kinds?: unknown; unreadable?: WatchedRow[];
+    pending_kinds?: unknown; availability?: unknown; pod_metrics?: { availability?: unknown }; node_metrics?: { availability?: unknown };
+  }
 
   test("overview stays truthful while the user refreshes, navigates, opens a second tab and idles", async ({ browser }) => {
     test.setTimeout((minutes * 60 + 300) * 1000);
@@ -4050,7 +4065,19 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
           clusterHealth: Boolean(document.querySelector('[aria-label="Cluster health"]')),
           loading: [...document.querySelectorAll('[aria-label^="Loading"],[aria-label^="Checking"]')].map((element) => element.getAttribute("aria-label") ?? ""),
           alerts: [...document.querySelectorAll('[role="alert"]')].map((element) => norm(element.textContent).slice(0, 200)).filter(Boolean),
-          failureText: [...new Set(text.match(/Cluster sync failed|Sync failed|Sync degraded|cannot be read right now|cluster read failed|Couldn't load[^\n]{0,60}|Something went wrong|is not configured|no longer available|Updates disconnected/gi) ?? [])],
+          failureText: [...new Set(text.match(/Cluster sync failed|Sync failed|Sync degraded|cannot be read right now|cluster read failed|Couldn't load[^\n]{0,60}|Something went wrong|is not configured|no longer available|Updates disconnected|permission denied|[A-Z][a-z ]{2,40} (?:is |are )?unavailable\./gi) ?? [])],
+          notCollected: norm(document.querySelector("[data-not-collected-note]")?.textContent) || null,
+          historyOff: text.includes("History is off for namespace-only access."),
+          retry: [...document.querySelectorAll("button, a")].map((element) => norm(element.textContent)).filter((label) => /^Retry\b/.test(label)),
+          brokenUnknown: /Broken unknown/.test(text),
+          // The not-readable note and the not-collected line in the page body (not in a popover).
+          bodyNotes: [...document.querySelectorAll("[data-unreadable-note], [data-not-collected-note]")].map((element) => norm(element.textContent).slice(0, 120)),
+          chips: [...(document.querySelector('[aria-label="Cluster health"]')?.querySelectorAll("span, button") ?? [])].map((element) => norm(element.textContent)).filter((label) => /^(\d+|Unknown) (warnings?|broken)$|^Broken unknown$/.test(label)),
+          namespacePickers: [...document.querySelectorAll('input[aria-label*="amespace" i], select[aria-label*="amespace" i]')].map((element) => {
+            const field = element as HTMLInputElement;
+            const shown = field.tagName === "SELECT" ? (field as unknown as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : field.value || field.placeholder;
+            return `${field.getAttribute("aria-label")}=${norm(shown)}`;
+          }),
           rawCodes: [...new Set(text.match(/\b(?:[a-z]+_){1,4}[a-z]+\b|\bErr[A-Z]\w+|\bHTTP [45]\d\d\b|\bstatus [45]\d\d\b/g) ?? [])].slice(0, 10),
         };
       };
@@ -4085,14 +4112,18 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
           // What the page itself was told, so a screen state can be matched to
           // the answer behind it: only changes are recorded.
           const name = { "/api/admin/kubernetes/overview": "overview", "/api/admin/kubernetes/sync": "sync", "/api/admin/kubernetes/usage": "usage" }[url.pathname];
-          if (name && response.request().method() === "GET") void response.json().then((json: Record<string, any>) => {
-            const digest = name === "overview" ? { status: response.status(), sync: json.sync?.state, observed_at: json.observed_at, pods: json.pods, nodes: json.nodes, metrics: json.metrics_status, partial: (json.partial_failures ?? []).map((row: Record<string, unknown>) => `${row.scope ?? row.resource_id ?? ""}:${row.class ?? ""}`) }
-              : name === "sync" ? { status: response.status(), state: json.state, failing: json.failing_kinds, unreadable: (json.unreadable ?? []).map((row: Record<string, unknown>) => row.kind), pending: json.pending_kinds }
+          if (name && response.request().method() === "GET") void response.json().then((json: WatchedAnswer) => {
+            const digest = name === "overview" ? { status: response.status(), sync: json.sync?.state, observed_at: json.observed_at, pods: json.pods, nodes: json.nodes, metrics: json.metrics_status, partial: (json.partial_failures ?? []).map((row: WatchedRow) => `${row.scope ?? row.resource_id ?? ""}:${row.class ?? ""}`) }
+              : name === "sync" ? { status: response.status(), state: json.state, failing: json.failing_kinds, unreadable: (json.unreadable ?? []).map((row: WatchedRow) => row.kind), pending: json.pending_kinds }
                 : { status: response.status(), availability: json.availability, pods: json.pod_metrics?.availability, nodes: json.node_metrics?.availability };
             const key = `${tab}:${name}`;
             const value = JSON.stringify(digest);
             if (apiLast.get(key) !== value) { apiLast.set(key, value); note(tab, `api-${name}`, digest); }
           }).catch(() => undefined);
+        });
+        page.on("request", (request) => {
+          const url = new URL(request.url());
+          if (/\/api\/admin\/kubernetes\/(changes|timeline|crashes|history)/.test(url.pathname)) note(tab, "history-request", url.pathname);
         });
         page.on("requestfailed", (request) => {
           const url = new URL(request.url());
@@ -4113,8 +4144,15 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
     };
     const waitOverview = async (page: Page) => {
       await expect(page.getByRole("heading", { name: "Kubernetes", exact: true })).toBeVisible({ timeout: 30_000 });
+      // Lenient: record whatever the page shows (for example a preparation
+      // panel that does not end) instead of stopping the watch on it.
+      if (process.env.E2E_KUBERNETES_WATCH_LENIENT === "1") {
+        await page.waitForTimeout(3_000);
+        return;
+      }
       await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible({ timeout: 30_000 });
       if (expectedUnreadable.length) await expect(page.locator("[data-unreadable-note]")).toBeVisible({ timeout: 30_000 });
+      if (expectedNotCollected) await expect(page.locator("[data-not-collected-note]")).toBeVisible({ timeout: 30_000 });
     };
     const setHidden = (page: Page, hidden: boolean) => page.evaluate((value) => {
       // Headless pages are always visible; tell the app what a real browser
@@ -4139,6 +4177,49 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
       }
       const unreadable = await page.locator("[data-unreadable-note]").innerText().catch(() => null);
       note(labels.get(page) ?? "unknown", "coverage", { marker: present, popover, unreadable });
+      // The top-bar status popover: hover, keyboard focus and press each open it; Escape closes it.
+      const trigger = page.locator("[data-read-coverage-trigger], [data-namespace-access-trigger], [data-sync-details-trigger]").first();
+      if (await trigger.count()) {
+        const panel = page.locator('[aria-label="Sync status details"], [aria-label="Namespace access details"]').first();
+        const result: Record<string, unknown> = { trigger: await trigger.getAttribute("aria-label") ?? (await trigger.innerText()).slice(0, 80) };
+        await page.mouse.move(2, 2);
+        await trigger.hover();
+        result.hover = await panel.isVisible().catch(() => false);
+        await page.keyboard.press("Escape");
+        await page.mouse.move(2, (page.viewportSize()?.height ?? 800) - 2);
+        await page.waitForTimeout(300);
+        // Reach the trigger from the keyboard (Shift+Tab, then Tab) so focus is keyboard focus.
+        await trigger.focus();
+        await page.keyboard.press("Shift+Tab");
+        await page.keyboard.press("Tab");
+        await page.waitForTimeout(300);
+        result.focusedByKeyboard = await trigger.evaluate((element) => element === document.activeElement);
+        result.focus = await panel.isVisible().catch(() => false);
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(300);
+        result.escapeClosesFocus = !(await panel.isVisible().catch(() => false));
+        await trigger.click();
+        result.press = await panel.isVisible().catch(() => false);
+        if (result.press) {
+          result.text = (await panel.innerText()).replace(/\s+/g, " ");
+          result.links = await panel.locator("a").evaluateAll((links) => links.map((link) => (link as HTMLAnchorElement).href));
+          const box = await panel.boundingBox();
+          const view = page.viewportSize();
+          result.box = box;
+          result.fits = Boolean(box && view && box.x >= 0 && box.y >= 0 && box.x + box.width <= view.width && box.y + box.height <= view.height);
+          await shot(page, viewport, theme, `${state}-topbar-popover`);
+        }
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(300);
+        result.escapeClosesPress = !(await panel.isVisible().catch(() => false));
+        await page.mouse.move(2, (page.viewportSize()?.height ?? 800) - 2);
+        note(labels.get(page) ?? "unknown", "topbar-popover", result);
+        const want = (process.env.E2E_KUBERNETES_WATCH_POPOVER_TEXT ?? "").split("|").filter(Boolean);
+        const missing = want.filter((text) => !String(result.text ?? "").includes(text));
+        if (missing.length || !result.hover || !result.focus || !result.press || !result.escapeClosesPress || !result.fits) note(labels.get(page) ?? "unknown", "topbar-popover-problem", { missing, ...result });
+      } else if (process.env.E2E_KUBERNETES_WATCH_POPOVER_TEXT) {
+        note(labels.get(page) ?? "unknown", "topbar-popover-problem", { missing: ["no top-bar trigger"] });
+      }
     };
     const mobilePass = async (label: string) => {
       const context = await browser.newContext({ baseURL: env.baseURL, viewport: { width: 390, height: 844 }, colorScheme: "light" });
@@ -4207,6 +4288,24 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
           await main.getByRole("tab", { name: "Timeline", exact: true }).click();
           await main.waitForTimeout(3_000);
           await shot(main, 1440, "dark", "timeline");
+          if (process.env.E2E_KUBERNETES_WATCH_TOUR === "1") {
+            for (const view of ["Helm", "GitOps", "Topology", "Traffic"]) {
+              await main.getByRole("tab", { name: view, exact: true }).click();
+              await main.waitForTimeout(2_500);
+              await shot(main, 1440, "dark", view.toLowerCase());
+              const focus = process.env.E2E_KUBERNETES_WATCH_TOPOLOGY_NAMESPACE;
+              if (view === "Topology" && focus) {
+                // Open one namespace's graph, where Gateway and HTTPRoute objects are drawn.
+                try {
+                  await main.getByLabel("Topology namespace", { exact: true }).selectOption(focus, { timeout: 5_000 });
+                  await main.waitForTimeout(3_000);
+                  await shot(main, 1440, "dark", `topology-${focus}`);
+                } catch (error) {
+                  note("main", "topology-open-failed", String(error).slice(0, 200));
+                }
+              }
+            }
+          }
           await main.getByRole("tab", { name: "Overview", exact: true }).click();
           await waitOverview(main);
           await shot(main, 1440, "dark", "overview-returned");
@@ -4285,7 +4384,15 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
       // public_host is the config key the Issues alert settings ask the user to set.
       const codes = state.rawCodes.filter((code) => code !== "public_host");
       if (codes.length) flag(event, "raw-code", codes);
-      if (state.path.startsWith("/agent/kubernetes") && (state.syncState === "ready" || state.unreadable)) {
+      if (state.path.startsWith("/agent/kubernetes") && state.retry.length) flag(event, "retry-control", state.retry);
+      if (process.env.E2E_KUBERNETES_WATCH_NO_BODY_NOTES === "1" && state.bodyNotes.length) flag(event, "body-note", state.bodyNotes);
+      if (expectedNotCollected !== undefined && state.path.startsWith("/agent/kubernetes") && state.syncState && !state.loading.length) {
+        const shown = (state.notCollected?.match(/configuration: (.*?)(?: Configuration)?$/)?.[1] ?? "").split(",").map((kind) => kind.trim()).filter(Boolean).sort().join();
+        const want = expectedNotCollected.split(",").map((kind) => kind.trim()).filter(Boolean).sort().join();
+        if (shown !== want) flag(event, "not-collected-line", { shown, expected: want, text: state.notCollected });
+      }
+      if (expectedStatus && state.syncLabel !== null && state.syncLabel !== "Loading" && state.syncLabel !== expectedStatus) flag(event, "namespace-status", state.syncLabel);
+      if (judgeUnreadable && state.path.startsWith("/agent/kubernetes") && (state.syncState === "ready" || state.unreadable)) {
         const shown = (state.unreadable?.match(/connector identity: (.*?) \(/)?.[1] ?? "").split(",").map((kind) => kind.trim()).filter(Boolean).sort();
         if (shown.join() !== expectedUnreadable.join()) flag(event, "unreadable-set", { shown, expected: expectedUnreadable, text: state.unreadable });
       }
@@ -4298,6 +4405,7 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
         const until = series[index + 1]?.t ?? event.t;
         const state = event.detail;
         if (state.loading.length && until - event.t > 15) flag(event, "loading-over-15s", { loading: state.loading, seconds: until - event.t });
+        if (state.brokenUnknown && until - event.t > 15) flag(event, "broken-unknown-over-15s", { seconds: until - event.t });
         const onOverview = state.path.startsWith("/agent/kubernetes") && (state.tab === "Overview" || state.tab === null) && state.syncLabel !== null;
         if (onOverview && !state.clusterHealth && !state.loading.length && until - event.t > 0) flag(event, "overview-without-data-or-loading", { seconds: until - event.t, state });
       });
@@ -4317,20 +4425,20 @@ test.describe("Kubernetes Overview watched over time on the harness kind cluster
       if (event.kind === "http-error" && explained(detail.status ?? 0, detail.path ?? "")) { explainedEvents.push(event); continue; }
       if (event.kind === "console-error" && /Failed to load resource: the server responded with a status of (\d+)/.test(detail.text ?? "")
         && explained(Number(/status of (\d+)/.exec(detail.text ?? "")![1]), new URL(detail.url || "http://x/").pathname + new URL(detail.url || "http://x/").search)) { explainedEvents.push(event); continue; }
-      if (["console-error", "pageerror", "http-error", "request-failed"].includes(event.kind)) flag(event, event.kind, event.detail);
+      if (["console-error", "pageerror", "http-error", "request-failed", "topbar-popover-problem", "topology-open-failed"].includes(event.kind)) flag(event, event.kind, event.detail);
     }
     const appeared: Array<{ at: string; t: number; tab: string; field: string; from: unknown; to: unknown }> = [];
     const previous = new Map<string, DomState>();
     for (const event of dom) {
       const before = previous.get(event.tab);
-      if (before) for (const field of ["path", "visibility", "tab", "syncState", "syncLabel", "unreadable", "coverageMarker", "clusterHealth", "loading", "alerts", "failureText", "rawCodes"] as const) {
+      if (before) for (const field of ["path", "visibility", "tab", "syncState", "syncLabel", "unreadable", "notCollected", "bodyNotes", "chips", "historyOff", "retry", "brokenUnknown", "namespacePickers", "coverageMarker", "clusterHealth", "loading", "alerts", "failureText", "rawCodes"] as const) {
         if (JSON.stringify(before[field]) !== JSON.stringify(event.detail[field])) appeared.push({ at: event.at, t: event.t, tab: event.tab, field, from: before[field], to: event.detail[field] });
       }
       previous.set(event.tab, event.detail);
     }
     const receipt = {
       classification: "live: real harness kind stack, no browser routes or API mocks; tab hiding is emulated through document.visibilityState",
-      minutes, expectedUnreadable, started_at: new Date(begun).toISOString(), ended_at: new Date().toISOString(),
+      minutes, expectedUnreadable, expectedNotCollected, expectedStatus, started_at: new Date(begun).toISOString(), ended_at: new Date().toISOString(),
       failure: failure ? String((failure as Error).message ?? failure).slice(0, 2000) : null,
       captures, violations, changes: appeared, apiCounts,
       explained: explainedEvents.map((event) => ({ at: event.at, t: event.t, tab: event.tab, kind: event.kind, detail: event.detail })),

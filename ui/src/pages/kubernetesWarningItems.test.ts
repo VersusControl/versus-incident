@@ -17,6 +17,6 @@ describe("failure warnings", () => {
   });
 
   it("keeps naming resource types by their kind", () => {
-    expect(failureWarnings([{ resource_id: "argoproj.io~v1alpha1~rollouts", class: "timeout" }])[0].content).toBe("rollouts: source did not respond");
+    expect(failureWarnings([{ resource_id: "argoproj.io~v1alpha1~rollouts", class: "timeout" }])[0].content).toBe("Rollout took too long to read; the next sync tries again.");
   });
 });

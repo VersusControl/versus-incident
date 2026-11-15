@@ -4,6 +4,13 @@ Explore your Kubernetes environment in one place: cluster health and capacity, w
 
 This Kubernetes Connector supports the Harness dashboard and AI, enabling Site Reliability Engineers (SREs) to use the same cluster context within the DevOps Chat Agent. Begin with the dashboard to gain insights into a workload, and then go deeper into the details by engaging in the chat with the resource already attached.
 
+## Get started
+
+New to the connector? The [Kubernetes quickstart](/agent/kubernetes/quickstart)
+runs Versus inside your cluster with `kubectl apply` or `helm install`, step by
+step. For every setting and other auth modes, see
+[Kubernetes Configuration](/agent/kubernetes/configuration).
+
 ## Harness Dashboard
 
 Open **Connectors > Kubernetes** after connecting your cluster. The dashboard

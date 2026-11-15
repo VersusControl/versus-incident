@@ -13,6 +13,22 @@ const problem = (kind: string, reason: string, since?: string): KubernetesKindPr
 const label = () => document.querySelector("[data-sync-state]")?.textContent;
 
 describe("Sync state indicator", () => {
+  it("says which namespaces a namespace-only identity shows, with the freshness and docs in its details", () => {
+    render(<KubernetesSyncStateIndicator state="ready" streamState="live" ageSeconds={4} firstReadyAt={published} readableNamespaces={["payments", "shop"]} />);
+    expect(label()).toBe("Namespace access — showing payments, shop");
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "Namespace access — showing payments, shop" }));
+    const details = screen.getByRole("region", { name: "Namespace access details" });
+    expect(details.textContent).toContain("Last synced 4s ago");
+    expect(within(details).getByRole("link").getAttribute("target")).toBe("_blank");
+  });
+
+  it("lets a real failure and a disconnected feed outrank namespace access", () => {
+    const { rerender } = render(<KubernetesSyncStateIndicator state="failed" streamState="live" firstReadyAt={published} readableNamespaces={["shop"]} />);
+    expect(label()).toMatch(/^Sync failed/);
+    rerender(<KubernetesSyncStateIndicator state="ready" streamState="reconnecting" firstReadyAt={published} readableNamespaces={["shop"]} />);
+    expect(label()).toBe("Updates disconnected — refreshing every 30s");
+  });
+
   it.each([
     ["ready", "Last synced 4s ago"],
     ["preparing", "Preparing"],

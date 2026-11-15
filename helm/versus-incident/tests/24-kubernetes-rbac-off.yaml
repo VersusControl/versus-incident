@@ -1,0 +1,6 @@
+# in_cluster with the reader role turned off and nobody else granting access.
+kubernetesReaderRBAC:
+  enabled: false
+connectors:
+  kubernetes:
+    enabled: true

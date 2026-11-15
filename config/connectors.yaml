@@ -1,12 +1,17 @@
-connectors:
-  kubernetes:
-    auth:
-      mode: ""
-    actions:
-      enable: false
-      auth:
-        mode: ""
-
+# Optional connector settings. When this file holds settings it replaces any
+# inline `connectors:` block in config.yaml; while it holds only comments it is
+# ignored and the inline block is used. It is not shipped in the container
+# image: mount your own file at /app/config/connectors.yaml, or configure
+# `connectors:` inline in config.yaml.
+#
+# Single cluster, read with the pod ServiceAccount:
+# connectors:
+#   kubernetes:
+#     auth:
+#       mode: in_cluster
+#     actions:
+#       enable: false
+#
 # Multi-cluster form replaces the single connection block above.
 # connectors:
 #   kubernetes:

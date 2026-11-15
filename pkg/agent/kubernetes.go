@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"strings"
 	"time"
@@ -54,22 +53,22 @@ func NewKubernetesRegistry(cfg config.KubernetesConnectorConfig, scope tenancy.O
 
 func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScope) (*kubernetes.Service, error) {
 	if cfg.ChangeCapture != "" && cfg.ChangeCapture != "continuous" && cfg.ChangeCapture != "demand" {
-		return nil, errors.New("kubernetes: invalid change capture configuration")
+		return nil, kubernetes.NewSetupError("invalid change capture configuration", "Set connectors.kubernetes.change_capture to continuous or demand, or leave it empty.")
 	}
 	mode := strings.TrimSpace(cfg.Auth.Mode)
 	if mode == "" && !reflect.ValueOf(cfg.Auth).IsZero() {
-		return nil, errors.New("kubernetes: auth.mode is required when auth.* is configured")
+		return nil, kubernetes.NewSetupError("auth.mode is required when auth.* is configured", "Set connectors.kubernetes.auth.mode to the mode the auth settings belong to, then restart Versus.")
 	}
 	if mode == "" && strings.TrimSpace(cfg.Endpoint) == "" {
 		return nil, nil
 	}
 	timeout, err := time.ParseDuration(cfg.Timeout)
 	if err != nil && cfg.Timeout != "" {
-		return nil, errors.New("kubernetes: invalid timeout configuration")
+		return nil, kubernetes.NewSetupError("invalid timeout configuration", "Set connectors.kubernetes.timeout to a duration such as 10s.")
 	}
 	ttl, err := time.ParseDuration(cfg.DiscoveryTTL)
 	if err != nil && cfg.DiscoveryTTL != "" {
-		return nil, errors.New("kubernetes: invalid discovery TTL configuration")
+		return nil, kubernetes.NewSetupError("invalid discovery TTL configuration", "Set connectors.kubernetes.discovery_ttl to a duration such as 5m.")
 	}
 	clientConfig := kubernetes.Config{Endpoint: cfg.Endpoint, TokenFile: cfg.TokenFile, CAFile: cfg.CAFile, ServerName: cfg.ServerName}
 	if cfg.CAData != "" {
@@ -80,7 +79,7 @@ func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScop
 	}
 	if mode != "" {
 		if cfg.TokenFile != "" {
-			return nil, errors.New("kubernetes: legacy token_file conflicts with auth.mode")
+			return nil, kubernetes.NewSetupError("legacy token_file conflicts with auth.mode", "Move connectors.kubernetes.token_file to auth.token_file with auth.mode token_file, then restart Versus.")
 		}
 		auth := cfg.Auth
 		clientConfig, err = kubernetes.ResolveAuthentication(kubernetes.AuthOptions{
@@ -117,5 +116,6 @@ func NewKubernetesService(cfg config.KubernetesToolConfig, scope tenancy.OrgScop
 	if err := service.SetCaptureMode(cfg.ChangeCapture); err != nil {
 		return nil, err
 	}
+	service.SetCollectionScope(cfg.ExcludeResources, cfg.Namespaces)
 	return service, nil
 }

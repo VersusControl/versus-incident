@@ -10,6 +10,7 @@ import (
 	"os"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -40,21 +41,29 @@ func (connector KubernetesConnectorConfig) Resolved() []KubernetesClusterConfig 
 }
 
 type KubernetesToolConfig struct {
-	Endpoint             string                      `mapstructure:"endpoint"`
-	TokenFile            string                      `mapstructure:"token_file"`
-	CAFile               string                      `mapstructure:"ca_file"`
-	CAData               string                      `mapstructure:"ca_data"`
-	ServerName           string                      `mapstructure:"server_name"`
-	Auth                 KubernetesAuthConfig        `mapstructure:"auth"`
-	ClusterID            string                      `mapstructure:"cluster_id"`
-	CredentialID         string                      `mapstructure:"credential_id"`
-	Timeout              string                      `mapstructure:"timeout"`
-	DiscoveryTTL         string                      `mapstructure:"discovery_ttl"`
-	ChangeCapture        string                      `mapstructure:"change_capture"`
-	AllowLoopback        bool                        `mapstructure:"allow_loopback"`
-	AllowPrivateNetworks bool                        `mapstructure:"allow_private_networks"`
-	EndpointCIDRs        []string                    `mapstructure:"endpoint_cidrs"`
-	Actions              KubernetesActionsToolConfig `mapstructure:"actions"`
+	Endpoint             string               `mapstructure:"endpoint"`
+	TokenFile            string               `mapstructure:"token_file"`
+	CAFile               string               `mapstructure:"ca_file"`
+	CAData               string               `mapstructure:"ca_data"`
+	ServerName           string               `mapstructure:"server_name"`
+	Auth                 KubernetesAuthConfig `mapstructure:"auth"`
+	ClusterID            string               `mapstructure:"cluster_id"`
+	CredentialID         string               `mapstructure:"credential_id"`
+	Timeout              string               `mapstructure:"timeout"`
+	DiscoveryTTL         string               `mapstructure:"discovery_ttl"`
+	ChangeCapture        string               `mapstructure:"change_capture"`
+	AllowLoopback        bool                 `mapstructure:"allow_loopback"`
+	AllowPrivateNetworks bool                 `mapstructure:"allow_private_networks"`
+	EndpointCIDRs        []string             `mapstructure:"endpoint_cidrs"`
+	// ExcludeResources names resources, by their plural API name such as
+	// "secrets", that Versus never lists. A resource left out on purpose is
+	// reported as not collected, never as a permission gap.
+	ExcludeResources []string `mapstructure:"exclude_resources"`
+	// Namespaces names the namespaces the connector reads when its identity
+	// may read only inside some namespaces. They are read from the first sync
+	// on, after every restart.
+	Namespaces []string                    `mapstructure:"namespaces"`
+	Actions    KubernetesActionsToolConfig `mapstructure:"actions"`
 }
 
 type KubernetesActionsToolConfig struct {
@@ -132,15 +141,15 @@ func decodeConnectors(value any) (ConnectorsConfig, error) {
 				}
 				entries, _ := rawEntries.([]any)
 				for index, entry := range entries {
-					if !validConnectorShape(entry, reflect.TypeOf(KubernetesClusterConfig{})) {
-						return connectors, fmt.Errorf("connectors.kubernetes.clusters[%d]: invalid configuration", index)
+					if err := connectorShapeError(entry, reflect.TypeOf(KubernetesClusterConfig{}), fmt.Sprintf("connectors.kubernetes.clusters[%d]", index)); err != nil {
+						return connectors, err
 					}
 				}
 			}
 		}
 	}
-	if !validConnectorShape(value, reflect.TypeOf(connectors)) {
-		return connectors, errors.New("invalid connectors configuration")
+	if err := connectorShapeError(value, reflect.TypeOf(connectors), "connectors"); err != nil {
+		return connectors, err
 	}
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		Result: &connectors, TagName: "mapstructure", ErrorUnused: true,
@@ -196,10 +205,45 @@ func validateMultipleShape(value any) error {
 	return nil
 }
 
+// kubernetesResourceName is the shape of a plural API resource name.
+var kubernetesResourceName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+
+// kubernetesNamespaceName is a DNS-1123 label, the only shape a namespace has.
+var kubernetesNamespaceName = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+// validateNameList checks a bounded list of distinct names of one shape.
+func validateNameList(key string, values []string, shape *regexp.Regexp) error {
+	if len(values) > 32 {
+		return fmt.Errorf("connectors.kubernetes.%s lists more than 32 entries", key)
+	}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if !shape.MatchString(value) {
+			return fmt.Errorf("connectors.kubernetes.%s: %q is not a valid name", key, value)
+		}
+		if seen[value] {
+			return fmt.Errorf("connectors.kubernetes.%s lists %q twice", key, value)
+		}
+		seen[value] = true
+	}
+	return nil
+}
+
 func validateKubernetesClusters(connector KubernetesConnectorConfig) error {
 	for _, entry := range connector.Resolved() {
 		if entry.ChangeCapture != "" && entry.ChangeCapture != "continuous" && entry.ChangeCapture != "demand" {
 			return errors.New("connectors.kubernetes.change_capture must be continuous or demand")
+		}
+		if err := validateNameList("exclude_resources", entry.ExcludeResources, kubernetesResourceName); err != nil {
+			return err
+		}
+		for _, resource := range entry.ExcludeResources {
+			if resource == "pods" || resource == "namespaces" {
+				return fmt.Errorf("connectors.kubernetes.exclude_resources cannot exclude %q: every Kubernetes view is built from it", resource)
+			}
+		}
+		if err := validateNameList("namespaces", entry.Namespaces, kubernetesNamespaceName); err != nil {
+			return err
 		}
 	}
 	if !connector.Multiple {
@@ -330,31 +374,57 @@ func connectorScalar(source, target reflect.Type, value any) (any, error) {
 	}
 }
 
-func validConnectorShape(value any, target reflect.Type) bool {
+// connectorShapeError checks a decoded connector block against its Go type
+// and names the first problem by YAML path: an unknown key by its name, a
+// wrong type as an invalid value. Values are never included, because a
+// connector value may be a credential.
+func connectorShapeError(value any, target reflect.Type, path string) error {
 	if value == nil {
-		return false
+		return fmt.Errorf("%s: invalid value", path)
 	}
 	if target.Kind() != reflect.Struct {
 		if reflect.TypeOf(value).AssignableTo(target) {
-			return true
+			return nil
 		}
 		if reflect.TypeOf(value).Kind() == reflect.String && (target.Kind() == reflect.Bool || target.Kind() == reflect.Int) {
-			_, err := connectorScalar(reflect.TypeOf(value), target, value)
-			return err == nil
+			if _, err := connectorScalar(reflect.TypeOf(value), target, value); err == nil {
+				return nil
+			}
+			return fmt.Errorf("%s: invalid value", path)
 		}
-		return target.Kind() == reflect.Slice && validConnectorSlice(value, target)
+		if target.Kind() == reflect.Slice {
+			return connectorSliceError(value, target, path)
+		}
+		return fmt.Errorf("%s: invalid value", path)
 	}
 	fields, ok := value.(map[string]any)
 	if !ok {
-		return false
+		return fmt.Errorf("%s: invalid value", path)
 	}
-	for key, nested := range fields {
+	keys := make([]string, 0, len(fields))
+	for key := range fields {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
 		fieldType, found := connectorFieldType(target, key)
-		if !found || !validConnectorShape(nested, fieldType) {
-			return false
+		if !found {
+			return fmt.Errorf("%s: unknown key %q", path, connectorKeyForError(key))
+		}
+		if err := connectorShapeError(fields[key], fieldType, path+"."+connectorKeyForError(key)); err != nil {
+			return err
 		}
 	}
-	return true
+	return nil
+}
+
+// connectorKeyForError bounds a key before it is echoed in an error, so a
+// value pasted where a key belongs cannot be reproduced in full.
+func connectorKeyForError(key string) string {
+	if runes := []rune(key); len(runes) > 64 {
+		return string(runes[:64]) + "..."
+	}
+	return key
 }
 
 func connectorFieldType(target reflect.Type, key string) (reflect.Type, bool) {
@@ -371,17 +441,17 @@ func connectorFieldType(target reflect.Type, key string) (reflect.Type, bool) {
 	return nil, false
 }
 
-func validConnectorSlice(value any, target reflect.Type) bool {
+func connectorSliceError(value any, target reflect.Type, path string) error {
 	items, ok := value.([]any)
 	if !ok {
-		return false
+		return fmt.Errorf("%s: invalid value", path)
 	}
-	for _, item := range items {
-		if !validConnectorShape(item, target.Elem()) {
-			return false
+	for index, item := range items {
+		if err := connectorShapeError(item, target.Elem(), fmt.Sprintf("%s[%d]", path, index)); err != nil {
+			return err
 		}
 	}
-	return true
+	return nil
 }
 
 func rawConfigSettings(raw []byte) (map[string]any, error) {
@@ -429,6 +499,25 @@ func rejectToolConnectors(raw []byte) error {
 		}
 	}
 	return nil
+}
+
+// loadSiblingConnectorsFile reads the connectors.yaml next to the main
+// config. present is false when the file holds no YAML document at all
+// (empty or comments only), so the caller keeps the inline connectors.
+func loadSiblingConnectorsFile(path string) (config ConnectorsConfig, present bool, err error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ConnectorsConfig{}, false, errors.New("cannot read connectors file")
+	}
+	settings, err := rawConfigSettings(raw)
+	if err != nil {
+		return ConnectorsConfig{}, false, errors.New("invalid connectors YAML")
+	}
+	if len(settings) == 0 {
+		return ConnectorsConfig{}, false, nil
+	}
+	config, err = loadConnectorsFile(path)
+	return config, err == nil, err
 }
 
 func loadConnectorsFile(path string) (ConnectorsConfig, error) {

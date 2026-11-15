@@ -2,10 +2,12 @@
 {{- include "versus-incident.validateStorage" . -}}
 {{- include "versus-incident.validateAgent" . -}}
 {{- include "versus-incident.validateHA" . -}}
+{{- include "versus-incident.validateKubernetesReaderRBAC" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "versus-incident.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 data:
@@ -21,13 +23,14 @@ data:
     # leaves admin routes unregistered (no silent open surface).
     gateway_secret: ${GATEWAY_SECRET}
 
+    {{- if .Values.proxy.url }}
     # Outbound HTTP proxy used by the channels that opt in via `use_proxy`
-    # (telegram, viber, lark). Values arrive from the chart Secret as env
-    # vars; an unset PROXY_URL expands to empty, which disables the proxy.
+    # (telegram, viber, lark). Values arrive from the chart Secret as env vars.
     proxy:
       url: ${PROXY_URL}
       username: ${PROXY_USERNAME}
       password: ${PROXY_PASSWORD}
+    {{- end }}
 
     # Pluggable storage backend. `file` (single-node) or `postgres` (durable,
     # multi-writer). HA (ha.enabled) derives `postgres` automatically — all
@@ -74,14 +77,17 @@ data:
 
       telegram:
         enable: {{ .Values.alert.telegram.enable }}
+        {{- if .Values.alert.telegram.enable }}
         bot_token: ${TELEGRAM_BOT_TOKEN}
         chat_id: ${TELEGRAM_CHAT_ID}
         template_path: "/app/config/telegram_message.tmpl"
         kubernetes_issue_template_path: {{ .Values.alert.telegram.kubernetesIssueTemplatePath | default "" | quote }}
         use_proxy: {{ .Values.alert.telegram.useProxy | default false }}
+        {{- end }}
 
       viber:
         enable: {{ .Values.alert.viber.enable }}
+        {{- if .Values.alert.viber.enable }}
         bot_token: ${VIBER_BOT_TOKEN}
         user_id: ${VIBER_USER_ID}
         channel_id: ${VIBER_CHANNEL_ID}
@@ -89,9 +95,11 @@ data:
         template_path: "/app/config/viber_message.tmpl"
         kubernetes_issue_template_path: {{ .Values.alert.viber.kubernetesIssueTemplatePath | default "" | quote }}
         use_proxy: {{ .Values.alert.viber.useProxy | default false }}
+        {{- end }}
 
       email:
         enable: {{ .Values.alert.email.enable }}
+        {{- if .Values.alert.email.enable }}
         smtp_host: ${SMTP_HOST}
         smtp_port: ${SMTP_PORT}
         username: ${SMTP_USERNAME}
@@ -100,9 +108,11 @@ data:
         subject: ${EMAIL_SUBJECT}
         template_path: "/app/config/email_message.tmpl"
         kubernetes_issue_template_path: {{ .Values.alert.email.kubernetesIssueTemplatePath | default "" | quote }}
+        {{- end }}
 
       msteams:
         enable: {{ .Values.alert.msteams.enable }}
+        {{- if .Values.alert.msteams.enable }}
         power_automate_url: ${MSTEAMS_POWER_AUTOMATE_URL}
         template_path: "/app/config/msteams_message.tmpl"
         kubernetes_issue_template_path: {{ .Values.alert.msteams.kubernetesIssueTemplatePath | default "" | quote }}
@@ -112,9 +122,11 @@ data:
           {{ $key }}: ${MSTEAMS_OTHER_POWER_URL_{{ $key | upper }}}
           {{- end }}
         {{- end }}
+        {{- end }}
 
       lark:
         enable: {{ .Values.alert.lark.enable }}
+        {{- if .Values.alert.lark.enable }}
         webhook_url: ${LARK_WEBHOOK_URL}
         template_path: "/app/config/lark_message.tmpl"
         kubernetes_issue_template_path: {{ .Values.alert.lark.kubernetesIssueTemplatePath | default "" | quote }}
@@ -125,14 +137,11 @@ data:
           {{ $key }}: ${LARK_OTHER_WEBHOOK_URL_{{ $key | upper }}}
           {{- end }}
         {{- end }}
+        {{- end }}
 
-    # Inbound queue sources. The server reads these from the top-level
-    # `queue` block, not from `alert` — `alert` is outbound channels only.
-    # The sns/sqs toggles stay under `alert.*` in values.yaml for backward
-    # compatibility and are mapped in here.
     queue:
       enable: {{ or .Values.alert.sns.enable .Values.alert.sqs.enable }}
-      debug_body: {{ dig "debugBody" true (.Values.queue | default dict) }}
+      debug_body: {{ dig "debugBody" false (.Values.queue | default dict) }}
 
       sns:
         enable: {{ .Values.alert.sns.enable }}
@@ -344,6 +353,9 @@ data:
   {{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict }}
   {{- $kubernetesAuth := $kubernetes.auth | default dict }}
   connectors.yaml: |
+    {{- if not (include "versus-incident.kubernetesConnectorEnabled" .) }}
+    # The Kubernetes connector is off (connectors.kubernetes.enabled=false).
+    {{- else }}
     connectors:
       kubernetes:
         {{- if $kubernetes.multiple }}
@@ -369,6 +381,16 @@ data:
         change_capture: {{ $kubernetes.changeCapture | default "continuous" | quote }}
         allow_private_networks: {{ dig "allowPrivateNetworks" false $kubernetes }}
         endpoint_cidrs: {{ $kubernetes.endpointCIDRs | default list | toJson }}
+        {{- $exclude := $kubernetes.excludeResources }}
+        {{- if kindIs "invalid" $exclude }}
+        {{- $exclude = list }}
+        {{- if and (include "versus-incident.kubernetesReaderRBACEnabled" .) (not (.Values.kubernetesReaderRBAC | default dict).secrets) }}
+        {{- $exclude = list "secrets" }}
+        {{- end }}
+        {{- end }}
+        {{- include "versus-incident.validateExcludeResources" $exclude }}
+        exclude_resources: {{ $exclude | toJson }}
+        namespaces: {{ $kubernetes.namespaces | default list | toJson }}
         auth:
           mode: {{ $kubernetesAuthMode | quote }}
           {{- if eq $kubernetesAuthMode "token" }}
@@ -419,6 +441,7 @@ data:
           auth:
             {{- include "versus-incident.connectorAuth" (dict "auth" ($actions.auth | default dict) "prefix" "KUBERNETES_ACTOR") | nindent 12 }}
           {{- end }}
+    {{- end }}
   {{- if .Values.agent.enable }}
   {{- $tools := .Values.agent.tools | default dict }}
   {{- $recentChanges := $tools.recentChanges | default dict }}

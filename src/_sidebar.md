@@ -15,6 +15,7 @@
 
 - Kubernetes Connectors
   - [Kubernetes](/agent/connectors/kubernetes)
+  - [Quickstart](/agent/kubernetes/quickstart)
   - [Configuration](/agent/kubernetes/configuration)
   - [Multi-Cluster](/agent/kubernetes/multi-cluster)
   - [Auto Detect Issue](/agent/kubernetes/auto-detect-issue)

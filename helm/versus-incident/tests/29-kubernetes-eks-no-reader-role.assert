@@ -1,0 +1,2 @@
+mode: "eks"
+!kind: ClusterRole

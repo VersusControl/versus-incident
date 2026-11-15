@@ -20,6 +20,9 @@ export function KubernetesPreparingPanel({ progress, cluster }: { progress?: Kub
   const nodes = progress?.node_count;
   const facts = [serverVersion && `Kubernetes ${serverVersion}`, nodes !== undefined && Number.isSafeInteger(nodes) && nodes >= 0 && `${firstSyncCount(nodes)} ${nodes === 1 ? "node" : "nodes"}`].filter((fact): fact is string => Boolean(fact));
   const listing = firstSyncListingProgress(progress);
+  // Steps run in order, so once a later step is done or under way no earlier
+  // step reads as waiting, whatever a lagging per-step status still says.
+  const furthest = Math.max(current, ...firstSyncSteps.map((step, index) => progress?.steps_done?.includes(step.id) ? index : -1));
   const progressLabel = listing ? `Listing resource types: ${listing.done} / ${listing.total}` : "Waiting for preparation progress";
   return <section aria-labelledby={titleID} data-preparing-panel className="card rise-in overflow-hidden">
     <div className="flex flex-wrap items-start gap-4 border-b border-ink-700 p-4 sm:p-6">
@@ -35,7 +38,10 @@ export function KubernetesPreparingPanel({ progress, cluster }: { progress?: Kub
     </div>
     <ol aria-label="First sync steps" className="divide-y divide-ink-700">
       {firstSyncSteps.map((step, index) => {
-        const done = current >= 0 && Boolean(progress?.steps_done?.includes(step.id));
+        // The step the worker names as current stays active: after the core
+        // kinds publish, listing can still finish the remaining types while
+        // building is already done.
+        const done = current >= 0 && (Boolean(progress?.steps_done?.includes(step.id)) || index < furthest && index !== current);
         const active = !done && index === current && !progress?.phase_status?.[step.id];
         const state = done ? "done" : active ? "active" : "waiting";
         // Listed counts are separate elements, never one joined string: the
@@ -45,7 +51,7 @@ export function KubernetesPreparingPanel({ progress, cluster }: { progress?: Kub
           : [];
         const detail = step.id === "connected" && done && serverVersion ? `Kubernetes ${serverVersion}`
           : listed.length ? undefined
-            : progress?.phase_status?.[step.id] ?? (active ? step.id === "listing" ? "counting" : "in progress" : done ? "done" : "waiting");
+            : done ? "done" : progress?.phase_status?.[step.id] ?? (active ? step.id === "listing" ? "counting" : "in progress" : done ? "done" : "waiting");
         return <li key={step.id} data-step={step.id} data-state={state} aria-current={active ? "step" : undefined} className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm sm:flex-nowrap sm:gap-3 sm:px-6">
           <span aria-hidden="true" className={`inline-flex size-6 shrink-0 items-center justify-center rounded-full ${done ? "bg-sev-ok/15 text-sev-ok" : active ? "bg-accent-subtle text-link" : "bg-ink-700 text-ink-400"}`}>
             {done ? <Check size={14} /> : active ? <Loader2 size={14} data-preparing-motion className="animate-spin motion-reduce:animate-none" /> : <span className="size-1.5 rounded-full bg-current" />}

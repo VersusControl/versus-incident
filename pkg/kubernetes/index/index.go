@@ -164,7 +164,12 @@ type KindStatus struct {
 	// says the connector could not read anything at all, so it stays a fault even
 	// when its class is a permission class: a per-kind capability gap and a dead
 	// credential are different problems with different remedies.
-	CycleFailure    bool `json:"cycle_failure,omitempty"`
+	CycleFailure bool `json:"cycle_failure,omitempty"`
+	// ScopeError and ScopeNamespace describe a kind read only inside
+	// namespaces whose read failed in one of them for a reason other than a
+	// denial: the class of that failure and the namespace it happened in.
+	ScopeError      string `json:"scope_error,omitempty"`
+	ScopeNamespace  string `json:"scope_namespace,omitempty"`
 	hasCompleteSync bool
 }
 

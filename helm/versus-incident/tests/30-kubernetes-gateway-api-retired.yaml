@@ -1,0 +1,3 @@
+# A values file from an older chart that still sets the retired gatewayAPI key.
+kubernetesReaderRBAC:
+  gatewayAPI: false

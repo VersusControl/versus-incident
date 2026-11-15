@@ -1,6 +1,7 @@
 gateway_secret: \$\{GATEWAY_SECRET\}
 - name: GATEWAY_SECRET
-gateway_secret: ""
+!gateway_secret: ""
+gateway_secret: "[A-Za-z0-9+/]{80,}={0,2}"
 storage:
 - name: STORAGE_TYPE
 mountPath: /app/data

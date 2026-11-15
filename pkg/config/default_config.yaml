@@ -27,7 +27,7 @@ proxy:
   password: ${PROXY_PASSWORD}
 
 alert:
-  debug_body: true
+  debug_body: false
 
   slack:
     enable: false
@@ -89,7 +89,7 @@ alert:
 
 queue:
   enable: true
-  debug_body: true
+  debug_body: false
 
   sns:
     enable: false

@@ -56,12 +56,13 @@ export function TopBar({
   // Only poll the agent liveness endpoint when the agent is actually enabled.
   // /api/agent/status does not exist when agent.enable=false, so polling it
   // would 404 forever and the chip would show "reconnecting…" for a deployment
-  // that is simply running without the agent. Gate on the config: undefined
-  // (still loading) keeps polling; an explicit false stops it.
+  // that is simply running without the agent. Gate on the config.
   const liveness = useQuery({
     queryKey: ["status-pulse"],
     queryFn: api.status,
-    enabled: config.data?.enable !== false,
+    // Only once the config says the agent is on: while it loads, or when it
+    // cannot be read, the route may not exist and a request would 404.
+    enabled: config.data?.enable === true,
     refetchInterval: () => (document.hidden ? false : 30_000),
     retry: 1,
   });

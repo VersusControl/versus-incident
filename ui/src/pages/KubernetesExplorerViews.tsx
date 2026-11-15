@@ -16,6 +16,8 @@ import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel"
 import { evidenceLoading, pendingKindNames } from "@/lib/kubernetesPending";
 import { KubernetesPendingNote } from "@/components/KubernetesPendingNote";
 import { KubernetesHistorySaveNotice } from "@/components/KubernetesHistorySaveNotice";
+import { KubernetesHistoryOffNotice, KubernetesHelmAccessNotice, KubernetesMetricsServerNotice } from "@/components/KubernetesAccessNotices";
+import { countsKnown, helmAccessDenial, historyOffFor, metricsApiMissing, metricsState, useKubernetesNamespaceAccess } from "@/lib/kubernetesNamespaceAccess";
 import {
   ApiError,
   type KubernetesChange,
@@ -238,7 +240,9 @@ function relationshipTone(type: string): string {
 
 function OverviewTopology({ overview, indexStatus, unavailable, onFullTopology }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; unavailable: boolean; onFullTopology: () => void }) {
   const overviewFields = { Node: "nodes", Pod: "pods", Namespace: "namespaces" } as const;
-  const kinds = [...new Set(["Namespace", "Node", "Ingress", "Gateway", "HTTPRoute", "Service", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "Event", ...Object.keys(indexStatus?.kinds ?? {})])];
+  // A kind the configuration excludes is never read, so it has no count at all.
+  const notCollected = new Set(useKubernetesNamespaceAccess().notCollected ?? []);
+  const kinds = [...new Set(["Namespace", "Node", "Ingress", "Gateway", "HTTPRoute", "Service", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "Event", ...Object.keys(indexStatus?.kinds ?? {})])].filter((kind) => !notCollected.has(kind));
   const missingCount = { display: "0", reported: false };
   const countFor = (kind: string) => {
     if (unavailable) return missingCount;
@@ -296,16 +300,21 @@ export function KubernetesOverviewTimeline({ overview, onSelectResource, onSelec
     retry: false,
   });
   const { refetch: refetchChanges } = changes;
+  // No history is kept for a namespace-only identity, so asking again every
+  // 30 s could never fill the card; the window stops sliding with it.
+  const access = useKubernetesNamespaceAccess();
+  const historyIsOff = historyOffFor(access, changes.data, changes.error);
   useEffect(() => {
+    if (historyIsOff) return;
     const timer = window.setInterval(() => {
       setWindowEnd(Date.now());
       void refetchChanges();
     }, 30_000);
     return () => window.clearInterval(timer);
-  }, [refetchChanges]);
+  }, [refetchChanges, historyIsOff]);
 
   const denied = changes.error instanceof ApiError && [401, 403].includes(changes.error.status);
-  return <><TimelineCard changes={denied ? undefined : changes.data} changesAsOf={changes.isError && changes.data ? changes.dataUpdatedAt : undefined} windowEnd={windowEnd} clusterId={overview.cluster_id} onSelectResource={onSelectResource} onSelectView={onSelectView} resourceFor={issueResource} warningsOwned />{changes.isError && <p role="status" className="text-xs text-sev-warning">Recent change history unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void changes.refetch()}>Retry</button></p>}</>;
+  return <><TimelineCard changes={denied || historyIsOff ? undefined : changes.data} historyOff={historyIsOff} changesAsOf={changes.isError && changes.data && !historyIsOff ? changes.dataUpdatedAt : undefined} windowEnd={windowEnd} clusterId={overview.cluster_id} onSelectResource={onSelectResource} onSelectView={onSelectView} resourceFor={issueResource} warningsOwned />{changes.isError && !historyIsOff && <p role="status" className="text-xs text-sev-warning">Recent change history unavailable.<button type="button" className="ml-2 text-link underline" onClick={() => void changes.refetch()}>Retry</button></p>}</>;
 }
 
 export function KubernetesOverviewInsights({ overview, indexStatus, unavailable, onSelectView }: { overview: KubernetesOverview; indexStatus: KubernetesIndexStatus | null; unavailable: boolean; onSelectView: (tab: KubernetesExplorerTab) => void }) {
@@ -313,7 +322,10 @@ export function KubernetesOverviewInsights({ overview, indexStatus, unavailable,
   const top = useQuery({ queryKey: ["kubernetes-top", "pod", "cpu", 5], queryFn: () => api.kubernetesTop({ kind: "pod", sort: "cpu", limit: 5 }), retry: false });
   const releases = useQuery({ queryKey: ["kubernetes-releases", "overview"], queryFn: () => api.kubernetesReleases({ limit: 5 }), retry: false });
   const traffic = useQuery({ queryKey: ["kubernetes-traffic", "", "15m"], queryFn: () => api.kubernetesTraffic({ window: "15m" }), retry: false });
-  const releaseList = asArray(releases.data?.items);
+  // An empty list from a connector that may not list Secrets is not "no
+  // releases": Helm keeps them in Secrets, so the server's reason is shown.
+  const helmDenied = helmAccessDenial(releases.data, releases.error);
+  const releaseList = helmDenied ? [] : asArray(releases.data?.items);
   const unhealthyReleases = releaseList.filter((release) => release.health !== "healthy");
   const trafficEdges = traffic.data?.available ? [...asArray(traffic.data.edges)].sort((left, right) => (right.rate_per_sec ?? 0) - (left.rate_per_sec ?? 0)) : [];
 
@@ -322,12 +334,13 @@ export function KubernetesOverviewInsights({ overview, indexStatus, unavailable,
       <OverviewCard
         title="Top pod usage"
         icon={<Cpu size={14} aria-hidden="true" />}
-        meta={top.data && <span className={`pill ${top.data.fresh ? "pill-good" : ""}`}>{top.data.fresh ? "Fresh" : top.data.availability}</span>}
+        meta={top.data && !metricsApiMissing(top.data) && <span className={`pill ${top.data.fresh ? "pill-good" : ""}`}>{top.data.fresh ? "Fresh" : top.data.availability}</span>}
         delay={40}
       >
-        {top.isPending && !top.data && <CardSkeleton label="Loading usage ranking" rows={4} />}
+        {(top.isPending && !top.data || metricsState(top.data) === "syncing") && <CardSkeleton label="Loading usage ranking" rows={4} />}
         {top.isError && (!top.data || top.error instanceof ApiError && [401, 403].includes(top.error.status)) && <CardNote>Usage ranking unavailable.</CardNote>}
-        {top.data && !(top.error instanceof ApiError && [401, 403].includes(top.error.status)) && <TopUsageRows data={top.data} compact />}
+        {top.data && metricsState(top.data) === "forbidden" && <CardNote>Usage metrics are not readable with this access.</CardNote>}
+        {top.data && !["syncing", "forbidden"].includes(metricsState(top.data) ?? "") && !(top.error instanceof ApiError && [401, 403].includes(top.error.status)) && (metricsApiMissing(top.data) ? <KubernetesMetricsServerNotice className="p-4" /> : <TopUsageRows data={top.data} compact />)}
       </OverviewCard>
 
       <OverviewCard
@@ -339,8 +352,9 @@ export function KubernetesOverviewInsights({ overview, indexStatus, unavailable,
         delay={160}
       >
         {releases.isPending && !releases.data && <CardSkeleton label="Loading release summary" />}
-        {releases.isError && (!releases.data || releases.error instanceof ApiError && [401, 403].includes(releases.error.status)) && <CardNote>Release summary unavailable.</CardNote>}
-        {releases.data && !(releases.error instanceof ApiError && [401, 403].includes(releases.error.status)) && (releaseList.length === 0 ? <CardNote>No Helm release labels were found.</CardNote> : (
+        {helmDenied && <KubernetesHelmAccessNotice access={helmDenied} className="p-4 !text-xs" />}
+        {!helmDenied && releases.isError && (!releases.data || releases.error instanceof ApiError && [401, 403].includes(releases.error.status)) && <CardNote>Release summary unavailable.</CardNote>}
+        {!helmDenied && releases.data && !(releases.error instanceof ApiError && [401, 403].includes(releases.error.status)) && (releaseList.length === 0 ? <CardNote>No Helm release labels were found.</CardNote> : (
           <ul className="divide-y divide-ink-700">
             {[...unhealthyReleases, ...releaseList.filter((release) => release.health === "healthy")].slice(0, 4).map((release) => (
               <li key={`${release.namespace}:${release.name}`} className="flex items-center gap-3 px-4 py-2.5">
@@ -538,7 +552,8 @@ function graphLayout(graph: KubernetesGraph) {
   return { positions, width: Math.max(1, columns.length) * graphColumnWidth + 20, height: Math.max(450, 90 + rowCount * graphRowHeight), columns };
 }
 
-const defaultGraphKinds = ["Ingress", "Service", "Deployment", "Pod"];
+// Networking entry points are shown together: Ingress and the Gateway API kinds.
+const defaultGraphKinds = ["Ingress", "Gateway", "HTTPRoute", "Service", "Deployment", "Pod"];
 const graphFilterGroups = [
   { label: "Networking", kinds: ["Ingress", "HTTPRoute", "Gateway", "Service"] },
   { label: "Workloads", kinds: ["Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob", "HorizontalPodAutoscaler", "Pod"] },
@@ -554,7 +569,13 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
   const [scrollOffset, setScrollOffset] = useState({ left: 0, top: 0 });
   const [viewportSize, setViewportSize] = useState({ width: 1200, height: 700 });
   const viewportRef = useRef<HTMLDivElement>(null);
-  const namespaces = useQuery({ queryKey: ["kubernetes-namespaces"], queryFn: () => api.kubernetesNamespaces(), enabled: !preview, retry: false });
+  // A namespace-only identity cannot list Namespaces; it chooses among the
+  // namespaces the server says it reads.
+  const access = useKubernetesNamespaceAccess();
+  const namespaces = useQuery({ queryKey: ["kubernetes-namespaces"], queryFn: () => api.kubernetesNamespaces(), enabled: !preview && access.clusterWide, retry: false });
+  const namespacesPending = access.clusterWide && namespaces.isPending;
+  const namespacesFailed = access.clusterWide && namespaces.isError;
+  const namespacesListed = !access.clusterWide || Boolean(namespaces.data);
   const graph = useQuery({
     queryKey: preview ? ["kubernetes-overview-topology"] : ["kubernetes-graph", namespace, "complete"],
     queryFn: () => preview ? api.kubernetesOverviewGraph() : api.kubernetesGraph({ namespace, connected_only: true, complete: true }),
@@ -566,7 +587,7 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
   const graphMalformed = Boolean(graph.data && (!Array.isArray(graph.data.nodes) || !Array.isArray(graph.data.edges)));
   const graphData = graph.isError || graphMalformed ? undefined : graph.data;
   const graphAccessDenied = graph.error instanceof ApiError && [401, 402, 403].includes(graph.error.status);
-  const namespaceNames = useMemo(() => [...new Set(namespaces.data?.items ?? [])].sort(), [namespaces.data]);
+  const namespaceNames = useMemo(() => [...new Set(access.clusterWide ? namespaces.data?.items ?? [] : access.namespaces)].sort(), [access, namespaces.data]);
   const availableKinds = useMemo(() => [...new Set((graphData?.nodes ?? []).map((node) => node.kind))].sort(), [graphData]);
   const pendingKinds = useMemo(() => pendingKindNames(graphData?.sync?.pending), [graphData]);
   const kindCounts = useMemo(() => {
@@ -682,10 +703,10 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
         </select>
         <button type="button" className="btn-icon shrink-0" aria-label={namespace ? "Refresh namespace topology" : "Refresh namespaces"} title={namespace ? "Refresh namespace topology" : "Refresh namespaces"} onClick={() => void (namespace ? graph.refetch() : namespaces.refetch())}><RotateCcw size={14} /></button>
       </div>} />
-    {!preview && namespaces.isPending && <CardSkeleton label="Loading Kubernetes namespaces" rows={4} />}
-    {!preview && namespaces.isError && <div role="alert" className="p-4 text-sm text-sev-warning"><p>Namespace list unavailable. Check Kubernetes resource-list permission and retry.</p><p className="mt-1 break-words text-xs">{namespaces.error.message}</p><button type="button" className="btn mt-3" onClick={() => void namespaces.refetch()}>Retry namespace list</button></div>}
-    {!preview && namespaces.data && namespaceNames.length === 0 && <p role="status" className="p-5 text-sm text-ink-400">No namespaces are available to display.</p>}
-    {!preview && namespaces.data && namespaceNames.length > 0 && !namespace && <p role="status" className="p-5 text-sm text-ink-400">Select one of {namespaceNames.length} listed namespaces to load its complete connected graph.</p>}
+    {!preview && namespacesPending && <CardSkeleton label="Loading Kubernetes namespaces" rows={4} />}
+    {!preview && namespacesFailed && <div role="alert" className="p-4 text-sm text-sev-warning"><p>Namespace list unavailable. Check Kubernetes resource-list permission and retry.</p><p className="mt-1 break-words text-xs">{namespaces.error?.message}</p><button type="button" className="btn mt-3" onClick={() => void namespaces.refetch()}>Retry namespace list</button></div>}
+    {!preview && namespacesListed && namespaceNames.length === 0 && <p role="status" className="p-5 text-sm text-ink-400">No namespaces are available to display.</p>}
+    {!preview && namespacesListed && namespaceNames.length > 0 && !namespace && <p role="status" className="p-5 text-sm text-ink-400">Select one of {namespaceNames.length} listed namespaces to load its complete connected graph.</p>}
     {!preview && !namespace && namespaceNames.length > 0 && <div className="p-4">
       <input className="input mb-3 w-full" aria-label="Search topology namespaces" placeholder="Search namespaces" value={namespaceSearch} onChange={(event) => setNamespaceSearch(event.target.value)} />
       <div role="group" aria-label="Namespace blocks" className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,12rem),1fr))] gap-3">
@@ -775,8 +796,9 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
   // The server only reports severities it matched, so a missing key in a
   // trusted response means zero. Counts are unknown only when there is no
   // response, or a fault or incomplete snapshot returned no items.
-  const countsKnown = Boolean(current && (current.items.length > 0 || !currentFault && !incompleteKubernetesSnapshot(current)));
-  const totals = countsKnown && current ? current.totals : {};
+  const access = useKubernetesNamespaceAccess();
+  const totalsKnown = Boolean(current && (current.items.length > 0 || countsKnown(access, current, currentFault)));
+  const totals = totalsKnown && current ? current.totals : {};
   return (
     <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes issues">
       <ExplorerHeader icon={<AlertTriangle size={15} />} title="Issues" trailing={!denied && issues.data && <span className={`pill ${statusTone(issuesFault ? "error" : issues.data.sync.state)}`}>{issuesFault ? "unavailable" : issues.data.sync.state}</span>} />
@@ -793,7 +815,7 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
           screen; only a cluster that has never published has nothing to keep. */}
       {!denied && issues.data && (Boolean(firstReadyAt) || issues.data.sync.state !== "syncing") && <>
         <KubernetesHistorySaveNotice pages={[issues.data]} className="border-b border-ink-700 px-4 py-2" />
-        <div className="flex flex-wrap gap-2 border-b border-ink-700 px-4 py-3">{(severity ? [severity] : ["critical", "warning", "info"]).map((key) => <span className={`pill inline-flex gap-1.5 ${severityTone(key)}`} key={key}><span>{key}</span><span aria-label={`${key} count`}>{countsKnown ? historyCount(totals[key] ?? 0, current?.count_capped) : "Unknown"}</span></span>)}</div>
+        <div className="flex flex-wrap gap-2 border-b border-ink-700 px-4 py-3">{(severity ? [severity] : ["critical", "warning", "info"]).map((key) => <span className={`pill inline-flex gap-1.5 ${severityTone(key)}`} key={key}><span>{key}</span><span aria-label={`${key} count`}>{totalsKnown ? historyCount(totals[key] ?? 0, current?.count_capped) : "Unknown"}</span></span>)}</div>
         {current?.count_capped && <p className="px-4 py-2 text-xs text-ink-400">Counts are lower bounds from a bounded sample.</p>}
         <div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{issues.data.items.map((issue, index) => <BreakRow key={`${issue.rule}:${issue.root.uid ?? issue.root.name}:${index}`} issue={issue} resource={issueResource(issue)} onSelectResource={onSelectResource} clusterId={clusterId} warningScope={JSON.stringify([namespace, severity, paging.cursor])} sourceSync={issuesFault ? undefined : issues.data?.sync} sourceFailures={issues.data?.partial_failures} collapsed />)}</div>
         {issues.data.items.length === 0 && !issues.data.next && !incompleteKubernetesSnapshot(issues.data) && !issuesFault && <p className="p-6 text-center text-sm text-ink-400">No issues match these filters.</p>}
@@ -844,15 +866,24 @@ function ReleasesView() {
   const paging = useCursorPagination("helm-releases");
   const releases = useQuery({ queryKey: ["kubernetes-releases", paging.cursor], queryFn: () => api.kubernetesReleases({ limit: 20, cursor: paging.cursor }), retry: false });
   const releasesReset = useKubernetesCursorReset(paging, releases);
+  const helmDenied = helmAccessDenial(releases.data, releases.error);
   return <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Helm releases"><ExplorerHeader icon={<Layers3 size={15} />} title="Helm releases" trailing={<span className="text-xs text-ink-400">Label metadata only</span>} />
-    {releases.isPending && <CardSkeleton label="Loading release metadata" rows={5} />}{releases.isError && !releasesReset && <p role="status" className="p-4 text-sm text-ink-400">Release metadata is unavailable.</p>}{releasesReset === "notice" && <ListChangedNotice onBack={paging.resetPage} />}
+    {releases.isPending && <CardSkeleton label="Loading release metadata" rows={5} />}
+    {helmDenied ? <KubernetesHelmAccessNotice access={helmDenied} /> : <>
+    {releases.isError && !releasesReset && <p role="status" className="p-4 text-sm text-ink-400">Release metadata is unavailable.</p>}{releasesReset === "notice" && <ListChangedNotice onBack={paging.resetPage} />}
     {releases.data && <><div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{releases.data.items.map((release) => <ReleaseRow release={release} key={`${release.namespace}:${release.name}`} />)}</div>{releases.data.items.length === 0 && <p className="p-6 text-center text-sm text-ink-400">No Helm release labels were found.</p>}<CursorPagination state={paging} next={releases.data.next} total={releases.data.total} limit={releases.data.limit} count={releases.data.items.length}/><PartialFailuresDisclosure failures={releases.data.partial_failures}/></>}
+    </>}
   </section>;
 }
 
 function ReleaseRow({ release }: { release: KubernetesHelmRelease }) {
   const [expanded, setExpanded] = useState(false);
   return <article className="border-b border-ink-700/70"><button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left transition-colors duration-150 motion-reduce:transition-none hover:bg-ink-800/60 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.7fr)_8rem_7rem]"><span className="min-w-0"><span className="block truncate text-sm font-medium text-ink-100">{release.name}</span><span className="block text-2xs text-ink-400">{release.namespace}</span></span><span className={`pill ${statusTone(release.current.status || "unknown")}`}>{release.current.status || "unknown"}</span><span className="hidden text-xs text-ink-300 sm:block">Revision {release.current.revision}</span><span className={`pill ${statusTone(release.health)}`}>{release.health}</span></button>{expanded && <ol className="divide-y divide-ink-700 border-t border-ink-700 bg-ink-900/30 px-4">{release.history.map((revision) => <li className="flex justify-between gap-3 py-2 text-xs" key={revision.revision}><span className="text-ink-200">Revision {revision.revision}</span><span className={`pill ${statusTone(revision.status)}`}>{revision.status}</span><time className="text-ink-400">{revision.created ? new Date(revision.created).toLocaleString() : "Time unavailable"}</time></li>)}</ol>}</article>;
+}
+
+/** A failure class that says what the identity may read, not that a read broke. */
+function capabilityGap(failureClass: string): boolean {
+  return ["forbidden", "unauthorized", "namespace_scope"].includes(failureClass);
 }
 
 function GitOpsView() {
@@ -863,10 +894,21 @@ function GitOpsView() {
   const rollouts = useQuery({ queryKey: ["kubernetes-rollouts", rolloutsPaging.cursor], queryFn: () => api.kubernetesRollouts({ limit: 20, cursor: rolloutsPaging.cursor }), retry: false });
   const appsReset = useKubernetesCursorReset(appsPaging, apps);
   const rolloutsReset = useKubernetesCursorReset(rolloutsPaging, rollouts);
-  return <div className="space-y-4"><PartialFailuresDisclosure failures={[...(apps.data?.partial_failures ?? []), ...(rollouts.data?.partial_failures ?? [])]} /><section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="GitOps applications"><ExplorerHeader icon={<GitBranch size={15} />} title="GitOps applications" trailing={apps.data && <span className={`pill ${apps.data.available ? "pill-good" : "pill-warn"}`}>{apps.data.available ? "Detected" : "Not detected"}</span>} />
-    {apps.isPending && <CardSkeleton label="Loading GitOps applications" rows={5} />}{apps.isError && !appsReset && <p role="status" className="p-4 text-sm text-sev-warning">GitOps status is unavailable.</p>}{appsReset === "notice" && <ListChangedNotice onBack={appsPaging.resetPage} />}{apps.data && <>{!apps.data.available && <p role="status" className="p-4 text-sm text-ink-400">{apps.data.reason || "No GitOps APIs detected."}</p>}<div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{apps.data.items.map((app) => <article className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_8rem_8rem_8rem]" key={`${app.tool}:${app.namespace}:${app.name}`}><span className="min-w-0"><span className="block truncate text-sm font-medium text-ink-100">{app.name}</span><span className="flex flex-wrap gap-x-2 text-2xs text-ink-400"><span>{app.namespace}</span><span>{app.tool}</span><span>{app.kind}</span></span></span><span className="pill w-fit">{app.sync}</span><span className="pill w-fit">{app.health}</span><span className="truncate text-xs text-ink-400" title={app.revision}>{app.revision || "Revision unavailable"}</span>{app.message && <p className="break-words text-xs text-ink-300 sm:col-span-4">{app.message}</p>}</article>)}</div>{apps.data.items.length === 0 && apps.data.available && <p role="status" className="p-6 text-center text-sm text-ink-400">No GitOps applications were returned.</p>}<CursorPagination state={appsPaging} next={apps.data.next} total={apps.data.total} limit={apps.data.limit} count={apps.data.items.length}/></>}</section>
+  // An empty list the connector was refused is not "none returned": the kinds
+  // are installed but this access cannot list them. The server says so with
+  // `access: "not_readable"` and a sentence; a refused partial failure from an
+  // older server reads the same way.
+  const refusedMessage = (page: { items: unknown[]; access?: string; access_message?: string; partial_failures?: Array<{ class: string }> } | undefined, fallback: string) => {
+    if (!page || page.items.length) return undefined;
+    if (page.access === "not_readable") return page.access_message?.trim() || fallback;
+    return page.partial_failures?.some((failure) => capabilityGap(failure.class)) ? fallback : undefined;
+  };
+  const appsRefused = refusedMessage(apps.data, "GitOps applications are not readable with this access.");
+  const rolloutsRefused = refusedMessage(rollouts.data, "Rollouts are not readable with this access.");
+  return <div className="space-y-4"><PartialFailuresDisclosure failures={[...(apps.data?.partial_failures ?? []), ...(rollouts.data?.partial_failures ?? [])]} /><section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="GitOps applications"><ExplorerHeader icon={<GitBranch size={15} />} title="GitOps applications" trailing={apps.data && <span className={`pill ${appsRefused ? "" : apps.data.available ? "pill-good" : "pill-warn"}`}>{appsRefused ? "Not readable" : apps.data.available ? "Detected" : "Not detected"}</span>} />
+    {apps.isPending && <CardSkeleton label="Loading GitOps applications" rows={5} />}{apps.isError && !appsReset && <p role="status" className="p-4 text-sm text-sev-warning">GitOps status is unavailable.</p>}{appsReset === "notice" && <ListChangedNotice onBack={appsPaging.resetPage} />}{apps.data && <>{!apps.data.available && !appsRefused && <p role="status" className="p-4 text-sm text-ink-400">{apps.data.reason || "No GitOps APIs detected."}</p>}<div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{apps.data.items.map((app) => <article className="grid gap-2 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_8rem_8rem_8rem]" key={`${app.tool}:${app.namespace}:${app.name}`}><span className="min-w-0"><span className="block truncate text-sm font-medium text-ink-100">{app.name}</span><span className="flex flex-wrap gap-x-2 text-2xs text-ink-400"><span>{app.namespace}</span><span>{app.tool}</span><span>{app.kind}</span></span></span><span className="pill w-fit">{app.sync}</span><span className="pill w-fit">{app.health}</span><span className="truncate text-xs text-ink-400" title={app.revision}>{app.revision || "Revision unavailable"}</span>{app.message && <p className="break-words text-xs text-ink-300 sm:col-span-4">{app.message}</p>}</article>)}</div>{apps.data.items.length === 0 && (apps.data.available || appsRefused) && <p role="status" data-gitops-refused={appsRefused ? "" : undefined} className="p-6 text-center text-sm text-ink-400">{appsRefused ?? "No GitOps applications were returned."}</p>}<CursorPagination state={appsPaging} next={apps.data.next} total={apps.data.total} limit={apps.data.limit} count={apps.data.items.length}/></>}</section>
     <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Argo Rollouts"><ExplorerHeader icon={<RotateCcw size={15} />} title="Argo Rollouts" />
-      {rollouts.isPending && <CardSkeleton label="Loading Argo Rollouts" rows={5} />}{rollouts.isError && !rolloutsReset && <p role="status" className="p-4 text-sm text-sev-warning">Rollout inventory is unavailable.</p>}{rolloutsReset === "notice" && <ListChangedNotice onBack={rolloutsPaging.resetPage} />}{rollouts.data && <>{!rollouts.data.available && <p role="status" className="p-4 text-sm text-ink-400">{rollouts.data.reason || "Argo Rollouts are not available."}</p>}<div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{rollouts.data.items.map((rollout) => <article className="space-y-2 px-4 py-3" key={`${rollout.namespace}:${rollout.name}`}><div className="flex flex-wrap items-center gap-2"><h3 className="min-w-0 flex-1 break-all text-sm font-medium text-ink-100">{rollout.namespace}/{rollout.name}</h3><span className="pill">{rollout.phase}</span></div><dl className="grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-ink-400">Strategy</dt><dd className="mt-1 text-ink-200">{rollout.strategy || "Unavailable"}</dd></div><div><dt className="text-ink-400">Step</dt><dd className="mt-1 text-ink-200">{rollout.total_steps > 0 ? `${rollout.step} of ${rollout.total_steps}` : "Unavailable"}</dd></div><div><dt className="text-ink-400">Canary weight</dt><dd className="mt-1 text-ink-200">{rollout.weight === undefined ? "Unavailable" : `${rollout.weight}%`}</dd></div><div><dt className="text-ink-400">Stable and canary ReplicaSets</dt><dd className="mt-1 break-words text-ink-200">{rollout.stable_rs || "Unavailable"} / {rollout.canary_rs || "Unavailable"}</dd></div></dl>{rollout.message && <p className="break-words text-xs text-ink-300">{rollout.message}</p>}</article>)}</div>{rollouts.data.items.length === 0 && rollouts.data.available && <p role="status" className="p-6 text-center text-sm text-ink-400">No Rollouts were returned.</p>}<CursorPagination state={rolloutsPaging} next={rollouts.data.next}/></>}
+      {rollouts.isPending && <CardSkeleton label="Loading Argo Rollouts" rows={5} />}{rollouts.isError && !rolloutsReset && <p role="status" className="p-4 text-sm text-sev-warning">Rollout inventory is unavailable.</p>}{rolloutsReset === "notice" && <ListChangedNotice onBack={rolloutsPaging.resetPage} />}{rollouts.data && <>{!rollouts.data.available && !rolloutsRefused && <p role="status" className="p-4 text-sm text-ink-400">{rollouts.data.reason || "Argo Rollouts are not available."}</p>}<div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{rollouts.data.items.map((rollout) => <article className="space-y-2 px-4 py-3" key={`${rollout.namespace}:${rollout.name}`}><div className="flex flex-wrap items-center gap-2"><h3 className="min-w-0 flex-1 break-all text-sm font-medium text-ink-100">{rollout.namespace}/{rollout.name}</h3><span className="pill">{rollout.phase}</span></div><dl className="grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-ink-400">Strategy</dt><dd className="mt-1 text-ink-200">{rollout.strategy || "Unavailable"}</dd></div><div><dt className="text-ink-400">Step</dt><dd className="mt-1 text-ink-200">{rollout.total_steps > 0 ? `${rollout.step} of ${rollout.total_steps}` : "Unavailable"}</dd></div><div><dt className="text-ink-400">Canary weight</dt><dd className="mt-1 text-ink-200">{rollout.weight === undefined ? "Unavailable" : `${rollout.weight}%`}</dd></div><div><dt className="text-ink-400">Stable and canary ReplicaSets</dt><dd className="mt-1 break-words text-ink-200">{rollout.stable_rs || "Unavailable"} / {rollout.canary_rs || "Unavailable"}</dd></div></dl>{rollout.message && <p className="break-words text-xs text-ink-300">{rollout.message}</p>}</article>)}</div>{rollouts.data.items.length === 0 && (rollouts.data.available || rolloutsRefused) && <p role="status" className="p-6 text-center text-sm text-ink-400">{rolloutsRefused ?? "No Rollouts were returned."}</p>}<CursorPagination state={rolloutsPaging} next={rollouts.data.next}/></>}
     </section>
   </div>;
 }
@@ -886,7 +928,20 @@ function TimelineView({ onSelectResource }: { onSelectResource: ResourceSelectio
   const { search } = useLocation();
   const focus = new URLSearchParams(search);
   const rootUID = focus.get("root_uid");
+  const access = useKubernetesNamespaceAccess();
+  // A focused break timeline is read from saved history, which is not kept for
+  // a namespace-only identity; say so instead of failing every read.
+  if (rootUID && !access.clusterWide) return <RootTimelineHistoryOff focus={focus} rootUID={rootUID} />;
   return rootUID ? <RootTimelineView key={JSON.stringify([cluster, rootUID, focus.get("occurrence_id"), focus.get("crash_id"), focus.get("center"), focus.get("namespace"), focus.get("kind")])} rootUID={rootUID} focus={focus} onSelectResource={onSelectResource} /> : <UnfocusedTimelineView onSelectResource={onSelectResource} />;
+}
+
+function RootTimelineHistoryOff({ rootUID, focus }: { rootUID: string; focus: URLSearchParams }) {
+  const unfocused = new URLSearchParams(focus);
+  for (const name of ["root_uid", "occurrence_id", "crash_id", "center", "logs_from", "logs_to", "logs_mode", "logs_pod", "logs_container"]) unfocused.delete(name);
+  return <section className="card overflow-clip" aria-label="Kubernetes change timeline">
+    <div className="flex min-w-0 flex-wrap items-center gap-2 border-b border-ink-700 px-4 py-2 text-xs"><span className="text-ink-300">Filtered</span><span className="pill max-w-full"><span className="truncate" title={rootUID}>{rootUID}</span><Link to={`?${unfocused}`} className="ml-2" aria-label="Clear root filter" title="Clear root filter"><X size={12} aria-hidden="true" /></Link></span></div>
+    <KubernetesHistoryOffNotice />
+  </section>;
 }
 
 function RootTimelineView({ rootUID, focus, onSelectResource }: { rootUID: string; focus: URLSearchParams; onSelectResource: ResourceSelection }) {
@@ -1123,11 +1178,15 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     refetchInterval: false,
   });
   const { refetch: refetchTimeline } = timeline;
+  // History is not kept for a namespace-only identity: the page is empty by
+  // design, so it is neither retried nor refreshed every 30 s.
+  const access = useKubernetesNamespaceAccess();
+  const historyIsOff = historyOffFor(access, timeline.data, timeline.error);
   useEffect(() => {
-    if (centered || paging.page > 1) return;
+    if (centered || paging.page > 1 || historyIsOff) return;
     const timer = window.setInterval(() => { setWindowEnd(Date.now()); void refetchTimeline({ cancelRefetch: false }); }, 30_000);
     return () => window.clearInterval(timer);
-  }, [centered, paging.page, refetchTimeline]);
+  }, [centered, paging.page, refetchTimeline, historyIsOff]);
   const data = timeline.data;
   const { since, until } = data ?? pageWindow.current;
   // The window slides forward every 30 s on its own; only a range the user
@@ -1174,13 +1233,14 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
       content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(crash.root_uid || crash.pod_uid, entry.at, crash.namespace, undefined, crash.id)}>Open crash details</Link> };
   });
   return <section className="card overflow-clip transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
-    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && (data.items.length > 0 || !timeline.isError && !incompleteKubernetesSnapshot(data)) && <span className="text-2xs text-ink-400">{breaksOnly ? `${counted(data.counts?.break ?? data.total, "break", data.count_capped)} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event", data.count_capped)} and ${counted(data.crash_count, "crash", data.count_capped)}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
+    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && !historyIsOff && (data.items.length > 0 || !timeline.isError && !incompleteKubernetesSnapshot(data)) && <span className="text-2xs text-ink-400">{breaksOnly ? `${counted(data.counts?.break ?? data.total, "break", data.count_capped)} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event", data.count_capped)} and ${counted(data.crash_count, "crash", data.count_capped)}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
     {data?.count_capped && <p className="px-4 py-2 text-xs text-ink-400">Counts are lower bounds from a bounded sample.</p>}
     <div className="flex flex-wrap items-end justify-between gap-3 border-b border-ink-700 p-3">
       <TimelineRangeControl minutes={minutes} onChange={setMinutes} loading={rangeLoading} />
       <div className={filterRowClass}><KubernetesFilterField label="Namespace"><NamespaceSelect label="Timeline namespace" value={namespace} onChange={setNamespace} className={filterFieldControlClass} /></KubernetesFilterField><KubernetesFilterField label="Kind"><select aria-label="Timeline kind" className={filterFieldControlClass} value={kind} onChange={(event) => setKind(event.target.value)}><option value="">All kinds</option>{["Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node"].map((value) => <option key={value}>{value}</option>)}</select></KubernetesFilterField></div>
     </div>
     {timeline.isPending && <CardSkeleton label="Loading projected change history" rows={5} />}
+    {historyIsOff ? <KubernetesHistoryOffNotice /> : <>
     {(timeline.unpublished || data?.sync.state === "syncing") && !firstReadyAt && <div className="p-3"><KubernetesPreparingPanel progress={data?.sync.progress} /></div>}
     {!data && !timeline.isPending && !timeline.isError && (firstReadyAt || !timeline.unpublished) && <p role="status" className="p-4 text-sm text-ink-400">Timeline unavailable.</p>}
     {timeline.isError && <p role="status" className="p-4 text-sm text-ink-400">Timeline unavailable. <button type="button" className="text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor && timeline.error instanceof ApiError && timeline.error.status === 400 ? "Restart Timeline" : "Retry Timeline"}</button></p>}
@@ -1195,5 +1255,6 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
       <nav aria-label="Timeline pages"><CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} total={data?.total} limit={data?.limit} capped={data?.count_capped} count={data?.items.length} /></nav>
     </div>
     <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster, namespace, kind, breaksOnly, since, until, paging.cursor])} /></div>
+    </>}
   </section>;
 }

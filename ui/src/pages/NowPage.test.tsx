@@ -308,3 +308,24 @@ describe("NowPage Agent pulse", () => {
     expect(api.listBaselines).not.toHaveBeenCalled();
   });
 });
+
+describe("NowPage without the agent", () => {
+  it("never asks for agent status while the agent is off or its config is unknown", async () => {
+    vi.mocked(api.status).mockClear();
+    let finish!: (value: Awaited<ReturnType<typeof api.getAgentConfig>>) => void;
+    vi.mocked(api.getAgentConfig).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    renderPageAt();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(api.status).not.toHaveBeenCalled();
+    await act(async () => { finish({ enable: false } as Awaited<ReturnType<typeof api.getAgentConfig>>); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(api.status).not.toHaveBeenCalled();
+  });
+
+  it("asks for agent status once the config says the agent is on", async () => {
+    vi.mocked(api.status).mockClear();
+    vi.mocked(api.getAgentConfig).mockResolvedValue({ enable: true } as Awaited<ReturnType<typeof api.getAgentConfig>>);
+    renderPageAt();
+    await vi.waitFor(() => expect(api.status).toHaveBeenCalled());
+  });
+});

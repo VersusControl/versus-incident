@@ -26,6 +26,8 @@ export interface KubernetesKindProblem {
    * that never produced a listing, the start of its last attempt.
    */
   sinceBasis?: "observed" | "attempt";
+  /** The namespaces the kind fails in, when it fails only there. */
+  namespaces?: string[];
 }
 
 /** A kind the connector identity may not read, with the reason in plain words. */
@@ -64,6 +66,17 @@ export interface KubernetesSyncHealth {
   firstReadyAt?: string;
   /** Age of the data on screen, from the report's own snapshot age. */
   ageSeconds?: number;
+  /**
+   * Present only when the connector identity reads namespaced kinds inside some
+   * namespaces and not cluster-wide: the namespaces it reads, sorted. That is
+   * the steady state of a namespace-only role, not a fault.
+   */
+  readableNamespaces?: string[];
+  /**
+   * Kinds read only inside some namespaces by an identity that otherwise reads
+   * cluster-wide. Named calmly; never a fault and never part of `unreadable`.
+   */
+  namespaceScoped?: KubernetesUnreadableSummary[];
 }
 
 const defaultFailureReason = "the last sync attempt at this resource type failed";
@@ -87,7 +100,7 @@ const failureReasons: Record<string, string> = {
   unavailable: "the cluster read failed",
   read_failed: "the cluster read failed",
   budget_exhausted: "the read budget for this sync ran out",
-  namespace_scope: "the namespace scope could not be read",
+  namespace_scope: "readable only in some namespaces",
   unsupported: "the cluster does not support this read",
   syncing: "it is still being listed",
 };
@@ -127,6 +140,15 @@ export function kindFailed(kind: KubernetesKindStatus): boolean {
   if (kind.error && kind.error !== "syncing") return true;
   if (kind.state === "pending" || kind.state === "warming") return false;
   return kind.state === "error" || kind.state === "partial" || kind.partial;
+}
+
+/**
+ * A kind read only inside the namespaces the identity may read. For an identity
+ * the server calls namespace-only this is how every namespaced kind is read, so
+ * it is the expected answer rather than a failure.
+ */
+function namespaceScoped(kind: KubernetesKindStatus): boolean {
+  return kind.error === "namespace_scope";
 }
 
 /** The kind has not been listed yet, and nothing about it has failed. */
@@ -170,8 +192,12 @@ function kindProblems(
   failing: readonly KubernetesFailingKind[],
 ): KubernetesKindProblem[] {
   const reported = new Map(failing.filter((row) => row?.kind).map((row) => [row.kind, row]));
+  const failingIn = new Map<string, string[]>();
+  for (const row of failing) {
+    if (row?.kind && typeof row.namespace === "string" && row.namespace) failingIn.set(row.kind, [...new Set([...(failingIn.get(row.kind) ?? []), row.namespace])].sort());
+  }
   return Object.entries(kinds)
-    .filter(([name, kind]) => !unreadable.has(name) && kindFailed(kind))
+    .filter(([name, kind]) => !unreadable.has(name) && kindFailed(kind) && !namespaceScoped(kind))
     .map(([name, kind]) => {
       // The kind carries its own stable first-failure time, so the surface can
       // print "since" even when the bounded failing list dropped this row.
@@ -186,6 +212,7 @@ function kindProblems(
         skipped: Math.max(0, kind.skipped ?? row?.skipped ?? 0),
         records: Math.max(0, kind.records ?? row?.records ?? 0),
         ...since,
+        ...(failingIn.has(name) ? { namespaces: failingIn.get(name) } : {}),
       };
     })
     .sort((left, right) => left.kind.localeCompare(right.kind));
@@ -202,6 +229,14 @@ export interface KubernetesSyncSignals {
   failing?: readonly KubernetesFailingKind[] | null;
   /** When this cluster first published a ready generation, if it ever has. */
   firstReadyAt?: string;
+  /**
+   * The namespaces a namespace-only identity reads. Present only when the
+   * report says the identity does not read cluster-wide; kinds read inside those
+   * namespaces are then not counted as failing.
+   */
+  readableNamespaces?: readonly string[];
+  /** The report's rows for kinds read only inside some namespaces. */
+  namespaceScoped?: readonly KubernetesUnreadableKind[] | null;
 }
 
 /**
@@ -279,6 +314,8 @@ export function reportSyncHealth(report?: KubernetesSyncHealthReport, progress?:
     unreadable: report?.unreadable,
     failing: report?.failing,
     firstReadyAt: firstReadyAt(report),
+    readableNamespaces: report?.cluster_wide === false ? [...new Set(report.readable_namespaces ?? [])].filter(Boolean).sort() : undefined,
+    namespaceScoped: report?.namespace_scoped,
   });
 }
 
@@ -297,12 +334,22 @@ export function reportSyncHealth(report?: KubernetesSyncHealthReport, progress?:
  * A response without the envelope cannot be classified, so it is left as it is
  * rather than blocked on a guess; the backend always sends one.
  */
-export function syncHealth({ sync, kinds, unreadable, failing, firstReadyAt: published }: KubernetesSyncSignals): KubernetesSyncHealth {
-  const unreadableKinds = unreadableSummaries(unreadable ?? []);
-  const withUnreadable = (health: KubernetesSyncHealth): KubernetesSyncHealth => unreadableKinds.length ? { ...health, unreadable: unreadableKinds } : health;
+export function syncHealth({ sync, kinds, unreadable, failing, firstReadyAt: published, readableNamespaces, namespaceScoped: reportedScoped }: KubernetesSyncSignals): KubernetesSyncHealth {
+  // A kind read only inside some namespaces is a permission gap, not a sync
+  // fault: it never blocks a view. For a namespace-only identity that is how
+  // every namespaced kind is read, so it is not named; for any other identity
+  // it is named on its own calm line. The report's own list is preferred; the
+  // per-kind state covers a server that does not send one.
+  const scopedRows = readableNamespaces ? [] : reportedScoped ?? Object.entries(kinds ?? {})
+    .filter(([, kind]) => served(kind) && kindFailed(kind) && namespaceScoped(kind))
+    .map(([name]) => ({ kind: name, state: "partial", class: "namespace_scope", records: 0 }));
+  const scopedKinds = unreadableSummaries(scopedRows.map((row) => ({ ...row, class: row.class || "namespace_scope" })));
+  const unreadableKinds = unreadableSummaries(unreadable ?? []).filter((entry) => !scopedKinds.some((scoped) => scoped.kind === entry.kind));
+  const scope = { ...(readableNamespaces ? { readableNamespaces: [...readableNamespaces] } : {}), ...(scopedKinds.length ? { namespaceScoped: scopedKinds } : {}) };
+  const withUnreadable = (health: KubernetesSyncHealth): KubernetesSyncHealth => ({ ...(unreadableKinds.length ? { ...health, unreadable: unreadableKinds } : health), ...scope });
   if (!sync) return withUnreadable(ready);
   const entries = Object.values(kinds ?? {});
-  const problems = kindProblems(kinds ?? {}, new Set(unreadableKinds.map((entry) => entry.kind)), failing ?? []);
+  const problems = kindProblems(kinds ?? {}, new Set([...unreadableKinds, ...scopedKinds].map((entry) => entry.kind)), failing ?? []);
   // Loading names and the pending count belong to a cycle that is progressing.
   // A failing or stalled cycle has no loading kinds, only failed ones, so the
   // blocking surface can never present a failure as something still on its way.
@@ -310,7 +357,7 @@ export function syncHealth({ sync, kinds, unreadable, failing, firstReadyAt: pub
   // Having published once is remembered whatever the current state says, and
   // the age travels with it: a strip can only label the data it keeps on screen.
   const publishedAt = published ? { firstReadyAt: published } : {};
-  const envelope: Omit<KubernetesSyncHealth, "state"> = { kinds: problems.map((problem) => problem.kind), problems, unreadable: unreadableKinds, loading: [], loadingCount: 0, progress, ageSeconds: sync.age_s, ...publishedAt };
+  const envelope: Omit<KubernetesSyncHealth, "state"> = { kinds: problems.map((problem) => problem.kind), problems, unreadable: unreadableKinds, loading: [], loadingCount: 0, progress, ageSeconds: sync.age_s, ...publishedAt, ...scope };
   const progressing = { loading: [...pendingKindNames(sync.pending)], loadingCount: sync.pending_kinds ?? 0 };
   // A snapshot the backend calls stale is shown for what it is, even when the
   // kinds that failed are the reason it aged.

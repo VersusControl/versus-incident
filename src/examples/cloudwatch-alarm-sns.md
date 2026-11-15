@@ -67,7 +67,7 @@ host: 0.0.0.0
 port: 3000
 
 alert:
-  debug_body: true
+  debug_body: false   # true logs every alert body; turn it on only while debugging
 
   slack:
     enable: true
@@ -182,6 +182,43 @@ aws sns subscribe \
   --protocol https \
   --notification-endpoint https://your-versus-https-url.ngrok-free.app/sns
 ```
+
+### Let Versus subscribe itself
+
+Instead of running `aws sns subscribe`, Versus can create the subscription when
+it starts. Set `https_endpoint_subscription` to the public base URL of Versus,
+and `topic_arn` to the topic:
+
+```yaml
+queue:
+  enable: true
+  sns:
+    enable: true
+    https_endpoint_subscription_path: /sns
+    https_endpoint_subscription: https://your-versus-https-url.ngrok-free.app
+    topic_arn: arn:aws:sns:us-east-1:123456789012:RDS-CPU-Alarm-Topic
+```
+
+Versus subscribes `https_endpoint_subscription` plus
+`https_endpoint_subscription_path` (here `https://your-versus-https-url.ngrok-free.app/sns`)
+to the topic over HTTPS. It uses the standard AWS credential chain, so the
+identity Versus runs as needs `sns:Subscribe` on that topic:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "sns:Subscribe",
+      "Resource": "arn:aws:sns:us-east-1:123456789012:RDS-CPU-Alarm-Topic"
+    }
+  ]
+}
+```
+
+Without it, the subscription is not created and the only sign is a line in the
+Versus logs that starts with `Listener error: SNS subscription failed:`.
 
 ## Test the Integration
 

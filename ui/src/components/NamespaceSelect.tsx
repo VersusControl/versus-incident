@@ -1,11 +1,16 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useKubernetesCluster, useKubernetesQuery } from "@/lib/useKubernetesCluster";
+import { allNamespacesLabel, useKubernetesNamespaceAccess } from "@/lib/kubernetesNamespaceAccess";
 
 export function NamespaceSelect({ value, onChange, label = "Namespace", id, className = "input w-full min-w-0" }: {
   value: string; onChange: (namespace: string) => void; label?: string; id?: string; className?: string;
 }) {
   const { client } = useKubernetesCluster();
+  // A namespace-only identity cannot list Namespaces, so its choices are the
+  // namespaces the server says it reads, and the empty choice means all of them.
+  const access = useKubernetesNamespaceAccess();
+  const allLabel = allNamespacesLabel(access);
   const generated = useId();
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
@@ -52,10 +57,14 @@ export function NamespaceSelect({ value, onChange, label = "Namespace", id, clas
     queryFn: () => client.kubernetesNamespaces(value || undefined),
     staleTime: 30000,
     retry: false,
+    enabled: access.clusterWide,
     refetchInterval: (query) => query.state.data?.sync.state === "syncing" ? 1000 : 30000,
   });
-  const options = ["", ...new Set(namespaces.isError ? [] : namespaces.data?.items ?? [])]
-    .filter((name) => !search || (name || "All namespaces").toLowerCase().includes(search.toLowerCase()));
+  const listed = access.clusterWide ? namespaces.isError ? [] : namespaces.data?.items ?? [] : access.namespaces;
+  const options = ["", ...new Set(listed)]
+    .filter((name) => !search || (name || allLabel).toLowerCase().includes(search.toLowerCase()));
+  const listing = access.clusterWide && (namespaces.isPending || namespaces.data?.sync.state === "syncing");
+  const listFailed = access.clusterWide && namespaces.isError;
   const listID = `${generated}-options`;
   useEffect(() => {
     if (open) document.getElementById(`${generated}-${active}`)?.scrollIntoView?.({ block: "nearest" });
@@ -64,7 +73,7 @@ export function NamespaceSelect({ value, onChange, label = "Namespace", id, clas
   return <div ref={field} className="relative min-w-0" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget) && !panel.current?.contains(event.relatedTarget)) { setOpen(false); setSearch(""); } }}>
     <input id={id} role="combobox" aria-label={label} aria-autocomplete="list" aria-expanded={open} aria-controls={open ? listID : undefined}
       aria-activedescendant={open && options.length ? `${generated}-${Math.min(active, options.length - 1)}` : undefined}
-      className={className} value={open ? search : value || "All namespaces"}
+      className={className} value={open ? search : value || allLabel}
       onFocus={() => { setOpen(true); setSearch(""); }}
       onClick={() => setOpen(true)}
       onChange={(event) => { setSearch(event.target.value); setActive(0); setOpen(true); }}
@@ -82,14 +91,14 @@ export function NamespaceSelect({ value, onChange, label = "Namespace", id, clas
     {open && createPortal(<div ref={panel} style={position} onKeyDown={(event) => { if (event.key === "Escape") { field.current?.querySelector("input")?.focus(); setOpen(false); setSearch(""); } }}
       onBlur={(event) => { if (!panel.current?.contains(event.relatedTarget) && !field.current?.contains(event.relatedTarget)) { setOpen(false); setSearch(""); } }}
       className="fixed z-overlay overflow-auto rounded-control border border-ink-600 bg-surface-raised shadow-overlay">
-      {(namespaces.isPending || namespaces.data?.sync.state === "syncing") && <p role="status" className="p-2 text-xs text-ink-400">Loading namespaces…</p>}
-      {namespaces.isError && <div role="status" className="p-2 text-xs text-ink-400">Namespaces unavailable. <button type="button" className="text-link" onClick={() => void namespaces.refetch()}>Retry namespaces</button></div>}
+      {listing && <p role="status" className="p-2 text-xs text-ink-400">Loading namespaces…</p>}
+      {listFailed && <div role="status" className="p-2 text-xs text-ink-400">Namespaces unavailable. <button type="button" className="text-link" onClick={() => void namespaces.refetch()}>Retry namespaces</button></div>}
       <ul id={listID} role="listbox" aria-label={`${label} options`} className="max-h-52 overflow-y-auto">
         {options.map((name, index) => <li key={name} id={`${generated}-${index}`} role="option" aria-selected={value === name}
           onPointerDown={(event) => event.preventDefault()} onClick={() => choose(name)}
-          className={`cursor-pointer truncate px-3 py-2 text-xs ${index === active ? "bg-accent-subtle text-link" : "text-ink-200"}`}>{name || "All namespaces"}</li>)}
+          className={`cursor-pointer truncate px-3 py-2 text-xs ${index === active ? "bg-accent-subtle text-link" : "text-ink-200"}`}>{name || allLabel}</li>)}
       </ul>
-      {!options.length && !namespaces.isPending && <p className="p-2 text-xs text-ink-400">No matching namespaces</p>}
+      {!options.length && !listing && <p className="p-2 text-xs text-ink-400">No matching namespaces</p>}
     </div>, document.body)}
   </div>;
 }

@@ -1,0 +1,4 @@
+# The Kubernetes connector turned off: no reader role, no connector auth.
+connectors:
+  kubernetes:
+    enabled: false

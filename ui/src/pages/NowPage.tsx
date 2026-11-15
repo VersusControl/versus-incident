@@ -104,7 +104,9 @@ export function NowPage() {
   const status = useQuery({
     queryKey: ["status-pulse"],
     queryFn: api.status,
-    enabled: config.data?.enable !== false,
+    // Only once the config says the agent is on: while it loads, or when it
+    // cannot be read, the route may not exist and a request would 404.
+    enabled: config.data?.enable === true,
     refetchInterval: () => (document.hidden ? false : 30_000),
     retry: 1,
   });

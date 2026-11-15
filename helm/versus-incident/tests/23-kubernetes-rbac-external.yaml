@@ -1,0 +1,7 @@
+# The user binds the ServiceAccount to their own role.
+kubernetesReaderRBAC:
+  enabled: false
+  external: true
+connectors:
+  kubernetes:
+    enabled: true

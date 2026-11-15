@@ -1,0 +1,2 @@
+# EXPECT_FAIL: the string "false" turns the role off, which in_cluster rejects.
+kubernetesReaderRBAC.enabled=false

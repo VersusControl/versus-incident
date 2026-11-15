@@ -20,6 +20,12 @@ runs only the services required for that source.
 See [docker-compose/README.md](./docker-compose/README.md) for the
 shared workflow.
 
+## kubernetes
+
+[kubernetes/](./kubernetes/) — `k8s-connector-in-cluster-enabled.yaml`, one
+`kubectl apply` that runs Versus in an existing cluster with the in-cluster
+Kubernetes connector and a read-only reader role.
+
 ## Notification channels
 
 Channel webhook setup lives in the main docs:

@@ -497,7 +497,7 @@ func validateEndpoint(value string, policy endpointPolicy) (*url.URL, error) {
 		}
 	}
 	if address := net.ParseIP(parsed.Hostname()); address != nil && !policy.allows(address) {
-		return nil, ErrInvalidEndpoint
+		return nil, policy.refusal(address)
 	}
 	parsed.Path = ""
 	return parsed, nil
@@ -521,7 +521,7 @@ func guardedDialContext(dialer contextDialer, resolver ipResolver, policy endpoi
 		}
 		for _, candidate := range addresses {
 			if !policy.allows(candidate.IP) {
-				return nil, ErrInvalidEndpoint
+				return nil, policy.refusal(candidate.IP)
 			}
 		}
 		var lastErr error
@@ -555,6 +555,22 @@ func (policy endpointPolicy) allows(address net.IP) bool {
 		}
 	}
 	return false
+}
+
+// refusal names a refused address and the setting that would allow it.
+func (policy endpointPolicy) refusal(address net.IP) error {
+	refused := &endpointRefusedError{address: address}
+	switch {
+	case address == nil:
+		return ErrInvalidEndpoint
+	case address.IsUnspecified(), address.IsMulticast(), address.IsLinkLocalUnicast(), address.IsLinkLocalMulticast():
+		refused.reason = "an unspecified, multicast or link-local address"
+	case address.IsLoopback():
+		refused.reason, refused.setting = "a loopback address", "allow_loopback"
+	default:
+		refused.reason, refused.setting = "on a private network", "allow_private_networks"
+	}
+	return refused
 }
 
 func isLoopbackHost(host string) bool {

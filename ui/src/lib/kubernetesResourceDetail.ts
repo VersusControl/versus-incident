@@ -7,6 +7,7 @@ import type {
 import { useEffect, useState } from "react";
 import { useKubernetesCrashes } from "./useKubernetesCluster";
 import { isKnownKubernetesTime } from "./kubernetesTime";
+import { historyOffFor, useKubernetesNamespaceAccess } from "./kubernetesNamespaceAccess";
 
 export type ResourceDetailTab =
   | "overview"
@@ -128,12 +129,15 @@ export function useResourceCrashes(resource: KubernetesResource) {
     since: new Date(windowEnd - 86400000).toISOString(),
     until: new Date(windowEnd).toISOString(),
   }, Boolean(resource.uid));
+  // No crash history is kept for a namespace-only identity, so the window
+  // stops sliding rather than asking again every 30 s.
+  const historyIsOff = historyOffFor(useKubernetesNamespaceAccess(), query.data, query.error);
   useEffect(() => {
-    if (!resource.uid || query.paging.page !== 1) return;
+    if (!resource.uid || query.paging.page !== 1 || historyIsOff) return;
     const timer = window.setInterval(() => setWindowEnd(Date.now()), 30000);
     return () => window.clearInterval(timer);
-  }, [resource.uid, query.paging.page]);
-  return query;
+  }, [resource.uid, query.paging.page, historyIsOff]);
+  return { ...query, historyOff: historyIsOff };
 }
 export function scopedCrashes(
   page: KubernetesCrashPage | undefined,

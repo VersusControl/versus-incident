@@ -117,6 +117,10 @@ func TestHelmChartKubernetesIssueTemplateOverrides(t *testing.T) {
 		name := "defaults"
 		args := []string{}
 		want := map[string]string{}
+		// A disabled channel renders only `enable: false`, so turn each one on.
+		for _, channel := range channels {
+			args = append(args, "--set", "alert."+channel+".enable=true")
+		}
 		for _, channel := range channels {
 			path := ""
 			if override {
@@ -152,6 +156,7 @@ func TestHelmChartKubernetesIssueTemplateOverrides(t *testing.T) {
 
 func kubernetesModeArgs(mode string, overrides ...string) []string {
 	values := []string{
+		"connectors.kubernetes.enabled=true",
 		"connectors.kubernetes.auth.mode=" + mode,
 		"connectors.kubernetes.endpoint=https://cluster.example",
 		"connectors.kubernetes.caFile=/run/kubernetes/ca.crt",
@@ -226,7 +231,7 @@ func TestHelmMultiClusterConnectorsAndSecrets(t *testing.T) {
 	t.Setenv("KUBERNETES_CLUSTER_EAST_ACTOR_TOKEN", "actor-east")
 	t.Setenv("KUBERNETES_CLUSTER_WEST_TOKEN", "reader-west")
 	clusters := `[{"clusterId":"east","displayName":"East","endpoint":"https://east.example","auth":{"mode":"token","token":"reader-east"},"actions":{"enable":true,"auth":{"mode":"token","token":"actor-east"}}},{"clusterId":"west","endpoint":"https://west.example","auth":{"mode":"token","token":"reader-west"}}]`
-	args := []string{"--set", "agent.enable=false", "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters=" + clusters}
+	args := []string{"--set", "agent.enable=false", "--set", "connectors.kubernetes.enabled=true", "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters=" + clusters}
 	files := renderChartFiles(t, chartScenario{name: "multi-cluster", args: args})
 	directory := t.TempDir()
 	for name, body := range files {
@@ -258,7 +263,7 @@ func TestHelmMultiClusterConnectorsAndSecrets(t *testing.T) {
 		}
 	}
 	for _, invalid := range []string{`[]`, `[{"clusterId":"same"},{"clusterId":"same"}]`, `[{"clusterId":"BAD"}]`, `[{"clusterId":"one","endpoint":"https://same.example"},{"clusterId":"two","endpoint":"https://same.example"}]`} {
-		command := exec.Command("helm", "template", "fleet", chartDir, "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters="+invalid)
+		command := exec.Command("helm", "template", "fleet", chartDir, "--set", "connectors.kubernetes.enabled=true", "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters="+invalid)
 		if err := command.Run(); err == nil {
 			t.Fatal("invalid Helm cluster catalog accepted")
 		}

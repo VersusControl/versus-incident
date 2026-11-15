@@ -39,8 +39,11 @@ func TestKubernetesReaderRBACTemplateIsReadOnly(t *testing.T) {
 	if !containsString(verbs, "get") || !containsString(verbs, "list") {
 		t.Errorf("Kubernetes reader RBAC must preserve get/list access: %v", verbs)
 	}
-	if !regexp.MustCompile(`(?m)resources: \["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "secrets", "persistentvolumeclaims", "persistentvolumes"\]\s*\n\s*verbs: \["get", "list"\]`).MatchString(content) {
+	if !regexp.MustCompile(`(?m)resources: \["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "persistentvolumeclaims", "persistentvolumes"\]\s*\n\s*verbs: \["get", "list"\]`).MatchString(content) {
 		t.Error("core metadata reads missing or not read-only")
+	}
+	if !regexp.MustCompile(`(?s)\{\{- if \.Values\.kubernetesReaderRBAC\.secrets \}\}\s*- apiGroups: \[""\]\s*resources: \["secrets"\]\s*verbs: \["list"\]\s*\{\{- end \}\}`).MatchString(content) {
+		t.Error("Secret access must be list-only and granted only behind kubernetesReaderRBAC.secrets")
 	}
 	if !regexp.MustCompile(`(?m)resources: \["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"\]\s*\n\s*verbs: \["get", "list"\]`).MatchString(content) {
 		t.Error("controller revision reads missing or not read-only")
@@ -48,8 +51,19 @@ func TestKubernetesReaderRBACTemplateIsReadOnly(t *testing.T) {
 	if !regexp.MustCompile(`(?m)resources: \["pods/log"\]\s*\n\s*verbs: \["get"\]`).MatchString(content) {
 		t.Error("Kubernetes reader RBAC must preserve get-only access to pods/log")
 	}
-	if !regexp.MustCompile(`(?s)\{\{- if \.Values\.kubernetesReaderRBAC\.gatewayAPI \}\}.*apiGroups: \["gateway\.networking\.k8s\.io"\].*resources: \["gateways", "httproutes"\].*verbs: \["get", "list"\].*\{\{- end \}\}`).MatchString(content) {
-		t.Error("Gateway API read rules must remain gated by kubernetesReaderRBAC.gatewayAPI")
+	optional := regexp.MustCompile(`(?s)\{\{- if \.Values\.kubernetesReaderRBAC\.optionalKinds \}\}(.*?)\{\{- end \}\}`).FindStringSubmatch(content)
+	if optional == nil {
+		t.Fatal("optional kinds must be gated by kubernetesReaderRBAC.optionalKinds")
+	}
+	for _, rule := range []string{
+		"apiGroups: [\"gateway.networking.k8s.io\"]\n    resources: [\"gateways\", \"httproutes\"]\n    verbs: [\"get\", \"list\"]",
+		"apiGroups: [\"argoproj.io\"]\n    resources: [\"applications\", \"rollouts\"]\n    verbs: [\"get\", \"list\"]",
+		"apiGroups: [\"kustomize.toolkit.fluxcd.io\"]\n    resources: [\"kustomizations\"]\n    verbs: [\"get\", \"list\"]",
+		"apiGroups: [\"helm.toolkit.fluxcd.io\"]\n    resources: [\"helmreleases\"]\n    verbs: [\"get\", \"list\"]",
+	} {
+		if !strings.Contains(optional[1], rule) {
+			t.Errorf("optional kinds block lacks read-only rule %q", rule)
+		}
 	}
 }
 
@@ -105,27 +119,31 @@ func quotedTemplateFieldValues(t *testing.T, content, field string) []string {
 	return values
 }
 
-// Every metadata-only kind the inventory reads — Secret included — must be
-// granted by the shipped reader role, or a default install reports it
-// unreadable forever. Metadata is all the role reaches, so granting Secret
-// get/list exposes names and labels, never Secret contents.
+// Every metadata-only kind the inventory reads must be granted by the shipped
+// reader role, or a default install reports it unreadable forever. Secrets are
+// the exception: listing them exposes Secret values to the connector identity,
+// so the default role leaves them out and the grant is an explicit opt-in.
 func TestKubernetesReaderRBACGrantsEveryMetadataKind(t *testing.T) {
 	template, err := os.ReadFile("../../helm/versus-incident/templates/kubernetes-reader-rbac.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	resources := quotedTemplateFieldValues(t, string(template), "resources")
+	withoutOptIn := regexp.MustCompile(`(?s)\{\{- if \.Values\.kubernetesReaderRBAC\.secrets \}\}.*?\{\{- end \}\}`).ReplaceAllString(string(template), "")
+	resources := quotedTemplateFieldValues(t, withoutOptIn, "resources")
 	granted := map[string]bool{}
 	for _, resource := range resources {
 		granted[resource] = true
 	}
 	for kind := range metadataOnlyIndexKinds {
 		resource := strings.ToLower(kind) + "s"
+		if kind == "Secret" {
+			if granted[resource] {
+				t.Fatal(`the default reader role must not grant "secrets"; it is opt-in through kubernetesReaderRBAC.secrets`)
+			}
+			continue
+		}
 		if !granted[resource] {
 			t.Fatalf("metadata-only kind %s needs %q get/list in the shipped reader role", kind, resource)
 		}
-	}
-	if !granted["secrets"] {
-		t.Fatal(`the shipped reader role must grant "secrets" get/list`)
 	}
 }

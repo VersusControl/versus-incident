@@ -107,6 +107,33 @@ type partialRoleCluster struct {
 	// extraGroups serves that many additional API groups next to the Gateway
 	// API group, the way a cluster with many installed CRDs does.
 	extraGroups atomic.Int32
+	// denyWidgets answers 403 to the LIST of the listable extra-group kinds,
+	// as a role without a grant for an installed CRD does; widgetLists counts
+	// those LISTs.
+	denyWidgets atomic.Bool
+	widgetLists atomic.Int64
+	// argoApps serves the Argo CD Application API with one object, and
+	// denyArgo answers 403 to its LISTs.
+	argoApps atomic.Bool
+	denyArgo atomic.Bool
+	// denyNamespace answers 403 to every read inside one namespace, as
+	// removing that namespace's RoleBinding does. fixture is the fake API
+	// server behind the role, for seeding objects.
+	denyNamespace atomic.Pointer[string]
+	// failNamespace answers 500 to every read inside one namespace, as an API
+	// server whose storage for that namespace is failing does.
+	failNamespace atomic.Pointer[string]
+	fixture       http.Handler
+	// excludeResources and namespaces are the connector's collection scope,
+	// applied on every connect as configuration is on every start;
+	// secretRequests counts every request for Secrets.
+	excludeResources, namespaces []string
+	secretRequests               atomic.Int64
+	// denyClusterSecrets answers 403 to the cluster-wide Secret LIST only,
+	// as a role that grants Secrets inside namespaces does;
+	// clusterSecretLists counts those LISTs.
+	denyClusterSecrets atomic.Bool
+	clusterSecretLists atomic.Int64
 
 	mu             sync.Mutex
 	secretAnswered chan struct{}
@@ -130,11 +157,21 @@ func newPartialRoleCluster(t *testing.T, gatewayAPI bool) *partialRoleCluster {
 	if secret.Code != http.StatusOK {
 		t.Fatal("secret fixture failed")
 	}
-	cluster := &partialRoleCluster{t: t, secretAnswered: make(chan struct{})}
+	cluster := &partialRoleCluster{t: t, secretAnswered: make(chan struct{}), fixture: fixture}
 	const gatewayGroup = "/apis/gateway.networking.k8s.io/v1"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		query := r.URL.Query()
+		if strings.HasSuffix(path, "/secrets") {
+			cluster.secretRequests.Add(1)
+		}
+		if r.Method == http.MethodGet && query.Has("limit") && path == "/api/v1/secrets" {
+			cluster.clusterSecretLists.Add(1)
+			if cluster.denyClusterSecrets.Load() {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+		}
 		list := r.Method == http.MethodGet && query.Has("limit")
 		switch {
 		case cluster.outage.Load():
@@ -160,6 +197,10 @@ func newPartialRoleCluster(t *testing.T, gatewayAPI bool) *partialRoleCluster {
 			}
 			version := map[string]any{"groupVersion": "gateway.networking.k8s.io/v1", "version": "v1"}
 			groups.Groups = append(groups.Groups, map[string]any{"name": "gateway.networking.k8s.io", "preferredVersion": version, "versions": []any{version}})
+			if cluster.argoApps.Load() {
+				argo := map[string]any{"groupVersion": "argoproj.io/v1alpha1", "version": "v1alpha1"}
+				groups.Groups = append(groups.Groups, map[string]any{"name": "argoproj.io", "preferredVersion": argo, "versions": []any{argo}})
+			}
 			writeJSON(w, map[string]any{"groups": groups.Groups})
 			return
 		case gatewayAPI && path == gatewayGroup:
@@ -188,6 +229,20 @@ func newPartialRoleCluster(t *testing.T, gatewayAPI bool) *partialRoleCluster {
 			}
 			writeJSON(w, map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "items": items})
 			return
+		case cluster.argoApps.Load() && path == "/apis/argoproj.io/v1alpha1":
+			writeJSON(w, map[string]any{"groupVersion": "argoproj.io/v1alpha1", "resources": []any{
+				map[string]any{"name": "applications", "kind": "Application", "namespaced": true, "verbs": []string{"get", "list"}},
+			}})
+			return
+		case cluster.argoApps.Load() && strings.HasPrefix(path, "/apis/argoproj.io/v1alpha1/"):
+			if cluster.denyArgo.Load() {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			writeJSON(w, map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "items": []any{
+				map[string]any{"apiVersion": "argoproj.io/v1alpha1", "kind": "Application", "metadata": map[string]any{"name": "shop", "namespace": "argocd", "uid": "uid-argo-shop"}},
+			}})
+			return
 		case strings.HasPrefix(path, "/apis/extra-"):
 			parts := strings.Split(strings.Trim(path, "/"), "/")
 			if len(parts) == 3 {
@@ -202,7 +257,18 @@ func newPartialRoleCluster(t *testing.T, gatewayAPI bool) *partialRoleCluster {
 				}})
 				return
 			}
+			cluster.widgetLists.Add(1)
+			if cluster.denyWidgets.Load() {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 			writeJSON(w, map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "items": []any{}})
+			return
+		case cluster.failNamespace.Load() != nil && strings.Contains(path, "/namespaces/"+*cluster.failNamespace.Load()+"/"):
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		case cluster.denyNamespace.Load() != nil && strings.Contains(path, "/namespaces/"+*cluster.denyNamespace.Load()+"/"):
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		case cluster.namespaceOnly.Load() && !discoveryPath(path) && !strings.Contains(path, "/namespaces/shop/") && !strings.Contains(path, "/namespaces/payments/"):
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -222,7 +288,7 @@ func newPartialRoleCluster(t *testing.T, gatewayAPI bool) *partialRoleCluster {
 		case list && strings.HasPrefix(path, "/api/v1/namespaces/") && strings.HasSuffix(path, "/pods") && cluster.denyNamespacedPods.Load():
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
-		case list && strings.HasSuffix(path, "/secrets") && cluster.denySecrets.Load():
+		case (list || r.Method == http.MethodGet && query.Has("labelSelector")) && strings.HasSuffix(path, "/secrets") && cluster.denySecrets.Load():
 			if path == "/api/v1/secrets" && cluster.order.Load() == secretOrderLast {
 				cluster.waitOthersIdle()
 			}
@@ -273,6 +339,7 @@ func (cluster *partialRoleCluster) connect() {
 	client.indexLimiter = nil
 	cluster.service = NewService(client, Scope{OrgID: "default", ClusterID: "partial-role", CredentialID: "configured"}, time.Hour)
 	cluster.service.SetChangeStorage(cluster.provider)
+	cluster.service.SetCollectionScope(cluster.excludeResources, cluster.namespaces)
 	cluster.registry = NewServiceRegistry(cluster.service)
 	t.Cleanup(cluster.registry.Close)
 }
@@ -322,7 +389,7 @@ func (cluster *partialRoleCluster) start() {
 		// cluster fully ready, so its first complete publication is partial.
 		// A role without any cluster-wide grant first publishes a cluster it
 		// cannot read at all, before it learns the namespaces it may read.
-		published := !report.FirstReadyAt.IsZero() || cluster.denyClusterPods.Load() && report.State == "partial" || cluster.namespaceOnly.Load() && report.TotalKinds > 0 && report.PendingKinds == 0
+		published := !report.FirstReadyAt.IsZero() || (cluster.denyClusterPods.Load() || cluster.denyClusterSecrets.Load()) && report.State == "partial" || cluster.namespaceOnly.Load() && report.TotalKinds > 0 && report.PendingKinds == 0
 		if (err == nil || cluster.namespaceOnly.Load()) && report.PendingKinds == 0 && published {
 			break
 		}

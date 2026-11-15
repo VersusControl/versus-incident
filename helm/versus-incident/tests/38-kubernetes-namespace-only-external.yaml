@@ -1,0 +1,8 @@
+# Your own namespace-only RBAC: the chart excludes nothing on its own and
+# reads the namespaces you name from the first sync.
+kubernetesReaderRBAC:
+  external: true
+connectors:
+  kubernetes:
+    enabled: true
+    namespaces: [shop, payments]

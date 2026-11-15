@@ -106,6 +106,105 @@ func TestConnectorsLoad(t *testing.T) {
 	}
 }
 
+// A connectors.yaml without settings must not switch off connectors written
+// inline in config.yaml; a mounted file with settings still replaces them.
+func TestInlineConnectorsSurviveEmptyConnectorsFile(t *testing.T) {
+	directory := t.TempDir()
+	main := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(main, []byte("connectors:\n  kubernetes:\n    auth:\n      mode: in_cluster\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(directory, "connectors.yaml")
+	for name, content := range map[string]string{
+		"no file":       "",
+		"empty file":    "\n",
+		"comments only": "# connectors:\n#   kubernetes:\n#     auth:\n#       mode: token\n",
+	} {
+		if name == "no file" {
+			_ = os.Remove(sibling)
+		} else if err := os.WriteFile(sibling, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := loadConfigFromPath(main)
+		if err != nil || loaded.Connectors.Kubernetes.Auth.Mode != "in_cluster" {
+			t.Fatalf("%s: inline connectors were not used: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(sibling, []byte("connectors:\n  kubernetes:\n    auth:\n      mode: \"\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadConfigFromPath(main)
+	if err != nil || loaded.Connectors.Kubernetes.Auth.Mode != "" {
+		t.Fatalf("a mounted connectors file with settings must replace inline connectors: %v", err)
+	}
+	if err := os.WriteFile(sibling, []byte("not: [valid\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfigFromPath(main); err == nil {
+		t.Fatal("an invalid connectors file must still fail the load")
+	}
+}
+
+// The repository's sample connectors.yaml carries comments only, so a build
+// that ships it can never override inline connectors.
+func TestShippedConnectorsSampleHasNoSettings(t *testing.T) {
+	_, present, err := loadSiblingConnectorsFile("../../config/connectors.yaml")
+	if err != nil || present {
+		t.Fatalf("config/connectors.yaml must hold only comments: present=%v err=%v", present, err)
+	}
+}
+
+func TestRequiredGatewaySecretStopsStartup(t *testing.T) {
+	directory := t.TempDir()
+	main := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(main, []byte("gateway_secret: ${GATEWAY_SECRET}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GATEWAY_SECRET", "")
+	t.Setenv("GATEWAY_SECRET_REQUIRED", "")
+	if _, err := loadConfigFromPath(main); err != nil {
+		t.Fatalf("an empty sign-in secret is allowed unless required: %v", err)
+	}
+	t.Setenv("GATEWAY_SECRET_REQUIRED", "true")
+	t.Setenv("GATEWAY_SECRET_HINT", "create it with: kubectl -n versus create secret generic versus-incident")
+	_, err := loadConfigFromPath(main)
+	if err == nil || !strings.Contains(err.Error(), "sign-in secret is missing") || !strings.Contains(err.Error(), "kubectl -n versus create secret generic versus-incident") {
+		t.Fatalf("missing required sign-in secret: %v", err)
+	}
+	t.Setenv("GATEWAY_SECRET", "present")
+	loaded, err := loadConfigFromPath(main)
+	if err != nil || loaded.GatewaySecret != "present" {
+		t.Fatalf("a supplied sign-in secret must load: %v", err)
+	}
+}
+
+// A mistyped connector key must be named with its YAML path so the operator
+// can fix it; the value is never echoed because it may be a credential.
+func TestConnectorUnknownKeyIsNamedWithoutItsValue(t *testing.T) {
+	for _, test := range []struct {
+		fields map[string]any
+		want   string
+	}{
+		{map[string]any{"endpointt": "sensitive-value"}, `connectors.kubernetes: unknown key "endpointt"`},
+		{map[string]any{"auth": map[string]any{"mode": "eks", "eks": map[string]any{"cluster": "sensitive-value"}}}, `connectors.kubernetes.auth.eks: unknown key "cluster"`},
+		{map[string]any{"actions": map[string]any{"auth": map[string]any{"tokn": "sensitive-value"}}}, `connectors.kubernetes.actions.auth: unknown key "tokn"`},
+		{map[string]any{"multiple": true, "clusters": []any{map[string]any{"cluster_id": "one", "endpoint": "https://one.example", "auth": map[string]any{"mode": "token", "toke": "sensitive-value"}}}}, `connectors.kubernetes.clusters[0].auth: unknown key "toke"`},
+		{map[string]any{"timeout": []any{"sensitive-value"}}, `connectors.kubernetes.timeout: invalid value`},
+	} {
+		_, err := decodeConnectors(map[string]any{"kubernetes": test.fields})
+		if err == nil || err.Error() != test.want {
+			t.Errorf("error = %v, want %s", err, test.want)
+		}
+		if err != nil && strings.Contains(err.Error(), "sensitive-value") {
+			t.Errorf("error echoes a configured value: %v", err)
+		}
+	}
+	_, err := decodeConnectors(map[string]any{"kubernetez": map[string]any{}})
+	if err == nil || err.Error() != `connectors: unknown key "kubernetez"` {
+		t.Errorf("top-level unknown key: %v", err)
+	}
+}
+
 func TestCloneConnectors(t *testing.T) {
 	source := &Config{Connectors: ConnectorsConfig{Kubernetes: KubernetesConnectorConfig{KubernetesToolConfig: KubernetesToolConfig{
 		EndpointCIDRs: []string{"10.0.0.0/8"}, Auth: KubernetesAuthConfig{Mode: "token", Token: "reader"},
@@ -205,5 +304,36 @@ func TestConnectorEndpointCIDRsNormalize(t *testing.T) {
 		if err != nil || len(loaded.Kubernetes.EndpointCIDRs) != 0 {
 			t.Fatalf("empty CIDRs: %v", err)
 		}
+	}
+}
+
+// A connector names the resources it never lists and the namespaces it reads;
+// both are bounded lists of valid names, and a clone owns its own copies.
+func TestConnectorCollectionScope(t *testing.T) {
+	connector, err := decodeConnectors(map[string]any{"kubernetes": map[string]any{
+		"exclude_resources": []any{"secrets"}, "namespaces": []any{"shop", "payments"},
+	}})
+	if err != nil || strings.Join(connector.Kubernetes.ExcludeResources, ",") != "secrets" || strings.Join(connector.Kubernetes.Namespaces, ",") != "shop,payments" {
+		t.Fatalf("collection scope = %+v %v", connector.Kubernetes, err)
+	}
+	for _, resource := range []string{"pods", "namespaces"} {
+		if _, err := decodeConnectors(map[string]any{"kubernetes": map[string]any{"exclude_resources": []any{resource}}}); err == nil || !strings.Contains(err.Error(), "cannot exclude \""+resource+"\"") {
+			t.Errorf("excluding %s answered %v", resource, err)
+		}
+	}
+	for key, value := range map[string][]any{
+		"namespaces":        {"Shop"},
+		"exclude_resources": {"secrets", "secrets"},
+	} {
+		if _, err := decodeConnectors(map[string]any{"kubernetes": map[string]any{key: value}}); err == nil || !strings.Contains(err.Error(), "connectors.kubernetes."+key) {
+			t.Errorf("%s %v answered %v", key, value, err)
+		}
+	}
+	source := &Config{Connectors: connector}
+	cloned := cloneConfig(source)
+	cloned.Connectors.Kubernetes.Namespaces[0] = "changed"
+	cloned.Connectors.Kubernetes.ExcludeResources[0] = "changed"
+	if source.Connectors.Kubernetes.Namespaces[0] != "shop" || source.Connectors.Kubernetes.ExcludeResources[0] != "secrets" {
+		t.Fatal("a clone shares the collection scope lists")
 	}
 }

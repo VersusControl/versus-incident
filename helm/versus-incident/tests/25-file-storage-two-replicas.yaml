@@ -1,0 +1,2 @@
+# Two replicas on the file backend would keep two separate states.
+replicaCount: 2

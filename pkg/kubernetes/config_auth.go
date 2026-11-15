@@ -3,7 +3,6 @@ package kubernetes
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"io"
 	"net"
 	"os"
@@ -37,7 +36,7 @@ func ResolveAuthentication(options AuthOptions) (Config, error) {
 	result := Config{Endpoint: strings.TrimSpace(options.Endpoint), CAFile: strings.TrimSpace(options.CAFile), ServerName: strings.TrimSpace(options.ServerName)}
 	var err error
 	if result.CAFile != "" && options.CAData != "" {
-		return Config{}, errors.New("kubernetes: conflicting certificate authority configuration")
+		return Config{}, setupError("conflicting certificate authority configuration", "Set only one of connectors.kubernetes.ca_file or ca_data, then restart Versus.")
 	}
 	if options.CAData != "" {
 		result.CAData, err = DecodeCAData(options.CAData)
@@ -48,7 +47,7 @@ func ResolveAuthentication(options AuthOptions) (Config, error) {
 	switch mode {
 	case "in_cluster":
 		if result.Endpoint != "" || result.CAFile != "" || len(result.CAData) > 0 || result.ServerName != "" || hasExplicitCredential(options) {
-			return Config{}, errors.New("kubernetes: conflicting in-cluster configuration")
+			return Config{}, setupError("conflicting in-cluster configuration", "With auth.mode in_cluster, remove endpoint, ca_file, ca_data, server_name and every explicit credential, then restart Versus.")
 		}
 		host := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_HOST"))
 		port := strings.TrimSpace(os.Getenv("KUBERNETES_SERVICE_PORT"))
@@ -59,7 +58,7 @@ func ResolveAuthentication(options AuthOptions) (Config, error) {
 			port = "443"
 		}
 		if host == "" {
-			return Config{}, errors.New("kubernetes: in-cluster environment unavailable")
+			return Config{}, setupError("in-cluster environment unavailable", "auth.mode in_cluster works only inside a Kubernetes Pod. Outside a cluster, use auth.mode token_file, client_certificate, kubeconfig, eks, aks or gke.")
 		}
 		result.Endpoint = "https://" + net.JoinHostPort(host, port)
 		result.CAFile = inClusterCAFile
@@ -67,7 +66,7 @@ func ResolveAuthentication(options AuthOptions) (Config, error) {
 		result.Credentials = tokenFileCredential(inClusterTokenFile)
 	case "token":
 		if options.TokenFile != "" || hasNonTokenCredential(options) {
-			return Config{}, errors.New("kubernetes: conflicting credential configuration")
+			return Config{}, setupError("conflicting credential configuration", "Configure exactly one credential for the selected connectors.kubernetes.auth.mode, then restart Versus.")
 		}
 		credential, err := staticTokenCredential(options.Token)
 		if err != nil {
@@ -76,12 +75,12 @@ func ResolveAuthentication(options AuthOptions) (Config, error) {
 		result.Credentials = credential
 	case "token_file":
 		if options.Token != "" || options.TokenFile == "" || hasNonTokenCredential(options) {
-			return Config{}, errors.New("kubernetes: conflicting credential configuration")
+			return Config{}, setupError("conflicting credential configuration", "Configure exactly one credential for the selected connectors.kubernetes.auth.mode, then restart Versus.")
 		}
 		result.Credentials = tokenFileCredential(options.TokenFile)
 	case "client_certificate":
 		if options.Token != "" || options.TokenFile != "" || hasCloudCredential(options) || hasKubeconfigCredential(options) {
-			return Config{}, errors.New("kubernetes: conflicting credential configuration")
+			return Config{}, setupError("conflicting credential configuration", "Configure exactly one credential for the selected connectors.kubernetes.auth.mode, then restart Versus.")
 		}
 		certificateData, err := decodeCredentialData(options.CertificateData)
 		if err != nil {
@@ -97,26 +96,26 @@ func ResolveAuthentication(options AuthOptions) (Config, error) {
 		}
 	case "kubeconfig":
 		if result.Endpoint != "" || result.CAFile != "" || len(result.CAData) > 0 || result.ServerName != "" || options.KubeconfigPath == "" || options.Token != "" || options.TokenFile != "" || hasClientCertificateCredential(options) || hasCloudCredential(options) {
-			return Config{}, errors.New("kubernetes: conflicting kubeconfig configuration")
+			return Config{}, setupError("conflicting kubeconfig configuration", "With auth.mode kubeconfig, set auth.kubeconfig.path and remove endpoint, CA, server_name and every other credential, then restart Versus.")
 		}
 		return loadKubeconfig(options.KubeconfigPath, options.KubeconfigContext)
 	case "eks":
 		if options.EKSClusterName == "" || hasDirectCredential(options) || hasAKSCredential(options) || options.GKECredentialsFile != "" {
-			return Config{}, errors.New("kubernetes: invalid EKS configuration")
+			return Config{}, setupError("invalid EKS configuration", "Set auth.eks.cluster_name and remove credentials of other modes, then restart Versus.")
 		}
 		result.Credentials, err = newEKSCredentialSource(options)
 	case "aks":
 		if hasDirectCredential(options) || hasEKSCredential(options) || options.GKECredentialsFile != "" {
-			return Config{}, errors.New("kubernetes: invalid AKS configuration")
+			return Config{}, setupError("invalid AKS configuration", "Remove credentials of other modes from the AKS connector, then restart Versus.")
 		}
 		result.Credentials, err = newAKSCredentialSource(options)
 	case "gke":
 		if hasDirectCredential(options) || hasEKSCredential(options) || hasAKSCredential(options) {
-			return Config{}, errors.New("kubernetes: invalid GKE configuration")
+			return Config{}, setupError("invalid GKE configuration", "Remove credentials of other modes from the GKE connector, then restart Versus.")
 		}
 		result.Credentials, err = newGKECredentialSource(options.GKECredentialsFile)
 	default:
-		return Config{}, errors.New("kubernetes: unsupported authentication mode")
+		return Config{}, setupError("unsupported authentication mode", "Set connectors.kubernetes.auth.mode to in_cluster, token, token_file, client_certificate, kubeconfig, eks, aks or gke.")
 	}
 	if err != nil {
 		return Config{}, err
@@ -205,48 +204,48 @@ type kubeExecEnv struct {
 func loadKubeconfig(path, selectedContext string) (Config, error) {
 	info, err := os.Stat(path)
 	if err != nil || info.Mode().Perm()&0o022 != 0 {
-		return Config{}, errors.New("kubernetes: kubeconfig unavailable or writable by other users")
+		return Config{}, setupError("kubeconfig unavailable or writable by other users", "Mount the kubeconfig at auth.kubeconfig.path and make it writable only by its owner (for example chmod 600), then restart Versus.")
 	}
 	data, err := readBoundedFile(path, maxKubeconfigBytes)
 	if err != nil {
-		return Config{}, errors.New("kubernetes: kubeconfig unavailable")
+		return Config{}, setupError("kubeconfig unavailable", "Mount a readable kubeconfig at auth.kubeconfig.path, then restart Versus.")
 	}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	var document kubeconfigDocument
 	if decoder.Decode(&document) != nil {
-		return Config{}, errors.New("kubernetes: unsupported kubeconfig")
+		return Config{}, setupError("unsupported kubeconfig", "Use a kubeconfig with apiVersion v1 and kind Config.")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return Config{}, errors.New("kubernetes: multiple kubeconfig documents are unsupported")
+		return Config{}, setupError("multiple kubeconfig documents are unsupported", "Use a kubeconfig file that holds one YAML document.")
 	}
 	if document.APIVersion != "v1" || document.Kind != "Config" {
-		return Config{}, errors.New("kubernetes: unsupported kubeconfig")
+		return Config{}, setupError("unsupported kubeconfig", "Use a kubeconfig with apiVersion v1 and kind Config.")
 	}
 	if hasDuplicateNames(document.Clusters) || hasDuplicateNames(document.Contexts) || hasDuplicateNames(document.Users) {
-		return Config{}, errors.New("kubernetes: duplicate kubeconfig entry")
+		return Config{}, setupError("duplicate kubeconfig entry", "Remove the duplicate cluster, context or user entry from the kubeconfig.")
 	}
 	if selectedContext == "" {
 		selectedContext = document.CurrentContext
 	}
 	contextEntry, ok := findContext(document.Contexts, selectedContext)
 	if !ok {
-		return Config{}, errors.New("kubernetes: kubeconfig context unavailable")
+		return Config{}, setupError("kubeconfig context unavailable", "Set auth.kubeconfig.context to a context the kubeconfig defines, or set its current-context.")
 	}
 	cluster, ok := findCluster(document.Clusters, contextEntry.Cluster)
 	if !ok || cluster.Insecure || cluster.ProxyURL != "" || (cluster.CAFile != "" && cluster.CAData != "") {
-		return Config{}, errors.New("kubernetes: unsafe kubeconfig cluster")
+		return Config{}, setupError("unsafe kubeconfig cluster", "Remove insecure-skip-tls-verify and proxy-url from the kubeconfig cluster, and set only one of certificate-authority or certificate-authority-data.")
 	}
 	user, ok := findUser(document.Users, contextEntry.User)
 	if !ok {
-		return Config{}, errors.New("kubernetes: kubeconfig user unavailable")
+		return Config{}, setupError("kubeconfig user unavailable", "Make the selected kubeconfig context name a user the kubeconfig defines.")
 	}
 	if user.Exec != nil || user.AuthProvider != nil {
-		return Config{}, errors.New("kubernetes: kubeconfig exec and auth-provider credentials are unsupported; configure auth.mode as eks, aks, or gke")
+		return Config{}, setupError("kubeconfig exec and auth-provider credentials are unsupported; configure auth.mode as eks, aks, or gke", "Use auth.mode eks, aks or gke for a cloud cluster, or a kubeconfig user with a token, token file or client certificate.")
 	}
 	if user.Username != "" || user.Password != "" || user.As != "" || len(user.AsGroups) > 0 {
-		return Config{}, errors.New("kubernetes: unsupported kubeconfig authentication")
+		return Config{}, setupError("unsupported kubeconfig authentication", "Use a kubeconfig user with a token, token file or client certificate; username, password and impersonation are not supported.")
 	}
 	base := filepath.Dir(path)
 	if contextEntry.Namespace != "" && (!safeSegment(contextEntry.Namespace) || len(contextEntry.Namespace) > 63) {
@@ -283,7 +282,7 @@ func loadKubeconfig(path, selectedContext string) (Config, error) {
 		result.Credentials, err = clientCertificateCredential(resolveRelative(base, user.ClientCertificate), resolveRelative(base, user.ClientKey), certificateData, keyData)
 	}
 	if err != nil || modes != 1 {
-		return Config{}, errors.New("kubernetes: conflicting or invalid kubeconfig credentials")
+		return Config{}, setupError("conflicting or invalid kubeconfig credentials", "Give the kubeconfig user exactly one of token, tokenFile or a client certificate and key.")
 	}
 	return result, nil
 }
@@ -297,11 +296,11 @@ func decodeCredentialData(value string) ([]byte, error) {
 		return nil, nil
 	}
 	if len(value) > int(maxCredentialFileBytes*2) {
-		return nil, errors.New("kubernetes: credential data too large")
+		return nil, setupError("credential data too large", "Shorten the base64 credential data, or mount it as a file instead.")
 	}
 	decoded, err := base64.StdEncoding.DecodeString(value)
 	if err != nil || len(decoded) > int(maxCredentialFileBytes) {
-		return nil, errors.New("kubernetes: invalid credential data")
+		return nil, setupError("invalid credential data", "Set the credential data as standard base64 of the PEM or token bytes.")
 	}
 	return decoded, nil
 }

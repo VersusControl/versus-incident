@@ -1,0 +1,4 @@
+# EXPECT_FAIL: in_cluster without any reader role is rejected with the fix.
+kubernetesReaderRBAC.enabled=false
+kubernetesReaderRBAC.external=true
+connectors.kubernetes.enabled=false
