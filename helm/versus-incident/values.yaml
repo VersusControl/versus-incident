@@ -618,45 +618,86 @@ oncall:
 
 # Redis configuration
 #
-# Redis is REQUIRED only when on-call is enabled (oncall.enable=true or
-# oncall.initializedOnly=true). When on-call is disabled, the values in this
-# section are ignored and no Redis connection is attempted.
+# Versus uses Redis only for on-call (oncall.enable=true or
+# oncall.initializedOnly=true). The bundled Redis is deployed whenever
+# redis.enabled=true, even with on-call off, where it sits unused; with
+# on-call off and redis.enabled=false, no Redis is deployed or contacted.
 #
 # There are exactly TWO supported modes. Pick ONE:
 #
 #   1) Bundled Redis (recommended for getting started):
 #        redis.enabled: true
-#        redis.auth.password: "<your-password>"
-#      The chart deploys the Bitnami Redis subchart and the application
-#      automatically connects to "<release-name>-redis-master:6379".
-#      The externalRedis.* block is IGNORED in this mode.
+#      The chart runs one Redis pod (official redis image) with a Service
+#      named "<fullname>-redis". Its password is generated on the first
+#      install and kept on every upgrade, or read from redis.auth.password /
+#      redis.auth.existingSecret. The externalRedis.* block is IGNORED.
 #
 #   2) External Redis (production / shared Redis):
 #        redis.enabled: false
 #        externalRedis.host: "redis.my-namespace.svc.cluster.local"
 #        externalRedis.password: "<your-password>"
-#      The bundled Redis is NOT deployed; the application connects to the
-#      host/port you provide.
+#      No Redis is deployed; the application connects to the host/port you
+#      provide.
 #
 # Common pitfall: setting externalRedis.host while leaving redis.enabled=true
-# silently ignores externalRedis.* — the app talks to the bundled Redis.
+# fails the install, because externalRedis.* would be ignored.
 redis:
-  # Enable the bundled Redis subchart. Set to false to use externalRedis.
+  # Run the bundled Redis. Set to false to use externalRedis.
   enabled: false
 
-  # Authentication parameters for the built-in Redis (used only when enabled=true)
+  image:
+    repository: redis
+    tag: "7.4.12-alpine"
+    pullPolicy: IfNotPresent
+
   auth:
+    # Require a password. The Versus pod and the Redis probes read it from
+    # the Secret; it never appears in a command line.
     enabled: true
+    # Empty: generated on the first install and kept on upgrades. Set a value
+    # with --set-string at install time; do not commit it.
     password: ""
+    # Read the password from a Secret you create instead. The chart then
+    # creates no Redis Secret.
+    existingSecret: ""
+    existingSecretPasswordKey: "redis-password"
 
-  # Redis architecture choice
-  architecture: standalone
+  # On-call keeps its pending escalations in Redis. Without a volume they are
+  # lost when the Redis pod restarts.
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""   # "" → cluster default
+    # Bind to an existing PVC instead of creating one.
+    existingClaim: ""
 
-  # Redis master configuration
-  master:
-    persistence:
-      enabled: true
-      size: 8Gi
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+  # The official image runs as the redis user (uid 999, gid 1000).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+
+  # How long the Versus pod waits for the bundled Redis to answer before its
+  # init container gives up and the pod restarts.
+  waitTimeoutSeconds: 120
 
 # External Redis configuration (used only when redis.enabled=false)
 externalRedis:

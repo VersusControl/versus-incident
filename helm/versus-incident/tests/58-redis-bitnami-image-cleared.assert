@@ -1,0 +1,3 @@
+name: versus-test-versus-incident-redis$
+image: "redis:7\.4\.12-alpine"
+!bitnami

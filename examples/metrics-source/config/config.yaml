@@ -44,6 +44,8 @@ redis:
   password: ${REDIS_PASSWORD}
   db: 0
 
+# docker-compose.yml sets STORAGE_TYPE=postgres and POSTGRES_DSN, which
+# override this file backend.
 storage:
   type: file
   file:

@@ -1,0 +1,4 @@
+# EXPECT_FAIL: a Bitnami-style tag on the official image is refused.
+redis.image.tag="8.0.3-debian-12-r1" is a Bitnami Redis tag
+If your old release values set redis.image
+--set redis.image=null

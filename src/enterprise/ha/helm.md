@@ -2,148 +2,121 @@
 
 _Enterprise_
 
-Install the production Helm chart and turn high availability on with **one values
-file**. With `ha.enabled: true` the chart renders a **StatefulSet of replicas**
-sharing one Postgres; with the default (`ha.enabled: false`) it renders the
-single-instance **Deployment** unchanged — same chart, one switch.
+## Concept
 
-## What you'll need
+The Versus Helm chart runs a single replica by default. One values file,
+`values-ha.yaml`, turns it into an HA install: three Enterprise replicas in a
+StatefulSet, all on one Postgres, with a PodDisruptionBudget, a network policy
+and soft anti-affinity. See [High Availability](./overview.md) for how it
+works.
 
-| Item | Where it comes from |
-|---|---|
-| **Helm 3** + a cluster | `helm` ≥ 3 and `kubectl` access |
-| The **enterprise image** pullable by the cluster | `ghcr.io/versuscontrol/versus-enterprise` (private — `imagePullSecrets`) |
-| A **Versus Enterprise license** (`LICENSE_KEY`) | **required** — HA is license-gated; the chart refuses HA without one |
-| A **Postgres** the cluster can reach | one shared database for all replicas (managed Postgres recommended) |
+| | Default | With `values-ha.yaml` (`ha.enabled: true`) |
+|---|---|---|
+| Workload | Deployment | StatefulSet |
+| Replicas | 1 | `replicaCount` (3 in the file) |
+| Storage | `file` or `postgres` | `postgres` (required) |
+| License | optional | required |
 
-The chart lives at `versus-incident/helm/versus-incident` with an example
-overlay `values-ha.yaml`.
+## Example
 
-## Step 1 — Review `values-ha.yaml`
-
-`values-ha.yaml` is the HA overlay. It turns on the StatefulSet path, points at
-the enterprise image, and selects Postgres storage:
+`values-ha.yaml` lives in the chart folder,
+[`helm/versus-incident/values-ha.yaml`](https://github.com/VersusControl/versus-incident/blob/main/helm/versus-incident/values-ha.yaml):
 
 ```yaml
 replicaCount: 3
 
 image:
   repository: ghcr.io/versuscontrol/versus-enterprise
-  tag: dev            # used verbatim — set the tag you want to pin
+  tag: v1.0.0          # used as written; set the Enterprise tag you run
 
 ha:
-  enabled: true       # render the StatefulSet HA path (default false = Deployment)
+  enabled: true
 
 storage:
-  type: postgres      # required for >1 replica; the file backend refuses to start
+  type: postgres
   postgres:
-    dsn: ""                 # provide via --set (below) — do NOT commit a real DSN
-    dsnExistingSecret: ""   # …or reference your own Secret (key: postgres_dsn)
+    dsn: ""                 # pass with --set, or
+    dsnExistingSecret: ""   # name a Secret with the key postgres_dsn
 
 enterprise:
-  licenseKey: ""      # required — provide via --set or an existing Secret
-  existingSecret: ""  # …your own Secret (key: license_key)
+  licenseKey: ""      # pass with --set, or
+  existingSecret: ""  # name a Secret with the key license_key
 ```
 
-`ha.enabled: true` derives `STORAGE_TYPE=postgres` and wires each replica's
-`POD_NAME` (Downward API) + `INSTANCE_COUNT` (from `replicaCount`) for you. The
-hardening (securityContext, NetworkPolicy, PodDisruptionBudget, anti-affinity)
-and graceful-rollout probes come from the chart defaults.
+With `ha.enabled: true` the chart sets `POD_NAME` and `INSTANCE_COUNT` on every
+replica for you.
 
-## Step 2 — Install
+## Install
 
-Provide the license and the shared Postgres DSN. **Never
-commit a real key or DSN** — pass them at install time:
+You need Helm 3, Git, a cluster, and a Postgres the cluster can reach. The
+chart comes from the OCI registry; `values-ha.yaml` comes from the repository.
+Clone it and go into it:
 
 ```bash
-helm upgrade --install versus oci://ghcr.io/versuscontrol/charts/versus-incident \
-  -f versus-incident/helm/versus-incident/values-ha.yaml \
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Run the commands below from this `versus-incident` folder, the repository root:
+
+```bash
+export LICENSE_KEY=<your license key>
+
+helm upgrade --install versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
+  -f helm/versus-incident/values-ha.yaml \
   --set enterprise.licenseKey="$LICENSE_KEY" \
-  --set storage.postgres.dsn="postgres://versus:PASS@my-rds:5432/versus?sslmode=require"
+  --set storage.postgres.dsn="postgres://versus:<password>@<host>:5432/versus?sslmode=require"
 ```
 
-For GitOps / production, prefer **existing Secrets** over inline `--set` so no
-secret material lands in your release values:
+For GitOps, keep secrets out of your values and reference Secrets you created:
 
 ```bash
-helm upgrade --install versus oci://ghcr.io/versuscontrol/charts/versus-incident \
-  -f versus-incident/helm/versus-incident/values-ha.yaml \
+helm upgrade --install versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
+  -f helm/versus-incident/values-ha.yaml \
   --set enterprise.existingSecret=versus-license \
   --set storage.postgres.dsnExistingSecret=versus-pg
 ```
 
-`enterprise.existingSecret` must hold the key `license_key`;
-`storage.postgres.dsnExistingSecret` must hold the key `postgres_dsn`.
+`versus-license` must hold the key `license_key`, and `versus-pg` the key
+`postgres_dsn`.
 
-To **bring your own** enterprise encryption key, set
-`VERSUS_ENTERPRISE_SECRET_KEY` (the same value on every replica) via the chart's
-extra-env mechanism. Leave it unset to let Versus generate and converge the key
-automatically.
-
-## Step 3 — What success looks like
-
-The chart renders a StatefulSet plus a headless Service, a PodDisruptionBudget,
-a NetworkPolicy, and the license/DSN Secrets. Confirm the replicas are up:
+## What you see
 
 ```bash
-kubectl rollout status statefulset/versus
-kubectl get pods -l app.kubernetes.io/name=versus
-# versus-0, versus-1, versus-2 all Running / Ready
+kubectl rollout status statefulset/versus-incident
+kubectl get pods -l app.kubernetes.io/name=versus-incident
+for i in 0 1 2; do kubectl logs versus-incident-$i | grep "HA mode"; done
 ```
 
-**Each replica claims a distinct instance index:**
+The pods are `versus-incident-0`, `-1` and `-2`, and each logs its place:
+`instance 0 of 3`, `instance 1 of 3`, `instance 2 of 3`. Find the admin
+password with:
 
 ```bash
-for i in 0 1 2; do kubectl logs versus-$i | grep -E "HA mode|instance [0-9]+ of"; done
-# versus-0 -> "instance 0 of 3", and so on
+kubectl logs -l app.kubernetes.io/name=versus-incident --tail=-1 \
+  | grep -A6 "DEFAULT ADMIN CREDENTIALS"
 ```
 
-**Sessions and secrets converge** through the shared Postgres, so a login on one
-replica is valid on all — the Service can round-robin freely with no sticky
-sessions. Log in as the built-in admin `admin`; its password is printed once in
-the first-boot log (see [Getting Started](../getting-started.md)). See the
-[overview](./overview.md) for why.
+Sign in through your Ingress or a port-forward to the `versus-incident`
+Service. A sign-in works on every replica.
 
-## Single-instance vs HA
+Every replica needs outbound HTTPS to `versusincident.com` to renew the license
+key; allow it if you restrict egress.
 
-| | Default (`ha.enabled: false`) | HA (`ha.enabled: true`) |
-|---|---|---|
-| Workload | Deployment | StatefulSet |
-| Replicas | 1 | `replicaCount` (e.g. 3) |
-| Storage | `file` or `postgres` | `postgres` (required) |
-| License | optional | **required** |
-
-Switching `ha.enabled` is the only change needed to move between the two — the
-shared pod spec is identical.
+To bring your own encryption key, set `VERSUS_ENTERPRISE_SECRET_KEY` to the
+same value on every replica (see [High Availability](./overview.md#encryption-key)).
 
 ## Troubleshooting
 
-### Kubernetes change capture
-
-Projected `in_cluster` tokens from different Pods share capture only after
-cryptographic ServiceAccount-principal verification against the configured TLS
-API server. Check both replicas' effective `sync.capture.mode` and `reason`:
-unverified token-file or unsupported provider identities use demand mode, not
-continuous HA. This feature requires shared PostgreSQL; replica count alone is
-not proof of coordinated capture. See the connector's
-[capture identity and limitations](../../agent/kubernetes/configuration.md#continuous-capture-and-replica-identity).
-
-When moving from the old UUID-key capture version, do **not** use an overlapping
-rolling rollout: old and new key schemes can hold separate leases. Stop all old
-capture first, verify no old owner remains, then start the new continuous
-replicas and verify one key/owner. History is not automatically imported.
-Follow the [coordinated upgrade procedure](../../agent/kubernetes/configuration.md#coordinated-capture-key-upgrade).
-
 | Symptom | Likely cause |
 |---|---|
-| `helm install` / template fails complaining about a license | HA requires a license. Set `enterprise.licenseKey` or `enterprise.existingSecret`. |
-| Template fails complaining about storage | HA requires `storage.type: postgres` and a DSN. Set `storage.postgres.dsn` or `storage.postgres.dsnExistingSecret`. |
-| Pods `ImagePullBackOff` | The enterprise image is private — add `imagePullSecrets` to the chart values. |
-| You expected a StatefulSet but got a Deployment | `ha.enabled` is still `false`. Use `-f values-ha.yaml` (or `--set ha.enabled=true`). |
-| Image tag missing the leading `v` | When set, `image.tag` is used **verbatim** (so enterprise tags like `dev` work). For an OSS semver tag, include the leading `v` yourself; leave the tag empty to default to `v<appVersion>`. |
+| `ha.enabled=true is an ENTERPRISE capability and requires a license` | Set `enterprise.licenseKey` or `enterprise.existingSecret`. |
+| `storage.type=postgres requires a DSN` | Set `storage.postgres.dsn` or `storage.postgres.dsnExistingSecret`. |
+| A Deployment is created instead of a StatefulSet | `ha.enabled` is still `false`. Pass `-f helm/versus-incident/values-ha.yaml`. `--set ha.enabled=true` alone keeps the OSS image and one replica; without the file, also set `image.repository=ghcr.io/versuscontrol/versus-enterprise`, `image.tag` and `replicaCount`. |
+| `ImagePullBackOff` | Wrong `image.tag`, or the cluster needs `imagePullSecrets` for the registry. |
 
 ## See also
 
-- [High Availability overview](./overview.md)
+- [High Availability](./overview.md)
 - [HA on Docker Compose](./docker.md) · [HA on Kubernetes](./kubernetes.md)
-- [Helm Chart](../../configuration/helm.md) — the full chart reference.
+- [Helm Chart](../../configuration/helm.md): every chart value.

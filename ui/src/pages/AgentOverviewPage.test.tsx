@@ -32,7 +32,7 @@ beforeEach(() => {
   setViewport(false);
   vi.mocked(api.getAgentConfig).mockResolvedValue({ enable: true, mode: "detect", ai: { enable: false } } as AgentConfigView);
   vi.mocked(api.status).mockResolvedValue({ patterns: 7, dirty: false });
-  vi.mocked(api.shadowStats).mockResolvedValue({ events: 8, total_signals: 20, verdicts: { spike: 8 }, occurrences: 8 });
+  vi.mocked(api.shadowStats).mockResolvedValue({ events: 8, total_signals: 20, total_occurrences: 8, verdict_spike: 8, verdict_unknown: 0 });
   vi.mocked(api.detectStats).mockResolvedValue({ outcome_emitted: 6, outcome_cached: 2, verdict_spike: 3, severity_high: 4 });
   vi.mocked(api.listPatterns).mockResolvedValue([]);
   vi.mocked(api.listShadow).mockResolvedValue([]);

@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="448" viewBox="0 0 760 448" style="max-width:100%;height:auto" role="img" aria-label="Versus runs inside your Kubernetes cluster and reads the Kubernetes API read only, with get and list access and no Secrets; it maps the cluster into a Kubernetes dashboard with Overview, Topology, Timeline and changes, Helm releases, GitOps for Argo CD and Flux, and live logs; it detects issues such as crash loops, OOMKilled containers and stalled rollouts automatically, sends an issue alert to Slack or Teams with a link to the Timeline, and your on call routing pages the engineer on call">
+  <title>AIOps for Kubernetes</title>
+  <desc>Versus runs in your cluster with a read only role, get and list only and no Secrets, builds a Kubernetes dashboard of Overview, Topology, Timeline and changes, Helm releases, GitOps and live logs, detects issues automatically, and sends issue alerts to Slack or Teams and on to on call</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <symbol id="v" viewBox="24 18 64 55.1">
+      <path fill="#223947" fill-rule="evenodd" d="M53.55 23.74L56 27.98L58.45 23.74H77.96L74.71 29.38L65.76 44.89L62.51 50.52L59.25 56.16L56 61.79L52.75 56.16L49.5 50.52L37.29 29.38L34.04 23.74L30.78 18.11H24.28L27.53 23.74L30.78 29.38L46.24 56.16L52.75 67.42L56 73.06L59.25 67.42L62.51 61.79L65.76 56.16L69.01 50.52L81.21 29.38L84.47 23.74L87.72 18.11H50.3ZM47.04 23.74L43.79 18.11H37.29L40.54 23.74L43.79 29.38L52.75 44.89L56 50.52L59.25 44.89L62.51 39.25L68.2 29.38H61.7L59.25 33.62L56 39.25L50.3 29.38Z"/>
+    </symbol>
+  </defs>
+  <style>
+    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;fill:#000000}
+    .m{text-anchor:middle}
+    .name{font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .d{font-size:12px;fill:#5B6B78}
+    .dk{font-size:12px;fill:#12222F}
+    .e{font-size:12px;fill:#E51400}
+    .logo{font-weight:700;fill:#223947;letter-spacing:2.5px}
+    .btn{font-size:11px;font-weight:700;fill:#FFFFFF}
+    .grp{fill:none;stroke:#000000;stroke-width:1.5;stroke-dasharray:6 5}
+    .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
+    .chip{fill:#FFFFFF;stroke:#000000;stroke-width:1.5}
+    .flow{fill:none;stroke:#000000;stroke-width:2;marker-end:url(#a)}
+  </style>
+
+  <rect width="760" height="448" fill="#FFFFFF"/>
+
+  <!-- groups -->
+  <rect class="grp" x="16" y="44" width="204" height="359"/>
+  <rect class="grp" x="300" y="44" width="200" height="359"/>
+  <rect class="grp" x="560" y="196" width="184" height="150"/>
+
+  <!-- blocks -->
+  <rect class="blk" x="32" y="80" width="172" height="72" rx="10"/>
+  <rect class="blk" x="32" y="233" width="172" height="150" rx="10"/>
+  <use href="#v" x="86" y="249" width="64" height="55"/>
+
+  <rect class="chip" x="314" y="84" width="172" height="36" rx="6"/>
+  <rect class="chip" x="314" y="134" width="172" height="36" rx="6"/>
+  <rect class="chip" x="314" y="184" width="172" height="36" rx="6"/>
+  <rect class="chip" x="314" y="234" width="172" height="36" rx="6"/>
+  <rect class="chip" x="314" y="284" width="172" height="36" rx="6"/>
+  <rect class="chip" x="314" y="334" width="172" height="36" rx="6"/>
+
+  <rect class="sub" x="566" y="64" width="172" height="84" rx="10"/>
+
+  <rect x="574" y="228" width="156" height="104" rx="6" fill="#FFFFFF" stroke="#C3CED8"/>
+  <rect x="574" y="228" width="4" height="104" fill="#E51400"/>
+  <rect x="588" y="294" width="110" height="24" rx="4" fill="#007A5A"/>
+
+  <rect class="blk" x="566" y="380" width="172" height="48" rx="10"/>
+
+  <!-- arrows -->
+  <path class="flow" d="M118 152V227"/>
+  <path class="flow" d="M204 308H294"/>
+  <path class="flow" d="M500 106H560"/>
+  <path class="flow" d="M652 148V190"/>
+  <path class="flow" d="M652 346V374"/>
+
+  <!-- text -->
+  <text class="zone m" x="118" y="64">YOUR CLUSTER</text>
+  <text class="name m" x="118" y="108" style="font-size:16px">Kubernetes API</text>
+  <text class="d m" x="118" y="128">workloads, events, logs</text>
+
+  <text class="e" x="128" y="180">read only</text>
+  <text class="e" x="128" y="195">get and list</text>
+  <text class="e" x="128" y="210">no Secrets</text>
+
+  <text class="logo m" x="118" y="330">INCIDENT</text>
+  <text class="dk m" x="118" y="360">runs in your cluster</text>
+
+  <text class="e m" x="260" y="286">maps health</text>
+  <text class="e m" x="260" y="300">and changes</text>
+
+  <text class="zone m" x="400" y="64">KUBERNETES DASHBOARD</text>
+  <text class="m" x="400" y="107">Overview</text>
+  <text class="m" x="400" y="157">Topology</text>
+  <text class="m" x="400" y="207">Timeline and changes</text>
+  <text class="m" x="400" y="257">Helm releases</text>
+  <text class="m" x="400" y="307">GitOps: Argo CD, Flux</text>
+  <text class="m" x="400" y="357">Live logs</text>
+
+  <text class="e m" x="533" y="98">detects</text>
+
+  <text class="name m" x="652" y="92" style="font-size:16px">Issues found</text>
+  <text class="dk m" x="652" y="112">crash loops, OOMKilled,</text>
+  <text class="dk m" x="652" y="128">stalled rollouts</text>
+
+  <text class="e" x="662" y="174">issue alert</text>
+
+  <text class="zone m" x="652" y="216">SLACK OR TEAMS</text>
+  <text x="588" y="246" style="font-size:12px;font-weight:700;fill:#E51400">Critical issue</text>
+  <text class="name" x="588" y="264" style="font-size:14px">checkout</text>
+  <text class="d" x="588" y="282">CrashLoopBackOff</text>
+  <text class="btn m" x="643" y="310">Open Timeline</text>
+
+  <text class="e" x="644" y="366" text-anchor="end">on call routing</text>
+
+  <text class="name m" x="652" y="400" style="font-size:15px">On call</text>
+  <text class="d m" x="652" y="418">PagerDuty and more</text>
+</svg>

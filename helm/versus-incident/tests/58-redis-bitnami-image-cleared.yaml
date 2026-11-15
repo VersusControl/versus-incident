@@ -1,0 +1,14 @@
+# The way out of scenario 56. In an upgrade with --reset-then-reuse-values,
+# --set redis.image=null removes the stored override, so the chart default
+# image applies; these are the values the chart then receives. The leftover
+# global.security.allowInsecureImages is not read by this chart.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+global:
+  security:
+    allowInsecureImages: true

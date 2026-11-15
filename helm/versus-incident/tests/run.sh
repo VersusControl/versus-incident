@@ -24,12 +24,6 @@ if ! command -v helm >/dev/null 2>&1; then
   exit 2
 fi
 
-# Pull subchart deps once so `helm template` works offline.
-if [ ! -f "$CHART_DIR/Chart.lock" ] || [ ! -d "$CHART_DIR/charts" ] || [ -z "$(ls -A "$CHART_DIR/charts" 2>/dev/null)" ]; then
-  echo "==> helm dependency build"
-  helm dependency build "$CHART_DIR" >/dev/null
-fi
-
 pass=0
 fail=0
 failed_scenarios=()

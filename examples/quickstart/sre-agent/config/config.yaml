@@ -1,0 +1,102 @@
+# Versus config for the SRE agent quickstart.
+# Every ${VAR} is filled from the environment set in docker-compose.yml, so the
+# stack runs with no edits. Export a variable in your shell to change it.
+
+name: versus
+host: 0.0.0.0
+port: 3000
+
+gateway_secret: ${GATEWAY_SECRET}
+
+alert:
+  debug_body: false
+
+  slack:
+    enable: false # turned on by SLACK_ENABLE=true
+    token: ${SLACK_TOKEN}
+    channel_id: ${SLACK_CHANNEL_ID}
+    template_path: "config/slack_message.tmpl"
+
+queue:
+  enable: false
+
+oncall:
+  enable: false
+  initialized_only: false
+  wait_minutes: 0
+  provider: aws_incident_manager
+
+redis:
+  insecure_skip_verify: true
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+
+storage:
+  type: file
+  file:
+    max_incidents: 1000
+
+agent:
+  enable: true
+  # training | shadow | detect. Set by AGENT_MODE; the quickstart starts in
+  # training and you switch to detect once the catalog has learned the noise.
+  mode: ${AGENT_MODE}
+  poll_interval: 15s
+  lookback: 5m
+  batch_max: 5000
+
+  redaction:
+    enable: true
+    redact_ips: false
+
+  catalog:
+    persist_interval: 30s
+    # A pattern seen this many times counts as normal ("known"). Kept low so a
+    # few minutes of demo traffic is enough training.
+    auto_promote_after: 5
+    # A known pattern is flagged again when its rate jumps spike_z standard
+    # deviations above normal and the poll tick has at least
+    # spike_min_frequency matches. The floor is set high enough that the random
+    # demo traffic does not trip it.
+    spike_z: 3.0
+    spike_abs_ceiling: 0
+    spike_sustain_ticks: 1
+    spike_min_frequency: 20
+    spike_min_baseline_count: 20
+
+  miner:
+    similarity_threshold: 0.4
+    tree_depth: 4
+    max_children: 100
+
+  regex:
+    default_pattern: "(?i).*error.*"
+    rules:
+      - name: panic
+        pattern: "(?i)panic:"
+      - name: oom
+        pattern: "Out of memory"
+
+  # AI is optional. Detect mode raises templated incidents without it; set
+  # AGENT_AI_ENABLE=true and AGENT_AI_API_KEY to get AI-written findings.
+  ai:
+    enable: false
+    provider: openai
+    model: gpt-4o-mini
+    temperature: 0.2
+    max_tokens: 1024
+    max_calls_per_hour: 60
+    cache_ttl: "1h"
+
+  # A service seen for the first time is learned quietly for this long before
+  # it can raise incidents. Short here so the demo is quick.
+  new_service_grace: 1m
+
+  service_patterns:
+    - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'
+    - '(?i)\b(?:service|svc|app|component)\s*=\s*"?([A-Za-z0-9._-]+)'
+    - '(?i)"(?:service|svc|app|component)"\s*:\s*"([A-Za-z0-9._-]+)"'
+    - '([A-Za-z0-9._-]+)\[\d+\]:'
+    - '\[([A-Za-z0-9._-]+)\]'

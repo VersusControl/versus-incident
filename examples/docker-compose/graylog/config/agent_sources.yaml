@@ -6,7 +6,7 @@ sources:
       address: http://graylog:9000
       # Default admin credentials configured below in docker-compose.yml.
       username: admin
-      password: ${GRAYLOG_PASSWORD:-admin}
+      password: ${GRAYLOG_PASSWORD}
       query: "*"
       message_field: message
       severity_field: level

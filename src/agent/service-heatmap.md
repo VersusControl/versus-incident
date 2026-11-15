@@ -1,103 +1,102 @@
 # Service Heatmap
 
-Service Heatmap brings recent service evidence together without starting
-another source collection. Logs and Incidents provide a complete OSS
-view. Versus Enterprise can add supported metric and trace evidence.
+## Concept
 
-## Open Service Heatmap
+The **Service Heatmap** shows every service's recent health on one screen. It
+uses what the agent already collects: log events, new and spiking patterns, and
+open incidents for each service. It does not start any extra collection.
 
-1. Select **Agent Overview** in the app navigation.
-2. On mobile, select the **Services** tab.
-3. Find **Service Heatmap** immediately after the Agent runtime status.
+Each service gets a tile with its state, its recent log events and its active
+incidents:
 
-Service Heatmap is always enabled while the AI Agent runs.
+| State | When |
+|---|---|
+| **Degraded** | The service has an active incident. |
+| **Warning** | No incident, but recent logs show a new pattern, a spike, or error or warning lines. |
+| **Normal** | Nothing unusual in the window. |
 
-![Service Heatmap showing current service health and configured dependencies](../docs/images/service-health-overview.png)
+Services that need attention stand out, so you can see where to look first.
 
-## Find a service
+In OSS the heatmap is built from logs and incidents, and that view is complete
+on its own. _Enterprise_ adds latency, error rate, throughput and regression
+evidence from connected metric and trace sources.
 
-- Use **Find a service** to search by service or domain.
-- Use **Health state** to focus on services that need attention or have unknown
-  or stale evidence.
-- Use **Show data** to switch between **All data**, **Logs**, **Incidents**, and
-  any supported Enterprise measures available to you.
-- Use **Grid view** or **List view** without changing the underlying result.
+## Example
 
-Select a service to open its investigation drawer. **Overview** summarizes
-impact, evidence availability, observation times, logs, and incidents.
-**Signals** appears when supported metric or trace evidence is available.
-It lists the measure, source, operation when available, observation time, and
-freshness.
-**Logs** shows estimated event and pattern counts, new or unrecognized patterns,
-spikes, and the latest log observation.
+A release goes out at 14:00. At 14:06 you open the heatmap: most tiles are
+**Normal**, but `checkout-api` shows **Degraded** with one active incident, and
+`jobrunner` shows **Warning** with no incident yet. You open the `checkout-api`
+tile. The **Logs** view shows the new pattern behind the incident. Then you
+check `jobrunner`: a known error is spiking. You know which services to look
+at and what changed, before reading a single log line.
 
-When Versus can assess a regression, the drawer shows its score, heuristic
-confidence, and contributing evidence. A missing or withheld score is not zero
-and does not mean the service is healthy.
+## What you see in the UI
 
-## Evidence by edition
+Open **Agent Learning → Overview**. The Service Heatmap sits at the top of the
+page. On a phone, select the **Services** tab.
 
-OSS uses already-ingested logs, learned internal patterns, and Incidents.
-That log and internal result is complete and useful without metrics or traces.
-Counts marked with `~` are estimates for the selected evidence window, not
-lifetime totals.
+![Agent Learning → Overview with the Service Heatmap: 12 services, 2 need attention; checkout-api is Degraded with about 130 log events and 1 active incident, jobrunner is Warning with about 472 log events and no incident, the other services are Normal; above the tiles are the search box, the services and data filters, and grid and list views](../docs/images/sre-heatmap-ui-dark.png)
 
-Connect a supported log source once by following its UI guide:
-[File](./data-sources/file.md),
-[Elasticsearch](./data-sources/elasticsearch.md),
-[Loki](./data-sources/loki.md),
-[CloudWatch Logs](./data-sources/cloudwatch-logs.md),
-[Graylog](./data-sources/graylog.md),
-[Splunk](./data-sources/splunk.md), or
-[SigNoz Logs](./data-sources/signoz.md).
+| Control | What it does |
+|---|---|
+| **Search services** | Find a service by name. |
+| State filter | Show only the services that need attention, or all of them. |
+| Data filter | Switch between all data, logs, incidents and any _Enterprise_ measures available to you. |
+| **Grid** / **List** | Change the layout without changing the result. |
 
-When logs are not connected, select **Connect a log source** to open the
-[Data Sources guide](https://docs.versusincident.com/#/agent/data-sources).
+Select a service to open its details. **Overview** sums up impact, logs and
+incidents. **Logs** shows estimated event and pattern counts, new or
+unrecognized patterns, spikes, and the latest log time. Counts marked with `~`
+are estimates for the current window, not lifetime totals.
 
-With Versus Enterprise, the **Intelligence** entitlement, and a supported
-connected source, Service Heatmap can add:
+A missing measure is shown as missing, never as a healthy zero.
+
+### _Enterprise_ measures
+
+With Versus Enterprise and a connected metric or trace source, the details also
+show:
 
 | Measure | What it shows |
 |---|---|
-| **Latency P99** | Exact learned 99th-percentile latency, shown in milliseconds. |
+| **Latency P99** | The learned 99th-percentile latency in milliseconds. |
 | **Request error rate** | The latest learned request error ratio. |
-| **Throughput** | The latest learned request rate in requests per second. |
-| **Regression** | An adverse learned-baseline assessment based on supported latency or error-rate evidence. |
+| **Throughput** | The latest learned request rate per second. |
+| **Regression** | Whether latency or error rate has moved against its learned normal. |
 
-![Enterprise Service Health investigation showing latency and regression evidence](../docs/images/service-health-enterprise-detail.png)
+![Agent Learning → Overview with the Frequent log patterns block above the Service Heatmap, and the details panel open for the checkout service: Critical, latency P99 284.5 ms, regression assessment 82/100 driven by Latency P99 (POST /checkout), confidence 91%](../docs/images/service-health-enterprise-detail-dark.png)
 
-Service Heatmap withholds a measure when its meaning cannot be supported. It
-does not relabel P95 as P99, turn sampled traces into population rates or
-quantiles, fabricate Apdex, guess units, or show a healthy zero for missing
-evidence. Increased throughput alone is not an adverse regression.
+## Turn it on
 
-## Change collection timing
+The heatmap is always on while the agent runs. It needs at least one log source;
+see [Data Sources](./data-sources.md).
 
-Select **Settings**, select **System**, then find **Service Health Timing**.
+```yaml
+agent:
+  enable: true
+```
 
-| Setting | Default | Allowed values |
+To change how often it refreshes and how much recent data it looks at, open
+**Settings → General → Service health**. Changes apply on the next refresh, with
+no restart.
+
+| Setting | Default | Allowed |
 |---|---:|---:|
-| **Service Health Interval** | 60 seconds | 30-900 seconds |
-| **Service Health Window** | 300 seconds | 60-3600 seconds |
+| **Service Health Interval** | 60 seconds | 30–900 seconds |
+| **Service Health Window** | 300 seconds | 60–3600 seconds |
 
-The window must be greater than or equal to the interval. Select **Save** to
-apply changes on the next collection without restarting Versus. Read-only users
-can view the values but cannot save them.
+The window must be at least as long as the interval.
 
-![Service Health Timing controls on the System settings tab](../docs/images/service-health-timing-settings.png)
+## Troubleshooting
 
-## Troubleshoot
-
-| Visible symptom | Action in the UI |
+| You see | What to do |
 |---|---|
-| **Not connected** | Open **Settings** and connect a supported source if that evidence is needed. |
-| **Collecting** does not clear | Check source activity, then review **Service Health Timing**. |
-| **No data** or **No observations** | Confirm the source has traffic and the service is attributed correctly; widen **Service Health Window** when appropriate. |
-| **Partial** | Open the service drawer and inspect the unavailable source or measure while using the reported evidence. |
-| **Stale** | Check the last observation and source connection, then refresh. Treat the retained result as history. |
-| **Source error** | Review the source connection and select **Retry** where offered. |
-| **Restricted** | Ask an administrator to review access or continue with the evidence available to you. |
-| A measure is absent from **Show data** | Confirm the Enterprise **Intelligence** entitlement, source connection, and measure support. |
-| **Service topology is unavailable for this session.** | Ask an administrator to review access. |
-| **Showing saved topology. Refresh failed.** | Continue using the saved graph and select **Retry**. |
-| **No service dependencies are configured.** | Configure the static dependency graph through the existing Agent dependency tool. |
+| **Not connected** | Connect a log source in [Data Sources](./data-sources.md). |
+| **No data** | Check the source has traffic and the service name is detected correctly ([Service Detection](./service-detection.md)); widen the window if traffic is sparse. |
+| **Stale** | Check the source connection and refresh. |
+| A measure is missing from the data filter | Enterprise measures need a license and a connected metric or trace source. |
+
+## Reference
+
+- [Service Detection](./service-detection.md): how lines get a service name.
+- [Spike Detection](./spike.md): what counts as a spike.
+- [Configuration](./configuration.md): agent settings.

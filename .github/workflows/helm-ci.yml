@@ -32,11 +32,6 @@ jobs:
         with:
           version: v3.14.0
 
-      - name: Add chart dependencies
-        run: |
-          helm repo add bitnami https://charts.bitnami.com/bitnami
-          helm dependency build helm/versus-incident
-
       - name: helm lint
         run: |
           helm lint helm/versus-incident

@@ -27,6 +27,24 @@ services:
     volumes:
       - redis-tls:/tls
 
+  # One-shot: prepare the runtime log folder ./local/logs (ignored by git, so
+  # the demo traffic and the agent's read cursor never dirty the checkout),
+  # with an empty app.log the host user can append to with
+  # scripts/run_noisy_logs.sh.
+  sample-log-init:
+    image: alpine:3.20
+    container_name: versus-file-sample-log-init
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        touch /runtime/app.log
+        chmod 0777 /runtime
+        chmod 0666 /runtime/app.log
+    volumes:
+      - ./local/logs:/runtime
+
   redis:
     image: redis:7-alpine
     container_name: versus-file-redis
@@ -67,13 +85,15 @@ services:
       retries: 5
 
   versus:
-    image: ghcr.io/versuscontrol/versus-incident:latest
+    image: ${VERSUS_IMAGE:-ghcr.io/versuscontrol/versus-incident:latest}
     container_name: versus-file
     depends_on:
       redis:
         condition: service_healthy
+      sample-log-init:
+        condition: service_completed_successfully
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
       REDIS_HOST: redis
@@ -92,11 +112,11 @@ services:
       AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
     volumes:
       - ./config:/app/config:ro
-      - ./logs:/var/log/sample
+      - ./local/logs:/var/log/sample
       - versus-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5

@@ -146,8 +146,9 @@ func TestSpikeBaselineModeFireHold(t *testing.T) {
 }
 
 // TestFoldBaselineAvg proves the cumulative arithmetic mean is folded correctly
-// and incrementally: three ticks at 1/s, 2/s, 3/s leave baseline_avg at their
-// arithmetic mean (2.0), and its fold count equals the total seasonal
+// and incrementally: after a first tick at 1/s, ticks at 2/s, 3/s, 4/s leave
+// baseline_avg at their arithmetic mean (3.0) — the first tick only stands in
+// until a second arrives — and the fold count equals the total seasonal
 // observation count.
 func TestFoldBaselineAvg(t *testing.T) {
 	c, err := LoadCatalog(storage.NewMemory())
@@ -156,15 +157,122 @@ func TestFoldBaselineAvg(t *testing.T) {
 	}
 	c.SetBaselineFold(resolveSpikeParams(config.AgentCatalogConfig{}, 30).fold())
 
-	for _, tickCount := range []int{30, 60, 90} { // rates 1/s, 2/s, 3/s at a 30s poll
+	c.Upsert("k", "tmpl", "src", 30, 0.2, "default", "") // 1/s at a 30s poll
+	if got := c.Get("k").BaselineAvg; math.Abs(got-1.0) > 1e-9 {
+		t.Fatalf("BaselineAvg after the first tick = %v, want 1.0", got)
+	}
+	for _, tickCount := range []int{60, 90, 120} { // rates 2/s, 3/s, 4/s
 		c.Upsert("k", "tmpl", "src", tickCount, 0.2, "default", "")
 	}
 
 	p := c.Get("k")
-	if got := p.BaselineAvg; math.Abs(got-2.0) > 1e-9 {
-		t.Fatalf("BaselineAvg = %v, want 2.0 (mean of 1,2,3)", got)
+	if got := p.BaselineAvg; math.Abs(got-3.0) > 1e-9 {
+		t.Fatalf("BaselineAvg = %v, want 3.0 (mean of 2,3,4)", got)
 	}
-	if n := seasonalCount(p.Seasonal); n != 3 {
-		t.Fatalf("seasonal fold count = %d, want 3 (one per accepted tick)", n)
+	if n := seasonalCount(p.Seasonal); n != 4 {
+		t.Fatalf("seasonal fold count = %d, want 4 (one per accepted tick)", n)
+	}
+}
+
+// A first tick that reads a whole lookback window (a burst of history in one
+// tick) must not freeze the learned rate: later steady ticks have to pull the
+// baseline down to the real rate instead of being held out as outliers.
+func TestFoldBaselineConvergesAfterBackfillFirstTick(t *testing.T) {
+	c, err := LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	c.SetBaselineFold(resolveSpikeParams(config.AgentCatalogConfig{}, 30).fold())
+
+	c.Upsert("k", "tmpl", "src", 100, 0.2, "default", "") // 5 minutes of history: 3.33/s
+	for i := 0; i < 30; i++ {
+		c.Upsert("k", "tmpl", "src", 15, 0.2, "default", "") // steady 0.5/s
+	}
+
+	p := c.Get("k")
+	if got := p.BaselineFrequency; math.Abs(got-0.5) > 0.05 {
+		t.Fatalf("BaselineFrequency = %v after 30 steady ticks, want ≈ 0.5 (the steady rate)", got)
+	}
+	if got := p.BaselineAvg; math.Abs(got-0.5) > 1e-9 {
+		t.Fatalf("BaselineAvg = %v after 30 steady ticks, want 0.5 (the burst left out)", got)
+	}
+}
+
+// The warm-up before the hold-out applies without seasonal buckets too.
+func TestFoldBaselineConvergesAfterBackfillFirstTickWithoutSeasonal(t *testing.T) {
+	c, err := LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	c.SetBaselineFold(BaselineFold{PollSeconds: 30, RejectZ: 3, MinBaselineCount: 20, MinBucketSamples: 5})
+
+	c.Upsert("k", "tmpl", "src", 100, 0.2, "default", "")
+	for i := 0; i < 30; i++ {
+		c.Upsert("k", "tmpl", "src", 15, 0.2, "default", "")
+	}
+	if got := c.Get("k").BaselineFrequency; math.Abs(got-0.5) > 0.05 {
+		t.Fatalf("BaselineFrequency = %v after 30 steady ticks, want ≈ 0.5", got)
+	}
+
+	before := c.Get("k").BaselineFrequency
+	c.Upsert("k", "tmpl", "src", 3000, 0.2, "default", "")
+	if after := c.Get("k").BaselineFrequency; after != before {
+		t.Fatalf("BaselineFrequency moved %v → %v on a burst after warm-up; want it held out", before, after)
+	}
+}
+
+// Once the baseline has warmed up on steady ticks, a real burst is still held
+// out of the global fold.
+func TestFoldBaselineStillHoldsOutBurstAfterWarmUp(t *testing.T) {
+	c, err := LoadCatalog(storage.NewMemory())
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	c.SetBaselineFold(resolveSpikeParams(config.AgentCatalogConfig{}, 30).fold())
+
+	for i := 0; i < 20; i++ {
+		c.Upsert("k", "tmpl", "src", 14+i%3, 0.2, "default", "") // ≈ 0.5/s with a little wobble
+	}
+	before := c.Get("k").BaselineFrequency
+	c.Upsert("k", "tmpl", "src", 3000, 0.2, "default", "") // 100/s burst
+	if after := c.Get("k").BaselineFrequency; after != before {
+		t.Fatalf("BaselineFrequency moved %v → %v on a burst after warm-up; want it held out", before, after)
+	}
+}
+
+// Deleting or resetting a pattern clears its warm-up, so relearning it under
+// the same ID after a backfill first tick still converges instead of holding
+// every steady tick out against the burst seed.
+func TestFoldBaselineRelearnAfterDeleteRestartsWarmUp(t *testing.T) {
+	for _, clear := range []struct {
+		name string
+		run  func(c *Catalog)
+	}{
+		{"delete", func(c *Catalog) { c.Delete("k") }},
+		{"reset", func(c *Catalog) {
+			if _, err := c.ResetPatterns(); err != nil {
+				t.Fatalf("ResetPatterns: %v", err)
+			}
+		}},
+	} {
+		t.Run(clear.name, func(t *testing.T) {
+			c, err := LoadCatalog(storage.NewMemory())
+			if err != nil {
+				t.Fatalf("LoadCatalog: %v", err)
+			}
+			c.SetBaselineFold(BaselineFold{PollSeconds: 30, RejectZ: 3, MinBaselineCount: 20, MinBucketSamples: 5})
+			for i := 0; i < 10; i++ {
+				c.Upsert("k", "tmpl", "src", 15, 0.2, "default", "")
+			}
+			clear.run(c)
+
+			c.Upsert("k", "tmpl", "src", 100, 0.2, "default", "") // backfill burst: 3.33/s
+			for i := 0; i < 30; i++ {
+				c.Upsert("k", "tmpl", "src", 15, 0.2, "default", "")
+			}
+			if got := c.Get("k").BaselineFrequency; math.Abs(got-0.5) > 0.05 {
+				t.Fatalf("BaselineFrequency = %v after relearning, want ≈ 0.5", got)
+			}
+		})
 	}
 }

@@ -263,3 +263,134 @@ pod checksum annotation see the same random value within one render.
 {{- index $.Values "__generatedGatewaySecret" -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Bundled Redis. A single Redis pod in the release for on-call state, separate
+from the Versus pods: its own name label keeps it out of the Versus Service,
+Deployment and PodDisruptionBudget selectors. Every helper reads the redis
+values nil-safely, so values carried over from an older release that lack a
+nested block still render (or fail with validateRedis's message).
+*/}}
+{{- define "versus-incident.redisFullname" -}}
+{{- printf "%s-redis" (include "versus-incident.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "versus-incident.redisSelectorLabels" -}}
+app.kubernetes.io/name: {{ printf "%s-redis" (include "versus-incident.name" .) | trunc 63 | trimSuffix "-" }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: redis
+{{- end -}}
+
+{{- define "versus-incident.redisLabels" -}}
+helm.sh/chart: {{ include "versus-incident.chart" . }}
+{{ include "versus-incident.redisSelectorLabels" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end -}}
+
+{{- define "versus-incident.redisImage" -}}
+{{- $image := (.Values.redis | default dict).image | default dict -}}
+{{- printf "%s:%s" ($image.repository | default "redis") (required "redis.image.tag is required for the bundled Redis" $image.tag) -}}
+{{- end -}}
+
+{{- define "versus-incident.redisImagePullPolicy" -}}
+{{- ((.Values.redis | default dict).image | default dict).pullPolicy | default "IfNotPresent" -}}
+{{- end -}}
+
+{{/*
+"true" unless redis.auth.enabled is explicitly false: a missing value keeps
+the password on.
+*/}}
+{{- define "versus-incident.redisAuthEnabled" -}}
+{{- $auth := (.Values.redis | default dict).auth | default dict -}}
+{{- if ne (toString $auth.enabled) "false" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+"true" unless redis.persistence.enabled is explicitly false.
+*/}}
+{{- define "versus-incident.redisPersistenceEnabled" -}}
+{{- $persistence := (.Values.redis | default dict).persistence | default dict -}}
+{{- if ne (toString $persistence.enabled) "false" -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Whether the Versus pod talks to the bundled Redis: on-call uses Redis, and
+the bundled Redis is the one selected.
+*/}}
+{{- define "versus-incident.bundledRedisInUse" -}}
+{{- if and (.Values.redis | default dict).enabled (or .Values.oncall.enable .Values.oncall.initializedOnly) -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Secret holding the bundled Redis password: the user's redis.auth.existingSecret,
+or the chart's <fullname>-redis Secret.
+*/}}
+{{- define "versus-incident.redisSecretName" -}}
+{{- $auth := (.Values.redis | default dict).auth | default dict -}}
+{{- $auth.existingSecret | default (include "versus-incident.redisFullname" .) -}}
+{{- end -}}
+
+{{- define "versus-incident.redisSecretKey" -}}
+{{- $auth := (.Values.redis | default dict).auth | default dict -}}
+{{- if $auth.existingSecret -}}
+{{- $auth.existingSecretPasswordKey | default "redis-password" -}}
+{{- else -}}
+redis-password
+{{- end -}}
+{{- end -}}
+
+{{/*
+Base64 password for the chart's Redis Secret: the user's redis.auth.password,
+the one kept from the previous release, or a newly generated one. Generated
+once per render so every template sees the same value.
+*/}}
+{{- define "versus-incident.redisPasswordData" -}}
+{{- $auth := (.Values.redis | default dict).auth | default dict -}}
+{{- if $auth.password -}}
+{{- $auth.password | b64enc -}}
+{{- else -}}
+{{- if not (hasKey $.Values "__generatedRedisPassword") -}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace (include "versus-incident.redisFullname" .) -}}
+{{- $stored := "" -}}
+{{- if $existing -}}
+{{- $stored = index ($existing.data | default dict) "redis-password" | default "" -}}
+{{- end -}}
+{{- if not $stored -}}
+{{- $stored = randAlphaNum 64 | sha256sum | trunc 48 | b64enc -}}
+{{- end -}}
+{{- $_ := set $.Values "__generatedRedisPassword" $stored -}}
+{{- end -}}
+{{- index $.Values "__generatedRedisPassword" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Pod annotation value that changes whenever the bundled Redis password does,
+so the Redis pod and the Versus pods restart together and never hold
+different passwords. With redis.auth.existingSecret the chart cannot read
+the password, so it follows the Secret reference instead.
+*/}}
+{{- define "versus-incident.redisPasswordChecksum" -}}
+{{- $auth := (.Values.redis | default dict).auth | default dict -}}
+{{- if not (include "versus-incident.redisAuthEnabled" .) -}}
+{{- "no-auth" | sha256sum -}}
+{{- else if $auth.existingSecret -}}
+{{- printf "%s/%s" (include "versus-incident.redisSecretName" .) (include "versus-incident.redisSecretKey" .) | sha256sum -}}
+{{- else -}}
+{{- include "versus-incident.redisPasswordData" . | sha256sum -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+REDISCLI_AUTH for redis-cli in the Redis probes and the Versus init wait, so
+the password never appears in a command line.
+*/}}
+{{- define "versus-incident.redisCliAuthEnv" -}}
+{{- if include "versus-incident.redisAuthEnabled" . -}}
+- name: REDISCLI_AUTH
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "versus-incident.redisSecretName" . }}
+      key: {{ include "versus-incident.redisSecretKey" . }}
+{{- end }}
+{{- end -}}

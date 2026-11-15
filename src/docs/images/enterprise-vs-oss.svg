@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="524" viewBox="0 0 760 524" style="max-width:100%;height:auto" role="img" aria-label="Two cards side by side, joined by an arrow with a key labelled one license key; the OSS card, the versus-incident image with no license key, includes log sources File, Loki, Elasticsearch, Splunk, Graylog, CloudWatch Logs and SigNoz logs, the Training, Shadow and Detect modes, AI Chat and Analyze, webhook alerts and templates, channels and on call, the Kubernetes connector, and a single instance; the Enterprise card, the versus-enterprise image plus a license key, has everything in OSS plus metrics from Prometheus, CloudWatch and SigNoz, traces from Tempo and SigNoz, SLI and SLO with burn alerts, alert fatigue, SSO and roles, high availability, and runtime mode, AI key and channels set from the UI">
+  <title>Versus OSS and Versus Enterprise</title>
+  <desc>Left: what the OSS image includes; right: the Enterprise image does everything in OSS, plus metrics, traces, SLI and SLO, alert fatigue, SSO and roles, high availability and settings from the UI; one license key turns them on</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f17{font-size:17px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .row{fill:#BACFE3}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="524" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">Enterprise is Versus with a license key</text>
+  <text x="24" y="64" class="f13 sec">The Enterprise image does everything the OSS image does</text>
+
+  <!-- cards -->
+  <rect x="20" y="84" width="300" height="420" rx="12" fill="#FFFFFF" stroke="#C3CED8" stroke-width="2"/>
+  <rect x="440" y="84" width="300" height="420" rx="12" fill="#FFFFFF" stroke="#12222F" stroke-width="2"/>
+
+  <!-- OSS card -->
+  <text x="36" y="114" class="f17 b nm">OSS</text>
+  <text x="36" y="136" class="c f11">ghcr.io/versuscontrol/versus-incident</text>
+  <text x="36" y="154" class="f12 sec">No license key</text>
+  <path d="M36 166.5H304M36 260.5H304M36 300.5H304M36 340.5H304M36 380.5H304M36 420.5H304M36 460.5H304" fill="none" stroke="#C3CED8"/>
+  <text x="36" y="188" class="f13 b sec">Included</text>
+
+  <text x="36" y="214" class="f13 b nm">Log sources</text>
+  <text x="36" y="232" class="f11 sec">File, Loki, Elasticsearch, Splunk,</text>
+  <text x="36" y="247" class="f11 sec">Graylog, CloudWatch Logs, SigNoz logs</text>
+  <text x="36" y="285" class="f13 nm">Training, Shadow, Detect</text>
+  <text x="36" y="325" class="f13 nm">AI Chat and Analyze</text>
+  <text x="36" y="365" class="f13 nm">Webhook alerts and templates</text>
+  <text x="36" y="405" class="f13 nm">Channels and on call</text>
+  <text x="36" y="445" class="f13 nm">Kubernetes connector</text>
+  <text x="36" y="485" class="f13 nm">Single instance</text>
+
+  <!-- Enterprise card -->
+  <text x="456" y="114" class="f17 b nm">Enterprise</text>
+  <text x="456" y="136" class="c f11">ghcr.io/versuscontrol/versus-enterprise</text>
+  <text x="456" y="154" class="f12 sec">Plus a license key</text>
+  <path d="M456 166.5H724" fill="none" stroke="#C3CED8"/>
+  <text x="456" y="188" class="f13 b nm">Everything in OSS, plus</text>
+
+  <rect class="row" x="456" y="198" width="268" height="44" rx="8"/>
+  <rect class="row" x="456" y="248" width="268" height="44" rx="8"/>
+  <rect class="row" x="456" y="298" width="268" height="32" rx="8"/>
+  <rect class="row" x="456" y="336" width="268" height="32" rx="8"/>
+  <rect class="row" x="456" y="374" width="268" height="32" rx="8"/>
+  <rect class="row" x="456" y="412" width="268" height="32" rx="8"/>
+  <rect class="row" x="456" y="450" width="268" height="44" rx="8"/>
+
+  <text x="470" y="216" class="f13 b nm">Metrics</text>
+  <text x="470" y="233" class="f11 nm">Prometheus, CloudWatch, SigNoz</text>
+  <text x="470" y="266" class="f13 b nm">Traces</text>
+  <text x="470" y="283" class="f11 nm">Tempo, SigNoz</text>
+  <text x="470" y="319" class="f13 b nm">SLI/SLO and burn alerts</text>
+  <text x="470" y="357" class="f13 b nm">Alert fatigue</text>
+  <text x="470" y="395" class="f13 b nm">SSO and roles</text>
+  <text x="470" y="433" class="f13 b nm">High availability</text>
+  <text x="470" y="468" class="f13 b nm">Settings from the UI</text>
+  <text x="470" y="485" class="f11 nm">Runtime mode, AI key and channels</text>
+
+  <!-- license key -->
+  <circle cx="370" cy="298" r="9" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <path d="M379 298H398M392 298V305M398 298V304" fill="none" stroke="#000000" stroke-width="2.5"/>
+  <text x="380" y="352" class="f12 b nm mid">one license key</text>
+
+  <!-- flow -->
+  <path class="flow" d="M326 330H433" marker-end="url(#a)"/>
+</svg>

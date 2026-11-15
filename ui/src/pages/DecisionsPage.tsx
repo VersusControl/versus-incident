@@ -81,12 +81,14 @@ export function DecisionsPage() {
   // a partial (shadow-only) count.
   const spikeReady = shadowStats.data != null && detectStats.data != null;
   const spikeCount =
-    (shadowStats.data?.verdicts?.spike ?? 0) +
+    (shadowStats.data?.verdict_spike ?? 0) +
     (detectStats.data?.["verdict_spike"] ?? 0);
+  // Detect decisions are counted neutrally: with AI off the agent emits
+  // templated alerts and makes no model call, so "AI calls" would overstate.
   const subtitle =
     tab === "detect"
       ? detectStats.data
-        ? `${detectStats.data.events ?? 0} AI calls audited`
+        ? `${detectStats.data.events ?? 0} decisions audited`
         : undefined
       : tab === "spike"
         ? spikeReady
@@ -940,7 +942,7 @@ function ShadowTab() {
   }, [events.data, filter]);
 
   const verdictCount = (v: "spike" | "unknown") =>
-    stats.data ? ` (${stats.data.verdicts?.[v] ?? 0})` : "";
+    stats.data ? ` (${stats.data[`verdict_${v}`] ?? 0})` : "";
 
   return (
     <>

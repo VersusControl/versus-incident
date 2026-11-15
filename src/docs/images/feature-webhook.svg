@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="480" viewBox="0 0 760 480" style="max-width:100%;height:auto" role="img" aria-label="Your alert tools, Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit and your own scripts, POST a webhook to Versus, which renders your custom template and sends the alert to your channels such as Slack, Teams, Telegram and Email; clicking ACK in the message stops on call, and with no ACK Versus escalates to on call through PagerDuty, AWS Incident Manager, incident.io or ServiceNow; with Enterprise Alert Fatigue, repeats go to a separate fatigue channel while critical and high alerts always page">
+  <title>Webhook alerts with Versus</title>
+  <desc>Alert tools POST a webhook to Versus, Versus applies your template and sends the alert to Slack, Teams, Telegram, Email and more, an ACK click stops on call, no ACK escalates to PagerDuty, AWS Incident Manager, incident.io or ServiceNow, and Enterprise Alert Fatigue sends repeats to a separate fatigue channel</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <symbol id="v" viewBox="24 18 64 55.1">
+      <path fill="#223947" fill-rule="evenodd" d="M53.55 23.74L56 27.98L58.45 23.74H77.96L74.71 29.38L65.76 44.89L62.51 50.52L59.25 56.16L56 61.79L52.75 56.16L49.5 50.52L37.29 29.38L34.04 23.74L30.78 18.11H24.28L27.53 23.74L30.78 29.38L46.24 56.16L52.75 67.42L56 73.06L59.25 67.42L62.51 61.79L65.76 56.16L69.01 50.52L81.21 29.38L84.47 23.74L87.72 18.11H50.3ZM47.04 23.74L43.79 18.11H37.29L40.54 23.74L43.79 29.38L52.75 44.89L56 50.52L59.25 44.89L62.51 39.25L68.2 29.38H61.7L59.25 33.62L56 39.25L50.3 29.38Z"/>
+    </symbol>
+  </defs>
+  <style>
+    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;fill:#000000}
+    .m{text-anchor:middle}
+    .name{font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .d{font-size:12px;fill:#5B6B78}
+    .e{font-size:12px;fill:#E51400}
+    .logo{font-weight:700;fill:#223947;letter-spacing:2.5px}
+    .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;fill:#12222F}
+    .btn{font-size:11px;font-weight:700;fill:#FFFFFF}
+    .grp{fill:none;stroke:#000000;stroke-width:1.5;stroke-dasharray:6 5}
+    .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+    .opt{fill:#FFFFFF;stroke:#000000;stroke-width:2;stroke-dasharray:6 4}
+    .chip{fill:#FFFFFF;stroke:#000000;stroke-width:1.5}
+    .flow{fill:none;stroke:#000000;stroke-width:2;marker-end:url(#a)}
+    .dash{stroke-dasharray:6 4}
+  </style>
+
+  <rect width="760" height="480" fill="#FFFFFF"/>
+
+  <!-- groups -->
+  <rect class="grp" x="16" y="44" width="164" height="256"/>
+  <rect class="grp" x="560" y="44" width="184" height="256"/>
+
+  <!-- blocks -->
+  <rect class="chip" x="28" y="76" width="140" height="28" rx="6"/>
+  <rect class="chip" x="28" y="112" width="140" height="28" rx="6"/>
+  <rect class="chip" x="28" y="148" width="140" height="28" rx="6"/>
+  <rect class="chip" x="28" y="184" width="140" height="28" rx="6"/>
+  <rect class="chip" x="28" y="220" width="140" height="28" rx="6"/>
+  <rect class="chip" x="28" y="256" width="140" height="28" rx="6"/>
+
+  <rect class="blk" x="280" y="86" width="160" height="172" rx="10"/>
+  <rect x="300" y="100" width="120" height="30" rx="6" fill="#FFFFFF" stroke="#000000" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <use href="#v" x="328" y="146" width="64" height="55"/>
+
+  <rect x="574" y="116" width="156" height="164" rx="6" fill="#FFFFFF" stroke="#C3CED8"/>
+  <rect x="574" y="116" width="4" height="164" fill="#E51400"/>
+  <rect x="588" y="238" width="128" height="26" rx="4" fill="#007A5A"/>
+
+  <rect class="opt" x="16" y="360" width="220" height="100" rx="10"/>
+  <rect x="154" y="373" width="70" height="18" rx="9" fill="#F2F5F8" stroke="#C3CED8"/>
+
+  <rect class="blk" x="250" y="360" width="494" height="100" rx="10"/>
+  <rect class="chip" x="266" y="396" width="108" height="48" rx="6"/>
+  <rect class="chip" x="384" y="396" width="108" height="48" rx="6"/>
+  <rect class="chip" x="502" y="396" width="108" height="48" rx="6"/>
+  <rect class="chip" x="620" y="396" width="108" height="48" rx="6"/>
+
+  <!-- arrows -->
+  <path class="flow" d="M180 172H274"/>
+  <path class="flow" d="M440 140H554"/>
+  <path class="flow" d="M560 220H446"/>
+  <path class="flow" d="M360 258V354"/>
+  <path class="flow dash" d="M300 258V330H126V354"/>
+
+  <!-- text -->
+  <text class="zone m" x="98" y="64">YOUR ALERT TOOLS</text>
+  <text class="m" x="98" y="95">Alertmanager</text>
+  <text class="m" x="98" y="131">Grafana</text>
+  <text class="m" x="98" y="167">Sentry</text>
+  <text class="m" x="98" y="203">CloudWatch SNS</text>
+  <text class="m" x="98" y="239">FluentBit</text>
+  <text class="m" x="98" y="275">Your scripts</text>
+
+  <text class="e m" x="230" y="164">POST webhook</text>
+
+  <text class="m" x="360" y="120">Your template</text>
+  <text class="logo m" x="360" y="226">INCIDENT</text>
+
+  <text class="e m" x="500" y="132">Send alert</text>
+  <text class="e m" x="500" y="196">ACK clicked:</text>
+  <text class="e m" x="500" y="210">stop on call</text>
+
+  <text class="zone m" x="652" y="64">YOUR CHANNELS</text>
+  <text class="m" x="652" y="86">Slack, Teams, Telegram,</text>
+  <text class="m" x="652" y="102">Email and more</text>
+  <text x="588" y="138" style="font-size:12px;font-weight:700;fill:#E51400">CRITICAL alert</text>
+  <text class="name" x="588" y="158" style="font-size:14px">PostgresqlDown</text>
+  <text class="d" x="588" y="182">Instance:</text>
+  <text class="c" x="588" y="198">postgresql-prod-01</text>
+  <text class="d" x="588" y="220">Status: firing</text>
+  <text class="btn m" x="652" y="255">Acknowledge Alert</text>
+
+  <text class="e" x="370" y="312">No ACK: escalate to on call</text>
+  <text class="e m" x="213" y="322">Repeats</text>
+
+  <text class="name" x="32" y="386" style="font-size:16px">Alert Fatigue</text>
+  <text class="m" x="189" y="386" style="font-size:10px;font-weight:700;fill:#5B6B78">Enterprise</text>
+  <text class="d" x="32" y="410">Repeats go to a separate</text>
+  <text class="d" x="32" y="426">fatigue channel</text>
+  <text class="d" x="32" y="446">Critical and high always page</text>
+
+  <text class="zone m" x="497" y="382">ESCALATE TO ON CALL</text>
+  <text class="m" x="320" y="425">PagerDuty</text>
+  <text class="m" x="438" y="416">AWS Incident</text>
+  <text class="m" x="438" y="432">Manager</text>
+  <text class="m" x="556" y="425">incident.io</text>
+  <text class="m" x="674" y="425">ServiceNow</text>
+</svg>

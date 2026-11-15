@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" viewBox="0 0 760 430" style="max-width:100%;height:auto" role="img" aria-label="On the left, your backends: log backends Loki, Elasticsearch, Graylog, Splunk, SigNoz, CloudWatch Logs and file, and with Enterprise, metrics from Prometheus and CloudWatch Metrics and traces from Tempo and SigNoz; in the middle, Versus reads them read only on a schedule, then learns what normal looks like, its patterns and normal rates; on the right, when something is new or unexpected, a new pattern or a lasting change in a normal rate, Versus raises one incident, WARN and open, Anomaly: checkout-api via loki:checkout-logs, sent to your channels Slack, Teams and Email">
+  <title>Versus reads the backends you already have</title>
+  <desc>Left: log backends, and Enterprise metric and trace backends; middle: Versus reads them read only on a schedule and learns normal patterns and rates; right: something new or unexpected becomes one incident for checkout-api, sent to Slack, Teams and Email</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f14{font-size:14px}.f17{font-size:17px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}.amb{fill:#B54708}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .ch{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+      .chip{fill:#FFFFFF;stroke:#9AA9B6;stroke-width:1.5}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="430" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">Versus reads the backends you already have</text>
+  <text x="24" y="64" class="f13 sec">It learns what normal looks like and raises one incident when something is new</text>
+
+  <!-- panels -->
+  <rect x="20" y="84" width="252" height="326" rx="12" fill="#F2F5F8"/>
+  <rect x="506" y="84" width="234" height="326" rx="12" fill="#FFFFFF" stroke="#BACFE3" stroke-width="2"/>
+
+  <!-- LEFT: your backends -->
+  <text x="36" y="108" class="zone">YOUR BACKENDS</text>
+  <text x="36" y="132" class="f12 b nm">Logs</text>
+  <rect class="chip" x="36" y="140" width="44" height="24" rx="12"/>
+  <rect class="chip" x="86" y="140" width="104" height="24" rx="12"/>
+  <rect class="chip" x="36" y="170" width="64" height="24" rx="12"/>
+  <rect class="chip" x="106" y="170" width="58" height="24" rx="12"/>
+  <rect class="chip" x="170" y="170" width="58" height="24" rx="12"/>
+  <rect class="chip" x="36" y="200" width="118" height="24" rx="12"/>
+  <rect class="chip" x="160" y="200" width="44" height="24" rx="12"/>
+  <text x="58" y="156" class="f12 nm mid">Loki</text>
+  <text x="138" y="156" class="f12 nm mid">Elasticsearch</text>
+  <text x="68" y="186" class="f12 nm mid">Graylog</text>
+  <text x="135" y="186" class="f12 nm mid">Splunk</text>
+  <text x="199" y="186" class="f12 nm mid">SigNoz</text>
+  <text x="95" y="216" class="f12 nm mid">CloudWatch Logs</text>
+  <text x="182" y="216" class="f12 nm mid">file</text>
+
+  <line x1="36" y1="238" x2="256" y2="238" stroke="#C3CED8"/>
+  <rect x="36" y="250" width="72" height="18" rx="9" fill="#FFFFFF" stroke="#5B6B78"/>
+  <text x="72" y="263" class="f11 b sec mid">Enterprise</text>
+
+  <text x="36" y="290" class="f12 b nm">Metrics</text>
+  <rect class="chip" x="36" y="298" width="82" height="24" rx="12"/>
+  <rect class="chip" x="124" y="298" width="132" height="24" rx="12"/>
+  <text x="77" y="314" class="f12 nm mid">Prometheus</text>
+  <text x="190" y="314" class="f12 nm mid">CloudWatch Metrics</text>
+
+  <text x="36" y="344" class="f12 b nm">Traces</text>
+  <rect class="chip" x="36" y="352" width="52" height="24" rx="12"/>
+  <rect class="chip" x="94" y="352" width="58" height="24" rx="12"/>
+  <text x="62" y="368" class="f12 nm mid">Tempo</text>
+  <text x="123" y="368" class="f12 nm mid">SigNoz</text>
+
+  <!-- MIDDLE: Versus -->
+  <rect x="304" y="100" width="170" height="84" rx="12" fill="#BACFE3" stroke="#12222F" stroke-width="2"/>
+  <text x="389" y="128" class="f17 b nm mid">Versus reads</text>
+  <text x="389" y="148" class="f12 nm mid">read only</text>
+  <text x="389" y="164" class="f12 nm mid">on a schedule</text>
+
+  <rect x="304" y="218" width="170" height="84" rx="12" fill="#BACFE3" stroke="#12222F" stroke-width="2"/>
+  <text x="389" y="246" class="f17 b nm mid">Learns normal</text>
+  <text x="389" y="266" class="f12 nm mid">patterns</text>
+  <text x="389" y="282" class="f12 nm mid">normal rates</text>
+
+  <!-- RIGHT: what you get -->
+  <text x="522" y="108" class="zone">WHAT YOU GET</text>
+  <text x="522" y="134" class="f13 b nm">New or unexpected</text>
+  <text x="522" y="152" class="f12 sec">A new pattern, or a lasting</text>
+  <text x="522" y="168" class="f12 sec">change in a normal rate</text>
+
+  <rect x="522" y="217" width="202" height="86" rx="12" fill="#FFFFFF" stroke="#12222F" stroke-width="2"/>
+  <rect x="536" y="231" width="48" height="18" rx="9" fill="#FEF3E2" stroke="#B54708"/>
+  <text x="560" y="244" class="f11 b amb mid">WARN</text>
+  <rect x="592" y="231" width="44" height="18" rx="9" fill="#FFFFFF" stroke="#12222F"/>
+  <text x="614" y="244" class="f11 nm mid">open</text>
+  <text x="536" y="270" class="f14 b nm">Anomaly: checkout-api</text>
+  <text x="536" y="290" class="c f11">via loki:checkout-logs</text>
+
+  <rect class="ch" x="522" y="337" width="62" height="36" rx="10"/>
+  <rect class="ch" x="592" y="337" width="62" height="36" rx="10"/>
+  <rect class="ch" x="662" y="337" width="62" height="36" rx="10"/>
+  <text x="553" y="360" class="f13 b nm mid">Slack</text>
+  <text x="623" y="360" class="f13 b nm mid">Teams</text>
+  <text x="693" y="360" class="f13 b nm mid">Email</text>
+  <text x="522" y="396" class="f12 sec">Sent to your channels</text>
+
+  <!-- flows -->
+  <path class="flow" d="M278 142H297" marker-end="url(#a)"/>
+  <path class="flow" d="M389 190V211" marker-end="url(#a)"/>
+  <path class="flow" d="M480 260H499" marker-end="url(#a)"/>
+  <path class="flow" d="M553 309V330" marker-end="url(#a)"/>
+  <path class="flow" d="M623 309V330" marker-end="url(#a)"/>
+  <path class="flow" d="M693 309V330" marker-end="url(#a)"/>
+</svg>

@@ -1,6 +1,6 @@
 mode: "in_cluster"
 replicas: 1
-image: "ghcr.io/versuscontrol/versus-incident:v1.4.36"
+image: "ghcr.io/versuscontrol/versus-incident:v[0-9]
 kind: ClusterRole
 name: versus-test-versus-incident-kubernetes-reader
 nonResourceURLs: \["/.well-known/openid-configuration", "/openid/v1/jwks"\]

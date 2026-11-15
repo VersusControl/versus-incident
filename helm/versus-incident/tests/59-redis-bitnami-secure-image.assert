@@ -1,0 +1,4 @@
+# EXPECT_FAIL: a bitnamisecure image is refused with the way forward.
+redis.image.repository="registry.example.com/bitnamisecure/redis" is a Bitnami image
+If your old release values set redis.image
+--set redis.image=null

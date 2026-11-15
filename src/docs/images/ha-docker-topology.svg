@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="578" viewBox="0 0 760 578" style="max-width:100%;height:auto" role="img" aria-label="A browser or webhook sender calls http://localhost:8080, where nginx sends each request in round robin to one of two Versus Enterprise replicas, versus-0 as instance 0 of 2 and versus-1 as instance 1 of 2, each owning its share of signal sources and scheduled jobs; both replicas read and write one shared Postgres that holds sign in sessions, so restarting one replica keeps you signed in">
+  <title>Versus Enterprise HA on Docker Compose</title>
+  <desc>nginx on localhost port 8080 balances requests across versus-0 and versus-1, which split sources and jobs and share one Postgres for sessions</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      .t { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 400; fill: #000000; }
+      .name { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 700; fill: #12222F; }
+      .zone { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 12px; font-weight: 700; letter-spacing: 1.5px; fill: #5B6B78; }
+      .detail { font-size: 12px; fill: #5B6B78; }
+      .c { font-family: SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; font-weight: 400; fill: #12222F; }
+      .tag { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10px; font-weight: 700; fill: #5B6B78; }
+      .blk { fill: #FFFFFF; stroke: #000000; stroke-width: 2; }
+      .pill { fill: #F2F5F8; stroke: #C3CED8; }
+      .connector { fill: none; stroke: #000000; stroke-width: 2.5; }
+      .flow { fill: none; stroke: #000000; stroke-width: 2.5; marker-end: url(#a); }
+      .sync { fill: none; stroke: #000000; stroke-width: 2.5; marker-start: url(#a); marker-end: url(#a); }
+    </style>
+  </defs>
+
+  <rect width="760" height="578" fill="#FFFFFF"/>
+
+  <!-- zone panel -->
+  <rect x="60" y="258" width="640" height="160" rx="14" fill="#F2F5F8"/>
+
+  <!-- blocks -->
+  <rect class="blk" x="230" y="20" width="300" height="72" rx="13"/>
+  <rect class="blk" x="250" y="150" width="260" height="76" rx="13"/>
+  <rect class="blk" x="80" y="296" width="240" height="94" rx="13"/>
+  <rect class="pill" x="238" y="308" width="70" height="18" rx="9"/>
+  <rect class="blk" x="440" y="296" width="240" height="94" rx="13"/>
+  <rect class="pill" x="598" y="308" width="70" height="18" rx="9"/>
+  <rect x="245" y="466" width="270" height="88" rx="13" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+
+  <!-- arrows -->
+  <path class="flow" d="M380 92 V145"/>
+  <path class="connector" d="M380 226 V244 M200 244 H560"/>
+  <path class="flow" d="M200 244 V291"/>
+  <path class="flow" d="M560 244 V291"/>
+  <path class="sync" d="M200 395 V440 H315 V461"/>
+  <path class="sync" d="M560 395 V440 H445 V461"/>
+
+  <!-- text -->
+  <text class="name" x="380" y="62" font-size="17" text-anchor="middle">Browser or webhook sender</text>
+
+  <text class="c" x="392" y="124">http://localhost:8080</text>
+
+  <text class="name" x="380" y="183" font-size="20" text-anchor="middle">nginx</text>
+  <text class="t detail" x="380" y="205" text-anchor="middle">round robin, no sticky sessions</text>
+
+  <text class="zone" x="380" y="282" text-anchor="middle">ENTERPRISE REPLICAS</text>
+
+  <text class="name" x="100" y="330" font-size="19">versus-0</text>
+  <text class="tag" x="273" y="321" text-anchor="middle">Enterprise</text>
+  <text class="t detail" x="100" y="354">instance 0 of 2</text>
+  <text class="t detail" x="100" y="372">own share of sources and jobs</text>
+
+  <text class="name" x="460" y="330" font-size="19">versus-1</text>
+  <text class="tag" x="633" y="321" text-anchor="middle">Enterprise</text>
+  <text class="t detail" x="460" y="354">instance 1 of 2</text>
+  <text class="t detail" x="460" y="372">own share of sources and jobs</text>
+
+  <text class="t" x="380" y="444" font-size="12" text-anchor="middle">reads and writes</text>
+
+  <text class="name" x="380" y="498" font-size="20" text-anchor="middle">Shared Postgres</text>
+  <text class="t detail" x="380" y="520" text-anchor="middle">sign in sessions live here</text>
+  <text class="t detail" x="380" y="538" text-anchor="middle">a restart keeps you signed in</text>
+</svg>

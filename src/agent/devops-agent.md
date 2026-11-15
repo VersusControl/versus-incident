@@ -1,29 +1,69 @@
-# DevOps Agent
+# DevOps Agent Chat
 
-The DevOps Agent's shipped web experience is **Chat** in the Versus UI. This agent is designed to effectively enhance your understanding of your connection system. It empowers you to investigate incidents using read-only tools, allowing you to thoroughly examine the evidence that supports your findings. It does not execute remediation or make changes to your cluster.
+## Concept
 
-![Versus DevOps Agent](../docs/images/devops-agent.png)
+**Chat** lets you ask the DevOps Agent questions about your system in plain
+words: "what changed before the latest incident?", "which services have the
+highest error rate?". The agent answers using read-only tools over your
+incidents, learned patterns and connected data, and shows the evidence behind
+each answer so you can check it.
 
-## Investigate in Chat
+Chat only reads. It does not run fixes or change your systems or clusters.
 
-1. Sign in to the Versus UI and open **Respond > Chat**.
-2. Start a conversation, or open an existing thread from chat history. Ask a
-	specific question, such as which signals changed for a service after a deploy.
-3. Review the answer and its cited evidence. Open an evidence item to inspect
-	the tool result; use **Stop** to cancel a running response.
-4. Return to a thread from history when you need to continue the investigation.
-	Delete a thread when you no longer need it.
+## Example
 
-Chat can be unavailable when the agent or its AI configuration is disabled.
-Available evidence also depends on configured data sources, connected tools,
-permissions, and the **Chat** tool policy.
+It is Monday morning and you are taking over on-call. You open Chat and ask:
 
-The [Tool Reference](./tools/overview.md)
-explains what each read-only tool provides; [Kubernetes Configuration](/agent/kubernetes/configuration)
-explains its separate access and RBAC requirements. Tool policies for Chat and
-Analyze are independent.
+> Summarize unresolved incidents from the last 24 hours.
 
-Tool results are bounded, and some tools scrub selected fields, but there is no
-general post-result redaction pass for every successful tool response. Do not
-paste secrets into Chat or assume arbitrary provider output is fully redacted.
-Review source access and tool configuration before enabling a connector.
+The agent searches your incident history and answers: two unresolved
+incidents, a `jobrunner` error rate spike and `checkout-api` acme-pay timeouts.
+It marks what it confirmed and what is only a guess, and cites its evidence as
+**[1] Searching incident history**. You follow up:
+
+> Which services have the highest error rate?
+
+Each answer cites the tool results it used. Open one to see the raw evidence.
+Your thread is saved, so you can return to it later in the shift.
+
+## What you see in the UI
+
+Open **Respond → Chat**. A new thread offers suggested questions; type your own
+in **Ask about your system**.
+
+![The DevOps Agent chat page answering Summarize unresolved incidents from the last 24 hours: the search_incidents tool call expanded with its arguments (limit 20) and output, then the answer 2 unresolved incidents, jobrunner error rate spike and checkout-api acme-pay timeouts abort checkouts, a speculative note, the evidence chip [1] Searching incident history, and the message box at the bottom](../docs/images/sre-chat-ui-dark.png)
+
+| Control | What it does |
+|---|---|
+| **Stop** | Cancels a running answer. |
+| History icon | Opens your saved threads. Start a **New thread** or delete one you no longer need. |
+| Tool icon | Opens **Connectors & Tools**, the list of tools Chat may use. |
+
+## Turn it on
+
+Chat needs the agent and AI turned on:
+
+```yaml
+agent:
+  enable: true
+  ai:
+    enable: true
+    api_key: ${AGENT_AI_API_KEY}
+    model: gpt-4o-mini
+```
+
+What Chat can see depends on your data sources, connected tools, and the Chat
+tool policy. The policy is separate from [AI Analyze](./ai-analyze-mode.md):
+enabling a tool for Chat does not enable it for Analyze.
+
+> **Don't paste secrets into Chat.** Tool results are bounded and some fields
+> are scrubbed, but not every tool response is fully masked. Review what each
+> connector can read before you enable it.
+
+## Reference
+
+- [Tool Reference](./tools/overview.md): every read-only tool, what it needs, and
+  the Chat and Analyze policies.
+- [Kubernetes Configuration](./kubernetes/configuration.md): access for the
+  Kubernetes tools.
+- [Configuration](./configuration.md): the `agent.ai` keys.

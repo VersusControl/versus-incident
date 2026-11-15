@@ -1,0 +1,14 @@
+# Bundled Redis values without their nested blocks (as an older release can
+# carry them): the chart still renders, with the password and the volume on.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  auth: null
+  persistence: null
+  resources: null
+  podSecurityContext: null
+  securityContext: null

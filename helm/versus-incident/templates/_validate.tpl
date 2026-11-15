@@ -7,11 +7,35 @@ choose exactly one of:
   - external Redis (redis.enabled=false AND externalRedis.host non-empty)
 
 Common misconfigurations caught here:
+  - the bundled Redis turned on with values for the Bitnami Redis subchart
+    the chart used to ship (redis.master, redis.architecture), which
+    --reuse-values carries over from an older release
+  - the bundled Redis turned on with a Bitnami image (bitnami/,
+    bitnamilegacy/ or bitnamisecure/, with or without a registry), or a
+    Bitnami-style tag (-debian-, -r<n>) on the official redis image, which an
+    older release may have set and --reset-then-reuse-values keeps; this chart
+    runs the official redis image with its own tag, so either fails to pull
   - on-call enabled but no Redis selected at all
   - redis.enabled=true alongside a non-empty externalRedis.host
     (the externalRedis.* block would be silently ignored — see issue #100)
 */}}
 {{- define "versus-incident.validateRedis" -}}
+{{- $redis := .Values.redis | default dict -}}
+{{- /* A key set to null (--set redis.master=null) stays in the values with
+       no value; only keys that still carry a value are refused. */}}
+{{- if and $redis.enabled (or $redis.master $redis.architecture) -}}
+  {{- fail "versus-incident: redis.master and redis.architecture belong to the Bitnami Redis subchart, which this chart no longer uses. Move redis.master.persistence.* to redis.persistence.* in your values file, remove redis.architecture, and upgrade with only -f <values> (no --reuse-values). With --reset-then-reuse-values, also add --set redis.master=null --set redis.architecture=null if you set those keys yourself. See \"Upgrading from the Bitnami Redis\" in the chart README." -}}
+{{- end -}}
+{{- $redisImage := $redis.image | default dict -}}
+{{- $redisRepo := toString ($redisImage.repository | default "redis") -}}
+{{- $redisTag := toString ($redisImage.tag | default "") -}}
+{{- $bitnamiFix := "Remove redis.image from your values file. If your old release values set redis.image (for example the bitnamilegacy/redis override), also add --set redis.image=null when you upgrade with --reset-then-reuse-values. See \"Upgrading from the Bitnami Redis\" in the chart README." -}}
+{{- if and $redis.enabled (regexMatch "(^|/)bitnami(legacy|secure)?/" $redisRepo) -}}
+  {{- fail (printf "versus-incident: redis.image.repository=%q is a Bitnami image, left from the Bitnami Redis subchart this chart no longer uses. The bundled Redis runs the official redis image, and the Bitnami one with this chart's tag cannot be pulled. %s" $redisRepo $bitnamiFix) -}}
+{{- end -}}
+{{- if and $redis.enabled (regexMatch "^(docker\\.io/)?(library/)?redis$" $redisRepo) (regexMatch "-debian-|-r[0-9]+$" $redisTag) -}}
+  {{- fail (printf "versus-incident: redis.image.tag=%q is a Bitnami Redis tag, left from the Bitnami Redis subchart this chart no longer uses. The official redis image has no such tag. %s" $redisTag $bitnamiFix) -}}
+{{- end -}}
 {{- $oncallNeeded := or .Values.oncall.enable .Values.oncall.initializedOnly -}}
 {{- if $oncallNeeded -}}
   {{- if and .Values.redis.enabled .Values.externalRedis.host -}}

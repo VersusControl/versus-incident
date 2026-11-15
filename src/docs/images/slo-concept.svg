@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="570" viewBox="0 0 760 570" style="max-width:100%;height:auto" role="img" aria-label="Versus has learned metrics, traces, log patterns and incidents for each service and reviews them every 24 hours by default; on the AI SLIs/SLOs page it proposes an SLI and SLO for payments, marked Adopt first: indicator Payments availability, type availability, target 99%, window 30 days, with the rationale 14 days with no incidents, 99% leaves headroom, and an Adopt button; up to five SLIs per service are proposed; before you adopt, Versus already watches an auto-derived objective and pages on burn; when you click Adopt, your target replaces the derived target and burn alerts page against yours, and Revert to auto-derived goes back; a week later a bad deploy makes 20% of payments fail and the budget burns too fast, so Versus raises one critical, open incident: Error-budget burn on payments, fast window">
+  <title>From learned signals to your own SLO target and a burn alert</title>
+  <desc>Learned signals feed a proposed SLI and SLO for payments; Versus watches an auto-derived objective and pages on burn until you click Adopt, which replaces the derived target with yours, and Revert goes back; when a bad deploy burns the error budget too fast it raises one Error-budget burn incident</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f17{font-size:17px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}.red{fill:#B42318}.wh{fill:#FFFFFF}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}.end{text-anchor:end}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .chip{fill:#FFFFFF;stroke:#9AA9B6;stroke-width:1.5}
+      .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="570" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">Versus proposes an SLO, you adopt it</text>
+  <text x="24" y="64" class="f13 sec">Versus watches a derived objective, adopting sets your own target</text>
+
+  <!-- panels and blocks -->
+  <rect x="20" y="84" width="196" height="184" rx="12" fill="#F2F5F8"/>
+  <rect x="260" y="84" width="480" height="184" rx="12" fill="#FFFFFF" stroke="#12222F" stroke-width="2"/>
+  <rect class="blk" x="20" y="320" width="200" height="92" rx="12"/>
+  <rect class="blk" x="500" y="320" width="240" height="92" rx="12"/>
+  <rect class="blk" x="20" y="450" width="200" height="100" rx="12"/>
+  <rect x="500" y="450" width="240" height="100" rx="12" fill="#BACFE3" stroke="#12222F" stroke-width="2"/>
+
+  <!-- learned signals -->
+  <text x="36" y="108" class="zone">LEARNED SIGNALS</text>
+  <rect class="chip" x="36" y="120" width="70" height="24" rx="12"/>
+  <rect class="chip" x="112" y="120" width="62" height="24" rx="12"/>
+  <rect class="chip" x="36" y="150" width="96" height="24" rx="12"/>
+  <rect class="chip" x="138" y="150" width="70" height="24" rx="12"/>
+  <text x="71" y="136" class="f12 nm mid">Metrics</text>
+  <text x="143" y="136" class="f12 nm mid">Traces</text>
+  <text x="84" y="166" class="f12 nm mid">Log patterns</text>
+  <text x="173" y="166" class="f12 nm mid">Incidents</text>
+  <text x="36" y="204" class="f13 b nm">For each service</text>
+  <text x="36" y="226" class="f12 sec">Reviewed every 24h</text>
+  <text x="36" y="242" class="f12 sec">by default</text>
+
+  <!-- proposal card -->
+  <text x="276" y="108" class="zone">PROPOSED SLI AND SLO</text>
+  <text x="724" y="108" class="f11 sec end">AI → SLIs/SLOs</text>
+  <text x="276" y="136" class="f17 b nm">payments</text>
+  <rect x="362" y="122" width="88" height="20" rx="10" fill="#FFFFFF" stroke="#12222F"/>
+  <text x="406" y="136" class="f11 b nm mid">Adopt first</text>
+  <text x="276" y="160" class="zone">INDICATOR</text>
+  <text x="452" y="160" class="zone">TYPE</text>
+  <text x="540" y="160" class="zone">TARGET</text>
+  <text x="604" y="160" class="zone">WINDOW</text>
+  <rect x="268" y="168" width="464" height="36" rx="8" fill="#BACFE3"/>
+  <text x="276" y="191" class="f13 b nm">Payments availability</text>
+  <text x="452" y="190" class="c f11">availability</text>
+  <text x="540" y="191" class="f13 nm">99%</text>
+  <text x="604" y="191" class="f13 nm">30 days</text>
+  <rect x="664" y="174" width="60" height="24" rx="6" fill="#12222F"/>
+  <text x="694" y="190" class="f12 b wh mid">Adopt</text>
+  <text x="276" y="228" class="f12 sec">Rationale: 14 days with no incidents, 99% leaves headroom</text>
+  <text x="276" y="250" class="f12 sec">Up to five SLIs per service</text>
+
+  <!-- auto-derived -->
+  <text x="120" y="346" class="f12 sec mid">Before you adopt</text>
+  <text x="120" y="370" class="f17 b nm mid">Auto-derived</text>
+  <text x="120" y="392" class="f12 nm mid">objective, pages on burn</text>
+
+  <!-- adopted -->
+  <text x="620" y="350" class="f17 b nm mid">Adopted</text>
+  <text x="620" y="372" class="f12 nm mid">Replaces the derived target</text>
+  <text x="620" y="390" class="f12 nm mid">Pages on burn against yours</text>
+
+  <!-- bad deploy -->
+  <text x="120" y="474" class="f12 sec mid">A week later</text>
+  <text x="120" y="498" class="f17 b nm mid">Bad deploy</text>
+  <text x="120" y="518" class="f12 nm mid">20% of payments fail</text>
+  <text x="120" y="535" class="f12 nm mid">Budget burns too fast</text>
+
+  <!-- incident -->
+  <rect x="514" y="464" width="66" height="18" rx="9" fill="#FDECEC" stroke="#B42318"/>
+  <text x="547" y="477" class="f11 b red mid">CRITICAL</text>
+  <rect x="588" y="464" width="44" height="18" rx="9" fill="#FFFFFF" stroke="#12222F"/>
+  <text x="610" y="477" class="f11 nm mid">open</text>
+  <text x="514" y="506" class="f12 b nm">Error-budget burn on payments</text>
+  <text x="514" y="524" class="f12 nm">(fast window)</text>
+
+  <!-- flows -->
+  <path class="flow" d="M222 176H253" marker-end="url(#a)"/>
+  <path class="flow" d="M694 202V313" marker-end="url(#a)"/>
+  <text x="684" y="298" class="f13 b nm end">You click Adopt</text>
+  <path class="flow" d="M494 366H227" stroke-dasharray="6 4" marker-end="url(#a)"/>
+  <text x="360" y="356" class="f12 sec mid">Revert to auto-derived</text>
+  <path class="flow" d="M620 418V443" marker-end="url(#a)"/>
+  <path class="flow" d="M226 500H493" marker-end="url(#a)"/>
+</svg>

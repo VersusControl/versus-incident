@@ -40,12 +40,18 @@ func CreateIncidentFromKubernetesIssueContext(ctx context.Context, org string, a
 		AgentKind: "kubernetes", Source: "kubernetes:" + a.Cluster,
 		Service:    a.Namespace + "/" + a.WorkloadKind + "/" + a.Workload,
 		SignalKind: "kubernetes_issue", ConditionKey: conditionKey,
-	}, severity, kubernetesIssueParams(severity), org, 1, emission, storage.DefaultDetectionNotificationLease, ctx)
+	}, severity, kubernetesIssueParams(ctx, severity), org, 1, emission, storage.DefaultDetectionNotificationLease, ctx)
 	return kubernetes.Outcome{IncidentID: emission.IncidentID, NotificationOutcome: emission.NotificationOutcome}, err
 }
 
-func kubernetesIssueParams(severity string) map[string]string {
-	return map[string]string{"oncall_enable": fmt.Sprint(severity == "critical")}
+// kubernetesIssueParams keeps non-critical issues off on-call; a critical
+// issue pages wherever an on-call provider is set up, like a critical agent
+// finding (see severeDetectionOnCallParams).
+func kubernetesIssueParams(ctx context.Context, severity string) map[string]string {
+	if severity == "critical" {
+		return severeDetectionOnCallParams(ctx)
+	}
+	return map[string]string{"oncall_enable": "false"}
 }
 
 func kubernetesIssueContent(a kubernetes.IssueAlert, publicHost string) map[string]interface{} {

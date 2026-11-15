@@ -2,9 +2,12 @@ package agent
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/stats"
 )
 
 // heuristicMarker is stamped into every deterministic Summary so an operator
@@ -35,7 +38,7 @@ func deterministicFinding(
 	sigma := deviationSigma(score, baselineStd)
 
 	f := &core.AIFinding{
-		Title:      deterministicTitle(result, svc, sigma, baselineStd),
+		Title:      deterministicTitle(result, svc, score, baselineStd),
 		Summary:    deterministicSummary(result, verdict, svc, explanation),
 		Severity:   severityFromSigma(baselineStd, sigma),
 		Category:   "anomaly",
@@ -54,20 +57,17 @@ func deterministicFinding(
 	return f
 }
 
-// deviationSigma returns the deviation magnitude in standard deviations. Per
-// the detect design the magnitude is score / baselineStd; a non-positive
-// baselineStd means the dispersion is unknown (e.g. a log novelty verdict with
-// no learned spread), signalled by a zero sigma so callers treat it as
-// indeterminate.
+// deviationSigma returns the deviation magnitude in standard deviations. The
+// brains already report the verdict score as a z-score against the learned
+// baseline, so the magnitude is |score|; dividing by the spread again would
+// scale it by 1/std. A non-positive baselineStd means the dispersion is
+// unknown (e.g. a log novelty verdict with no learned spread), signalled by a
+// zero sigma so callers treat it as indeterminate.
 func deviationSigma(score, baselineStd float64) float64 {
 	if baselineStd <= 0 {
 		return 0
 	}
-	s := score / baselineStd
-	if s < 0 {
-		s = -s
-	}
-	return s
+	return math.Abs(score)
 }
 
 // severityFromSigma maps deviation magnitude to a canonical severity. With an
@@ -145,14 +145,85 @@ func titleSubject(result core.AgentResult) string {
 
 // deterministicTitle renders the incident title. With a learned dispersion it
 // uses the metric/trace form carrying the deviation and baseline; otherwise it
-// uses the log form carrying the template and frequency.
-func deterministicTitle(result core.AgentResult, svc string, sigma, baselineStd float64) string {
+// uses the log form carrying the template and frequency. The baseline is shown
+// in the unit Agent Learning shows (an error fraction as a percent, metric
+// seconds as milliseconds) next to the floored spread the score was taken
+// against, so the σ follows from the two numbers beside it.
+func deterministicTitle(result core.AgentResult, svc string, score, baselineStd float64) string {
 	subject := truncateString(titleSubject(result), 120)
 	if baselineStd > 0 {
-		return fmt.Sprintf("Anomaly: %s — %s (%.1fσ above baseline %.2f±%.2f)",
-			svc, subject, sigma, result.Baseline, baselineStd)
+		direction := "above"
+		if score < 0 {
+			direction = "below"
+		}
+		std := stats.FlooredStd(result.Baseline, baselineStd)
+		mean, spread, unit := displayBaseline(result, result.Baseline, std)
+		return fmt.Sprintf("Anomaly: %s — %s (%.1fσ %s baseline %s±%s%s)",
+			svc, subject, math.Abs(score), direction, formatTitleValue(mean), formatTitleValue(spread), unit)
 	}
 	return fmt.Sprintf("Anomaly: %s — %s ×%d", svc, subject, result.Frequency)
+}
+
+// displayBaseline converts a metric or trace baseline into the unit the Agent
+// Learning view uses: a unit the source stated is kept as is ("Percent" reads
+// "%"); otherwise the golden-signal name decides — error rates are 0–1
+// fractions shown as percent, metric latencies are seconds shown as
+// milliseconds (trace latencies are already milliseconds), traffic is req/s.
+// Log baselines are counts and are returned unchanged with no unit.
+func displayBaseline(result core.AgentResult, mean, std float64) (float64, float64, string) {
+	isTrace := result.SignalKind == "traces"
+	if result.SignalKind != "metrics" && !isTrace {
+		return mean, std, ""
+	}
+	signal, unit := "", ""
+	for _, s := range result.SampleSignals {
+		if s.Fields == nil {
+			continue
+		}
+		if v, ok := s.Fields[core.FieldSignal].(string); ok && signal == "" {
+			signal = v
+		}
+		if v, ok := s.Fields[core.FieldUnit].(string); ok && unit == "" {
+			unit = strings.TrimSpace(v)
+		}
+	}
+	if unit != "" {
+		if strings.EqualFold(unit, "percent") {
+			return mean, std, "%"
+		}
+		return mean, std, " " + unit
+	}
+	name := strings.ToLower(strings.TrimSpace(signal))
+	switch {
+	case strings.HasPrefix(name, "saturation") || strings.HasPrefix(name, "gauge:"):
+		return mean, std, ""
+	case strings.Contains(name, "error"):
+		return mean * 100, std * 100, "%"
+	case strings.Contains(name, "latency") || strings.Contains(name, "p99") || strings.Contains(name, "duration"):
+		if isTrace {
+			return mean, std, " ms"
+		}
+		return mean * 1000, std * 1000, " ms"
+	case strings.Contains(name, "rate") || strings.Contains(name, "rps") ||
+		strings.Contains(name, "request") || strings.Contains(name, "traffic") ||
+		strings.Contains(name, "throughput"):
+		return mean, std, " req/s"
+	default:
+		return mean, std, ""
+	}
+}
+
+// formatTitleValue keeps small baselines readable: two decimals from 1 up,
+// two significant digits below, so a 0.0042 rate never renders as 0.00.
+func formatTitleValue(v float64) string {
+	switch {
+	case v == 0:
+		return "0"
+	case math.Abs(v) >= 1:
+		return strconv.FormatFloat(v, 'f', 2, 64)
+	default:
+		return strconv.FormatFloat(v, 'g', 2, 64)
+	}
 }
 
 // deterministicSummary renders a templated one-liner, the honesty marker, and

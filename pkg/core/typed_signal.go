@@ -45,6 +45,12 @@ type Observation struct {
 	// only for discovery logging and never affects classification. (Additive
 	// to the design-doc struct.)
 	IsNew bool
+	// Window is how much source time this observation's own signals span,
+	// measured on their timestamps. A learner that turns Frequency into a
+	// rate divides by it when it is longer than one poll (a catch-up read
+	// after a fresh start, a lost cursor or a capped page). Zero means
+	// unknown: use the poll interval.
+	Window time.Duration
 }
 
 // TypedVerdict is the per-type classification of one observation.

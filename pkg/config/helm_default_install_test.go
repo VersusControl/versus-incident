@@ -222,7 +222,7 @@ func TestKubectlManifestReadsUserCreatedSignInSecret(t *testing.T) {
 		for _, want := range []string{
 			`"name":"GATEWAY_SECRET","valueFrom":{"secretKeyRef":{"key":"gateway_secret","name":"versus-incident","optional":true}}`,
 			`"name":"GATEWAY_SECRET_REQUIRED","value":"true"`,
-			`"image":"ghcr.io/versuscontrol/versus-incident:v`,
+			`"image":"ghcr.io/versuscontrol/versus-incident"`,
 			`"replicas":1`,
 			`"namespace":"versus"`,
 		} {

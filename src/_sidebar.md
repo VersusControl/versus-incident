@@ -1,37 +1,41 @@
 - [Introduction](/introduction)
-
-- AI SRE Agent
-  - [Introduction](/agent/agent-introduction)
-  - [Getting Started](/agent/getting-started)
-  - [Shadow Mode](/agent/shadow-mode)
-  - [AI Detect Mode](/agent/ai-detect-mode)
-  - [Spike Detection](/agent/spike)
-  - [AI Analyze](/agent/ai-analyze-mode)
-  - [DevOps Agent](/agent/devops-agent)
-  - [Service Detection](/agent/service-detection)
-  - [Service Heatmap](/agent/service-heatmap)
-  - [Incidents Report](/agent/incident-report)
-  - [Configuration](/agent/configuration)
+- [AIOps Kubernetes Quickstart](/agent/kubernetes/quickstart)
+- [AIOps SRE Quickstart](/agent/quickstart)
+- [Webhook Quickstart](/webhook/quickstart)
 
 - Kubernetes Connectors
   - [Kubernetes](/agent/connectors/kubernetes)
-  - [Quickstart](/agent/kubernetes/quickstart)
   - [Configuration](/agent/kubernetes/configuration)
   - [Multi-Cluster](/agent/kubernetes/multi-cluster)
   - [Auto Detect Issue](/agent/kubernetes/auto-detect-issue)
 
+- SRE Agent
+  - [Introduction](/agent/agent-introduction)
+  - [Training Mode](/agent/training-mode)
+  - [Shadow Mode](/agent/shadow-mode)
+  - [AI Detect Mode](/agent/ai-detect-mode)
+  - [Spike Detection](/agent/spike)
+  - [AI Analyze](/agent/ai-analyze-mode)
+  - [DevOps Agent Chat](/agent/devops-agent)
+  - [Service Detection](/agent/service-detection)
+  - [Service Heatmap](/agent/service-heatmap)
+  - [Incident Reports](/agent/incident-report)
+  - [Configuration](/agent/configuration)
+
 - Data Sources
   - [Overview](/agent/data-sources)
-  - [File](/agent/data-sources/file)
-  - [Elasticsearch](/agent/data-sources/elasticsearch)
-  - [Loki](/agent/data-sources/loki)
-  - [CloudWatch Logs](/agent/data-sources/cloudwatch-logs)
-  - [Graylog](/agent/data-sources/graylog)
-  - [Splunk](/agent/data-sources/splunk)
-  - [SigNoz](/agent/data-sources/signoz)
-  - [Prometheus](/agent/data-sources/prometheus)
-  - [CloudWatch Metrics](/agent/data-sources/cloudwatch-metrics)
-  - [Traces](/agent/data-sources/traces)
+  - Logs
+    - [File](/agent/data-sources/file)
+    - [Loki](/agent/data-sources/loki)
+    - [Elasticsearch](/agent/data-sources/elasticsearch)
+    - [CloudWatch Logs](/agent/data-sources/cloudwatch-logs)
+    - [Graylog](/agent/data-sources/graylog)
+    - [Splunk](/agent/data-sources/splunk)
+    - [SigNoz](/agent/data-sources/signoz)
+  - Metrics (Enterprise)
+    - [Prometheus](/agent/data-sources/prometheus)
+    - [CloudWatch Metrics](/agent/data-sources/cloudwatch-metrics)
+  - [Traces (Enterprise)](/agent/data-sources/traces)
 
 - Tools
   - [Tool Reference](/agent/tools/overview)
@@ -67,10 +71,6 @@
   - [Traces](/enterprise/traces)
   - [SLI/SLO auto-define](/enterprise/slo)
   - [Alert fatigue](/enterprise/alert-fatigue)
-  - Versus Security
-    - [Overview](/enterprise/security/overview)
-    - [Secret scanning](/enterprise/security/secret-scanning)
-    - [Fraud & abuse detection](/enterprise/security/fraud-detection)
 
 - Configuration
   - [Configuration](/configuration/configuration)
@@ -79,7 +79,7 @@
   - [Helm Chart](/configuration/helm)
 
 - Notifications & Webhooks
-  - [Getting Started](/webhook/getting-started)
+  - [Send Alerts from Your Tools](/webhook/send-alerts)
   - [Template Syntax](/webhook/template-syntax)
   - [Advanced Template Tips](/webhook/advanced-template-tips)
 

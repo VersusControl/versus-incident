@@ -1,0 +1,36 @@
+{
+  "receiver": "versus",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "severity": "critical",
+        "instance": "checkout-api:8080",
+        "job": "checkout-api"
+      },
+      "annotations": {
+        "summary": "5xx error rate above 5% for 5 minutes",
+        "description": "checkout-api is returning 503 on POST /api/orders."
+      },
+      "startsAt": "2026-11-15T09:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:9090/graph?g0.expr=job%3Acheckout_errors%3Arate5m+%3E+0.05",
+      "fingerprint": "a1b2c3d4e5f60718"
+    }
+  ],
+  "groupLabels": { "alertname": "HighErrorRate" },
+  "commonLabels": {
+    "alertname": "HighErrorRate",
+    "severity": "critical",
+    "instance": "checkout-api:8080",
+    "job": "checkout-api"
+  },
+  "commonAnnotations": {
+    "summary": "5xx error rate above 5% for 5 minutes"
+  },
+  "externalURL": "http://localhost:9093",
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}"
+}

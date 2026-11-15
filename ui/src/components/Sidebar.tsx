@@ -136,9 +136,12 @@ export function SidebarContent({
 
   // Probe the enterprise baselines endpoint once to determine if Metrics/Traces
   // are available. A 403 (no intelligence license) or 404 (OSS binary — route
-  // absent) means locked; any other error or success means available.
+  // absent) means locked; any other error or success means available. The
+  // probe waits for the deployment answer and is skipped on a community
+  // binary, where the route does not exist.
   const baselinesProbe = useQuery({
     queryKey: ["baselines-probe"],
+    enabled: !deploymentOrg.isPending && !isOSS,
     queryFn: async () => {
       try {
         await api.listBaselines({ type: "metric" });
@@ -154,7 +157,7 @@ export function SidebarContent({
     staleTime: 5 * 60_000, // re-probe every 5 minutes at most
     retry: 1,
   });
-  const enterpriseLocked = baselinesProbe.data === false;
+  const enterpriseLocked = isOSS || baselinesProbe.data === false;
 
   const respond: SideItem[] = [
     { to: "/now", label: "Now", icon: CircleGauge },

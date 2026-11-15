@@ -1,0 +1,13 @@
+route:
+  receiver: versus
+  group_by: ["alertname"]
+  group_wait: 10s
+  group_interval: 1m
+  # Resend a still-firing alert every 5 minutes.
+  repeat_interval: 5m
+
+receivers:
+  - name: versus
+    webhook_configs:
+      - url: http://versus:3000/api/incidents
+        send_resolved: true

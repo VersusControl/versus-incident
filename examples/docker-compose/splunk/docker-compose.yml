@@ -68,30 +68,38 @@ services:
   # (>= 8 chars, mix of letter/digit/symbol). Default below works.
   splunk:
     image: splunk/splunk:latest
+    # Splunk publishes amd64 images only; Apple Silicon runs them under
+    # emulation (slow start, slow indexing).
+    platform: linux/amd64
     container_name: versus-splunk
     environment:
       SPLUNK_START_ARGS: "--accept-license"
+      # Current images refuse to start until the general terms are accepted.
+      SPLUNK_GENERAL_TERMS: "--accept-sgt-current-at-splunk-com"
       SPLUNK_PASSWORD: ${SPLUNK_PASSWORD:-Changeme1!}
       # Enable HEC for log ingest (token below; index "main").
       SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN:-00000000-0000-0000-0000-000000000000}
     ports:
-      - "8000:8000"   # Splunk Web UI
-      - "8088:8088"   # HTTP Event Collector (HEC)
-      - "8089:8089"   # splunkd REST (what the Versus source talks to)
+      - "127.0.0.1:8000:8000"   # Splunk Web UI
+      - "127.0.0.1:8088:8088"   # HTTP Event Collector (HEC)
+      - "127.0.0.1:8089:8089"   # splunkd REST (what the Versus source talks to)
     volumes:
       - splunk-etc:/opt/splunk/etc
       - splunk-var:/opt/splunk/var
     restart: unless-stopped
     healthcheck:
-      # `splunkd` answers /services/server/info once it's fully up.
-      test: ["CMD-SHELL", "curl -fsSk -u admin:${SPLUNK_PASSWORD:-Changeme1!} https://localhost:8089/services/server/info?output_mode=json || exit 1"]
+      # splunkd answers REST before the image's provisioning finishes, and
+      # provisioning restarts it and brings HEC up last. Healthy means the
+      # container state file says provisioning is done, splunkd answers, and
+      # HEC reports healthy — otherwise the first generator batches fail.
+      test: ["CMD-SHELL", "grep -qE 'running|started' \"$$CONTAINER_ARTIFACT_DIR/splunk-container.state\" && curl -fsSk -u admin:${SPLUNK_PASSWORD:-Changeme1!} https://127.0.0.1:8089/services/server/info?output_mode=json >/dev/null && curl -fsSk https://127.0.0.1:8088/services/collector/health >/dev/null || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 40
       start_period: 60s
 
   versus:
-    image: ghcr.io/versuscontrol/versus-incident:latest
+    image: ${VERSUS_IMAGE:-ghcr.io/versuscontrol/versus-incident:latest}
     container_name: versus-splunk-app
     depends_on:
       redis:
@@ -99,7 +107,7 @@ services:
       splunk:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
       REDIS_HOST: redis
@@ -122,7 +130,7 @@ services:
       - versus-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5

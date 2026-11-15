@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="390" viewBox="0 0 760 390" style="max-width:100%;height:auto" role="img" aria-label="On the left, your logs in shadow mode: a new checkout error, payment processor acme-pay did not answer within 30s, and a burst of the known payment declined for order card_expired error among ordinary cart reads; on the right, the Decisions Shadow tab with two would have alerted rows for checkout-api: one entry per source and pattern, the acme-pay timeout from source prod with verdict unknown and 60 signals, and the declined card pattern from source prod with verdict spike and 180 signals, a known pattern far above normal; a crossed out bell shows that nothing is sent, no Slack, no email, no on call">
+  <title>Shadow mode shows what it would have alerted on</title>
+  <desc>Left: a log stream with a new acme-pay timeout and a burst of a known declined card error; right: the Decisions Shadow list with one would have alerted row for each, verdicts unknown and spike, and a crossed out bell because nothing is sent</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f10{font-size:10px}.f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}.end{text-anchor:end}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <symbol id="i-belloff" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/></g></symbol>
+  </defs>
+
+  <rect width="760" height="390" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">Shadow mode shows what it would have alerted on</text>
+  <text x="24" y="64" class="f13 sec">It keeps learning and records each problem, but sends nothing</text>
+
+  <!-- panels -->
+  <rect x="20" y="84" width="340" height="286" rx="12" fill="#F2F5F8"/>
+  <rect x="400" y="84" width="340" height="286" rx="12" fill="#FFFFFF" stroke="#BACFE3" stroke-width="2"/>
+
+  <!-- LEFT: stream -->
+  <text x="36" y="108" class="zone">YOUR LOGS IN SHADOW MODE</text>
+  <rect x="36" y="120" width="308" height="176" rx="8" fill="#F7F9FB" stroke="#D8E0E8"/>
+  <rect x="39" y="147" width="3" height="29" rx="1.5" fill="#12222F"/>
+  <rect x="39" y="195" width="3" height="77" rx="1.5" fill="#12222F"/>
+  <text x="46" y="140" class="c f10 sec">cart read for user 4410 took 12ms</text>
+  <text x="46" y="156" class="c f10">checkout error: payment processor acme-pay</text>
+  <text x="58" y="172" class="c f10">did not answer within 30s</text>
+  <text x="46" y="188" class="c f10 sec">cart read for user 9022 took 9ms</text>
+  <text x="46" y="204" class="c f10">payment declined for order 81723 (card_expired)</text>
+  <text x="46" y="220" class="c f10">payment declined for order 81731 (card_expired)</text>
+  <text x="46" y="236" class="c f10">payment declined for order 81802 (card_expired)</text>
+  <text x="46" y="252" class="c f10">payment declined for order 81815 (card_expired)</text>
+  <text x="46" y="268" class="c f10">payment declined for order 81840 (card_expired)</text>
+  <text x="46" y="284" class="c f10 sec">cart read for user 1187 took 14ms</text>
+  <rect x="36" y="311" width="3" height="12" rx="1.5" fill="#12222F"/>
+  <text x="46" y="321" class="f12">A new line: the acme-pay timeout</text>
+  <rect x="36" y="331" width="3" height="12" rx="1.5" fill="#12222F"/>
+  <text x="46" y="341" class="f12">A burst of a known error, far above normal</text>
+
+  <!-- RIGHT: Decisions, Shadow tab -->
+  <text x="416" y="108" class="zone">DECISIONS: SHADOW TAB</text>
+
+  <rect x="416" y="120" width="308" height="94" rx="10" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <text x="428" y="142" class="f12 b nm">checkout-api</text>
+  <rect x="514" y="129" width="62" height="18" rx="9" fill="#BACFE3" stroke="#12222F"/>
+  <text x="545" y="142" class="c f11 mid">unknown</text>
+  <text x="712" y="142" class="f11 b sec end">would have alerted</text>
+  <text x="428" y="164" class="c f10">checkout error: payment processor acme-pay</text>
+  <text x="440" y="178" class="c f10">did not answer within 30s</text>
+  <text x="428" y="202" class="f11 sec">Source prod, Signals 60, one entry</text>
+
+  <rect x="416" y="222" width="308" height="78" rx="10" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <text x="428" y="244" class="f12 b nm">checkout-api</text>
+  <rect x="514" y="231" width="50" height="18" rx="9" fill="#BACFE3" stroke="#12222F"/>
+  <text x="539" y="244" class="c f11 mid">spike</text>
+  <text x="712" y="244" class="f11 b sec end">would have alerted</text>
+  <text x="428" y="266" class="c f10">payment declined for order &lt;*&gt; (card_expired)</text>
+  <text x="428" y="288" class="f11 sec">Source prod, Signals 180, far above normal</text>
+
+  <use href="#i-belloff" x="416" y="314" width="22" height="22" color="#12222F"/>
+  <text x="446" y="330" class="f13 b nm">Nothing is sent</text>
+  <text x="446" y="350" class="f12 sec">No Slack, no email, no on call</text>
+
+  <!-- flow -->
+  <path class="flow" d="M366 227H393" marker-end="url(#a)"/>
+</svg>

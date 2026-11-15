@@ -292,7 +292,7 @@ func TestCreateIncidentFromFinding_BatchIndependentCoalescing(t *testing.T) {
 		wantAction       string
 		wantNotification string
 	}{
-		{name: "one batch", calls: 1, frequency: 500, wantAction: "opened", wantNotification: "sent"},
+		{name: "one batch", calls: 1, frequency: 500, wantAction: "opened", wantNotification: "none"},
 		{name: "one occurrence per call", calls: 500, frequency: 1, wantAction: "coalesced", wantNotification: "not_applicable"},
 	}
 	for _, shape := range shapes {
@@ -575,8 +575,8 @@ func TestCreateIncidentFromFinding_RenewalErrorStillCompletesClaim(t *testing.T)
 	if err := <-done; err != nil {
 		t.Fatalf("recovered renewal error = %v", err)
 	}
-	if emission.NotificationOutcome != "sent" {
-		t.Fatalf("notification outcome = %q, want sent", emission.NotificationOutcome)
+	if emission.NotificationOutcome != "none" {
+		t.Fatalf("notification outcome = %q, want none", emission.NotificationOutcome)
 	}
 	if err := createIncidentFromFindingWithLease(finding, result, "loki", "checkout", 30*time.Millisecond); err != nil {
 		t.Fatalf("post-completion occurrence: %v", err)
@@ -905,8 +905,8 @@ func TestCreateIncidentFromFinding_DelayRemainsRetryable(t *testing.T) {
 	if err := CreateIncidentFromFinding(finding, result, "loki", "checkout"); err != nil {
 		t.Fatalf("retry CreateIncidentFromFinding: %v", err)
 	}
-	if attempts.Load() != 2 || result.DetectionEmission.NotificationOutcome != "sent" {
-		t.Fatalf("attempts=%d outcome=%q, want retry sent", attempts.Load(), result.DetectionEmission.NotificationOutcome)
+	if attempts.Load() != 2 || result.DetectionEmission.NotificationOutcome != "none" {
+		t.Fatalf("attempts=%d outcome=%q, want retry completed", attempts.Load(), result.DetectionEmission.NotificationOutcome)
 	}
 }
 
@@ -1149,7 +1149,7 @@ func TestCreateIncidentFromFinding_EpisodeErrorFailsOpen(t *testing.T) {
 		t.Fatalf("fail-open incidents=%d err=%v", len(incidents), err)
 	}
 	if result.DetectionEmission.EpisodeAction != "episode_error" ||
-		result.DetectionEmission.NotificationOutcome != "sent" ||
+		result.DetectionEmission.NotificationOutcome != "none" ||
 		len(result.DetectionEmission.EpisodeError) != 256 {
 		t.Fatalf("fail-open audit = %+v", result.DetectionEmission)
 	}

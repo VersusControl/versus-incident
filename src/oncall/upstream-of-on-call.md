@@ -103,5 +103,5 @@ Versus never introduces its own schedules or escalation policies.
 ## Try it
 
 Run the MIT core in under 30 minutes and route your first incident to your on-call
-platform: [AI Agent — Getting Started](../agent/getting-started.md). Email
+platform: [AIOps SRE Quickstart](../agent/quickstart.md). Email
 <a href="mailto:admin@versusincident.com?subject=Versus%20%2B%20on-call">admin@versusincident.com</a> for enterprise pricing.

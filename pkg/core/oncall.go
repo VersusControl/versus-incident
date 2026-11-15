@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 	"github.com/aws/aws-sdk-go-v2/service/ssmincidents"
 	"github.com/redis/go-redis/v9"
 )
@@ -31,6 +32,37 @@ var (
 	onCallWorkflow *OnCallWorkflow
 	once           sync.Once
 )
+
+// onCallWaitUnit is the unit of OnCallConfig.WaitMinutes. Tests shorten it.
+var onCallWaitUnit = time.Minute
+
+// DelayedOnCallRecorder receives the outcome of an escalation that fired after
+// the acknowledgement wait: nil when the provider accepted it, else the
+// provider's error. The caller of Start has already returned by then, so this
+// is the only way the result reaches the stored incident.
+type DelayedOnCallRecorder func(incidentID string, err error)
+
+var (
+	delayedOnCallMu       sync.Mutex
+	delayedOnCallRecorder DelayedOnCallRecorder
+)
+
+// SetDelayedOnCallRecorder registers the recorder for delayed escalation
+// outcomes. Last call wins; nil clears it.
+func SetDelayedOnCallRecorder(r DelayedOnCallRecorder) {
+	delayedOnCallMu.Lock()
+	defer delayedOnCallMu.Unlock()
+	delayedOnCallRecorder = r
+}
+
+func recordDelayedOnCall(incidentID string, err error) {
+	delayedOnCallMu.Lock()
+	r := delayedOnCallRecorder
+	delayedOnCallMu.Unlock()
+	if r != nil {
+		r(incidentID, err)
+	}
+}
 
 // NewOnCallWorkflow creates a new on-call workflow with the given provider
 func NewOnCallWorkflow(redisClient redis.UniversalClient, provider OnCallProvider) *OnCallWorkflow {
@@ -85,7 +117,9 @@ func SetOnCallWorkflow(w *OnCallWorkflow) {
 // triggerProvider triggers the on-call provider
 func (w *OnCallWorkflow) triggerProvider(ctx context.Context, incidentID string, cfg *config.OnCallConfig) error {
 	if err := w.provider.TriggerOnCall(ctx, incidentID, cfg); err != nil {
-		return err
+		// Provider errors can carry a credential in the request URL; redact
+		// before the error is stored on the incident, returned or logged.
+		return utils.SafeError(err)
 	}
 	return nil
 }
@@ -118,7 +152,7 @@ func (w *OnCallWorkflow) StartContext(ctx context.Context, incidentID string, oc
 	}
 
 	// Store incident in Redis with expiration time
-	expiration := time.Duration(oc.WaitMinutes)*time.Minute + 1*time.Minute
+	expiration := time.Duration(oc.WaitMinutes)*onCallWaitUnit + 1*time.Minute
 
 	if err := w.redisClient.Set(ctx, incidentID, "pending", expiration).Err(); err != nil {
 		return fmt.Errorf("failed to store incident %s in Redis: %v", incidentID, err)
@@ -129,7 +163,7 @@ func (w *OnCallWorkflow) StartContext(ctx context.Context, incidentID string, oc
 	// Start timer to check for acknowledgment
 	go func() {
 		ctx := context.Background()
-		<-time.After(time.Duration(oc.WaitMinutes) * time.Minute)
+		<-time.After(time.Duration(oc.WaitMinutes) * onCallWaitUnit)
 
 		// Check if incident is still pending
 		exists, err := w.redisClient.Exists(ctx, incidentID).Result()
@@ -139,10 +173,14 @@ func (w *OnCallWorkflow) StartContext(ctx context.Context, incidentID string, oc
 		}
 
 		if exists == 1 {
-			// If still pending, trigger on-call
-			if err := w.triggerProvider(ctx, incidentID, &oc); err != nil {
+			// If still pending, trigger on-call and write the outcome back to
+			// the incident: intake already answered "escalation queued", so a
+			// provider refusal would otherwise only reach the process log.
+			err := w.triggerProvider(ctx, incidentID, &oc)
+			if err != nil {
 				log.Printf("Failed to trigger provider: %v", err)
 			}
+			recordDelayedOnCall(incidentID, err)
 
 			// Remove from Redis
 			if err := w.redisClient.Del(ctx, incidentID).Err(); err != nil {

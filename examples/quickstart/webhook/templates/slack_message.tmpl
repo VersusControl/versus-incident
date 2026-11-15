@@ -1,0 +1,16 @@
+{{/*
+  Quickstart Slack template for Alertmanager webhooks.
+
+  The incoming JSON body is the template data: .status, .alerts,
+  .commonLabels and so on. Edit this file and send the alert again; Versus
+  reads the template on every alert, so no restart is needed.
+*/}}
+{{- $icon := "🔥" -}}
+{{- if eq .status "resolved" }}{{ $icon = "✅" }}{{ end -}}
+{{ $icon }} *{{ upper .status }}* · {{ .commonLabels.alertname }} ({{ len .alerts }} alert{{ if gt (len .alerts) 1 }}s{{ end }})
+{{ range .alerts -}}
+• *{{ upper (toString (default .labels.severity "none")) }}* on `{{ default .labels.instance "unknown" }}`: {{ .annotations.summary }}
+{{- if .annotations.description }}
+  _{{ .annotations.description }}_
+{{- end }}
+{{ end -}}

@@ -6,7 +6,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { BellOff, Info, Loader2, X } from "lucide-react";
+import { BellOff, Eye, Info, Loader2, X } from "lucide-react";
 
 import {
   ApiError,
@@ -706,7 +706,7 @@ function ReviewTable() {
             </PeekField>
             <PeekField label="Repeat count">{peek.repeat_count}</PeekField>
             <PeekField label="Detection occurrences">
-              {peek.detection_occurrence_count?.toLocaleString() || "—"}
+              {occurrenceText(peek.detection_occurrence_count)}
             </PeekField>
             <PeekField label="First seen">
               <span title={fmtAbs(peek.first_seen)}>
@@ -821,6 +821,13 @@ function PriorityBadge({
   );
 }
 
+// occurrenceText renders the detection occurrence count. Webhook fingerprints
+// carry no detection count (absent or zero), so they read "—" rather than 0.
+function occurrenceText(count?: number | null): string {
+  const n = Number(count ?? 0);
+  return Number.isFinite(n) && n > 0 ? n.toLocaleString() : "—";
+}
+
 function FingerprintRow({
   row,
   acting,
@@ -875,14 +882,9 @@ function FingerprintRow({
   return (
     <tr>
       <td className="font-mono text-2xs text-ink-200">
-        <button
-          type="button"
-          className="block w-full truncate text-left hover:text-link hover:underline"
-          onClick={onPeek}
-          title={displayService(row.service)}
-        >
+        <span className="block truncate" title={displayService(row.service)}>
           {displayService(row.service)}
-        </button>
+        </span>
       </td>
       <td className="text-2xs text-ink-300">
         <span className="block truncate" title={row.source || undefined}>
@@ -899,7 +901,7 @@ function FingerprintRow({
         {row.repeat_count}
       </td>
       <td className="text-right tabular-nums text-ink-300">
-        {row.detection_occurrence_count?.toLocaleString() || "—"}
+        {occurrenceText(row.detection_occurrence_count)}
       </td>
       <td className="text-2xs text-ink-300" title={fmtAbs(row.last_seen)}>
         {fmtRel(row.last_seen)}
@@ -925,42 +927,54 @@ function FingerprintRow({
         </span>
       </td>
       <td className="text-right">
-        {unreachable ? (
-          <span
-            data-testid="alert-fatigue-unreachable-action"
-            title={UNREACHABLE_HINT}
-            aria-label={`No action available: ${UNREACHABLE_HINT}`}
-            className="inline-flex max-w-full items-center gap-1 truncate text-2xs text-ink-500"
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <button
+            type="button"
+            className="btn px-2 py-1 text-2xs"
+            onClick={onPeek}
+            aria-label={`Details for fingerprint ${row.fingerprint}`}
+            title="Open the fingerprint to see the alert's content"
           >
-            <Info size={11} aria-hidden />
-            <span className="truncate">Stale key — no action</span>
-          </span>
-        ) : (
-          <div className="flex flex-wrap justify-end gap-1.5">
-            {s === "tracking" && markAsSpam}
-            {s === "pending_review" && (
-              <button
-                type="button"
-                className="btn px-2 py-1 text-2xs"
-                disabled={acting}
-                onClick={onConfirm}
-              >
-                Confirm spam
-              </button>
-            )}
-            {(s === "fatigued" || s === "pending_review") && (
-              <button
-                type="button"
-                className="btn px-2 py-1 text-2xs"
-                disabled={acting}
-                onClick={onReclaim}
-              >
-                Not spam
-              </button>
-            )}
-            {s === "reclaimed" && markAsSpam}
-          </div>
-        )}
+            <Eye size={11} aria-hidden />
+            Details
+          </button>
+          {unreachable ? (
+            <span
+              data-testid="alert-fatigue-unreachable-action"
+              title={UNREACHABLE_HINT}
+              aria-label={`No action available: ${UNREACHABLE_HINT}`}
+              className="inline-flex max-w-full items-center gap-1 truncate text-2xs text-ink-500"
+            >
+              <Info size={11} aria-hidden />
+              <span className="truncate">Stale key — no action</span>
+            </span>
+          ) : (
+            <div className="flex flex-wrap justify-end gap-1.5">
+              {s === "tracking" && markAsSpam}
+              {s === "pending_review" && (
+                <button
+                  type="button"
+                  className="btn px-2 py-1 text-2xs"
+                  disabled={acting}
+                  onClick={onConfirm}
+                >
+                  Confirm spam
+                </button>
+              )}
+              {(s === "fatigued" || s === "pending_review") && (
+                <button
+                  type="button"
+                  className="btn px-2 py-1 text-2xs"
+                  disabled={acting}
+                  onClick={onReclaim}
+                >
+                  Not spam
+                </button>
+              )}
+              {s === "reclaimed" && markAsSpam}
+            </div>
+          )}
+        </div>
       </td>
     </tr>
   );

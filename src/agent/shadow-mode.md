@@ -1,278 +1,102 @@
 # Shadow Mode
 
-Shadow mode is the **practice run** between training and detect.
-The agent keeps learning, and on top of that it decides what it
-*would* have alerted on — and writes those decisions to a file you
-can read later. **It does not send any alerts.**
+## Concept
 
-Think of it as: "show me what you would have woken me up for, so I
-can decide if I trust you."
+Shadow mode is a **practice run** for detect. The agent keeps learning exactly
+as in training, and on top of that it writes down every problem it *would* have
+alerted on. It sends nothing: no Slack, no email, no on-call.
 
-## When to switch to shadow
+Think of it as: "show me what you would have alerted me about, so I can decide
+whether to trust you."
 
-Stay in `training` until new patterns stop showing up often —
-usually a few days for a small service, longer for a large setup.
-Then switch the mode:
+The agent records two kinds of entries:
 
-```bash
-docker stop versus-agent
-docker run -d \
-  --name versus-agent \
-  ... \
-  -e AGENT_MODE=shadow \
-  ghcr.io/versuscontrol/versus-incident:latest
+| Verdict | Meaning |
+|---|---|
+| `unknown` | A pattern the agent has never seen, or has not seen often enough to call normal. |
+| `spike` | A known pattern firing far more than usual. See [Spike Detection](./spike.md). |
+
+Known patterns at their usual rate stay quiet; a known pattern only comes back
+if it spikes. Each source and pattern pair gets **one entry**, updated each
+time it comes back, so a busy problem does not flood the list.
+
+![Before and after shadow mode: on the left, the same log stream a detect agent would alert on, with a new checkout timeout and a burst of a known error; on the right, the Decisions → Shadow list with one would-have-alerted row per source and pattern, marked unknown and spike, and no notification sent](../docs/images/sre-shadow-concept.svg)
+
+## Example
+
+You trained the agent on `checkout-api` for three days, then switched to
+shadow. On Friday a release starts throwing:
+
+```text
+checkout-api payment processor acme-pay did not answer within 30s
 ```
 
-Or change `agent.mode` in `config.yaml` and restart.
+The agent has never seen this line. In detect mode it would raise an incident
+and send it to your channels. In shadow mode it adds one `unknown` entry
+instead, and the entry's signal count grows as the error repeats. Nothing is
+sent.
 
-The catalog and the shadow log are accessible from the UI:
+On Monday you review the list:
 
-- **Patterns page** — learned templates (kept growing in shadow)
-- **Shadow page** — would-have-alerted entries (only written in shadow)
+- The `acme-pay` timeout is a real problem you want to hear about. Leave it:
+  detect will raise an incident for it.
+- A `cache warmed for region <*>` line from a new nightly job is harmless. Mark
+  its pattern **known** on the **Logs** page. It stops showing up unless it
+  spikes.
 
-## How shadow mode works
+## What you see in the UI
 
-Shadow mode runs the same steps as training (read → hide secrets →
-filter → group → save) and adds **one extra step at the end**:
-look at the result and, if it isn't already known, record it in
-the shadow log.
+Open **AI → Decisions** and select the **Shadow** tab.
 
-![Shadow mode: the agent reads a log source, hides secrets, skips uninteresting lines, groups the rest into shapes and remembers them, then asks whether it has seen the pattern before. Old news stays quiet; anything new is written to shadow.log as a would have alerted entry and printed to the console for review. No real alert is sent](../docs/images/shadow-mode.svg)
+![AI → Decisions, Shadow tab in shadow mode: two would-have-alerted rows from loki:quickstart-loki, checkout-api with verdict unknown and 60 signals for the acme-pay timeout, and jobrunner with verdict spike and 143 signals for the failed to enqueue job line, each with pattern, rule, ticks, sample line and last seen time, and a Clear button](../docs/images/sre-shadow-ui-dark.png)
 
-Three things to remember:
+| Column | What it shows |
+|---|---|
+| **Service** | The service the line came from. See [Service Detection](./service-detection.md). |
+| **Verdict** | `unknown` for a new pattern, `spike` for a known pattern firing far above normal. |
+| **Pattern** | The learned pattern. Open it to see the full template. |
+| **Source** | The log source it came from, for example prod or staging. |
+| **Rule** | The [Regex](./regex.md) rule that matched the line. |
+| **Signals** / **Ticks** | Total matching lines, and how many separate reads they arrived in. |
+| **Sample** | One example line, with secrets masked. |
+| **Last seen** | When the pattern last appeared. |
 
-- **The catalog still grows.** Every line that passes the secret
-  hider and the filter rules is added to the catalog, just like in
-  training. Switching to shadow doesn't pause learning.
-- **The new step is just a check.** A pattern is "known" when
-  either (a) you labeled it `known` through the admin API, or (b)
-  it has been seen at least `auto_promote_after` times. Anything
-  else is "unknown" and ends up in the shadow log.
-- **No real alerts.** Would-have-alerted entries land in the
-  shadow log (viewable on the **Shadow** page in the UI) and also
-  print a green line in stdout.
+Filter by verdict to look at spikes on their own. When a review round is done,
+use **Clear** to start the next one with an empty list. The list keeps up to
+1000 patterns; the oldest entry is dropped when it is full.
 
-## What gets recorded
+## Turn it on
 
-Every time the agent checks for new logs, each line that survives
-the earlier steps falls into one of three buckets:
+Switch the mode and restart. What the agent learned in training is kept.
 
-1. **Known** — quietly update the catalog and move on. This is
-   what most lines do once the agent has trained.
-2. **Unknown** — write a row to the shadow log. This happens for a
-   brand-new template, or for a rare template that hasn't been
-   seen `auto_promote_after` times yet.
-3. **Spike** — a known pattern that is suddenly firing way more
-   often than usual. The agent keeps an average rate (an EWMA) for
-   every pattern; when one tick blows past that average by a
-   configurable factor, the row is written to the shadow log with
-   `verdict: spike`. Useful for spotting sudden surges that the
-   "known" check would otherwise hide.
-
-A pattern is "known" when **either** of these is true:
-
-- You've labeled it as known through
-  `POST /api/agent/patterns/<id>` with body `{"verdict":"known"}`.
-  This takes effect right away and stays until you change it.
-- It has been seen at least `agent.catalog.auto_promote_after`
-  times (default `100`). The agent saves this auto-promotion to
-  the catalog so you can check which patterns it considers
-  baseline on the **Patterns** page.
-
-### When a known pattern can still fire (spike)
-
-"Known" usually means "ignore". But there's one case where you
-probably still want to know: a pattern that has been quiet
-suddenly going loud. The agent keeps an average rate (an EWMA) of
-how often each pattern fires per tick, and compares the current
-tick to that average. If the current tick is way above the
-average, the row is written to the shadow log with
-`verdict: spike` instead of being silenced.
-
-Three settings control this:
-
-- **`agent.catalog.spike_multiplier`** (default `5.0`) — how many
-  times above the baseline a tick must be. Set to `0` to disable
-  spike detection.
-- **`agent.catalog.spike_min_frequency`** (default `5`) — the
-  current tick must have at least this many matches. Stops the
-  agent from screaming when the baseline is `0.5` and one tick has
-  3 matches (technically 6× but not interesting).
-- **`agent.catalog.spike_min_baseline_count`** (default `20`) —
-  the pattern must have been seen this many times overall before
-  it's eligible for a spike. Stops a barely-seen pattern's first
-  big tick from looking like a spike before any real baseline has
-  been built.
-
-In practice: with the defaults, a pattern that normally fires once
-or twice per tick suddenly producing 10+ matches in a single tick
-will land in the shadow log as a spike, even if you previously
-labeled it `known`.
-
-### One row per pattern, not per line
-
-If the agent wrote one row for every flagged line, a busy cluster
-would drown the shadow log. Instead, the log keeps **one row per
-pattern**. When the same pattern is hit again, its row is updated:
-the count grows, the occurrence counter ticks up, and the
-last-seen time is refreshed.
-
-So if 200 NTP-skew lines arrive across 4 ticks, you don't get 200
-rows — you get **one** row with a count of 200 across 4
-occurrences.
-
-### What each row shows
-
-Every row on the **Shadow** page carries:
-
-- **template** — the learned shape, `<*>` marks the parts that
-  change.
-- **source** — which log source it came from, so you can tell prod
-  from staging at a glance.
-- **rule** — the filter rule that matched (`default` means the
-  catch-all matched but no named rule did).
-- **verdict** — `unknown` for first sightings, `spike` for a known
-  pattern firing far more than usual.
-- **sample message** — one example line, with secrets already
-  hidden.
-- **count** / **occurrences** — raw lines matched, and how many
-  distinct ticks they arrived in.
-- **first seen** / **last seen** — when the pattern first and most
-  recently appeared.
-
-### Size limit and cleanup
-
-The shadow log holds at most **1000 different patterns**. When it's
-full, the oldest entry is dropped to make room. You shouldn't hit
-this on a normal-sized service: 1000 different anomalies in a single
-review window means something is *very* wrong (or the filter rules
-are too loose — see [Filter rules](./regex.md)).
-
-## Try it locally with the noisy-logs script
-
-If you went through [Getting Started](./getting-started.md), you
-already have the agent running against `./logs/my-app.log` with
-`from_beginning: true`. The repo has a
-[`scripts/generate_noisy_logs.py`][gen] script that mixes about 30
-common templates with a few rare, production-style oddities (kernel
-OOM with score, segfaults, expired TLS certs, NTP clock skew, lost
-Raft quorum, replication lag, unexpected `SIGTERM`, …). Those rare
-lines are exactly what shadow mode is meant to catch.
-
-[gen]: https://github.com/VersusControl/versus-incident/blob/main/scripts/generate_noisy_logs.py
-
-**Step 1 — train on the boring baseline.** With the agent in
-`training`, point the live script at the log file and let it run
-for a few minutes:
-
-```bash
-./scripts/run_noisy_logs.sh \
-  --output ./logs/my-app.log \
-  --interval 1 --batch 50
+```yaml
+agent:
+  enable: true
+  mode: shadow
 ```
 
-Watch the agent logs: the `agent: new pattern` lines should slow
-down within a minute or two. That's your baseline.
+Or set `AGENT_MODE=shadow`. _Enterprise_ admins can also switch from
+**Admin → Runtime mode** in the UI.
 
-**Step 2 — switch to shadow mode.** Stop the container, start it
-again with `AGENT_MODE=shadow`. The catalog you built is
-persisted, so the agent already knows
-what "normal" looks like.
+> **New services are quiet for a while.** A service the agent sees for the first
+> time is learned but not reported for `agent.new_service_grace` (`24h` in the
+> shipped `config.yaml`, `30m` in the Helm chart). Shadow and detect use the same grace, so shadow is a faithful preview
+> of detect.
 
-**Step 3 — keep generating logs.** Restart the live script (or
-just leave it running). Most of what comes through is now the
-boring baseline, which the agent treats as known. The rare lines
-end up in the shadow log:
+## A review loop
 
-```
-agent[shadow]: would alert pattern=p-9c2f01 tag=default verdict=unknown freq=1
-agent[shadow]: would alert pattern=p-7e1a44 tag=default verdict=unknown freq=2
-```
+1. Run shadow for about a day, so it covers peak hours and nightly jobs.
+2. Sort each entry: a real problem, harmless noise, or a new but expected line.
+3. Mark harmless patterns **known** on the **Logs** page.
+4. For a real problem that matched only the catch-all rule, give it its own
+   [Regex](./regex.md) rule so incidents carry a clear name.
+5. **Clear** the list and repeat until it holds mostly real problems over a full
+   release cycle.
+6. Switch to [AI Detect Mode](./ai-detect-mode.md).
 
-**Step 4 — review.** After a minute or two, open the admin UI and
-click **Shadow** in the sidebar. Each row is a pattern the agent
-*would* have alerted on, with its template, sample line, counts,
-and verdict. Click a row to see the full detail.
+## Reference
 
-This is the "what you would have been alerted about" version. Use
-the loop in [A typical review loop](#a-typical-review-loop) below
-to triage them.
-
-> **Tip.** Want a forced demo? Append a single batch of mostly
-> baseline + anomalies to the file the agent is reading while in
-> shadow mode:
->
-> ```bash
-> python3 scripts/generate_noisy_logs.py \
->   --append --start-time now \
->   --output ./logs/my-app.log --lines 500
-> ```
->
-> 500 lines at default weights gives about 25 anomaly lines across
-> ~10 different templates — a tidy worked example.
-
-## A typical review loop
-
-This is the pattern you'll repeat for as long as the agent is in
-shadow mode. Each pass should make the next one quieter.
-
-1. **Run shadow mode for about 24 hours.** Long enough to cover at
-   least one full traffic cycle (peak hours, off-peak, any nightly
-   cron jobs).
-2. **Review the entries** on the **Shadow** page. Sort them in your
-   head into three groups: real anomalies you'd want to be paged
-   about, noise that should have been silenced, and "new but
-   legitimate" patterns (fresh deploys, new endpoints, etc.).
-3. **For things you _would_ want to be paged about:**
-   - Add or improve a rule under `agent.regex.rules` in
-     `config.yaml` so the pattern gets the right `name` next time.
-   - Example: a `quorum lost` line that landed with rule `default`
-     deserves its own rule:
-
-     ```yaml
-     agent:
-       regex:
-         rules:
-           - name: quorum-lost
-             pattern: "(?i)quorum lost"
-     ```
-4. **For things that are just noise:**
-   - Either raise `agent.catalog.auto_promote_after` (default 100)
-     so the pattern becomes "known" sooner, **or** open the pattern
-     on the **Patterns** page and set its verdict to **known**.
-
-     Once a pattern is marked known, it will never appear in the
-     shadow log again, no matter how often it shows up.
-5. **Clear the log** with the **Clear** action on the Shadow page.
-   The next round starts clean.
-6. **Repeat** until the shadow log is mostly empty over a full
-   release cycle (one or two weeks).
-7. **Switch to detect.** Set `AGENT_MODE=detect` and you're live.
-
-## Common questions
-
-**Q: Will shadow mode send any alerts?**
-No. Not Slack, Telegram, email, on-call — nothing. It only records
-would-have-alerted entries you review on the Shadow page.
-
-**Q: Does shadow mode keep adding patterns to the catalog?**
-Yes. Every line that passes the secret hider and filter rules is
-grouped and saved, exactly like in training. This is on purpose:
-shadow is "training plus a check" so you don't lose ground while
-reviewing.
-
-**Q: What happens if I switch back to training?**
-The shadow log is kept; the worker just stops adding to it. Switch
-back to `shadow` later and it picks up where it left off.
-
-**Q: Can the shadow log fill up forever?**
-No. It holds at most 1000 distinct patterns. When full, the oldest
-entry is dropped to make room.
-
-## What's next
-
-- [Configuration](./configuration.md) — every setting and
-  environment variable.
-- [Catalog](./catalog.md) — labeling patterns from the shadow log.
-- [Filter rules](./regex.md) — tuning what reaches the grouper so
-  shadow noise stays manageable.
+- [Configuration](./configuration.md): `agent.mode`, `agent.new_service_grace`,
+  `agent.catalog.auto_promote_after`.
+- [Catalog](./catalog.md): labelling patterns as known.
+- [Spike Detection](./spike.md): when a known pattern still shows up.

@@ -1,0 +1,6 @@
+# File storage on an emptyDir: nothing is shared between pods, so the
+# Deployment keeps the default rolling update.
+storage:
+  type: file
+  persistence:
+    enabled: false

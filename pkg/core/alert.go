@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // AlertProvider is implemented by every notification channel (Slack,
@@ -46,6 +47,9 @@ func (a *Alert) SendAllAlerts(incident *m.Incident) AlertResult {
 	var errs []error
 	for _, p := range a.providers {
 		if err := p.SendAlert(incident); err != nil {
+			// Channel errors can carry the channel's credential in the request
+			// URL; redact before the error is stored, returned or logged.
+			err = utils.SafeError(err)
 			res.Failed[p.Name()] = err
 			errs = append(errs, fmt.Errorf("%s: %w", p.Name(), err))
 			continue

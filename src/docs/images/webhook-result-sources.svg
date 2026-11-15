@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="352" viewBox="0 0 760 352" style="max-width:100%;height:auto" role="img" aria-label="Four alert tools, Prometheus Alertmanager, Grafana, Sentry and Fluent Bit, send their webhooks to POST /api/incidents on Versus, which applies its default template so every tool turns into the same clear Slack alert; the Alertmanager example becomes FIRING: PostgresqlDown from Prometheus, severity CRITICAL, resource postgresql-prod-01, Postgresql instance is down; the Sentry example becomes FIRING: Example Issue, severity ERROR, in the same layout">
+  <title>Many alert tools in, one clear Slack alert out</title>
+  <desc>Alertmanager, Grafana, Sentry and Fluent Bit webhooks pass through the Versus default template and arrive in Slack in one shared format with status, title, severity, resource and description</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <style>
+      text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-weight: 400; fill: #000000; }
+      .m { text-anchor: middle; }
+      .name { font-weight: 700; fill: #12222F; }
+      .zone { font-size: 12px; font-weight: 700; letter-spacing: 1.5px; fill: #5B6B78; }
+      .d { font-size: 12px; fill: #5B6B78; }
+      .c { font-family: SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; fill: #12222F; }
+      .b { font-weight: 700; }
+      .blk { fill: #FFFFFF; stroke: #000000; stroke-width: 2; }
+      .line { fill: none; stroke: #000000; stroke-width: 2.5; }
+      .flow { fill: none; stroke: #000000; stroke-width: 2.5; marker-end: url(#a); }
+    </style>
+  </defs>
+
+  <rect width="760" height="352" fill="#FFFFFF"/>
+
+  <!-- zone panel -->
+  <rect x="440" y="24" width="312" height="312" rx="14" fill="#F2F5F8"/>
+
+  <!-- blocks: alert tools -->
+  <rect class="blk" x="16" y="64" width="170" height="52" rx="12"/>
+  <rect class="blk" x="16" y="128" width="170" height="52" rx="12"/>
+  <rect class="blk" x="16" y="192" width="170" height="52" rx="12"/>
+  <rect class="blk" x="16" y="256" width="170" height="52" rx="12"/>
+
+  <!-- block: Versus -->
+  <rect class="blk" x="250" y="144" width="140" height="84" rx="14"/>
+
+  <!-- blocks: Slack messages -->
+  <rect class="blk" x="456" y="62" width="280" height="156" rx="12"/>
+  <rect x="470" y="78" width="5" height="124" rx="2.5" fill="#E51400"/>
+  <rect x="456" y="234" width="280" height="86" rx="12" fill="#FFFFFF" stroke="#9AA9B6" stroke-width="1.5"/>
+  <rect x="470" y="248" width="5" height="58" rx="2.5" fill="#9AA9B6"/>
+
+  <!-- arrows -->
+  <path class="line" d="M186 90 H214 M186 154 H214 M186 218 H214 M186 282 H214 M214 90 V282"/>
+  <path class="flow" d="M214 186 H245"/>
+  <path class="line" d="M390 186 H420 M420 140 V277"/>
+  <path class="flow" d="M420 140 H451"/>
+  <path class="flow" d="M420 277 H451"/>
+
+  <!-- text -->
+  <text class="zone m" x="101" y="48">YOUR ALERT TOOLS</text>
+  <text class="name m" x="101" y="88" font-size="16">Alertmanager</text>
+  <text class="d m" x="101" y="105">Prometheus</text>
+  <text class="name m" x="101" y="152" font-size="16">Grafana</text>
+  <text class="d m" x="101" y="169">alert rules</text>
+  <text class="name m" x="101" y="216" font-size="16">Sentry</text>
+  <text class="d m" x="101" y="233">errors</text>
+  <text class="name m" x="101" y="280" font-size="16">Fluent Bit</text>
+  <text class="d m" x="101" y="297">logs</text>
+
+  <text class="name m" x="320" y="182" font-size="22">Versus</text>
+  <text class="d m" x="320" y="206">default template</text>
+  <text class="c m" x="320" y="252">POST /api/incidents</text>
+
+  <text class="zone m" x="596" y="48">IN SLACK</text>
+
+  <text class="d" x="488" y="88">from Prometheus</text>
+  <text class="name" x="488" y="114" font-size="17">FIRING: PostgresqlDown</text>
+  <text xml:space="preserve" style="white-space:pre" x="488" y="146" font-size="14"><tspan class="b">Severity: </tspan><tspan class="b" fill="#E51400">CRITICAL</tspan></text>
+  <text xml:space="preserve" style="white-space:pre" x="488" y="170" font-size="14"><tspan class="b">Resource: </tspan>postgresql-prod-01</text>
+  <text x="488" y="194" font-size="14">Postgresql instance is down</text>
+
+  <text class="d" x="488" y="256">from Sentry</text>
+  <text class="name" x="488" y="280" font-size="15">FIRING: Example Issue</text>
+  <text xml:space="preserve" style="white-space:pre" x="488" y="304" font-size="13"><tspan class="b">Severity: </tspan>ERROR</text>
+</svg>

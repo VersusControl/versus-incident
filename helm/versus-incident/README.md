@@ -12,7 +12,7 @@ for complete values and cloud prerequisites.
 ## Requirements
 
 - Kubernetes 1.19+
-- Helm 3.2.0+
+- Helm 3.8.0+ (installs from the OCI registry)
 - PV provisioner support in the underlying infrastructure (if persistence is required for Redis)
 
 ## Installing the Chart
@@ -371,14 +371,6 @@ oncall:
 
 redis:
   enabled: true
-  auth:
-    enabled: true
-    password: "your-redis-password"
-  architecture: standalone
-  master:
-    persistence:
-      enabled: true
-      size: 8Gi
 ```
 
 ### PagerDuty
@@ -398,25 +390,21 @@ oncall:
 
 redis:
   enabled: true
-  auth:
-    enabled: true
-    password: "your-redis-password"
-  architecture: standalone
-  master:
-    persistence:
-      enabled: true
-      size: 8Gi
 ```
 
 ## Redis Configuration
 
-Redis is **only required when on-call is enabled** (`oncall.enable=true` or `oncall.initializedOnly=true`). When on-call is disabled, the Redis settings are ignored.
+Versus uses Redis **only for on-call** (`oncall.enable=true` or `oncall.initializedOnly=true`). The bundled Redis is deployed whenever `redis.enabled=true`; with on-call off it runs unused, so leave it off. With `redis.enabled=false` and on-call off, no Redis is deployed or contacted.
 
 The chart supports exactly two modes — pick one:
 
 ### Mode 1 — Bundled Redis (recommended for getting started)
 
-The chart deploys a Bitnami Redis subchart and the application connects to it automatically at `<release-name>-redis-master:6379`.
+The chart runs one Redis pod from the official `redis` image with a Service named `<fullname>-redis` on port 6379, and the application connects to it automatically. The Versus pod waits for Redis to answer before it starts.
+
+- **Password:** generated on the first install and kept on every upgrade, in the Secret `<fullname>-redis` (key `redis-password`). Set `redis.auth.password` with `--set-string`, or point `redis.auth.existingSecret` (and `redis.auth.existingSecretPasswordKey`) at a Secret you create. Tools that render the chart without cluster access (`helm template`, many GitOps setups) cannot read the kept password and generate a new one on every render; set `redis.auth.password` or `redis.auth.existingSecret` there. Whenever the chart-managed password changes, the Redis pod and the Versus pods restart together. With `redis.auth.existingSecret` the chart cannot see the password, only the Secret name and key: after you rotate the password in your own Secret, restart both yourself with `kubectl -n <namespace> rollout restart deploy/<fullname>-redis`, then `kubectl -n <namespace> rollout restart deploy/<fullname>` (`statefulset/<fullname>` with `ha.enabled`).
+- **Data:** a 1Gi PersistentVolumeClaim `<fullname>-redis-data` by default (`redis.persistence.enabled`, `size`, `storageClassName`, `existingClaim`).
+- **Image:** `redis.image.repository` and `redis.image.tag` (pinned to an exact release).
 
 ```yaml
 oncall:
@@ -424,14 +412,6 @@ oncall:
 
 redis:
   enabled: true
-  auth:
-    enabled: true
-    password: "your-redis-password"
-  architecture: standalone
-  master:
-    persistence:
-      enabled: true
-      size: 8Gi
 
 # externalRedis.* is IGNORED in this mode — leave it untouched.
 ```
@@ -473,6 +453,22 @@ Setting `externalRedis.host` while leaving `redis.enabled: true` (the default in
 3. Verify connectivity from the pod: `kubectl exec -it <pod> -- nc -vz <externalRedis.host> 6379`.
 4. If you see timeouts, raise `externalRedis.connectionTimeout` / `readTimeout` / `writeTimeout` (now defaulted to 30s).
 
+
+### Upgrading from the Bitnami Redis
+
+Charts before this one deployed the Bitnami Redis subchart. The bundled Redis is now part of this chart, so an upgrade with `redis.enabled=true` needs four things:
+
+- **Values:** `helm upgrade --reuse-values` keeps the old chart's defaults, including `redis.architecture` and `redis.master`, and the upgrade stops with a message naming them. Move `redis.master.persistence.*` to `redis.persistence.*` in your values file and drop `redis.architecture`, then upgrade with only `-f <values>` (no reuse flag). `--reset-then-reuse-values` (Helm 3.14+) drops the old chart defaults but keeps values you set yourself in the release: if `redis.master` or `redis.architecture` came from your own values, add `--set redis.master=null --set redis.architecture=null`.
+- **Image:** the bundled Redis runs the official `redis` image with this chart's tag. If your old release values set `redis.image` (for example `redis.image.repository=bitnamilegacy/redis`, often with `global.security.allowInsecureImages`), the upgrade stops with a message naming `redis.image`. Remove `redis.image` from your values file and, with `--reset-then-reuse-values`, add `--set redis.image=null`. Add it only in that case: when the old values never set `redis.image`, the flag removes the chart's own image too and the upgrade fails with `redis.image.tag is required`. `global.security.*` is not read by this chart and can stay.
+
+  ```bash
+  helm upgrade <release> <chart> --namespace <namespace> --reset-then-reuse-values -f <values> \
+    --set redis.master=null --set redis.architecture=null
+  # Only if your old values set redis.image:
+  #   add --set redis.image=null
+  ```
+- **Data:** the new Redis starts empty on a new volume, `<fullname>-redis-data`. Pending on-call escalations held in the old Redis are lost; incidents and history are not stored in Redis.
+- **Clean-up:** the old volume is no longer used. Delete it when you no longer need it: `kubectl -n <namespace> delete pvc redis-data-<release>-redis-master-0`.
 
 ## Custom Alert Templates
 

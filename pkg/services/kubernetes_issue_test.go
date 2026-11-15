@@ -7,17 +7,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 func TestKubernetesIssueContentAllowlistSeverityLinksAndRedaction(t *testing.T) {
+	loadAgentTestConfig(t)
+	// The config is loaded once per process, so pin on-call off (no provider
+	// set up) rather than inherit what an earlier test left.
+	cfg := config.GetConfig()
+	prev := cfg.OnCall
+	t.Cleanup(func() { cfg.OnCall = prev })
+	cfg.OnCall.Enable, cfg.OnCall.InitializedOnly = false, false
 	a := kubernetes.IssueAlert{Cluster: "prod & east", Namespace: "shop", WorkloadKind: "Deployment", Workload: "checkout", RootUID: "root&uid", ResourceID: "deployments", Rule: "pod.crash_loop", RuleLabel: "crash looping", Severity: "warning", BrokeAt: time.Now(), Evidence: []string{"password=secret-value", "12 restarts"}, Changes: []string{"Image changed 4m before break"}}
 	c := kubernetesIssueContent(a, "https://versus.invalid")
 	if c["Severity"] != "medium" || c["KubernetesSeverity"] != "warning" {
 		t.Fatal(c)
 	}
-	if kubernetesIssueParams(c["Severity"].(string))["oncall_enable"] != "false" {
+	if kubernetesIssueParams(context.Background(), c["Severity"].(string))["oncall_enable"] != "false" {
 		t.Fatal("warning would page")
 	}
 	encoded, _ := json.Marshal(c)
@@ -31,8 +39,8 @@ func TestKubernetesIssueContentAllowlistSeverityLinksAndRedaction(t *testing.T) 
 	if c := kubernetesIssueContent(a, ""); c["Severity"] != "critical" {
 		t.Fatal(c)
 	}
-	if kubernetesIssueParams("critical")["oncall_enable"] != "true" {
-		t.Fatal("critical would not page")
+	if _, forced := kubernetesIssueParams(context.Background(), "critical")["oncall_enable"]; forced {
+		t.Fatal("with no on-call provider set up a critical issue must not opt in to on-call")
 	}
 	a.RollupCount = 4
 	c = kubernetesIssueContent(a, "https://versus.invalid")
@@ -77,7 +85,7 @@ func TestKubernetesIssueCoalescedHistoryAndRollupCriticalEscalation(t *testing.T
 	}
 	a.Severity = "critical"
 	critical, err := CreateIncidentFromKubernetesIssue("org", a)
-	if err != nil || critical.IncidentID != warning.IncidentID || critical.NotificationOutcome != "sent" {
+	if err != nil || critical.IncidentID != warning.IncidentID || critical.NotificationOutcome != "none" {
 		t.Fatal(critical, err)
 	}
 	a.RollupCount = 50
@@ -85,7 +93,7 @@ func TestKubernetesIssueCoalescedHistoryAndRollupCriticalEscalation(t *testing.T
 	if err != nil || repeated.IncidentID != warning.IncidentID || repeated.NotificationOutcome != "not_applicable" {
 		t.Fatal(repeated, err)
 	}
-	if len(severities) != 3 || severities[1] != "medium" || severities[2] != "critical" || kubernetesIssueParams(severities[2])["oncall_enable"] != "true" {
+	if len(severities) != 3 || severities[1] != "medium" || severities[2] != "critical" || kubernetesIssueParams(context.Background(), severities[2])["oncall_enable"] == "false" {
 		t.Fatal("unbounded or missing critical rollup escalation", severities)
 	}
 }
@@ -102,7 +110,7 @@ func TestKubernetesIssueSharedEpisodeCoalesceEscalateAndOncall(t *testing.T) {
 	})
 	a := kubernetes.IssueAlert{Cluster: "prod", Namespace: "shop", WorkloadKind: "Deployment", Workload: "checkout", RootUID: "root", Rule: "pod.crash_loop", RuleLabel: "crash looping", Severity: "warning", BrokeAt: time.Now()}
 	first, err := CreateIncidentFromKubernetesIssue("org-a", a)
-	if err != nil || first.IncidentID == "" || first.NotificationOutcome != "sent" {
+	if err != nil || first.IncidentID == "" || first.NotificationOutcome != "none" {
 		t.Fatalf("%+v %v", first, err)
 	}
 	second, err := CreateIncidentFromKubernetesIssue("org-a", a)

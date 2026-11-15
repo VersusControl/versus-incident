@@ -402,6 +402,34 @@ describe("AlertFatiguePage — fingerprint review table", () => {
     expect(screen.queryByText(/No fingerprints yet/)).toBeNull();
   });
 
+  it("shows a dash, not 0, when a fingerprint has no detection occurrences", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([finding({ id: "wh", service: "", repeat_count: 5, detection_occurrence_count: 0 })]),
+    );
+    renderPage();
+    const details = await screen.findByRole("button", { name: "Details for fingerprint abc123" });
+    const row = details.closest("tr")!;
+    const cells = within(row).getAllByRole("cell");
+    expect(cells[5].textContent).toBe("—");
+    expect(within(row).queryByText("0")).toBeNull();
+  });
+
+  it("opens the fingerprint detail from a Details button on every row, with or without a service", async () => {
+    vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(
+      page([
+        finding({ id: "wh", fingerprint: "webhookfp", service: "", alert_content: { title: "HighErrorRate" } }),
+        finding({ id: "stale", fingerprint: "stalefp", status: "fatigued", unreachable: true }),
+      ]),
+    );
+    renderPage();
+    const details = await screen.findAllByRole("button", { name: /^Details for fingerprint/ });
+    expect(details.length).toBe(2);
+    fireEvent.click(screen.getByRole("button", { name: "Details for fingerprint webhookfp" }));
+    const panel = await screen.findByText("Fingerprint detail");
+    expect(panel).toBeTruthy();
+    expect(screen.getAllByText("webhookfp").length).toBeGreaterThan(0);
+  });
+
   it("sorts server-side: default last_seen desc, and a header click changes sort/dir + refetches", async () => {
     vi.mocked(api.listAlertFatigueFingerprints).mockResolvedValue(page([finding()]));
     renderPage();

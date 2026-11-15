@@ -64,7 +64,7 @@ curating the agent's pattern catalog.
 | Shadow | `/shadow` | NDJSON log of "would-have-alerted" events recorded in shadow mode. |
 | Shadow detail | `/shadow/:patternId` | Drill into one shadow event with the matching catalog entry side-by-side. |
 | Services | `/services` | Every service the agent has discovered, with first-seen timestamps and grace controls. |
-| Tool catalog | `/agent/tools` | The complete tool catalog, grouped by domain, with availability reasons and separate Chat/Analyze enablement toggles. Remains readable when the agent is disabled. |
+| Connectors & Tools (under AI in the sidebar) | `/agent/tools` | The complete tool catalog, grouped by domain, with availability reasons and separate Chat/Analyze enablement toggles. Remains readable when the agent is disabled. |
 | Runbooks | `/runbooks` | The runbook corpus that backs the `find_runbook` tool. Upload `.md` files, view a runbook's contents, or delete one. |
 
 ### Incident lifecycle
@@ -107,9 +107,9 @@ surface without you needing `curl`:
   uploads are embedded and searchable immediately; otherwise they are
   stored but flagged as not yet searchable.
 
-#### Agent Tool Catalog
+#### Connectors & Tools
 
-The Tool catalog at `/agent/tools` is an availability and policy view for the
+The **Connectors & Tools** page (under **AI** in the sidebar, `/agent/tools`) is an availability and policy view for the
 Chat and Analyze agents. It remains readable when `agent.enable` is false so
 operators can inspect requirements and prepare tool policy before enabling the
 runtime.

@@ -7,16 +7,20 @@ import (
 	"testing"
 )
 
-// K34 H1: the chart's version and appVersion follow the release, and the
-// image tag defaults to "v<appVersion>" so a default install and the one-file
-// manifest run the image of the release they came from. The release workflow
-// checks the tag against Chart.yaml; these tests keep the chart, its default
-// image and the committed manifest in step before a tag exists.
+// The chart's version and appVersion follow the release, and the image tag
+// defaults to "v<appVersion>" so a Helm install runs the image of the release
+// it came from. The one-file kubectl manifests are served from the main
+// branch, so they run the image without a tag. The release workflow checks the
+// tag against Chart.yaml; these tests keep the chart, its default image and
+// the committed manifests in step before a tag exists.
 
 var (
 	chartVersionLine    = regexp.MustCompile(`(?m)^version:\s*"?([^"\s]+)"?\s*$`)
 	chartAppVersionLine = regexp.MustCompile(`(?m)^appVersion:\s*"?([^"\s]+)"?\s*$`)
 	renderedImageLine   = regexp.MustCompile(`(?m)^\s*image:\s*"?(ghcr\.io/versuscontrol/versus-incident:[^"\s]+)"?\s*$`)
+	// Any versus-incident image line, tagged or not, so a tag that comes back
+	// into a one-file manifest is reported rather than skipped.
+	manifestImageLine = regexp.MustCompile(`(?m)^\s*image:\s*"?(ghcr\.io/versuscontrol/versus-incident(?::[^"\s]+)?)"?\s*$`)
 )
 
 func chartVersions(t *testing.T, chartYAML []byte) (version, appVersion string) {
@@ -82,25 +86,27 @@ func TestHelmDefaultImageTagFollowsAppVersion(t *testing.T) {
 	}
 }
 
-// The committed kubectl manifest pins the image of the chart's appVersion.
-func TestKubectlManifestPinsTheReleaseImage(t *testing.T) {
-	chartYAML, err := os.ReadFile(filepath.Join(chartDir, "Chart.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, appVersion := chartVersions(t, chartYAML)
-	manifest, err := os.ReadFile("../../examples/kubernetes/k8s-connector-in-cluster-enabled.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	images := renderedImages(manifest)
-	if len(images) == 0 {
-		t.Fatal("the manifest has no versus-incident image")
-	}
-	want := "ghcr.io/versuscontrol/versus-incident:v" + appVersion
-	for _, image := range images {
-		if image != want {
-			t.Errorf("manifest image %q, want %q", image, want)
+// Every committed one-file kubectl manifest runs the versus-incident image
+// without a tag.
+func TestKubectlManifestsUseTheUntaggedImage(t *testing.T) {
+	const want = "ghcr.io/versuscontrol/versus-incident"
+	for _, name := range []string{
+		"k8s-connector-in-cluster-enabled.yaml",
+		"agent-only.yaml",
+		"webhook-only.yaml",
+	} {
+		manifest, err := os.ReadFile(filepath.Join("../../examples/kubernetes", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		matches := manifestImageLine.FindAllSubmatch(manifest, -1)
+		if len(matches) == 0 {
+			t.Errorf("%s has no versus-incident image", name)
+		}
+		for _, match := range matches {
+			if image := string(match[1]); image != want {
+				t.Errorf("%s image %q, want %q", name, image, want)
+			}
 		}
 	}
 }

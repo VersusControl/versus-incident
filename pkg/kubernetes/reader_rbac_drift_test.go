@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -201,16 +200,12 @@ func readerMarkdownRole(t *testing.T, path, heading string) map[readerGrant]bool
 
 // renderDefaultReaderChart renders the chart with the Kubernetes connector on
 // (connectors.kubernetes.enabled=true) and otherwise default values, which is
-// when the chart creates the reader role. It skips when Helm or the chart
-// dependencies are not available locally.
+// when the chart creates the reader role. It skips when Helm is not installed.
 func renderDefaultReaderChart(t *testing.T, args ...string) []byte {
 	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Skip("helm is not installed; the committed manifest check covers the default role")
-	}
-	if entries, _ := os.ReadDir(filepath.Join(readerChartDir, "charts")); len(entries) == 0 {
-		t.Skip("chart dependencies are not built; run `helm dependency build helm/versus-incident`")
 	}
 	base := []string{"template", "versus-incident", readerChartDir, "--namespace", "versus", "--set", "connectors.kubernetes.enabled=true"}
 	command := exec.Command(helm, append(base, args...)...)

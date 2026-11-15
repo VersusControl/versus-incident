@@ -280,6 +280,27 @@ describe("IncidentsPage row actions", () => {
     expect(await screen.findByText("CRITICAL")).toBeTruthy();
   });
 
+  it("renders the server-reported severity of a webhook row", async () => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident({ origin: "webhook", severity: "critical" })]));
+    renderPage();
+    expect(await screen.findByText("CRITICAL")).toBeTruthy();
+  });
+
+  it("normalises a raw warning severity on a list row", async () => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident({ severity: "warning" })]));
+    renderPage();
+    expect(await screen.findByText("WARN")).toBeTruthy();
+  });
+
+  it("shows nothing sent when no channel was enabled", async () => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(index([incident({ notify_status: "none" })]));
+    renderPage();
+    const eye = await screen.findByLabelText(/View incident/);
+    const row = eye.closest("tr") as HTMLTableRowElement;
+    expect(within(row).getByText("nothing sent")).toBeTruthy();
+    expect(within(row).queryByText("none")).toBeNull();
+  });
+
   it("shows only the eye action per row — no Assign / Resolve buttons", async () => {
     renderPage();
     // The single row's eye is present…

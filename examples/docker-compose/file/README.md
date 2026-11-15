@@ -1,13 +1,26 @@
 # File-source example
 
+You need Git and Docker with Docker Compose v2; the traffic generator below
+also needs Python 3. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command in this README runs from that `versus-incident` folder, the
+repository root.
+
 The smallest possible Versus + AI-agent stack: just `versus` and
-`redis`. The agent tails `./logs/app.log` and catalogs whatever you
-append to it.
+`redis`. The agent tails `./local/logs/app.log`, created empty on first
+start, and catalogs whatever you append to it. `local/` is ignored by
+git, so the demo traffic and the agent's read cursor never change your
+checkout.
 
 ## Run
 
 ```bash
-docker compose up -d
+docker compose -f examples/docker-compose/file/docker-compose.yml up -d
 ```
 
 Everything defaults to safe local values. To override (e.g. real
@@ -29,27 +42,24 @@ Either append a single line manually:
 
 ```bash
 echo "$(date -u +%FT%TZ) ERROR [api] service=payments db connection refused" \
-  >> logs/app.log
+  >> examples/docker-compose/file/local/logs/app.log
 ```
 
 …or use the bundled generator to produce realistic noisy traffic
-that the agent can cluster (run from the repo root):
+that the agent can cluster:
 
 ```bash
-# 500 mixed lines (INFO/WARN/ERROR) appended once:
-python3 scripts/generate_noisy_logs.py --append \
-  --output examples/docker-compose/file/logs/app.log --lines 500
-
-# Continuous live tail — 20 lines every 5s, Ctrl+C to stop:
-OUTPUT=examples/docker-compose/file/logs/app.log \
+# Training traffic — 20 lines every 5s, stamped with the current time.
+# Leave it running while the agent learns its baseline; Ctrl+C to stop:
+OUTPUT=examples/docker-compose/file/local/logs/app.log \
   scripts/run_noisy_logs.sh
 
-# Inject a spike burst (test the spike detector):
-OUTPUT=examples/docker-compose/file/logs/app.log \
+# Inject a spike burst (test the spike detector) — one burst, then exits:
+OUTPUT=examples/docker-compose/file/local/logs/app.log \
   scripts/run_noisy_logs.sh --spike db-conn-refused --spike-burst 80
 
-# Inject a curated incident cluster (test detect mode):
-OUTPUT=examples/docker-compose/file/logs/app.log \
+# Inject a curated incident cluster (test detect mode) — one 60-line burst, then exits:
+OUTPUT=examples/docker-compose/file/local/logs/app.log \
   scripts/run_noisy_logs.sh --scenario db-outage
 ```
 
@@ -65,14 +75,14 @@ file/
 ├── config/
 │   ├── config.yaml
 │   └── agent_sources.yaml
-└── logs/
+└── local/logs/               # runtime folder (git-ignored)
     └── app.log               # mounted at /var/log/sample/app.log
 ```
 
 ## Cleanup
 
 ```bash
-docker compose down -v
+docker compose -f examples/docker-compose/file/docker-compose.yml down -v
 ```
 
 ## Reference

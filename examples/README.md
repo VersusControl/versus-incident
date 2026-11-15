@@ -3,6 +3,10 @@
 Runnable examples for Versus Incident. For prose docs, see the
 [user guide](https://docs.versusincident.com).
 
+## quickstart
+
+[quickstart/sre-agent/](./quickstart/sre-agent/) (detect a new log error from Loki) and [quickstart/webhook/](./quickstart/webhook/) (Alertmanager alert to Slack with a custom template) — one `docker compose up -d` each, no edits.
+
 ## docker-compose
 
 One folder per AI-agent data source. Each is self-contained and
@@ -12,9 +16,8 @@ runs only the services required for that source.
 |---|---|
 | [docker-compose/file/](./docker-compose/file/) | (none — local file) |
 | [docker-compose/loki/](./docker-compose/loki/) | Loki + Grafana |
-| [docker-compose/metrics/](./docker-compose/metrics/) | Prometheus + loadgen (Tempo optional) |
+| [metrics-source/](./metrics-source/) (_Enterprise_) | Versus Enterprise + Postgres + Prometheus + Pushgateway; learns metric baselines and raises an incident on a spike (Tempo or SigNoz overlay optional; needs `LICENSE_KEY`) |
 | [docker-compose/elasticsearch/](./docker-compose/elasticsearch/) | Elasticsearch + Kibana |
-| [docker-compose/cloudwatch/](./docker-compose/cloudwatch/) | (your AWS account) |
 | [docker-compose/signoz/](./docker-compose/signoz/) | SigNoz + ClickHouse + ZooKeeper + OTel collector (**≥4 GB Docker memory**) |
 
 See [docker-compose/README.md](./docker-compose/README.md) for the

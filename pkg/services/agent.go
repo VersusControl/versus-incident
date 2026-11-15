@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
@@ -76,16 +77,14 @@ func createIncidentFromFindingWithLease(f *core.AIFinding, r core.AgentResult, s
 		"Status": "firing",
 	}
 
-	// Escalate to on-call for high/critical severity findings when
-	// on-call is configured. Lower severities skip on-call even if it
-	// is globally enabled — agent medium/low findings are informational
-	// and should not page operators.
-	params := map[string]string{}
+	// High/critical findings page wherever an on-call provider is set up
+	// (see severeDetectionOnCallParams). Lower severities skip on-call even
+	// when it is enabled — agent medium/low findings are informational and
+	// should not page.
+	params := map[string]string{"oncall_enable": "false"}
 	switch f.Severity {
 	case "critical", "high":
-		params["oncall_enable"] = "true"
-	default:
-		params["oncall_enable"] = "false"
+		params = severeDetectionOnCallParams(context.Background())
 	}
 
 	agentKind := strings.TrimSpace(r.AgentKind)
@@ -99,6 +98,28 @@ func createIncidentFromFindingWithLease(f *core.AIFinding, r core.AgentResult, s
 	return emitDetection(content, storage.DetectionIdentity{
 		AgentKind: agentKind, Source: source, Service: service, SignalKind: signalKind, ConditionKey: r.PatternID,
 	}, f.Severity, params, "", r.Frequency, r.DetectionEmission, claimLease)
+}
+
+// severeDetectionOnCallParams is the on-call routing for a critical or high
+// detection. On-call has three modes: enabled (every firing incident pages),
+// initialized only (providers are set up, and a request opts in with
+// oncall_enable=true), and off (no provider at all). A severe detection opts
+// in whenever a provider is set up — enabled or initialized only, read from
+// the effective config including any runtime override — and leaves on-call
+// untouched when it is off, so it never tries to page through a provider that
+// does not exist.
+func severeDetectionOnCallParams(ctx context.Context) map[string]string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if config.GetConfigOrNil() == nil {
+		return map[string]string{}
+	}
+	cfg := config.GetConfigForAlert(ctx, nil)
+	if cfg != nil && (cfg.OnCall.Enable || cfg.OnCall.InitializedOnly) {
+		return map[string]string{"oncall_enable": "true"}
+	}
+	return map[string]string{}
 }
 
 // emitDetection is the single episode claim, heartbeat and completion path for detectors.

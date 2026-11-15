@@ -195,7 +195,7 @@ func TestCreateIncident_DeliveryHandledIgnoredForWebhook(t *testing.T) {
 	if err != nil || len(incidents) != 1 {
 		t.Fatalf("webhook incidents=%+v err=%v", incidents, err)
 	}
-	if incidents[0].Origin != storage.OriginWebhook || incidents[0].NotifyStatus != "sent" {
+	if incidents[0].Origin != storage.OriginWebhook || incidents[0].NotifyStatus != "none" {
 		t.Fatalf("webhook lifecycle was silently dropped: %+v", incidents[0])
 	}
 }

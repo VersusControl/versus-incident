@@ -64,14 +64,21 @@ func (e EWMA) Std() float64 { return math.Sqrt(math.Max(0, e.Variance)) }
 // least 1e-9), so a near-constant series can't produce an infinite score and a
 // zero-variance baseline can't divide by zero.
 func ZScore(value, mean, std float64) float64 {
+	return (value - mean) / FlooredStd(mean, std)
+}
+
+// FlooredStd is the spread ZScore divides by: std raised to a 1% relative
+// floor of mean (at least 1e-9). Anything that reports a z-score next to its
+// baseline uses it so the shown spread is the one the score was taken against.
+func FlooredStd(mean, std float64) float64 {
 	floor := math.Abs(mean) * 0.01
 	if floor < 1e-9 {
 		floor = 1e-9
 	}
 	if std < floor {
-		std = floor
+		return floor
 	}
-	return (value - mean) / std
+	return std
 }
 
 // ShouldReject reports whether value is a strong enough outlier to be held OUT

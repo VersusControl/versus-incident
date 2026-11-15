@@ -156,6 +156,74 @@ func Rule(record index.Record, observed time.Time) string {
 	return ""
 }
 
+// startingRollouts returns the Deployments whose missing replicas are Pods
+// that are still starting for the first time, so their unavailability is
+// expected and not a break yet. That is a fresh install, a restart or an
+// upgrade before the new Pods pass their readiness probe.
+//
+// A Deployment qualifies only while the controller still reports its rollout
+// as progressing within the progress deadline, and only when every Pod it owns
+// is still on its first start. A Pod that has restarted, terminated, waits for
+// any reason other than being created, or was ready and then lost readiness is
+// a real failure, and the progress deadline alone would hide it: the
+// controller extends the deadline each time a Pod becomes ready, so a
+// crash-looping or flapping Deployment can stay "progressing" indefinitely.
+// Once the deadline passes the rollout is reported as stalled.
+func startingRollouts(records []index.Record, byUID map[string]index.Record) map[string]bool {
+	starting := map[string]bool{}
+	for _, record := range records {
+		if rolloutInProgress(record) {
+			starting[record.UID] = true
+		}
+	}
+	if len(starting) == 0 {
+		return starting
+	}
+	for _, record := range records {
+		if record.Kind != "Pod" {
+			continue
+		}
+		if root := Root(record, byUID); starting[root.UID] && !firstStart(record) {
+			delete(starting, root.UID)
+		}
+	}
+	return starting
+}
+
+func rolloutInProgress(record index.Record) bool {
+	if record.Kind != "Deployment" || record.ProgressingStatus != "True" {
+		return false
+	}
+	switch record.ProgressingReason {
+	case "NewReplicaSetCreated", "FoundNewReplicaSet", "ReplicaSetUpdated":
+		return true
+	}
+	return false
+}
+
+// firstStart reports whether a Pod is still on its first start: no container
+// has restarted or terminated, none waits for anything but its own creation,
+// and the Pod has not lost readiness after a container started. The Ready
+// condition turns False when the Pod is first set up, before any container
+// starts; a later transition to not-ready means the Pod was ready and dropped.
+func firstStart(pod index.Record) bool {
+	if pod.Phase != "" && pod.Phase != "Pending" && pod.Phase != "Running" {
+		return false
+	}
+	for _, container := range pod.Containers {
+		if container.RestartCount > 0 || container.CurrentTermination || container.TerminatedReason != "" || !container.TerminatedAt.IsZero() {
+			return false
+		}
+		if reason := container.WaitingReason; reason != "" && reason != "ContainerCreating" && reason != "PodInitializing" {
+			return false
+		}
+		if pod.ReadyStatus != "True" && !container.StartedAt.IsZero() && pod.ReadyTransitionAt.After(container.StartedAt) {
+			return false
+		}
+	}
+	return true
+}
+
 func availabilityKnown(record index.Record) bool {
 	for _, key := range []string{"available_replicas", "ready_replicas", "number_ready"} {
 		if _, exists := record.Summary[key]; exists {
@@ -186,9 +254,10 @@ func Classify(records []index.Record, observed time.Time) []Break {
 	groups := map[string]*Break{}
 	pods := map[string]map[string]bool{}
 	acc := map[string]*accumulator{}
+	starting := startingRollouts(records, byUID)
 	for _, record := range records {
 		rule := Rule(record, observed)
-		if rule == "" {
+		if rule == "" || rule == "workload.unavailable" && starting[record.UID] {
 			continue
 		}
 		if (rule == "pod.failed" || rule == "pod.evicted") && healthyAncestor(record, byUID) {

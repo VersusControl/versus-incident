@@ -51,13 +51,15 @@ import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
 import { EmptyState } from "@/components/feedback";
 import { countWindowLabel } from "@/lib/countWindow";
+import { notifyStatusDisplay } from "@/lib/incidentPresentation";
+import { incidentSeverity } from "@/lib/severity";
 
 // NowPage — the primary "what's on fire / how bad" surface (UX_REDESIGN
 // §2.3a). Top→bottom: open-incident banner (or a quiet "Nothing open"
 // strip), KPI tiles that deep-link with their filter, then the latest-10
-// incident feed beside the Agent Pulse card. Severity renders "—" until
-// the list endpoint carries it (backend ask #1); Ack stays a status, not
-// a button, until ask #3; Agent Pulse shows lifetime totals only until
+// incident feed beside the Agent Pulse card. Feed severity reads the list
+// summary through the same normaliser as the Incidents list; Ack stays a
+// status, not a button, until ask #3; Agent Pulse shows lifetime totals only until
 // windowed stats exist (ask #6).
 export function NowPage() {
   const navigate = useNavigate();
@@ -283,8 +285,7 @@ export function NowPage() {
         />
 
         {/* (1) Open-incident banner — the OPEN count is the server number;
-            the preview rows are the loaded page. Recency-sorted until backend
-            ask #1 ships severity on summaries. */}
+            the preview rows are the loaded page, recency-sorted. */}
         {(incidents.isPending || countsQ.isPending) && (
           <div aria-hidden className="sk h-14 rounded-card" />
         )}
@@ -469,7 +470,14 @@ export function NowPage() {
                           {i.service || "—"}
                         </td>
                         <td>
-                          <SeverityBadge severity={null} />
+                          <SeverityBadge
+                            severity={incidentSeverity(
+                              null,
+                              i.highest_observed_severity,
+                              i.highest_notified_severity,
+                              i.severity,
+                            )}
+                          />
                         </td>
                         <td
                           className="whitespace-nowrap text-2xs text-ink-300"
@@ -546,12 +554,14 @@ function NotifyCell({ incident }: { incident: IncidentSummary }) {
       {channels.length > 3 && (
         <span className="text-2xs text-ink-300">+{channels.length - 3}</span>
       )}
-      {st === "sent" && (
+      {notifyStatusDisplay(incident) === "nothing sent" ? (
+        <span className="text-2xs text-ink-400">nothing sent</span>
+      ) : st === "sent" ? (
         <span className="inline-flex items-center gap-0.5 text-2xs font-medium text-sev-ok">
           <Check size={11} aria-hidden />
-          {channels.length > 0 ? channels.length : "sent"}
+          {channels.length}
         </span>
-      )}
+      ) : null}
       {st === "failed" && (
         <span className="inline-flex items-center gap-0.5 text-2xs font-medium text-sev-critical">
           <X size={11} aria-hidden />

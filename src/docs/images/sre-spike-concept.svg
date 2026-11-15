@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="408" viewBox="0 0 760 408" style="max-width:100%;height:auto" role="img" aria-label="On the left, the rate of the known checkout-api pattern payment declined for order star (card_expired): it ticks along at about one and a half per second inside a narrow normal band of plus or minus 0 point 3, then jumps to six per second at 14:05; because the pattern is known, the known check alone stays quiet; on the right, the Decisions Spike tab row for checkout-api with the pattern, source prod and verdict spike; when you open the detect decision, its side panel shows why it tripped: 6 point 0 per second equals 15 sigma above 1 point 5 per second plus or minus 0 point 3, because six minus one and a half, divided by 0 point 3, is 15 wobbles above normal, past the default bar of 3; in shadow mode this is a would have alerted entry, in detect mode an incident sent to your channels">
+  <title>Spike detection catches a known error firing far more than usual</title>
+  <desc>Left: the rate of a known declined card pattern, flat at about one and a half per second inside its wobble band, jumping to six per second at 14:05; right: the Decisions Spike row for that pattern with its source and verdict spike, and the detect side panel with the recorded reason, 15 sigma above normal</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f10{font-size:10px}.f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}.end{text-anchor:end}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="408" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">A known error that suddenly fires far more</text>
+  <text x="24" y="64" class="f13 sec">Spike detection measures the jump in the pattern's own wobble</text>
+
+  <!-- panels -->
+  <rect x="20" y="84" width="340" height="304" rx="12" fill="#F2F5F8"/>
+  <rect x="400" y="84" width="340" height="304" rx="12" fill="#FFFFFF" stroke="#BACFE3" stroke-width="2"/>
+
+  <!-- LEFT: rate chart -->
+  <text x="36" y="108" class="zone">RATE OF A KNOWN PATTERN</text>
+  <text x="36" y="128" class="c f10">payment declined for order &lt;*&gt; (card_expired)</text>
+  <rect x="36" y="140" width="308" height="160" rx="8" fill="#FFFFFF" stroke="#D8E0E8"/>
+  <rect x="80" y="241.6" width="252" height="10.8" fill="#BACFE3"/>
+  <path d="M80 274H332" fill="none" stroke="#C3CED8" stroke-width="1.5"/>
+  <text x="86" y="234" class="f11 sec">normal 1.5/s ± 0.3</text>
+  <path d="M80 247L98 244L116 250L134 246L152 249L170 245L188 248L206 244L224 250L242 247L260 247L266 166L278 168L296 164L314 167L332 165" fill="none" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
+  <circle cx="266" cy="166" r="4" fill="#12222F"/>
+  <text x="256" y="170" class="f11 b nm end">6.0/s at 14:05</text>
+  <text x="80" y="290" class="f11 sec">14:00</text>
+  <text x="263" y="290" class="f11 sec mid">14:05</text>
+  <text x="36" y="330" class="f12">Known pattern: the known check stays quiet</text>
+  <text x="36" y="348" class="f12 sec">The rate jumps from 1.5/s to 6.0/s</text>
+
+  <!-- RIGHT: Decisions, Spike tab -->
+  <text x="416" y="108" class="zone">DECISIONS: SPIKE TAB</text>
+  <rect x="416" y="120" width="308" height="76" rx="10" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <text x="428" y="142" class="f12 b nm">checkout-api</text>
+  <rect x="662" y="129" width="50" height="18" rx="9" fill="#BACFE3" stroke="#12222F"/>
+  <text x="687" y="142" class="c f11 mid">spike</text>
+  <text x="428" y="166" class="c f10">payment declined for order &lt;*&gt; (card_expired)</text>
+  <text x="428" y="186" class="f11 sec">Source prod</text>
+
+  <text x="416" y="220" class="zone">DETECT SIDE PANEL</text>
+  <rect x="416" y="228" width="308" height="56" rx="8" fill="#F7F9FB" stroke="#D8E0E8"/>
+  <text x="430" y="246" class="f11 sec">Why it tripped</text>
+  <text x="430" y="270" class="c f12">6.0/s = 15.0σ above 1.5/s ± 0.3</text>
+  <text x="416" y="306" class="f12 nm">(6.0 − 1.5) / 0.3 = 15 wobbles above normal</text>
+  <text x="416" y="324" class="f12 sec">σ: the usual wobble, the bar is 3 by default</text>
+  <text x="416" y="348" class="f12">Shadow: a would have alerted entry</text>
+  <text x="416" y="366" class="f12">Detect: an incident sent to your channels</text>
+
+  <!-- flow -->
+  <path class="flow" d="M366 236H393" marker-end="url(#a)"/>
+</svg>
