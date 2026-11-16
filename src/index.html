@@ -33,6 +33,10 @@
       --accent-hover: #1d4ed8;
       --accent-bg: rgba(37, 99, 235, 0.06);
       --accent-ring: rgba(37, 99, 235, 0.35);
+      /* Caution tone for work that is not released yet. */
+      --caution: #92400e;
+      --caution-bg: rgba(217, 119, 6, 0.1);
+      --caution-border: rgba(217, 119, 6, 0.35);
       --header-h: 56px;
       --sidebar-w: 260px;
       --toc-w: 200px;
@@ -668,6 +672,22 @@
 
     .markdown-section blockquote p {
       margin: 0 !important;
+    }
+
+    /* "In development" pill under the title of a page that is built from the
+       dev branch. The docs build adds it; see tools/devdocs. */
+    .markdown-section p.dev-badge {
+      display: inline-block;
+      margin: -0.5rem 0 1.25rem !important;
+      padding: 2px 10px;
+      font-size: 12px !important;
+      font-weight: 600;
+      line-height: 1.6 !important;
+      letter-spacing: 0.02em;
+      color: var(--caution) !important;
+      background: var(--caution-bg);
+      border: 1px solid var(--caution-border);
+      border-radius: 999px;
     }
 
     .markdown-section table {
