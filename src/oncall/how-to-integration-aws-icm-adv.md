@@ -5,7 +5,7 @@ This document provides an advanced guide to integrating Versus Incident with AWS
 ## Prerequisites
 
 Before proceeding with this advanced guide, ensure you have:
-+ Completed the basic [AWS Incident Manager integration](/src/oncall/how-to-integration-aws-icm.md)
++ Completed the basic [AWS Incident Manager integration](/oncall/how-to-integration-aws-icm)
 + An AWS account with administrative access
 + Versus Incident deployed and functioning with basic integrations
 + Prometheus Alert Manager configured and sending alerts to Versus

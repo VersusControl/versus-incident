@@ -13,19 +13,48 @@ permissions:
   packages: write    # Needed for publishing to GHCR
 
 jobs:
-  release:
+  # A release tag must point at a commit on main. Unreleased work lives on
+  # dev, so a tag on a dev-only commit would publish its chart; this stops that.
+  on-main:
+    name: Tagged commit is on main
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the tagged commit is an ancestor of main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag $TAG points at $GITHUB_SHA, which is not on main. Release tags go on main only."
+            exit 1
+          fi
+          echo "Tag $TAG ($GITHUB_SHA) is on main"
+
+  release:
+    needs: [on-main]
+    runs-on: ubuntu-latest
+    # Packaging and pushing one chart takes a minute or two; the job bound
+    # also keeps every step under the 15-minute limit.
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v3.12.0
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -35,24 +64,29 @@ jobs:
         id: version
         run: |
           VERSION=$(grep '^version:' helm/versus-incident/Chart.yaml | awk '{print $2}')
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "Chart version: $VERSION"
           
+      # The token reaches helm on stdin, never on its command line. VERSION
+      # comes from the step above through the job environment.
       - name: Package and Push Chart to OCI Registry
+        env:
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd helm/versus-incident
           helm package .
           # Try to push the chart, and create the repository if it doesn't exist
-          if ! helm push versus-incident-${{ env.VERSION }}.tgz oci://ghcr.io/versuscontrol/charts; then
+          if ! helm push "versus-incident-${VERSION}.tgz" oci://ghcr.io/versuscontrol/charts; then
             echo "Initial push failed. The repository might not exist yet. Creating it now..."
             # Create parent directories if needed
-            helm registry login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+            printf '%s' "$REGISTRY_TOKEN" | helm registry login ghcr.io --username "$REGISTRY_USER" --password-stdin
             # Try pushing again
-            helm push versus-incident-${{ env.VERSION }}.tgz oci://ghcr.io/versuscontrol/charts
+            helm push "versus-incident-${VERSION}.tgz" oci://ghcr.io/versuscontrol/charts
           fi
           # Verify the push was successful
           echo "Verifying chart was pushed successfully..."
-          helm show chart oci://ghcr.io/versuscontrol/charts/versus-incident --version ${{ env.VERSION }}
+          helm show chart oci://ghcr.io/versuscontrol/charts/versus-incident --version "$VERSION"
           
       - name: Display installation instructions
         run: |
