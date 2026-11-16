@@ -1,0 +1,7 @@
+{
+  "image": "ghcr.io/versuscontrol/versus-incident",
+  "pages": [
+    { "path": "in-development/**", "sidebar": { "group": "In Development" } },
+    { "path": "agent/aws/quickstart.md", "sidebar": { "group": "AWS", "title": "Quickstart" } }
+  ]
+}

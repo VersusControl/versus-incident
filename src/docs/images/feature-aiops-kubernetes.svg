@@ -10,70 +10,70 @@
     </symbol>
   </defs>
   <style>
-    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:13px;fill:#000000}
+    text{font-family:Inter,"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;font-size:13px;fill:#000000}
     .m{text-anchor:middle}
+    .end{text-anchor:end}
     .name{font-weight:700;fill:#12222F}
     .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
     .d{font-size:12px;fill:#5B6B78}
     .dk{font-size:12px;fill:#12222F}
-    .e{font-size:12px;fill:#E51400}
+    .lbl{font-size:12px;font-weight:600;fill:#5B6B78}
+    .red{font-size:12px;font-weight:700;fill:#B42318}
     .logo{font-weight:700;fill:#223947;letter-spacing:2.5px}
     .btn{font-size:11px;font-weight:700;fill:#FFFFFF}
-    .grp{fill:none;stroke:#000000;stroke-width:1.5;stroke-dasharray:6 5}
-    .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
-    .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
-    .chip{fill:#FFFFFF;stroke:#000000;stroke-width:1.5}
-    .flow{fill:none;stroke:#000000;stroke-width:2;marker-end:url(#a)}
+    .out{fill:none;stroke:#9AA9B6;stroke-width:1}
+    .blk{fill:#FFFFFF;stroke:#12222F;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#12222F;stroke-width:2}
+    .chip{fill:#FFFFFF;stroke:#12222F;stroke-width:1.5}
+    .flow{fill:none;stroke:#000000;stroke-width:2}
   </style>
 
   <rect width="760" height="448" fill="#FFFFFF"/>
 
-  <!-- groups -->
-  <rect class="grp" x="16" y="44" width="204" height="359"/>
-  <rect class="grp" x="300" y="44" width="200" height="359"/>
-  <rect class="grp" x="560" y="196" width="184" height="150"/>
+  <!-- thin outline: the dashboard is the target of maps and the source of detects -->
+  <rect class="out" x="300" y="44" width="200" height="359" rx="6"/>
 
   <!-- blocks -->
-  <rect class="blk" x="32" y="80" width="172" height="72" rx="10"/>
-  <rect class="blk" x="32" y="233" width="172" height="150" rx="10"/>
+  <rect class="blk" x="32" y="80" width="172" height="72" rx="6"/>
+  <rect class="blk" x="32" y="233" width="172" height="150" rx="6"/>
   <use href="#v" x="86" y="249" width="64" height="55"/>
 
-  <rect class="chip" x="314" y="84" width="172" height="36" rx="6"/>
-  <rect class="chip" x="314" y="134" width="172" height="36" rx="6"/>
-  <rect class="chip" x="314" y="184" width="172" height="36" rx="6"/>
-  <rect class="chip" x="314" y="234" width="172" height="36" rx="6"/>
-  <rect class="chip" x="314" y="284" width="172" height="36" rx="6"/>
-  <rect class="chip" x="314" y="334" width="172" height="36" rx="6"/>
+  <rect class="chip" x="314" y="84" width="172" height="36" rx="4"/>
+  <rect class="chip" x="314" y="134" width="172" height="36" rx="4"/>
+  <rect class="chip" x="314" y="184" width="172" height="36" rx="4"/>
+  <rect class="chip" x="314" y="234" width="172" height="36" rx="4"/>
+  <rect class="chip" x="314" y="284" width="172" height="36" rx="4"/>
+  <rect class="chip" x="314" y="334" width="172" height="36" rx="4"/>
 
-  <rect class="sub" x="566" y="64" width="172" height="84" rx="10"/>
+  <rect class="sub" x="566" y="64" width="172" height="84" rx="6"/>
 
-  <rect x="574" y="228" width="156" height="104" rx="6" fill="#FFFFFF" stroke="#C3CED8"/>
-  <rect x="574" y="228" width="4" height="104" fill="#E51400"/>
+  <rect x="574" y="228" width="156" height="104" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <rect x="575" y="236" width="4" height="88" rx="2" fill="#B42318"/>
   <rect x="588" y="294" width="110" height="24" rx="4" fill="#007A5A"/>
 
-  <rect class="blk" x="566" y="380" width="172" height="48" rx="10"/>
+  <rect class="blk" x="566" y="380" width="172" height="48" rx="6"/>
 
   <!-- arrows -->
-  <path class="flow" d="M118 152V227"/>
-  <path class="flow" d="M204 308H294"/>
-  <path class="flow" d="M500 106H560"/>
-  <path class="flow" d="M652 148V190"/>
-  <path class="flow" d="M652 346V374"/>
+  <path class="flow" d="M118 152V227" marker-end="url(#a)"/>
+  <path class="flow" d="M204 308H294" marker-end="url(#a)"/>
+  <path class="flow" d="M500 106H560" marker-end="url(#a)"/>
+  <path class="flow" d="M700 148V222" marker-end="url(#a)"/>
+  <path class="flow" d="M652 332V374" marker-end="url(#a)"/>
 
   <!-- text -->
   <text class="zone m" x="118" y="64">YOUR CLUSTER</text>
   <text class="name m" x="118" y="108" style="font-size:16px">Kubernetes API</text>
   <text class="d m" x="118" y="128">workloads, events, logs</text>
 
-  <text class="e" x="128" y="180">read only</text>
-  <text class="e" x="128" y="195">get and list</text>
-  <text class="e" x="128" y="210">no Secrets</text>
+  <text class="lbl" x="128" y="180">read only</text>
+  <text class="lbl" x="128" y="195">get and list</text>
+  <text class="lbl" x="128" y="210">no Secrets</text>
 
   <text class="logo m" x="118" y="330">INCIDENT</text>
   <text class="dk m" x="118" y="360">runs in your cluster</text>
 
-  <text class="e m" x="260" y="286">maps health</text>
-  <text class="e m" x="260" y="300">and changes</text>
+  <text class="lbl m" x="252" y="286">maps health</text>
+  <text class="lbl m" x="252" y="300">and changes</text>
 
   <text class="zone m" x="400" y="64">KUBERNETES DASHBOARD</text>
   <text class="m" x="400" y="107">Overview</text>
@@ -83,21 +83,21 @@
   <text class="m" x="400" y="307">GitOps: Argo CD, Flux</text>
   <text class="m" x="400" y="357">Live logs</text>
 
-  <text class="e m" x="533" y="98">detects</text>
+  <text class="lbl m" x="533" y="98">detects</text>
 
   <text class="name m" x="652" y="92" style="font-size:16px">Issues found</text>
   <text class="dk m" x="652" y="112">crash loops, OOMKilled,</text>
   <text class="dk m" x="652" y="128">stalled rollouts</text>
 
-  <text class="e" x="662" y="174">issue alert</text>
+  <text class="lbl end" x="692" y="182">issue alert</text>
 
-  <text class="zone m" x="652" y="216">SLACK OR TEAMS</text>
-  <text x="588" y="246" style="font-size:12px;font-weight:700;fill:#E51400">Critical issue</text>
-  <text class="name" x="588" y="264" style="font-size:14px">checkout</text>
-  <text class="d" x="588" y="282">CrashLoopBackOff</text>
+  <text class="zone" x="574" y="216">SLACK OR TEAMS</text>
+  <text class="red" x="588" y="248">Critical issue</text>
+  <text class="name" x="588" y="266" style="font-size:14px">checkout</text>
+  <text class="d" x="588" y="283">CrashLoopBackOff</text>
   <text class="btn m" x="643" y="310">Open Timeline</text>
 
-  <text class="e" x="644" y="366" text-anchor="end">on call routing</text>
+  <text class="lbl end" x="644" y="366">on call routing</text>
 
   <text class="name m" x="652" y="400" style="font-size:15px">On call</text>
   <text class="d m" x="652" y="418">PagerDuty and more</text>

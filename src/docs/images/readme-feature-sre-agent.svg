@@ -11,93 +11,91 @@
     </symbol>
   </defs>
   <style>
-    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;fill:#000000}
+    text{font-family:Inter,"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;font-size:12px;fill:#000000}
     .m{text-anchor:middle}
     .name{font-weight:700;fill:#12222F}
     .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
-    .tag{font-size:10px;font-weight:700;fill:#5B6B78}
+    .tag{font-size:11px;font-weight:700;fill:#FFFFFF}
     .d{fill:#5B6B78}
     .dk{fill:#12222F}
-    .e{fill:#E51400}
+    .lbl{font-weight:600;fill:#5B6B78}
+    .red{font-weight:700;fill:#B42318}
     .logo{font-weight:700;fill:#223947;letter-spacing:2.5px}
     .btn{font-size:11px;font-weight:700;fill:#FFFFFF}
-    .grp{fill:none;stroke:#000000;stroke-width:1.5;stroke-dasharray:6 5}
-    .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
-    .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
-    .opt{fill:#FFFFFF;stroke:#000000;stroke-width:2;stroke-dasharray:6 4}
-    .chip{fill:#FFFFFF;stroke:#000000;stroke-width:1.5}
-    .pill{fill:#F2F5F8;stroke:#C3CED8}
-    .flow{fill:none;stroke:#000000;stroke-width:2;marker-end:url(#a)}
+    .out{fill:none;stroke:#9AA9B6;stroke-width:1}
+    .blk{fill:#FFFFFF;stroke:#12222F;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#12222F;stroke-width:2}
+    .chip{fill:#FFFFFF;stroke:#12222F;stroke-width:1.5}
+    .flow{fill:none;stroke:#000000;stroke-width:2}
   </style>
 
   <rect width="760" height="448" fill="#FFFFFF"/>
 
-  <!-- groups -->
-  <rect class="grp" x="16" y="44" width="230" height="346"/>
-  <rect class="grp" x="296" y="44" width="228" height="346"/>
-  <rect class="grp" x="560" y="256" width="184" height="104"/>
+  <!-- thin outlines: the reads arrow joins these two groups -->
+  <rect class="out" x="16" y="44" width="230" height="346" rx="6"/>
+  <rect class="out" x="296" y="44" width="228" height="346" rx="6"/>
 
   <!-- source chips -->
-  <rect class="chip" x="28" y="80" width="98" height="26" rx="6"/>
-  <rect class="chip" x="136" y="80" width="98" height="26" rx="6"/>
-  <rect class="chip" x="28" y="112" width="98" height="26" rx="6"/>
-  <rect class="chip" x="136" y="112" width="98" height="26" rx="6"/>
-  <rect class="chip" x="28" y="144" width="98" height="26" rx="6"/>
-  <rect class="chip" x="136" y="144" width="98" height="26" rx="6"/>
-  <rect class="chip" x="28" y="176" width="206" height="26" rx="6"/>
-  <rect class="pill" x="96" y="214" width="70" height="16" rx="8"/>
-  <rect class="chip" x="28" y="238" width="206" height="26" rx="6"/>
-  <rect class="chip" x="28" y="270" width="206" height="26" rx="6"/>
-  <rect class="pill" x="90" y="314" width="70" height="16" rx="8"/>
-  <rect class="chip" x="28" y="338" width="98" height="26" rx="6"/>
-  <rect class="chip" x="136" y="338" width="98" height="26" rx="6"/>
+  <rect class="chip" x="28" y="80" width="98" height="26" rx="4"/>
+  <rect class="chip" x="136" y="80" width="98" height="26" rx="4"/>
+  <rect class="chip" x="28" y="112" width="98" height="26" rx="4"/>
+  <rect class="chip" x="136" y="112" width="98" height="26" rx="4"/>
+  <rect class="chip" x="28" y="144" width="98" height="26" rx="4"/>
+  <rect class="chip" x="136" y="144" width="98" height="26" rx="4"/>
+  <rect class="chip" x="28" y="176" width="206" height="26" rx="4"/>
+  <rect x="92" y="213" width="80" height="18" rx="9" fill="#12222F"/>
+  <rect class="chip" x="28" y="238" width="206" height="26" rx="4"/>
+  <rect class="chip" x="28" y="270" width="206" height="26" rx="4"/>
+  <rect x="92" y="313" width="80" height="18" rx="9" fill="#12222F"/>
+  <rect class="chip" x="28" y="338" width="98" height="26" rx="4"/>
+  <rect class="chip" x="136" y="338" width="98" height="26" rx="4"/>
 
   <!-- agent -->
-  <rect class="blk" x="312" y="76" width="196" height="80" rx="10"/>
+  <rect class="blk" x="312" y="76" width="196" height="80" rx="6"/>
   <use href="#v" x="388" y="86" width="44" height="38"/>
-  <rect class="blk" x="312" y="176" width="196" height="54" rx="10"/>
-  <rect class="blk" x="312" y="248" width="196" height="54" rx="10"/>
-  <rect class="sub" x="312" y="320" width="196" height="54" rx="10"/>
+  <rect class="blk" x="312" y="176" width="196" height="54" rx="6"/>
+  <rect class="blk" x="312" y="248" width="196" height="54" rx="6"/>
+  <rect class="sub" x="312" y="320" width="196" height="54" rx="6"/>
 
   <!-- outcome -->
-  <rect class="opt" x="566" y="64" width="172" height="70" rx="10"/>
-  <rect class="sub" x="566" y="168" width="172" height="60" rx="10"/>
-  <rect x="574" y="284" width="156" height="66" rx="6" fill="#FFFFFF" stroke="#C3CED8"/>
-  <rect x="574" y="284" width="4" height="66" fill="#E51400"/>
+  <rect class="blk" x="566" y="64" width="172" height="70" rx="6"/>
+  <rect class="sub" x="566" y="168" width="172" height="60" rx="6"/>
+  <rect x="574" y="284" width="156" height="66" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <rect x="575" y="292" width="4" height="50" rx="2" fill="#B42318"/>
   <rect x="588" y="314" width="128" height="24" rx="4" fill="#007A5A"/>
-  <rect class="blk" x="566" y="380" width="172" height="48" rx="10"/>
+  <rect class="blk" x="566" y="380" width="172" height="48" rx="6"/>
 
   <!-- arrows -->
-  <path class="flow" d="M246 217H290"/>
-  <path class="flow" d="M410 156V170"/>
-  <path class="flow" d="M410 230V242"/>
-  <path class="flow" d="M410 302V314"/>
-  <path class="flow" d="M508 347H540V99H560"/>
-  <path class="flow" d="M652 134V162"/>
-  <path class="flow" d="M652 228V250"/>
-  <path class="flow" d="M652 360V374"/>
+  <path class="flow" d="M246 217H290" marker-end="url(#a)"/>
+  <path class="flow" d="M410 156V170" marker-end="url(#a)"/>
+  <path class="flow" d="M410 230V242" marker-end="url(#a)"/>
+  <path class="flow" d="M410 302V314" marker-end="url(#a)"/>
+  <path class="flow" d="M508 347H540V99H560" marker-end="url(#a)"/>
+  <path class="flow" d="M652 134V162" marker-end="url(#a)"/>
+  <path class="flow" d="M700 228V278" marker-end="url(#a)"/>
+  <path class="flow" d="M652 350V374" marker-end="url(#a)"/>
 
   <!-- text -->
   <text class="zone" x="28" y="68">LOGS</text>
-  <text class="m" x="77" y="97">Loki</text>
-  <text class="m" x="185" y="97">Elasticsearch</text>
-  <text class="m" x="77" y="129">Graylog</text>
-  <text class="m" x="185" y="129">Splunk</text>
-  <text class="m" x="77" y="161">SigNoz</text>
-  <text class="m" x="185" y="161">File</text>
-  <text class="m" x="131" y="193">CloudWatch Logs</text>
+  <text class="m dk" x="77" y="97">Loki</text>
+  <text class="m dk" x="185" y="97">Elasticsearch</text>
+  <text class="m dk" x="77" y="129">Graylog</text>
+  <text class="m dk" x="185" y="129">Splunk</text>
+  <text class="m dk" x="77" y="161">SigNoz</text>
+  <text class="m dk" x="185" y="161">File</text>
+  <text class="m dk" x="131" y="193">CloudWatch Logs</text>
 
   <text class="zone" x="28" y="226">METRICS</text>
-  <text class="tag m" x="131" y="226">Enterprise</text>
-  <text class="m" x="131" y="255">Prometheus</text>
-  <text class="m" x="131" y="287">CloudWatch Metrics</text>
+  <text class="tag m" x="132" y="226">Enterprise</text>
+  <text class="m dk" x="131" y="255">Prometheus</text>
+  <text class="m dk" x="131" y="287">CloudWatch Metrics</text>
 
   <text class="zone" x="28" y="326">TRACES</text>
-  <text class="tag m" x="125" y="326">Enterprise</text>
-  <text class="m" x="77" y="355">Tempo</text>
-  <text class="m" x="185" y="355">SigNoz</text>
+  <text class="tag m" x="132" y="326">Enterprise</text>
+  <text class="m dk" x="77" y="355">Tempo</text>
+  <text class="m dk" x="185" y="355">SigNoz</text>
 
-  <text class="e m" x="268" y="209">reads</text>
+  <text class="lbl m" x="268" y="209">reads</text>
 
   <text class="zone m" x="410" y="64">AI SRE AGENT</text>
   <text class="logo m" x="410" y="144">INCIDENT</text>
@@ -115,13 +113,13 @@
   <text class="name m" x="652" y="192" style="font-size:16px">Incident</text>
   <text class="dk m" x="652" y="212">visible in the web UI</text>
 
-  <text class="e" x="662" y="244">sends</text>
+  <text class="lbl" x="708" y="252">sends</text>
 
-  <text class="zone m" x="652" y="274">YOUR CHANNELS</text>
-  <text x="588" y="302" style="font-weight:700;fill:#E51400">New log pattern</text>
+  <text class="zone" x="574" y="274">YOUR CHANNELS</text>
+  <text class="red" x="588" y="304">New log pattern</text>
   <text class="btn m" x="652" y="330">Acknowledge Alert</text>
 
-  <text class="e" x="662" y="374">no ACK</text>
+  <text class="lbl" x="662" y="368">no ACK</text>
 
   <text class="name m" x="652" y="400" style="font-size:15px">On call</text>
   <text class="d m" x="652" y="418">PagerDuty and more</text>

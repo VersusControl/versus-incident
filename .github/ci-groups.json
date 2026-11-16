@@ -1,0 +1,111 @@
+{
+  "groups": [
+    {
+      "name": "docs",
+      "description": "Docs site, project prose and examples. Turns on the docs link check.",
+      "paths": [
+        "src/**",
+        "theme/**",
+        "**/*.md",
+        "!pkg/**",
+        "!cmd/**",
+        "!ui/**",
+        "!helm/**",
+        "!tests/**",
+        "!tools/**",
+        "!.github/**",
+        "examples/**",
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "ui",
+      "description": "The web UI. Turns on the ui job.",
+      "paths": ["ui/**"],
+      "enables": ["image"]
+    },
+    {
+      "name": "helm",
+      "description": "The Helm chart and the one-file manifests. The chart scenarios end with Go checks in pkg/config and pkg/kubernetes, so those packages turn the chart job on too.",
+      "paths": [
+        "helm/**",
+        "examples/kubernetes/**",
+        "scripts/render_kubernetes_manifest.sh",
+        "pkg/config/**",
+        "pkg/kubernetes/**"
+      ]
+    },
+    {
+      "name": "go-kubernetes",
+      "paths": ["pkg/kubernetes/**"],
+      "enables": ["image"]
+    },
+    {
+      "name": "go-aws",
+      "paths": [
+        "pkg/aws/**",
+        "pkg/awsauth/**",
+        "pkg/finops/**",
+        "cmd/harness_awsendpoint*",
+        "tests/fakeaws/**",
+        "tests/fixtures/**",
+        "tests/awsemulator/**",
+        "scripts/aws/**"
+      ],
+      "enables": ["image"]
+    },
+    {
+      "name": "go-storage",
+      "paths": ["pkg/storage/**", "scripts/postgres/**"],
+      "enables": ["image"]
+    },
+    {
+      "name": "go-controllers",
+      "paths": ["pkg/controllers/**", "pkg/routes/**"],
+      "enables": ["image"]
+    },
+    {
+      "name": "go-agent",
+      "paths": ["pkg/agent/**", "pkg/core/**", "pkg/services/**"],
+      "enables": ["image"]
+    },
+    {
+      "name": "go-shared",
+      "description": "Module files, the entry point, runtime config and every other package. Turns on all Go groups.",
+      "paths": [
+        "go.mod",
+        "go.sum",
+        "cmd/**",
+        "!cmd/harness_awsendpoint*",
+        "config/**",
+        "pkg/**",
+        "!pkg/kubernetes/**",
+        "!pkg/aws/**",
+        "!pkg/awsauth/**",
+        "!pkg/finops/**",
+        "!pkg/storage/**",
+        "!pkg/controllers/**",
+        "!pkg/routes/**",
+        "!pkg/agent/**",
+        "!pkg/core/**",
+        "!pkg/services/**",
+        "tests/**",
+        "!tests/fakeaws/**",
+        "!tests/fixtures/**",
+        "!tests/awsemulator/**"
+      ],
+      "enables": ["go-*"]
+    },
+    {
+      "name": "image",
+      "description": "The release image. Runs no job on a pull request; with any other code group it lets a push to dev or main build its image.",
+      "paths": ["Dockerfile", ".dockerignore"]
+    },
+    {
+      "name": "ci",
+      "description": "CI definitions and this change-detection tool. Turns on everything.",
+      "paths": [".github/**", "tools/cichanges/**", "tools/docscheck/**"],
+      "all": true
+    }
+  ]
+}
