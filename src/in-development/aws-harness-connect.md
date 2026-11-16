@@ -183,7 +183,7 @@ account in Versus stops the reads but leaves the role in place.
 
 ## Create the role with the AWS CLI
 
-The script in [scripts/aws/cli/](../../scripts/aws/cli/README.md) creates the same
+The script in [scripts/aws/cli/](https://github.com/VersusControl/versus-incident/blob/main/scripts/aws/cli/README.md) creates the same
 `versus-reader` role as the template, prints its ARN, and can be re-run to
 update the trust in place.
 

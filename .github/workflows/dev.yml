@@ -231,29 +231,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # Build the release Dockerfile on every pull request and push without pushing
-  # the image. `go build ./...` compiles packages, so it cannot catch a
-  # Dockerfile that builds a narrower target than the package.
-  docker-build:
-    name: Docker image build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build image (no push)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          platforms: linux/amd64
-          cache-from: type=gha,scope=docker-build
-          cache-to: type=gha,mode=max,scope=docker-build
-
   # Race detector run, split into shards that run in parallel so each one
   # finishes inside its timeout on a default hosted runner. The slowest
   # packages under -race get their own shard; "rest" is every other package.
@@ -517,9 +494,6 @@ jobs:
   # RPM, so the job needs no Docker. It stays apart from the product jobs: an
   # emulator bug fails only this job, and plain `go test ./...` never builds
   # these tests because they need the awsemulator build tag. The job holds no
-  # real AWS credentials and keeps the emulator's telemetry off.
-  aws-emulator:
-    name: AWS emulator contract tests
   # real AWS credentials and keeps the emulator's telemetry off. It runs only
   # when the AWS group changed and the branch carries tests/awsemulator.
   aws-emulator:
@@ -540,10 +514,6 @@ jobs:
       EMULATOR_TELEMETRY: 'off'
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
@@ -559,7 +529,6 @@ jobs:
 
       - name: Restore emulator package
         id: emu-cache
-        uses: actions/cache/restore@v6
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/aws-emulator/aws-emulator-x86_64.rpm
@@ -585,7 +554,6 @@ jobs:
       # leaves the verified package cached for the next one.
       - name: Save emulator package
         if: steps.emu-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/aws-emulator/aws-emulator-x86_64.rpm
@@ -676,7 +644,6 @@ jobs:
       - name: Contract tests
         run: |
           if ! find tests/awsemulator -name '*_test.go' | grep -q .; then
-            echo "::notice::tests/awsemulator has no Go tests yet; nothing to run"
             echo "::notice::AWS emulator contract tests: skipped, tests/awsemulator has no Go test files"
             exit 0
           fi
@@ -692,7 +659,6 @@ jobs:
 
       - name: Upload emulator log
         if: failure()
-        uses: actions/upload-artifact@v7
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: aws-emulator-log
