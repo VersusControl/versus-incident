@@ -20,7 +20,7 @@
     },
     {
       "name": "ui",
-      "description": "The web UI. Turns on the ui job and the image build.",
+      "description": "The web UI. Turns on the ui job.",
       "paths": ["ui/**"],
       "enables": ["image"]
     },
@@ -98,7 +98,7 @@
     },
     {
       "name": "image",
-      "description": "The release image. Also on whenever a Go group or the UI changes.",
+      "description": "The release image. Runs no job on a pull request; with any other code group it lets a push to dev or main build its image.",
       "paths": ["Dockerfile", ".dockerignore"]
     },
     {
