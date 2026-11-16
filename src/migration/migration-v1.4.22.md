@@ -25,9 +25,8 @@ For any issues with the upgrade, please
 GitHub.
 
 > **Coming from OSS to Enterprise?** If you are also switching the community
-> binary for the Enterprise one, read
-> [Migrating OSS data to Enterprise](./migration-oss-to-enterprise.md) — your
-> existing data stays filed under the org `default` until you move it.
+> binary for the Enterprise one, your existing data stays filed under the org
+> `default` until you move it.
 
 ## Must Act
 

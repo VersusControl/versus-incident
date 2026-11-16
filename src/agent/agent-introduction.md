@@ -1,14 +1,27 @@
 # SRE Agent
 
-The SRE Agent watches your logs so you don't have to. It learns what your
-normal logs look like, stays quiet about the things that always happen, and
-tells you only when something **new or unexpected** shows up. When it does, it
-explains the problem in a short incident: what happened, which service, how
-bad, and what to check first.
+The SRE Agent learns what normal looks like from your **logs, metrics and
+traces**. It stays quiet about what is normal and tells you only when something
+**new or unusual** happens. When it does, it raises one clear incident: what
+happened, which service, how bad, and what to check first.
 
-![Before and after: on the left, a noisy log stream of thousands of repeating lines with one new checkout timeout hidden among them; on the right, the same stream after the agent has learned normal, with the repeating lines grouped as known and a single incident raised for the new checkout timeout](../docs/images/sre-agent-concept.svg)
+![Three inputs flow into the SRE Agent: Logs, marked start here, plus Metrics and Traces, both marked Enterprise. The agent learns what normal looks like for each one and sends out a single incident when something new or unusual happens](../docs/images/sre-agent-overview.svg)
+
+| Signal | What the agent learns | Read more |
+|---|---|---|
+| **Logs** | Groups log lines into patterns and flags a new pattern or a sudden spike. This is where you start, and it works in OSS. | [Data Sources](./data-sources.md), [Quickstart](./quickstart.md) |
+| **Metrics** (_Enterprise_) | Finds each service's request rate, error rate, latency and resource use, learns their normal by time of week, and flags a signal that stays far outside it. | [Metrics](../enterprise/metrics/overview.md) |
+| **Traces** (_Enterprise_) | Learns each operation's p99 latency and error rate by time of week, and flags an operation that stays clearly slower or fails more. | [Traces](../enterprise/traces.md) |
+
+**Install and configure:** [Deploy on Kubernetes](../configuration/kubernetes.md),
+or use [Helm](../configuration/helm.md). Every agent setting is in the
+[Configuration](./configuration.md) reference.
 
 ## What it does
+
+The rest of this page covers logs, the easiest place to start. For instance, the SRE Agent monitors your logs automatically. In the image below, on the left, a noisy log stream of thousands of repeating lines with one new checkout timeout hidden among them; on the right, the same stream after the agent has learned normal, with the repeating lines grouped as known and a single incident raised for the new checkout timeout.
+
+![Before and after: on the left, a noisy log stream of thousands of repeating lines with one new checkout timeout hidden among them; on the right, the same stream after the agent has learned normal, with the repeating lines grouped as known and a single incident raised for the new checkout timeout](../docs/images/sre-agent-concept.svg)
 
 | Step | In plain words |
 |---|---|

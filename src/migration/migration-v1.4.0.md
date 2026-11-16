@@ -47,7 +47,7 @@ fail. A future minor release may treat unknown keys as fatal.
 ```
 
 Multi-LLM support (Anthropic, Bedrock, Ollama, OpenAI-compatible
-gateways) is on the [roadmap](../../ROADMAP.md) under Phase 7.
+gateways) is on the [roadmap](https://github.com/VersusControl/versus-incident/blob/main/ROADMAP.md) under Phase 7.
 
 ### 3. New admin endpoints (gated by `gateway_secret`)
 

@@ -1,28 +1,171 @@
 name: DEV - Code CI
 
+# Runs only the jobs a change needs. The `changes` job maps the changed files
+# onto the feature groups in .github/ci-groups.json; every other job checks
+# its group. `ci-ok` sums the results and is the one check branch protection
+# requires, so a skipped job never leaves a required check pending.
+#
+# Full runs (every group on): the nightly schedule, a manual run, a pull
+# request labelled `ci:full`, a force-push, a push to `main` that changed
+# code, a change to CI itself, and any change the group map cannot place.
+
 on:
   push:
-    branches: [main]
+    branches: [dev, main]
   pull_request:
-    branches: [main]
+    branches: [dev, main]
+    # `labeled` lets the `ci:full` label start a full run on its own.
+    types: [opened, synchronize, reopened, labeled]
+  # Scheduled runs use the default branch (`main`); the nightly-dev job starts
+  # the matching run on `dev` with that branch's own workflow.
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# Pull request runs share a group per pull request and replace each other.
+# Every other run is keyed by its commit, so a queued push run is never
+# cancelled and every merged commit gets its own image. Two pushes close
+# together can then finish out of order, so the moving dev and main tags may
+# briefly point at the older commit; deployments pin the -<sha> tag.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    name: Test
+  changes:
+    name: Changed groups
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      docs: ${{ steps.groups.outputs.docs }}
+      ui: ${{ steps.groups.outputs.ui }}
+      helm: ${{ steps.groups.outputs.helm }}
+      go-kubernetes: ${{ steps.groups.outputs.go-kubernetes }}
+      go-aws: ${{ steps.groups.outputs.go-aws }}
+      go-storage: ${{ steps.groups.outputs.go-storage }}
+      go-controllers: ${{ steps.groups.outputs.go-controllers }}
+      go-agent: ${{ steps.groups.outputs.go-agent }}
+      go-shared: ${{ steps.groups.outputs.go-shared }}
+      image: ${{ steps.groups.outputs.image }}
+      ci: ${{ steps.groups.outputs.ci }}
+      full: ${{ steps.groups.outputs.full }}
+      go_packages: ${{ steps.groups.outputs.go_packages }}
+      go: ${{ steps.groups.outputs.go }}
+      code: ${{ steps.groups.outputs.code }}
+      race_shards: ${{ steps.groups.outputs.race_shards }}
+      aws_emulator: ${{ steps.groups.outputs.aws_emulator }}
     steps:
+      # Full history, so the diff can find the merge base of any range.
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      # go list reads the ui package, whose `go:embed all:dist` needs the
+      # folder to exist.
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      - name: Work out the changed groups
+        id: groups
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          FORCED: ${{ github.event.forced }}
+          FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+        run: |
+          set -euo pipefail
+          force=false
+          case "$EVENT" in
+            pull_request)
+              base="$PR_BASE"
+              head="$PR_HEAD"
+              if [ "$FULL_LABEL" = true ]; then force=true; fi
+              ;;
+            push)
+              base="$PUSH_BEFORE"
+              head="$GITHUB_SHA"
+              # The old tip of a force-push may share nothing with the new one.
+              if [ "$FORCED" = true ]; then force=true; fi
+              ;;
+            *)
+              # schedule and workflow_dispatch
+              base=""
+              head="$GITHUB_SHA"
+              force=true
+              ;;
+          esac
+
+          decision="$RUNNER_TEMP/ci-groups.out"
+          detect() {
+            : > "$decision"
+            if [ "$1" = true ]; then
+              GITHUB_OUTPUT="$decision" go run ./tools/cichanges --config .github/ci-groups.json --base "$base" --head "$head" --all
+            else
+              GITHUB_OUTPUT="$decision" go run ./tools/cichanges --config .github/ci-groups.json --base "$base" --head "$head"
+            fi
+          }
+          detect "$force"
+
+          # A push to main that changed anything beyond docs runs the full
+          # suite before its image is built.
+          if [ "$EVENT" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$force" = false ] \
+            && grep -v -E '^(docs|full|go|go_packages)=' "$decision" | grep -q '=true$'; then
+            echo "Push to main changed code: running the full suite"
+            detect true
+          fi
+
+          on() { grep -qx "$1=true" "$decision"; }
+
+          code=false
+          if grep -v -E '^(docs|full|go|go_packages)=' "$decision" | grep -q '=true$'; then code=true; fi
+
+          shards=""
+          add_shard() { shards="${shards:+$shards,}\"$1\""; }
+          if on go-kubernetes; then add_shard kubernetes; fi
+          if on go-storage || on go-controllers; then add_shard storage-controllers; fi
+          if on go-aws; then add_shard aws; fi
+          # pkg/routes runs under -race in the rest shard.
+          if on go-agent || on go-controllers || on go-shared; then add_shard rest; fi
+
+          # The emulator contract tests exist only on branches that carry the
+          # AWS harness.
+          aws_emulator=false
+          if on go-aws && [ -d tests/awsemulator ]; then aws_emulator=true; fi
+
+          {
+            cat "$decision"
+            echo "code=$code"
+            echo "race_shards=[$shards]"
+            echo "aws_emulator=$aws_emulator"
+          } >> "$GITHUB_OUTPUT"
+          echo "code=$code race_shards=[$shards] aws_emulator=$aws_emulator"
+
+  test:
+    name: Test
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
           cache: true
@@ -53,41 +196,62 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # Test-build code behind build tags: the AWS endpoint redirect for the
+      # harness, under its tag and its older alias.
+      - name: go vet (harness build tags)
+        run: |
+          go vet -tags harness_awsendpoint ./cmd/...
+          go vet -tags harness_fakeaws ./cmd/...
+
       - name: Build
         run: go build ./...
 
-      # Coverage run without the race detector: plain instrumentation keeps
-      # wall-clock waits in tests realistic. The race detector runs in the
-      # sharded race job below; atomic covermode is only needed under -race.
+      # The changed packages and every package that depends on them, or
+      # ./... on a full run. Coverage runs without the race detector so
+      # wall-clock waits in tests stay realistic; the race job covers -race.
       - name: Test
-        run: go test -short -count=1 -timeout 15m -coverprofile=coverage.out -covermode=set ./...
+        env:
+          GO_PACKAGES: ${{ needs.changes.outputs.go_packages }}
+        run: |
+          if [ -z "$GO_PACKAGES" ]; then
+            echo "::notice::No Go package changed; vet and build ran, no tests to run"
+            exit 0
+          fi
+          # Word splitting of the package list is intended.
+          # shellcheck disable=SC2086
+          go test -short -count=1 -timeout 13m -coverprofile=coverage.out -covermode=set $GO_PACKAGES
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: coverage
           path: coverage.out
+          if-no-files-found: ignore
           retention-days: 7
 
   # Race detector run, split into shards that run in parallel so each one
-  # finishes well inside its timeout on a default hosted runner. The slowest
+  # finishes inside its timeout on a default hosted runner. The slowest
   # packages under -race get their own shard; "rest" is every other package.
+  # Only the shards whose groups changed run.
   race:
     name: Race (${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.race_shards != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        shard: [kubernetes, storage-controllers, rest]
+        shard: ${{ fromJSON(needs.changes.outputs.race_shards) }}
     env:
       GORACE: halt_on_error=1
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
           cache: true
@@ -104,44 +268,56 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
         run: |
+          set -euo pipefail
           case "$SHARD" in
-            kubernetes)
-              packages="./pkg/kubernetes/..."
-              ;;
-            storage-controllers)
-              packages="./pkg/storage/... ./pkg/controllers/..."
-              ;;
-            rest)
-              packages=$(go list ./... | grep -v -E '/pkg/(kubernetes|storage|controllers)(/|$)')
-              ;;
+            kubernetes) dirs="pkg/kubernetes" ;;
+            storage-controllers) dirs="pkg/storage pkg/controllers" ;;
+            aws) dirs="pkg/aws pkg/awsauth pkg/finops" ;;
+            rest) dirs="" ;;
             *)
               echo "::error::Unknown race shard: $SHARD"
               exit 1
               ;;
           esac
-          if [ -z "$packages" ]; then
-            echo "::error::Race shard $SHARD selected no packages"
-            exit 1
+          if [ "$SHARD" = rest ]; then
+            packages=$(go list ./... | grep -v -E '/pkg/(kubernetes|storage|controllers|aws|awsauth|finops)(/|$)')
+            if [ -z "$packages" ]; then
+              echo "::error::Race shard rest selected no packages"
+              exit 1
+            fi
+          else
+            patterns=""
+            for dir in $dirs; do
+              if [ -d "$dir" ]; then patterns="$patterns ./$dir/..."; fi
+            done
+            if [ -z "$patterns" ]; then
+              echo "::notice::Race shard $SHARD: none of $dirs exists on this branch; nothing to run"
+              exit 0
+            fi
+            # shellcheck disable=SC2086
+            packages=$(go list $patterns)
           fi
           # Word splitting of the package list is intended.
           # shellcheck disable=SC2086
-          go test -short -race -count=1 -timeout 20m $packages
+          go test -short -race -count=1 -timeout 13m $packages
 
-  # Helm chart checks that run on every change, not only on chart edits: the
-  # chart version must follow the release version, the committed one-file
-  # kubectl manifest must match a fresh render of the chart, and the chart
-  # must lint and pass its template scenarios.
+  # Helm chart checks: the chart version must follow the release version,
+  # the committed one-file kubectl manifest must match a fresh render of the
+  # chart, and the chart must lint and pass its template scenarios.
   chart:
     name: Chart & manifest
+    needs: changes
+    if: needs.changes.outputs.helm == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Same Helm version the committed manifest is rendered with, so the
       # freshness check compares like with like.
       - name: Install Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v3.15.3
 
@@ -149,7 +325,7 @@ jobs:
       # chart config through the application's config loader and key set, and
       # the reader role against what the Kubernetes connector reads.
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
           cache: true
@@ -200,23 +376,359 @@ jobs:
       - name: Chart template scenarios
         run: ./helm/versus-incident/tests/run.sh
 
+  # The web UI: unit tests, lint, type check and production build.
+  ui:
+    name: UI
+    needs: changes
+    if: needs.changes.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same Node major as the image's UI build stage.
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests (vitest)
+        run: npx vitest run
+
+      - name: Lint (eslint)
+        run: npx eslint .
+
+      - name: Type check
+        run: npx tsc -b
+
+      - name: Build
+        run: npx vite build
+
+  # Build the release Dockerfile without pushing the image. `go build ./...`
+  # compiles packages, so it cannot catch a Dockerfile that builds a narrower
+  # target than the package.
+  docker-build:
+    name: Docker image build
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=docker-build
+          cache-to: type=gha,mode=max,scope=docker-build
+
+  # Internal links and images in the docs site must point at files that exist.
+  docs-check:
+    name: Docs links
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.11'
+          cache: false
+
+      - name: Check internal links
+        run: go run ./tools/docscheck --root src
+
+  # Tests behind the `integration` build tag. They run the Kubernetes code
+  # against the in-process fake API server in tests/fakekube and need nothing
+  # beyond Go; the ones that need PostgreSQL skip without TEST_POSTGRES_DSN.
+  # Only the tagged test functions run, on the nightly and manual full runs.
+  # The job reports as its own check and stays out of ci-ok: a nightly run on
+  # main's tip shares that commit with the open main-to-dev pull request, and
+  # a red ci-ok there would block it.
+  integration:
+    name: Integration (fakekube)
+    needs: changes
+    if: >-
+      needs.changes.outputs.full == 'true'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      - name: Integration-tagged tests
+        run: |
+          set -euo pipefail
+          files=$(grep -rl --include='*_test.go' '^//go:build integration' pkg tests cmd || true)
+          if [ -z "$files" ]; then
+            echo "::notice::No integration-tagged tests on this branch"
+            exit 0
+          fi
+          # Word splitting of the file list is intended.
+          # shellcheck disable=SC2086
+          names=$(grep -h -o '^func Test[A-Za-z0-9_]*' $files | sed 's/^func //' | sort -u | paste -sd '|' -)
+          # shellcheck disable=SC2086
+          dirs=$(dirname $files | sort -u | sed 's|^|./|')
+          echo "Packages: $(echo "$dirs" | tr '\n' ' ')"
+          # shellcheck disable=SC2086
+          go test -tags integration -count=1 -timeout 13m -run "^($names)\$" $dirs
+
+  # Contract tests against the AWS Emulator, a local stand-in for the AWS APIs
+  # the collectors call. The emulator is a native binary unpacked from AWS's
+  # RPM, so the job needs no Docker. It stays apart from the product jobs: an
+  # emulator bug fails only this job, and plain `go test ./...` never builds
+  # these tests because they need the awsemulator build tag. The job holds no
+  # real AWS credentials and keeps the emulator's telemetry off. It runs only
+  # when the AWS group changed and the branch carries tests/awsemulator.
+  aws-emulator:
+    name: AWS emulator contract tests
+    needs: changes
+    if: needs.changes.outputs.aws_emulator == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # AWS publishes the package only under a "latest" URL, so the checksum
+      # is the version pin: a new upstream release fails the checksum step.
+      # Bump EMU_VERSION and EMU_RPM_SHA256 together, after re-checking the
+      # contract tests against the new release.
+      EMU_VERSION: '1.0.385'
+      EMU_RPM_SHA256: 2b2b5031e559d74c7a4154b11056be3a57716a177cd796cf058eebd91a6870d7
+      EMU_RPM_URL: https://downloads.aws.com/aws-emulator/packages/aws-emulator/LTS/latest/aws-emulator-x86_64.rpm
+      EMU_PORT: '9297'
+      EMULATOR_TELEMETRY: 'off'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      - name: Restore emulator package
+        id: emu-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/aws-emulator/aws-emulator-x86_64.rpm
+          key: aws-emulator-${{ env.EMU_VERSION }}-x86_64-${{ env.EMU_RPM_SHA256 }}
+
+      - name: Download emulator package
+        if: steps.emu-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/aws-emulator
+          curl -fsSL --retry 3 -o ~/.cache/aws-emulator/aws-emulator-x86_64.rpm "$EMU_RPM_URL"
+
+      # Runs on every job, cached or not, so a changed upstream package or a
+      # damaged cache entry never reaches the tests.
+      - name: Verify emulator package checksum
+        run: |
+          rpm=~/.cache/aws-emulator/aws-emulator-x86_64.rpm
+          if ! echo "$EMU_RPM_SHA256  $rpm" | sha256sum -c -; then
+            echo "::error::The emulator package does not match the pinned checksum: AWS has published a new release. Re-check the contract tests against it, then bump EMU_VERSION and EMU_RPM_SHA256 together."
+            exit 1
+          fi
+
+      # Saved straight after the checksum passes, so a failing test run still
+      # leaves the verified package cached for the next one.
+      - name: Save emulator package
+        if: steps.emu-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/aws-emulator/aws-emulator-x86_64.rpm
+          key: aws-emulator-${{ env.EMU_VERSION }}-x86_64-${{ env.EMU_RPM_SHA256 }}
+
+      # rpm2cpio and cpio unpack the package; the seed script zips its Lambda
+      # code. Installed only when the runner image lacks them.
+      - name: Install unpack and seed tools
+        run: |
+          missing=""
+          for tool in rpm2cpio cpio zip; do
+            command -v "$tool" >/dev/null || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "Installing:$missing"
+            sudo apt-get update -qq
+            # Word splitting of the package list is intended.
+            # shellcheck disable=SC2086
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing >/dev/null
+          fi
+
+      - name: Unpack emulator
+        run: |
+          dir="$RUNNER_TEMP/aws-emulator"
+          mkdir -p "$dir"
+          rpm2cpio ~/.cache/aws-emulator/aws-emulator-x86_64.rpm | (cd "$dir" && cpio -idm --quiet)
+          bin="$dir/opt/aws-emulator/bin/aws-emulator"
+          version=$("$bin" -v | awk '/^Version:/ {print $2}')
+          if [ "$version" != "$EMU_VERSION" ]; then
+            echo "::error::The unpacked emulator reports version '$version', expected $EMU_VERSION"
+            exit 1
+          fi
+          echo "EMU_BIN=$bin" >> "$GITHUB_ENV"
+
+      # Loopback only, its own home folder, telemetry off by both the
+      # environment and the flag, and an idle timeout so a stuck job cannot
+      # keep it running. The emulator writes per-run keys and a CA there.
+      - name: Start emulator
+        run: |
+          unset AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          home="$RUNNER_TEMP/aws-emulator-home"
+          mkdir -p "$home"
+          HOME="$home" nohup "$EMU_BIN" -b 127.0.0.1 -p "$EMU_PORT" --telemetry off --idle-timeout 900 \
+            > "$RUNNER_TEMP/aws-emulator.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/aws-emulator.pid"
+          state="$home/.aws/emulator/$EMU_PORT"
+          endpoint="https://127.0.0.1:$EMU_PORT"
+          ready=false
+          for _ in $(seq 30); do
+            if [ -f "$state/ca.pem" ] && curl -sf --cacert "$state/ca.pem" "$endpoint/__admin/health" >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::The emulator did not report healthy within 30 seconds"
+            exit 1
+          fi
+          creds="$state/emulator_credentials"
+          key_id=$(awk -F' *= *' '$1 == "aws_access_key_id" {print $2; exit}' "$creds")
+          secret=$(awk -F' *= *' '$1 == "aws_secret_access_key" {print $2; exit}' "$creds")
+          if [ -z "$key_id" ] || [ -z "$secret" ]; then
+            echo "::error::Could not read the emulator's per-run keys from $creds"
+            exit 1
+          fi
+          echo "::add-mask::$secret"
+          {
+            echo "VERSUS_HARNESS_AWS_ENDPOINT_URL=$endpoint"
+            echo "VERSUS_HARNESS_AWS_CA_BUNDLE=$state/ca.pem"
+            echo "AWS_ACCESS_KEY_ID=$key_id"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_REGION=us-east-1"
+            echo "AWS_EC2_METADATA_DISABLED=true"
+          } >> "$GITHUB_ENV"
+
+      # The AWS CLI on the runner image does the seeding. Only this step gets
+      # the CLI's own endpoint and CA variables; the tests reach the emulator
+      # through the harness endpoint variables alone.
+      - name: Seed emulator
+        env:
+          AWS_ENDPOINT_URL: ${{ env.VERSUS_HARNESS_AWS_ENDPOINT_URL }}
+          AWS_CA_BUNDLE: ${{ env.VERSUS_HARNESS_AWS_CA_BUNDLE }}
+        run: |
+          aws --version
+          bash tests/awsemulator/seed.sh
+
+      - name: Contract tests
+        run: |
+          if ! find tests/awsemulator -name '*_test.go' | grep -q .; then
+            echo "::notice::tests/awsemulator has no Go tests yet; nothing to run"
+            exit 0
+          fi
+          go test -tags 'awsemulator harness_awsendpoint' -timeout 8m ./tests/awsemulator/...
+
+      - name: Stop emulator
+        if: always()
+        run: |
+          pid_file="$RUNNER_TEMP/aws-emulator.pid"
+          if [ -f "$pid_file" ]; then
+            kill "$(cat "$pid_file")" 2>/dev/null || true
+          fi
+
+      - name: Upload emulator log
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aws-emulator-log
+          path: ${{ runner.temp }}/aws-emulator.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The one required check. A job that was skipped because its group did not
+  # change counts as passed; a failed or cancelled job fails this check.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [changes, test, race, chart, ui, docker-build, docs-check, aws-emulator]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "$NEEDS" | jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | .key')
+          if [ -n "$bad" ]; then
+            echo "::error::Jobs that failed or were cancelled: $(echo "$bad" | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "Every job that ran passed"
+
+  # Images build only after ci-ok passes, and not for a docs-only change.
+  # ci-ok runs even when an earlier job is skipped, so these jobs check its
+  # result themselves rather than relying on the default success() rule.
   build-and-push-dev:
     name: Build & push dev image
+    needs: [changes, ci-ok]
+    if: >-
+      !cancelled() && needs.ci-ok.result == 'success'
+      && github.event_name == 'push' && github.ref == 'refs/heads/dev'
+      && needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    needs: [test, race, chart]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -224,7 +736,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/versuscontrol/versus-incident
           tags: |
@@ -237,7 +749,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: ./Dockerfile
@@ -247,3 +759,77 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  build-and-push-main:
+    name: Build & push main image
+    needs: [changes, ci-ok]
+    if: >-
+      !cancelled() && needs.ci-ok.result == 'success'
+      && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/versuscontrol/versus-incident
+          tags: |
+            type=raw,value=main
+            type=sha,prefix=main-,format=short
+          labels: |
+            org.opencontainers.image.title=versus-incident
+            org.opencontainers.image.description=Open-source incident router with built-in AI SRE agent
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # The nightly run above covers main. This starts the same full run on dev,
+  # using dev's own copy of this workflow.
+  nightly-dev:
+    name: Start nightly dev run
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch this workflow on dev
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh api "repos/$GH_REPO/branches/dev" --silent 2>/dev/null; then
+            echo "::notice::No dev branch yet; nothing to start"
+            exit 0
+          fi
+          gh workflow run dev.yml --ref dev
