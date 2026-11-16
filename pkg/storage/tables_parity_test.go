@@ -2400,3 +2400,60 @@ func TestTablesParityFinOpsRollupReconcileFindsSameTotalRewrites(t *testing.T) {
 		record("by team", got)
 	})
 }
+
+// TestInsertRowsWideTableBatchesUnderParameterBudget inserts into a table
+// whose column count leaves room for only a few rows per statement, and
+// checks that column counts no statement could hold are refused up front.
+func TestInsertRowsWideTableBatchesUnderParameterBudget(t *testing.T) {
+	tables := newSQLiteTables(t.TempDir() + "/wide.sqlite")
+	db, err := tables.tablesDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const width, rowCount = 1500, 13
+	columns := make([]string, width)
+	for index := range columns {
+		columns[index] = "c" + strconv.Itoa(index)
+	}
+	if _, err := db.Exec("CREATE TABLE wide_insert (" + strings.Join(columns, " INTEGER, ") + " INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([][]any, rowCount)
+	for index := range rows {
+		row := make([]any, width)
+		for column := range row {
+			row[column] = index
+		}
+		rows[index] = row
+	}
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tables.insertRows(ctx, tx, "wide_insert", columns, rows, ""); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var count, sum int
+	if err := db.QueryRow("SELECT COUNT(*), SUM("+columns[width-1]+") FROM wide_insert").Scan(&count, &sum); err != nil {
+		t.Fatal(err)
+	}
+	if count != rowCount || sum != rowCount*(rowCount-1)/2 {
+		t.Fatalf("inserted count=%d sum=%d, want %d rows summing to %d", count, sum, rowCount, rowCount*(rowCount-1)/2)
+	}
+
+	tooWide := make([]string, maxStatementParams+1)
+	for index := range tooWide {
+		tooWide[index] = "c" + strconv.Itoa(index)
+	}
+	if err := tables.insertRows(ctx, nil, "wide_insert", tooWide, [][]any{{}}, ""); err == nil {
+		t.Fatal("insert with more columns than the parameter budget succeeded")
+	}
+	if err := tables.insertRows(ctx, nil, "wide_insert", nil, [][]any{{}}, ""); err == nil {
+		t.Fatal("insert with no columns succeeded")
+	}
+}

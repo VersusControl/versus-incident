@@ -503,13 +503,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # AWS publishes the package only under a "latest" URL, so the checksum
-      # is the version pin: a new upstream release fails the checksum step.
-      # Bump EMU_VERSION and EMU_RPM_SHA256 together, after re-checking the
-      # contract tests against the new release.
+      # AWS keeps each release under its own file name next to the moving
+      # "latest" copy, so the job downloads the pinned release and a new
+      # upstream release does not change what it fetches. The checksum still
+      # guards against a replaced file. To upgrade, re-check the contract
+      # tests against the new release, then bump EMU_VERSION, EMU_RPM_RELEASE
+      # and EMU_RPM_SHA256 together.
       EMU_VERSION: '1.0.385'
+      EMU_RPM_RELEASE: '1'
       EMU_RPM_SHA256: 2b2b5031e559d74c7a4154b11056be3a57716a177cd796cf058eebd91a6870d7
-      EMU_RPM_URL: https://downloads.aws.com/aws-emulator/packages/aws-emulator/LTS/latest/aws-emulator-x86_64.rpm
+      EMU_RPM_BASE_URL: https://downloads.aws.com/aws-emulator/packages/aws-emulator/LTS
       EMU_PORT: '9297'
       EMULATOR_TELEMETRY: 'off'
     steps:
@@ -538,7 +541,9 @@ jobs:
         if: steps.emu-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/.cache/aws-emulator
-          curl -fsSL --retry 3 -o ~/.cache/aws-emulator/aws-emulator-x86_64.rpm "$EMU_RPM_URL"
+          url="$EMU_RPM_BASE_URL/aws-emulator-$EMU_VERSION-$EMU_RPM_RELEASE-x86_64.rpm"
+          echo "Downloading $url"
+          curl -fsSL --retry 3 -o ~/.cache/aws-emulator/aws-emulator-x86_64.rpm "$url"
 
       # Runs on every job, cached or not, so a changed upstream package or a
       # damaged cache entry never reaches the tests.
@@ -546,7 +551,7 @@ jobs:
         run: |
           rpm=~/.cache/aws-emulator/aws-emulator-x86_64.rpm
           if ! echo "$EMU_RPM_SHA256  $rpm" | sha256sum -c -; then
-            echo "::error::The emulator package does not match the pinned checksum: AWS has published a new release. Re-check the contract tests against it, then bump EMU_VERSION and EMU_RPM_SHA256 together."
+            echo "::error::The emulator package for $EMU_VERSION-$EMU_RPM_RELEASE does not match the pinned checksum, so AWS replaced the file or the cache entry is damaged. Do not just update the checksum: confirm the change, re-check the contract tests, then update EMU_RPM_SHA256."
             exit 1
           fi
 

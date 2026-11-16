@@ -464,21 +464,33 @@ func (v *tableDayValue) Scan(src any) error {
 	return nil
 }
 
+// maxStatementParams is the bind-parameter budget of one insert statement,
+// kept well under the limits of both Postgres and SQLite.
+const maxStatementParams = 8000
+
 // insertRows writes rows with multi-row inserts, each under the parameter
 // budget of both databases.
 func (t *sqlTables) insertRows(ctx context.Context, tx *sql.Tx, table string, columns []string, rows [][]any, suffix string) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	per := 8000 / len(columns)
-	if per < 1 {
-		per = 1
+	width := len(columns)
+	if width < 1 || width > maxStatementParams {
+		return fmt.Errorf("storage: insert into %s has %d columns, want 1 to %d", table, width, maxStatementParams)
 	}
-	row := "(" + placeholders(len(columns)) + ")"
+	per := maxStatementParams / width
+	rowsPerBatch := per
+	if len(rows) < rowsPerBatch {
+		rowsPerBatch = len(rows)
+	}
+	// rowsPerBatch*width is at most maxStatementParams because width is
+	// bounded above and rowsPerBatch never exceeds per.
+	batchParams := rowsPerBatch * width
+	row := "(" + placeholders(width) + ")"
 	for start := 0; start < len(rows); start += per {
 		end := min(start+per, len(rows))
 		values := make([]string, 0, end-start)
-		args := make([]any, 0, (end-start)*len(columns))
+		args := make([]any, 0, batchParams)
 		for _, item := range rows[start:end] {
 			values = append(values, row)
 			args = append(args, item...)
