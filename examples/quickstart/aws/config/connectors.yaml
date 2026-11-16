@@ -1,0 +1,27 @@
+# The AWS account Versus reads. Every value comes from the environment, so this
+# file ships ready to use:
+#   AWS_ACCOUNT_ID  the account the access key belongs to
+#   AWS_REGION      the region Versus reads
+# Versus signs in with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY through the
+# default AWS credential chain.
+
+connectors:
+  aws:
+    enable: true
+    accounts:
+      - account_id: "${AWS_ACCOUNT_ID}"
+        display_name: Quickstart
+        regions: ["${AWS_REGION}"]
+        auth:
+          mode: default_chain
+    tags:
+      value_allowlist: [Name, app, service, team, env]
+    optional_data:
+      cost_explorer: true   # FinOps cost; at most 20 paid requests a day, $0.01 each
+    finops:
+      team_tag_key: team
+      max_paid_requests_per_day: 20
+      refresh_time: "09:00"         # once a day, in report.timezone
+      cost_source_account: ""       # empty: the account reads its own cost
+      report:
+        timezone: UTC

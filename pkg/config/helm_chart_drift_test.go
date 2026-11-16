@@ -378,18 +378,8 @@ func sortedKeys[V any](m map[string]V) []string {
 // regions, the external-ID placeholder, and the budget and optional-data
 // defaults all survive rendering.
 func TestHelmChartRendersAWSConnectors(t *testing.T) {
-	requireRenderableChart(t)
 	t.Setenv("VERSUS_AWS_EXTERNAL_ID", "external-value")
-	files := renderChartFiles(t, chartScenario{name: "aws-connectors", args: []string{"-f", coverageValues}})
-	directory := t.TempDir()
-	for name, body := range files {
-		if strings.HasSuffix(name, ".yaml") {
-			if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+	loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, "20-config-coverage")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,17 +413,7 @@ func TestHelmChartRendersAWSConnectors(t *testing.T) {
 // checks they match the loader's defaults, so the chart and the binary
 // never disagree about collection.
 func TestHelmChartAWSCollectDefaults(t *testing.T) {
-	requireRenderableChart(t)
-	files := renderChartFiles(t, chartScenario{name: "aws-collect-defaults", args: []string{"--set", "connectors.aws.enable=true"}})
-	directory := t.TempDir()
-	for name, body := range files {
-		if strings.HasSuffix(name, ".yaml") {
-			if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+	loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, "105-aws-connector-defaults")))
 	if err != nil {
 		t.Fatal(err)
 	}

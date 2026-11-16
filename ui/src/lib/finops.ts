@@ -5,6 +5,7 @@ import type {
   FinOpsBridgeRow,
   FinOpsComparison,
   FinOpsDateRange,
+  FinOpsDayAmount,
   FinOpsDepth,
   FinOpsForecast,
   FinOpsHeader,
@@ -146,22 +147,36 @@ export function monthName(key: string | undefined): string {
   return MONTH_NAMES[m - 1] ?? key;
 }
 
-/** "Oct 9 14:02" in UTC so every viewer reads the same time as the source. */
+/** "Oct 9 14:02 UTC": zone named so every viewer reads the same time as the source. */
 export function fmtStamp(iso: string | undefined): string {
   if (!iso) return "";
   const t = new Date(iso);
   if (Number.isNaN(t.getTime())) return "";
   const hh = String(t.getUTCHours()).padStart(2, "0");
   const mm = String(t.getUTCMinutes()).padStart(2, "0");
-  return `${MONTHS[t.getUTCMonth()]} ${t.getUTCDate()} ${hh}:${mm}`;
+  return `${MONTHS[t.getUTCMonth()]} ${t.getUTCDate()} ${hh}:${mm} UTC`;
 }
 
-/** "08:00" (UTC) for the freshness label. */
+/**
+ * "08:00 UTC": a time of day in UTC, zone named, so FinOps and AWS settings
+ * read the same clock as the source for every viewer.
+ */
 export function fmtClock(iso: string | undefined): string {
   if (!iso) return "";
   const t = new Date(iso);
   if (Number.isNaN(t.getTime())) return "";
-  return `${String(t.getUTCHours()).padStart(2, "0")}:${String(t.getUTCMinutes()).padStart(2, "0")}`;
+  return `${String(t.getUTCHours()).padStart(2, "0")}:${String(t.getUTCMinutes()).padStart(2, "0")} UTC`;
+}
+
+/**
+ * "Oct 25 – Nov 11": the days an increase's cause amounts add up over, from
+ * its start to the last complete day the chart shows. Empty when unknown.
+ */
+export function increaseWindow(startedOn: string | undefined, series: readonly FinOpsDayAmount[] | null | undefined): string {
+  if (!startedOn) return "";
+  const last = (series ?? []).filter((d) => !d.partial).reduce<string>((max, d) => (d.day > max ? d.day : max), "");
+  if (!last || last < startedOn) return "";
+  return last === startedOn ? fmtDay(startedOn) : `${fmtDay(startedOn)} – ${fmtDay(last)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +347,14 @@ export function missingAccountText(m: FinOpsMissingAccount): string {
   return `${m.name || m.id}: ${MISSING_REASONS[m.reason] ?? m.reason.replace(/_/g, " ")}`;
 }
 
+/** Words for why an account's cost cannot be read; never the raw code. */
+export function accountErrorText(code: string): string {
+  if (MISSING_REASONS[code]) return MISSING_REASONS[code];
+  if (STALE_REASONS[code]) return STALE_REASONS[code];
+  const aws = awsErrorText(code);
+  return aws.code === code ? aws.title : code.replace(/_/g, " ");
+}
+
 const STALE_REASONS: Record<string, string> = {
   throttled: "AWS throttled the refresh",
   timeout: "The refresh timed out",
@@ -349,6 +372,7 @@ const ACCESS_LOSS = new Set([
   "disconnected",
   "credentials_invalid",
   "no_server_identity",
+  "account_mismatch",
   "role_not_found",
   "trust_denied",
   "external_id_mismatch",
@@ -370,7 +394,7 @@ export function staleNeedsAccessFix(code: string | undefined): boolean {
 /** "Nov 11 05:18 UTC" for a timestamp, "Nov 11" for a day. */
 export function fmtSince(since: string | undefined): string {
   if (!since) return "";
-  return since.length > 10 ? `${fmtStamp(since)} UTC` : fmtDay(since);
+  return since.length > 10 ? fmtStamp(since) : fmtDay(since);
 }
 
 /**

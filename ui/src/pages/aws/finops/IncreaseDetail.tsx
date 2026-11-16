@@ -28,6 +28,7 @@ import {
   fmtMoney,
   fmtSignal,
   fmtStamp,
+  increaseWindow,
   isZeroAmount,
   niceTicks,
   signalRatio,
@@ -216,7 +217,7 @@ function increaseSummary(v: FinOpsIncreaseDetailView): string {
   // The server's sentence may already end in a full stop; never add a second.
   const lines = [/[.!?]$/.test(inc.sentence.trim()) ? inc.sentence.trim() : `${inc.sentence.trim()}.`];
   const s = inc.suspect_change;
-  if (s.state === "found" && s.summary) lines.push(`Why: ${s.summary}${s.actor ? ` by ${s.actor}` : ""}${s.at ? ` (${fmtStamp(s.at)} UTC)` : ""}.`);
+  if (s.state === "found" && s.summary) lines.push(`Why: ${s.summary}${s.actor ? ` by ${s.actor}` : ""}${s.at ? ` (${fmtStamp(s.at)})` : ""}.`);
   lines.push(`Owner: ${inc.owner.name} (${inc.owner.rule_text}).`);
   const fix = v.related_savings?.[0];
   if (fix) lines.push(`Fix: ${fix.line}`);
@@ -394,6 +395,7 @@ export function IncreaseDetailPage() {
   const signal = v?.usage_signal;
   const fix = v?.related_savings?.[0];
   const ratio = signal ? signalRatio(signal.before_micros, signal.after_micros) : "";
+  const causeWindow = increaseWindow(inc?.started_on, v?.series);
 
   return (
     <main className="flex min-h-0 flex-1 flex-col overflow-auto">
@@ -475,9 +477,12 @@ export function IncreaseDetailPage() {
                 <Card
                   title="Where the increase came from"
                   aside={
-                    <span className="pill pill-warn">
-                      {CAUSE_WORDS[inc.cause] ?? inc.cause}
-                      {ratio ? `: ${ratio}` : ""}
+                    <span className="flex items-center gap-2">
+                      {causeWindow && <span className="font-mono text-2xs text-ink-300">{causeWindow}</span>}
+                      <span className="pill pill-warn">
+                        {CAUSE_WORDS[inc.cause] ?? inc.cause}
+                        {ratio ? `: ${ratio}` : ""}
+                      </span>
                     </span>
                   }
                 >

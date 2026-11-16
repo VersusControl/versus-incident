@@ -1,10 +1,10 @@
-// AWS FinOps browser acceptance against a REAL AWS account
-// (plans/status/aws-harness/a8-finops.md §7.0–7.5, plan principle 11 "Quiet text").
+// AWS FinOps browser acceptance against a REAL AWS account: the page states
+// each fact once, in quiet text.
 //
 // Live only: the harness `oss-aws` stack reads one real account through the
 // default credential chain, and this spec drives the page like an operator.
 // It asserts what the page must show for whatever the account returns (the
-// worst-case states of §7.4 included), so the branches follow the live API.
+// worst-case states included), so the branches follow the live API.
 // The two toast checks that real data cannot trigger without changing AWS or
 // spending money (account removal, an error toast) patch one response with
 // page.route and are labelled fixture in the test title.
@@ -34,7 +34,10 @@ import type {
 
 const LIVE = process.env.E2E_AWS_LIVE === "1";
 const ALLOW_DRILL = process.env.E2E_AWS_ALLOW_DRILL === "1";
-test.skip(!LIVE, "needs the oss-aws harness stack reading a real AWS account (E2E_AWS_LIVE=1)");
+// Quickstart docs captures (end of file): a running server configured from
+// examples/quickstart/aws, run with --grep "quickstart docs".
+const QUICKSTART_DOCS = process.env.E2E_AWS_QUICKSTART_DOCS === "1";
+test.skip(!LIVE && !QUICKSTART_DOCS, "needs the oss-aws harness stack reading a real AWS account (E2E_AWS_LIVE=1)");
 
 const VIEWPORTS = [
   { name: "desktop", width: 1440, height: 900 },
@@ -48,7 +51,7 @@ type Viewport = (typeof VIEWPORTS)[number];
 const RAW_CODES = [
   "paid_request_cap_reached", "reserved_for_scheduled_refresh", "store_unavailable", "cost_data_off",
   "cost_period_too_large", "reason_required", "until_invalid", "status_change_not_allowed", "already_frozen",
-  "bill_not_closed", "report_not_month", "refresh_in_progress", "no_server_identity", "role_not_found",
+  "bill_not_closed", "report_not_month", "refresh_in_progress", "no_server_identity", "account_mismatch", "role_not_found",
   "trust_denied", "external_id_mismatch", "session_duration_invalid", "region_disabled", "ce_denied",
   "ce_unavailable", "ce_data_not_ready", "rate_limited", "invalid_body", "not_found", "cost_by_account",
   "cost_by_usage", "cost_by_team", "cost_by_record", "discount_coverage", "resource_detail", "drill_down",
@@ -86,7 +89,7 @@ async function getJson<T>(page: Page, url: string): Promise<T> {
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /**
- * Independent oracle for a partial comparison month (QA-403): "Oct 1–9", with
+ * Independent oracle for a partial comparison month: "Oct 1–9", with
  * ", 2025" when its year differs from the period's. "" for a whole month.
  */
 function partialLabel(range: FinOpsDateRange | undefined, periodYear: number | undefined): string {
@@ -100,7 +103,7 @@ function partialLabel(range: FinOpsDateRange | undefined, periodYear: number | u
   return periodYear && periodYear !== ys ? `${days}, ${ys}` : days;
 }
 
-/** A money amount that is zero ("$0", "+$0.00", "−$0"), never a price such as "$0.626/hour" (QA-404, QA-406, QA-408). */
+/** A money amount that is zero ("$0", "+$0.00", "−$0"), never a price such as "$0.626/hour". */
 const ZERO_MONEY = /(?:^|[^\d.,])[+−-]?\$0(?:\.0+)?(?![\d.,])/;
 
 /** Visible text of a region minus its charts (an axis tick of $0 is a value, not a stated amount). */
@@ -116,7 +119,7 @@ async function textOutsideCharts(loc: Locator): Promise<string> {
   });
 }
 
-/** Account IDs, ARNs and echoed AWS recommendation text must not reach a saving title (QA-406, QA-409). */
+/** Account IDs, ARNs and echoed AWS recommendation text must not reach a saving title. */
 const SAVING_TITLE_LEAKS: Array<[RegExp, string]> = [
   [/\b\d{12}\b/, "a 12-digit account ID"],
   [/arn:aws/i, "an ARN"],
@@ -297,7 +300,7 @@ async function liveState(page: Page) {
   const bridge = on ? await getJson<FinOpsBridgeView>(page, "/api/admin/aws/finops/bridge") : null;
   const byService = on ? await getJson<FinOpsBreakdownView>(page, "/api/admin/aws/finops/breakdown?group_by=service") : null;
   const savings = on ? await getJson<FinOpsSavingsView>(page, "/api/admin/aws/finops/savings") : null;
-  // Every status: resolved increases are what a bridge row links to (QA-404).
+  // Every status: resolved increases are what a bridge row links to.
   const increases = on ? await getJson<FinOpsIncreasesView>(page, "/api/admin/aws/finops/increases?status=all") : null;
   return { summary, on, bridge, byService, savings, increases };
 }
@@ -346,7 +349,7 @@ function shape(state: LiveState) {
   };
 }
 
-/** QA-406 and QA-409: saving titles name resources by ID, with no account IDs or echoed AWS text. */
+/** Saving titles name resources by ID, with no account IDs or echoed AWS text. */
 function savingTitleFindings(savings: FinOpsSavingsView | null, label: string): string[] {
   const out: string[] = [];
   for (const item of savings?.items ?? []) {
@@ -355,7 +358,7 @@ function savingTitleFindings(savings: FinOpsSavingsView | null, label: string): 
       for (const [re, why] of SAVING_TITLE_LEAKS) if (re.test(text)) out.push(`${label}: saving ${item.kind} text carries ${why}`);
     }
     if (item.kind === "commitment" && item.title.includes(":")) {
-      // QA-406: the suggestion clause is Versus wording only ("a 3-year compute commitment of $0.626/h").
+      // The suggestion clause is Versus wording only ("a 3-year compute commitment of $0.626/h").
       const clause = item.title.slice(item.title.indexOf(":") + 1).trim();
       if (!/^a( \d-year)?( [a-z ]+)? commitment of \$[\d.,]+\/h$/.test(clause)) out.push(`${label}: commitment clause is not in Versus wording`);
     }
@@ -385,11 +388,11 @@ for (const viewport of VIEWPORTS) {
       const firstSync = page.locator('[role="status"][aria-label*="first sync"]');
       const state = (await firstSync.count()) > 0 ? "first-sync" : "connected";
       test.info().annotations.push({ type: "settings-state", description: state });
-      // QA-409: the run keeps the default tag-value allowlist (no Name).
+      // The run keeps the default tag-value allowlist (no Name).
       const settings = await getJson<AwsSettings>(page, "/api/admin/aws/settings");
       const allow = settings.privacy?.tag_value_allowlist ?? [];
       test.info().annotations.push({ type: "tag-value-allowlist", description: `${allow.join(", ")} (${settings.privacy?.tag_value_allowlist_source})` });
-      if (allow.includes("Name")) findings.push("QA-409 setup: Name is on the tag-value allowlist; this pass needs the default");
+      if (allow.includes("Name")) findings.push("Setup: Name is on the tag-value allowlist; this pass needs the default");
       await page.waitForTimeout(300);
       await shot(page, "aws-settings-live", viewport, theme, state);
       await audit(page, `settings/${viewport.name}/${theme}`, findings);
@@ -399,7 +402,7 @@ for (const viewport of VIEWPORTS) {
   }
 }
 
-// First connect (QA-402): a snapshot of Settings and FinOps as they are right
+// First connect: a snapshot of Settings and FinOps as they are right
 // now, taken repeatedly while the first check and the first refresh run.
 // Live only, opt in with E2E_AWS_FIRST_CONNECT=<label>.
 const FIRST_CONNECT = process.env.E2E_AWS_FIRST_CONNECT ?? "";
@@ -421,7 +424,7 @@ for (const viewport of VIEWPORTS) {
     const summary = await getJson<FinOpsSummaryView>(page, "/api/admin/aws/finops/summary");
     const finopsText = await page.locator("main").innerText();
     test.info().annotations.push({ type: "finops", description: `enabled ${summary.enabled}; reason ${summary.reason ?? "-"}; stale ${summary.sync?.stale ?? "-"} ${summary.sync?.stale_reason ?? ""}; meter ${summary.meter?.used ?? "-"}; text: ${finopsText.split("\n").slice(0, 6).join(" | ").slice(0, 200)}` });
-    if (/No account ready/.test(finopsText)) findings.push("QA-402: FinOps says \"No account ready\" during a first connect");
+    if (/No account ready/.test(finopsText)) findings.push("FinOps says \"No account ready\" during a first connect");
     await audit(page, `first-connect/${viewport.name}`, findings);
     await shot(page, "aws-finops", viewport, theme, `first-connect-${FIRST_CONNECT}`);
     recordFindings(test.info().title, findings);
@@ -429,7 +432,7 @@ for (const viewport of VIEWPORTS) {
   });
 }
 
-// QA-409: set the tag-value allowlist through Settings ▸ Advanced, as an admin
+// Set the tag-value allowlist through Settings ▸ Advanced, as an admin
 // would. Live only, opt in with E2E_AWS_ALLOWLIST="app, team, …".
 const ALLOWLIST = process.env.E2E_AWS_ALLOWLIST ?? "";
 test("tag allowlist set through Settings (desktop, dark)", async ({ browser }) => {
@@ -480,7 +483,7 @@ for (const viewport of VIEWPORTS) {
         await expect(main.locator('section[aria-label$="cost"], section[aria-label$="to date"]')).toHaveCount(0);
         await shot(page, "aws-finops", viewport, theme, "ce-unavailable");
       } else {
-        // Three summary cards, no answer sentence (§7.0).
+        // Three summary cards, no answer sentence.
         const period = s.period!;
         const costLabel = period.open ? `${period.short} to date` : `${period.short} cost`;
         await expect(main.locator(`section[aria-label="${costLabel}"]`)).toBeVisible();
@@ -505,7 +508,7 @@ for (const viewport of VIEWPORTS) {
           await expect(main.getByRole("combobox", { name: "Accounts" })).toHaveCount(0);
         }
 
-        // QA-411: lost access keeps the stored cost, marked stale, with the
+        // Lost access keeps the stored cost, marked stale, with the
         // cause behind an ⓘ and "AWS settings ›" on the same line.
         await expect(main.getByText(/No account ready/)).toHaveCount(0);
         const staleGap = main.locator('[data-gap="stale-access"]');
@@ -519,14 +522,14 @@ for (const viewport of VIEWPORTS) {
             await tip.click();
             const noteText = await page.locator('[role="note"]').first().innerText();
             test.info().annotations.push({ type: "stale-note", description: noteText });
-            if (!/credentials|identity|disconnected|denied/i.test(noteText)) findings.push(`QA-411: stale ⓘ does not name the cause: "${noteText}"`);
+            if (!/credentials|identity|disconnected|denied/i.test(noteText)) findings.push(`Stale ⓘ does not name the cause: "${noteText}"`);
             await shot(page, "aws-finops", viewport, theme, "stale-note-open", false);
             await page.keyboard.press("Escape");
             const freshBtn = page.getByRole("button", { name: /^Stale since/ });
             await freshBtn.first().click();
             const freshNote = await page.locator('[role="note"]').first().innerText();
             test.info().annotations.push({ type: "stale-freshness-note", description: freshNote.replace(/\n/g, " | ") });
-            if (!/AWS settings/.test(freshNote)) findings.push(`QA-411: freshness note does not point to AWS settings: "${freshNote}"`);
+            if (!/AWS settings/.test(freshNote)) findings.push(`Freshness note does not point to AWS settings: "${freshNote}"`);
             await shot(page, "aws-finops", viewport, theme, "stale-freshness-open", false);
             await freshBtn.first().click();
           }
@@ -574,20 +577,20 @@ for (const viewport of VIEWPORTS) {
         }
         test.info().annotations.push({ type: "bridge-state", description: bridgeState });
 
-        // QA-403: a month-to-date compared with the same days of last month names
+        // A month-to-date compared with the same days of last month names
         // its days ("Oct 1–9"), never "October total".
         const partial = s.compare?.available ? partialLabel(s.compare.range, Number(period.range.start.slice(0, 4))) : "";
         test.info().annotations.push({ type: "compare-base", description: partial ? `partial: ${partial}` : "whole month" });
         if (partial) {
-          if ((await main.getByText(`${s.compare!.short} total`).count()) > 0) findings.push(`QA-403: "${s.compare!.short} total" shown for the partial base ${partial}`);
+          if ((await main.getByText(`${s.compare!.short} total`).count()) > 0) findings.push(`"${s.compare!.short} total" shown for the partial base ${partial}`);
           if (bridgeState === "bridge") {
             const base = viewport.name === "mobile" ? bridgeCard.locator('ol[aria-label="What moved the cost"] > li').first() : bridgeCard.locator('tr[data-row-kind="base"]');
             const baseText = await base.innerText();
-            if (!baseText.includes(partial)) findings.push(`QA-403: bridge base row reads "${baseText.split("\n")[0]}", want "${partial}"`);
+            if (!baseText.includes(partial)) findings.push(`Bridge base row reads "${baseText.split("\n")[0]}", want "${partial}"`);
           }
         }
 
-        // QA-404/QA-408: no zero amounts on the bridge or Spend by service.
+        // No zero amounts on the bridge or Spend by service.
         for (const [name, loc] of [
           ["What moved the cost", bridgeCard],
           ["Spend by service", main.locator("section").filter({ has: page.getByRole("heading", { name: "Spend by service" }) }).last()],
@@ -608,11 +611,11 @@ for (const viewport of VIEWPORTS) {
         test.info().annotations.push({ type: "spend-by", description: `${await spendBy.count()} titled card(s); options ${JSON.stringify(opts.map((o) => [o.group_by, o.reason ?? "ok"]))}` });
         await expect(main.getByRole("heading", { name: "Savings found" })).toBeVisible();
 
-        // QA-406: no green $0 total; commitment-only line when that is all; titles in Versus words.
+        // No green $0 total; commitment-only line when that is all; titles in Versus words.
         const sv = live.savings!;
         const savingsCard = main.locator("section").filter({ has: page.getByRole("heading", { name: "Savings found" }) }).last();
         const savingsText = await savingsCard.innerText();
-        if (ZERO_MONEY.test(savingsText)) findings.push(`QA-406: Savings found shows a zero amount: "${savingsText.split("\n").find((l) => ZERO_MONEY.test(l))}"`);
+        if (ZERO_MONEY.test(savingsText)) findings.push(`Savings found shows a zero amount: "${savingsText.split("\n").find((l) => ZERO_MONEY.test(l))}"`);
         const openItems = (sv.items ?? []).filter((i) => i.status !== "dismissed");
         let savingsState = openItems.length > 0 ? `items ${openItems.length} (counted ${sv.total.count})` : "none";
         if (openItems.length === 0 && sv.total.commitment_count > 0 && sv.total.commitment_monthly_micros > 0) {
@@ -657,7 +660,7 @@ for (const viewport of VIEWPORTS) {
           const note = page.locator('[role="note"]').first();
           await expect(note).toBeVisible();
           const noteText = await note.innerText();
-          if (partial && noteText.includes(`${s.compare!.short} total`)) findings.push(`QA-403: ⓘ "${tipName}" says "${s.compare!.short} total" for ${partial}`);
+          if (partial && noteText.includes(`${s.compare!.short} total`)) findings.push(`Ⓘ "${tipName}" says "${s.compare!.short} total" for ${partial}`);
           const vbox = await note.boundingBox();
           if (vbox && (vbox.y < 0 || vbox.y + vbox.height > page.viewportSize()!.height + 1)) findings.push(`ⓘ "${tipName}" note runs off screen vertically`);
           const box = await note.boundingBox();
@@ -789,15 +792,15 @@ for (const viewport of VIEWPORTS) {
       }
       const gapLines = await main.getByText("Resource data off").count();
       if (gapLines > 1) findings.push(`quiet text: "Resource data off" repeated on ${gapLines} cause rows`);
-      // QA-410: the whole stated amount is highlighted, as the sentence writes it.
+      // The whole stated amount is highlighted, as the sentence writes it.
       const hl = h1.locator("span.font-mono");
       if ((await hl.count()) > 0) {
         const hlText = (await hl.first().innerText()).trim();
         const token = heading.match(/[+−-]?\$[\d,]+(?:\.\d+)?/)?.[0] ?? "";
         test.info().annotations.push({ type: "heading-highlight", description: `${hlText} (sentence token ${token})` });
-        if (hlText !== token) findings.push(`QA-410: heading highlights "${hlText}" but the sentence states "${token}"`);
+        if (hlText !== token) findings.push(`Heading highlights "${hlText}" but the sentence states "${token}"`);
       }
-      // QA-410: chart axis labels inside the chart box.
+      // Chart axis labels inside the chart box.
       const clipped = await main.locator("svg").evaluateAll((svgs) =>
         svgs.flatMap((svg) => {
           const box = svg.getBoundingClientRect();
@@ -810,17 +813,17 @@ for (const viewport of VIEWPORTS) {
             .map((t) => (t.textContent ?? "").trim());
         }),
       );
-      if (clipped.length > 0) findings.push(`QA-410: chart labels run outside the chart: ${clipped.join(", ")}`);
-      // QA-404/QA-408: no zero amount anywhere on the detail (heading, aside, cause rows).
+      if (clipped.length > 0) findings.push(`Chart labels run outside the chart: ${clipped.join(", ")}`);
+      // No zero amount anywhere on the detail (heading, aside, cause rows).
       const detailText = await textOutsideCharts(main);
       const zeroLine = detailText.split("\n").find((l) => ZERO_MONEY.test(l));
       if (zeroLine) findings.push(`zero amount on the increase detail: "${zeroLine.replace(/[0-9]{12}/g, "<account>").trim().slice(0, 80)}"`);
       test.info().annotations.push({ type: "usage-signal", description: detailJson.usage_signal ? `${detailJson.usage_signal.label} [${detailJson.usage_signal.unit}]` : "none" });
-      // QA-408: chart text legible at 390 px (rendered glyph height).
+      // Chart text legible at 390 px (rendered glyph height).
       const tiny = await main.locator("svg text").evaluateAll((els) =>
         els.filter((e) => (e.textContent ?? "").trim() && e.getBoundingClientRect().height > 0 && e.getBoundingClientRect().height < 9).map((e) => `${(e.textContent ?? "").trim()} (${e.getBoundingClientRect().height.toFixed(1)}px)`),
       );
-      if (tiny.length > 0) findings.push(`QA-408: chart text under 9 px tall: ${tiny.slice(0, 4).join(", ")}`);
+      if (tiny.length > 0) findings.push(`Chart text under 9 px tall: ${tiny.slice(0, 4).join(", ")}`);
       await page.waitForTimeout(400);
       await shot(page, "aws-finops-increase", viewport, theme, "detail");
       if (ALLOW_DRILL && viewport.name === "desktop" && theme === "dark") {
@@ -842,7 +845,7 @@ for (const viewport of VIEWPORTS) {
   }
 }
 
-// QA-404: every increase the account has, not only the one the bridge links.
+// Every increase the account has, not only the one the bridge links.
 test("every increase states no zero and no forward impact once resolved (desktop, dark)", async ({ browser }) => {
   const findings: string[] = [];
   const page = await open(browser, VIEWPORTS[0], "dark", "/aws/finops");
@@ -902,16 +905,16 @@ for (const viewport of VIEWPORTS) {
       for (let el: Element | null = r; el; el = el.parentElement) h = Math.max(h, (el as HTMLElement).scrollHeight);
       return h + 40;
     });
-    // QA-403/404/406/409 on the report text.
+    // Partial-month wording, zero amounts and saving titles on the report text.
     const reportText = await report.innerText();
     const s = live.summary;
     const partial = s.compare?.available ? partialLabel(s.compare.range, Number(s.period!.range.start.slice(0, 4))) : "";
-    if (partial && reportText.includes(`${s.compare!.short} total`)) findings.push(`QA-403: report says "${s.compare!.short} total" for ${partial}`);
-    if (partial && !reportText.includes(partial)) findings.push(`QA-403: report never names the base days ${partial}`);
+    if (partial && reportText.includes(`${s.compare!.short} total`)) findings.push(`Report says "${s.compare!.short} total" for ${partial}`);
+    if (partial && !reportText.includes(partial)) findings.push(`Report never names the base days ${partial}`);
     const zero = reportText.split("\n").find((l) => ZERO_MONEY.test(l));
     if (zero) findings.push(`report states a zero amount: "${zero.replace(/[0-9]{12}/g, "<account>").trim().slice(0, 80)}"`);
     for (const [re, why] of SAVING_TITLE_LEAKS) if (re.test(reportText)) findings.push(`report shows ${why}`);
-    // QA-407: a window taller than the sheet stays light below it.
+    // A window taller than the sheet stays light below it.
     await page.setViewportSize({ width: viewport.width, height: Math.max(viewport.height, reportHeight) + 300 });
     await page.waitForTimeout(200);
     const below = await page.evaluate(() => {
@@ -925,7 +928,7 @@ for (const viewport of VIEWPORTS) {
       return { bg: html, lum: -1 };
     });
     test.info().annotations.push({ type: "report-below-sheet", description: `${below.bg} (lum ${below.lum.toFixed(2)})` });
-    if (below.lum >= 0 && below.lum < 0.5) findings.push(`QA-407: area below the light sheet is dark (${below.bg})`);
+    if (below.lum >= 0 && below.lum < 0.5) findings.push(`Area below the light sheet is dark (${below.bg})`);
     await shot(page, "aws-finops-report", viewport, "light", "screen", false);
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     if (viewport.name === "desktop") {
@@ -950,7 +953,7 @@ for (const viewport of VIEWPORTS) {
 // Toasts real data cannot trigger safely (fixture-patched single responses)
 // ---------------------------------------------------------------------------
 
-// QA-401 and QA-402: states the real account cannot reach again without
+// States the real account cannot reach again without
 // wiping its data (cost reads off; before the first account check). One
 // patched response each; everything else on the page is live.
 for (const viewport of VIEWPORTS) {
@@ -964,21 +967,21 @@ for (const viewport of VIEWPORTS) {
         summaryUrl,
         (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ enabled: false, reason, links: { ui: "/aws/finops" } }) }),
       );
-      // QA-401: cost reads off at 390 px; both cards inside the gutters.
+      // Cost reads off at 390 px; both cards inside the gutters.
       await page.goto("/aws/finops");
       const main = page.locator("main");
       await expect(main.getByText(/Cost Explorer reads: off/i)).toBeVisible();
       await page.waitForTimeout(300);
       await shot(page, "aws-finops", viewport, theme, "cost-off-fixture");
       await audit(page, `cost-off/${viewport.name}/${theme}`, findings);
-      // QA-402: no account ready yet: the page names the cause and the fix.
+      // No account ready yet: the page names the cause and the fix.
       reason = "no_connected_accounts";
       await page.goto("/aws/finops");
       await expect(main.getByText("No account ready to read cost yet")).toBeVisible();
       await expect(main.getByRole("link", { name: /AWS settings/ })).toBeVisible();
       await shot(page, "aws-finops", viewport, theme, "off-no-connected-accounts-fixture");
       await audit(page, `no-connected/${viewport.name}/${theme}`, findings);
-      // QA-402: Settings before the first check: waiting words, never zero counts or "All good".
+      // Settings before the first check: waiting words, never zero counts or "All good".
       await page.route(
         (url) => url.pathname === "/api/admin/aws/settings",
         async (route) => {
@@ -1007,12 +1010,12 @@ for (const viewport of VIEWPORTS) {
       test.info().annotations.push({ type: "settings-first-check", description: text.split("\n").filter((l) => /waiting|All good|of \d+|ready/i.test(l)).slice(0, 6).join(" | ") });
       // The API-use meter ("0 of 36 req/s") is a measured rate, not a count.
       const zeroCount = text.split("\n").find((l) => /\b0 of \d+\b(?! req\/s)/.test(l));
-      if (zeroCount) findings.push(`QA-402: zero count before the first check: "${zeroCount}"`);
-      if (/All good/.test(text)) findings.push("QA-402: \"All good\" before the first check");
-      if (!/waiting/i.test(text)) findings.push("QA-402: no waiting words before the first check");
+      if (zeroCount) findings.push(`Zero count before the first check: "${zeroCount}"`);
+      if (/All good/.test(text)) findings.push("\"All good\" before the first check");
+      if (!/waiting/i.test(text)) findings.push("No waiting words before the first check");
       await shot(page, "aws-settings-live", viewport, theme, "first-check-fixture");
       await audit(page, `first-check/${viewport.name}/${theme}`, findings);
-      // QA-406: only a commitment found (as seen live right after the first
+      // Only a commitment found (as seen live right after the first
       // sync): no total, never a green $0, and the commitment line is shown.
       await page.unroute(summaryUrl);
       const liveSummary = await getJson<FinOpsSummaryView>(page, "/api/admin/aws/finops/summary");
@@ -1033,8 +1036,8 @@ for (const viewport of VIEWPORTS) {
         const savingsCard = page.locator("main section").filter({ has: page.getByRole("heading", { name: "Savings found" }) }).last();
         await expect(savingsCard).toBeVisible();
         const savingsText = await savingsCard.innerText();
-        if (ZERO_MONEY.test(savingsText)) findings.push(`QA-406: commitment-only savings show a zero amount`);
-        if (!/up to \$[\d,]+ a month, before other savings/i.test(savingsText)) findings.push("QA-406: commitment-only savings miss the commitment line");
+        if (ZERO_MONEY.test(savingsText)) findings.push(`Commitment-only savings show a zero amount`);
+        if (!/up to \$[\d,]+ a month, before other savings/i.test(savingsText)) findings.push("Commitment-only savings miss the commitment line");
         await shot(page, "aws-finops", viewport, theme, "savings-commitment-only-fixture");
       }
       recordFindings(test.info().title, findings);
@@ -1043,7 +1046,7 @@ for (const viewport of VIEWPORTS) {
   }
 }
 
-// B123: codes that used to fall back to "The AWS request failed" are worded.
+// Codes that used to fall back to "The AWS request failed" are worded.
 // The drill-down POST is answered in the browser, so nothing reaches AWS.
 test("drill-down errors are worded (fixture: the POST is answered in the browser)", async ({ browser }) => {
   const findings: string[] = [];
@@ -1081,8 +1084,8 @@ test("drill-down errors are worded (fixture: the POST is answered in the browser
     await expect(toast.getByText(want).first()).toBeVisible();
     const text = await toast.innerText();
     test.info().annotations.push({ type: `toast-${c}`, description: text.replace(/\n/g, " | ") });
-    if (/The AWS request failed/.test(text)) findings.push(`B123: ${c} still reads "The AWS request failed"`);
-    if (new RegExp(`\\b${c}\\b`).test(text)) findings.push(`B123: raw code ${c} in the toast`);
+    if (/The AWS request failed/.test(text)) findings.push(`${c} still reads "The AWS request failed"`);
+    if (new RegExp(`\\b${c}\\b`).test(text)) findings.push(`Raw code ${c} in the toast`);
     await shot(page, "aws-finops-increase", viewport, theme, `toast-${c}-fixture`, false);
   }
   expect(posts, "every drill POST was answered in the browser").toBeGreaterThan(0);
@@ -1175,7 +1178,7 @@ test("error toasts are worded (fixture: one failing response per action)", async
   expect.soft(findings).toEqual([]);
 });
 
-// QA-413: Dismiss with reason on an open saving. The savings list and the
+// Dismiss with reason on an open saving. The savings list and the
 // dismiss POST are answered in the browser, so no saving changes on the server.
 for (const viewport of VIEWPORTS) {
   for (const theme of THEMES) {
@@ -1289,3 +1292,156 @@ for (const viewport of VIEWPORTS) {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Quickstart docs captures (E2E_AWS_QUICKSTART_DOCS=1, desktop 1440, light).
+// The server runs the examples/quickstart/aws config. Each shot is the app
+// frame (sidebar + header), its height grown to the target's bottom + 24 px,
+// like the Kubernetes quickstart images. Run "first sync" right after boot.
+// ---------------------------------------------------------------------------
+
+const QS_VIEWPORT = VIEWPORTS[0];
+const QS_ACCOUNT = process.env.E2E_AWS_ACCOUNT_NAME || "Quickstart";
+const QS_MIN_READY = Number(process.env.E2E_AWS_QS_MIN_READY || "6");
+const QS_FORBIDDEN = /127\.0\.0\.1|localhost|:\d{4,5}\b|fake|harness|fixture|test data/i;
+
+async function quickstartShot(page: Page, state: string, target: Locator, theme: Theme, scrollToTarget = false, clipPad = 0) {
+  const main = page.locator("main");
+  await page.setViewportSize({ width: QS_VIEWPORT.width, height: QS_VIEWPORT.height });
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (scrollToTarget) {
+      await target.evaluate((el) => {
+        const m = document.querySelector("main");
+        if (!m) return;
+        m.scrollTo({ top: m.scrollTop + el.getBoundingClientRect().top - m.getBoundingClientRect().top - 24 });
+      });
+    } else {
+      await main.evaluate((m) => m.scrollTo({ top: 0 }));
+    }
+    // Bottom + 24 px, but never into the next card below the target.
+    const want = await target.evaluate((el) => {
+      const bottom = el.getBoundingClientRect().bottom;
+      let next = Infinity;
+      for (let node: Element | null = el; node && node.tagName !== "MAIN"; node = node.parentElement) {
+        // Only a sibling below the target counts (not a column beside it).
+        const sib = node.nextElementSibling;
+        if (sib && sib.getBoundingClientRect().height > 0 && sib.getBoundingClientRect().top >= bottom - 1) { next = sib.getBoundingClientRect().top; break; }
+      }
+      return Math.ceil(Math.min(bottom + 24, next - 2));
+    });
+    const height = Math.max(want, 320);
+    if (height === page.viewportSize()!.height) break;
+    await page.setViewportSize({ width: QS_VIEWPORT.width, height });
+  }
+  await page.waitForTimeout(300);
+  await expect(target).toBeInViewport({ ratio: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), "no horizontal overflow").toBe(false);
+  const text = await page.locator("body").innerText();
+  const leak = text.split("\n").find((l) => QS_FORBIDDEN.test(l));
+  expect(leak, "no host, port or test wording on screen").toBeUndefined();
+  const out = capturePath("aws-quickstart", QS_VIEWPORT.width, theme, state);
+  if (clipPad > 0) {
+    const box = (await target.boundingBox())!;
+    await page.screenshot({ path: out, animations: "disabled", clip: { x: Math.max(0, box.x - clipPad), y: Math.max(0, box.y - clipPad), width: box.width + 2 * clipPad, height: box.height + 2 * clipPad } });
+    return;
+  }
+  await page.screenshot({ path: out, animations: "disabled" });
+}
+
+test.describe("quickstart docs", () => {
+  test.skip(!QUICKSTART_DOCS, "set E2E_AWS_QUICKSTART_DOCS=1 against a server running the AWS quickstart config");
+
+  test("quickstart docs: first sync (desktop, light and dark)", async ({ browser }) => {
+    test.setTimeout(180_000);
+    // Both themes at once: the first sync happens once per boot.
+    const pages = await Promise.all((["light", "dark"] as const).map(async (theme) => ({ theme, page: await open(browser, QS_VIEWPORT, theme, "/aws/settings") })));
+    for (const { theme, page } of pages) {
+      const accounts = page.locator('section[aria-labelledby="aws-accounts-title"]');
+      await expect(accounts.getByText(QS_ACCOUNT).first()).toBeVisible();
+      const status = accounts.locator('[role="status"][aria-label*="first sync"]');
+      await expect(status, "the account is in its first sync").toBeVisible({ timeout: 60_000 });
+      // A mixed moment: several services Ready, others still Loading or Waiting.
+      const rows = accounts.locator('ul[aria-label$=" services"] > li');
+      let mixed = false;
+      for (let i = 0; i < 480 && !mixed; i++) {
+        if ((await status.count()) === 0) break;
+        const labels = await rows.evaluateAll((els) => els.map((e) => e.getAttribute("aria-label") ?? ""));
+        const ready = labels.filter((l) => /: Ready$/.test(l)).length;
+        const pending = labels.filter((l) => /: (Loading|Waiting)$/.test(l)).length;
+        mixed = ready >= QS_MIN_READY && pending >= 3;
+        if (!mixed) await page.waitForTimeout(100);
+      }
+      expect(mixed, `first sync showed ${QS_MIN_READY}+ Ready next to Loading or Waiting (${theme})`).toBe(true);
+      await expect(status).toContainText(/\d+ of \d+ ready/);
+      test.info().annotations.push({ type: `first-sync-${theme}`, description: (await status.getAttribute("aria-label")) ?? "" });
+      await quickstartShot(page, "first-sync", accounts, theme);
+    }
+  });
+
+  test("quickstart docs: finops overview, increase and savings (desktop, light and dark)", async ({ browser }) => {
+    test.setTimeout(600_000);
+    const first = await open(browser, QS_VIEWPORT, "light", "/aws/finops");
+    // The first cost refresh runs on the scheduler tick after boot.
+    await expect
+      .poll(async () => {
+        const s = await getJson<FinOpsSummaryView>(first, "/api/admin/aws/finops/summary");
+        return Boolean(s.enabled) && s.reason !== "no_cost_data" && Boolean(s.sync?.updated_at);
+      }, { timeout: 540_000, intervals: [5_000] })
+      .toBe(true);
+    const live = await liveState(first);
+    expect(live.on).toBe(true);
+    // The fixture account must carry cost: a $0 month means its cost lines belong to another account.
+    expect(live.summary.total_micros ?? 0, "cost to date for the configured account").toBeGreaterThan(0);
+    for (const theme of ["light", "dark"] as const) {
+      const page = theme === "light" ? first : await open(browser, QS_VIEWPORT, theme, "/aws/finops");
+      await page.goto("/aws/finops");
+      const main = page.locator("main");
+      const s = live.summary;
+      const costLabel = s.period!.open ? `${s.period!.short} to date` : `${s.period!.short} cost`;
+      await expect(main.locator(`section[aria-label="${costLabel}"]`)).toBeVisible();
+      await expect(main.locator('section[aria-label^="Change"]')).toBeVisible();
+      await expect(main.locator('section[aria-label^="Forecast"]')).toBeVisible();
+      const bridge = main.locator('section[aria-labelledby="finops-bridge-title"]');
+      await expect(bridge.getByRole("heading", { name: "What moved the cost" })).toBeVisible();
+      // Desktop draws the bridge as a table, narrow screens as a list: wait for a driver row either way.
+      await expect(bridge.getByText(/^Used (more|less): /).first()).toBeVisible();
+      await expect(main.getByText(/^Loading/)).toHaveCount(0);
+      await quickstartShot(page, "finops-overview", bridge, theme);
+
+      const savingsCard = main.locator("section").filter({ has: page.getByRole("heading", { name: "Savings found" }) }).last();
+      await expect(savingsCard).toBeVisible();
+      expect((live.savings?.items ?? []).filter((i) => i.status !== "dismissed").length, "open savings").toBeGreaterThan(0);
+      await expect(savingsCard.getByText(/\/mo$/).first()).toBeVisible();
+      // The page is too short to scroll the card to the top: crop the card itself.
+      await quickstartShot(page, "finops-savings", savingsCard, theme, false, 16);
+
+      const id = (live.bridge?.rows ?? []).find((r) => r.increase_id)?.increase_id ?? live.increases?.items?.[0]?.id;
+      expect(id, "an increase to open").toBeTruthy();
+      await page.setViewportSize({ width: QS_VIEWPORT.width, height: QS_VIEWPORT.height });
+      await page.goto(`/aws/finops/increases/${encodeURIComponent(id!)}`);
+      const h1 = main.locator("h1").filter({ hasText: /went (up|down)|increase/i });
+      await expect(h1).toBeVisible();
+      await expect(main.getByRole("heading", { name: "Why" })).toBeVisible();
+      await expect(main.getByRole("heading", { name: "Where the increase came from" })).toBeVisible();
+      await expect(main.getByText(/^Loading/)).toHaveCount(0);
+      const where = main.locator("section").filter({ has: page.getByRole("heading", { name: "Where the increase came from" }) }).last();
+      await quickstartShot(page, "finops-increase", where, theme);
+    }
+  });
+
+  test("quickstart docs: settings connected account (desktop, light and dark)", async ({ browser }) => {
+    test.setTimeout(240_000);
+    for (const theme of ["light", "dark"] as const) {
+      const page = await open(browser, QS_VIEWPORT, theme, "/aws/settings");
+      const accounts = page.locator('section[aria-labelledby="aws-accounts-title"]');
+      await expect(accounts.getByText(QS_ACCOUNT).first()).toBeVisible();
+      await expect(accounts.locator('[role="status"][aria-label*="first sync"]')).toHaveCount(0, { timeout: 180_000 });
+      await expect(accounts.getByText("111122223333").first()).toBeVisible();
+      await expect(accounts.getByText(/^Connected$/).first()).toBeVisible();
+      // Accounts plus the Privacy card below it, so the sidebar's AWS ▸ Settings entry fits.
+      const privacy = page.locator('section[aria-labelledby="aws-privacy-title"]');
+      await expect(privacy).toBeVisible();
+      await quickstartShot(page, "settings-account", privacy, theme);
+    }
+  });
+});

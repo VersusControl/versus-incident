@@ -1,0 +1,28 @@
+# Versus config for the AWS quickstart.
+# Storage is file mode, so no database runs. The AWS account and the FinOps
+# settings are in connectors.yaml next to this file. Every ${VAR} is filled
+# from the environment set in docker-compose.yml.
+
+name: versus
+host: 0.0.0.0
+port: 3000
+
+gateway_secret: ${GATEWAY_SECRET}
+
+alert:
+  debug_body: false
+
+queue:
+  enable: false
+
+oncall:
+  enable: false
+  initialized_only: false
+
+storage:
+  type: file
+  file:
+    max_incidents: 1000
+
+agent:
+  enable: false

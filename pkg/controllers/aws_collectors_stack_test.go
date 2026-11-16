@@ -425,7 +425,7 @@ func TestAWSCollectorsStackE2E(t *testing.T) {
 		"task":         os.Getenv("HARNESS_TASK"),
 		"run_id":       os.Getenv("HARNESS_RUN_ID"),
 		"backend":      "tests/fakeaws via the product HTTPClient seam; wiring mirrors cmd/main.go (fixture, not live AWS)",
-		"read_surface": "GET /api/admin/aws/settings sync field over HTTP + pkg/aws/snapshot Store read methods in-process (A1 adds no read route)",
+		"read_surface": "GET /api/admin/aws/settings sync field over HTTP + pkg/aws/snapshot Store read methods in-process (the collectors add no read route)",
 		"groups":       results,
 		"observations": awsCollectObservations,
 	}

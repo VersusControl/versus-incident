@@ -1,0 +1,2 @@
+# EXPECT_FAIL: the error names the bad entry.
+connectors\.aws\.accounts\[1\]\.accountId="prod-account" is not a 12-digit AWS account ID

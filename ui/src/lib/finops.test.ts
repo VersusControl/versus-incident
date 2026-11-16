@@ -9,9 +9,12 @@ import {
   isZeroAmount,
   partialMonthLabel,
   periodYear,
+  fmtClock,
   fmtSince,
+  fmtStamp,
   staleNeedsAccessFix,
   staleReasonText,
+  accountErrorText,
   statedAmountSpan,
   usageSignalLabel,
   fmtChangePct,
@@ -325,8 +328,20 @@ describe("partial periods and quiet wording", () => {
     expect(staleNeedsAccessFix("no_server_identity")).toBe(true);
     expect(staleNeedsAccessFix("throttled")).toBe(false);
     expect(staleNeedsAccessFix(undefined)).toBe(false);
+    expect(staleReasonText("account_mismatch")).toBe("The AWS credentials belong to another account");
+    expect(staleNeedsAccessFix("account_mismatch")).toBe(true);
     expect(fmtSince("2026-11-11T05:18:00Z")).toBe("Nov 11 05:18 UTC");
+    expect(fmtStamp("2026-11-16T07:12:00Z")).toBe("Nov 16 07:12 UTC");
+    expect(fmtClock("2026-11-16T07:12:00Z")).toBe("07:12 UTC");
     expect(fmtSince("2026-11-09")).toBe("Nov 9");
+  });
+
+  it("words why an account's cost is not readable, never the raw code", () => {
+    expect(accountErrorText("credentials_invalid")).toBe("The server's AWS credentials are not valid");
+    expect(accountErrorText("ce_denied")).toBe("access denied");
+    expect(accountErrorText("account_mismatch")).toBe("The AWS credentials belong to another account");
+    expect(accountErrorText("no_server_identity")).toBe("The Versus server has no AWS identity");
+    expect(accountErrorText("cap_reached")).toBe("cap reached");
   });
 
   it("treats amounts that print as $0.00 as nothing", () => {

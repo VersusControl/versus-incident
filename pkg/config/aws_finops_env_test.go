@@ -67,21 +67,11 @@ func TestCostExplorerSwitchEnvironmentOverride(t *testing.T) {
 
 // TestHelmChartCostExplorerSwitch renders the chart's switch both ways.
 func TestHelmChartCostExplorerSwitch(t *testing.T) {
-	requireRenderableChart(t)
-	for want, args := range map[bool][]string{
-		false: {"--set", "connectors.aws.enable=true"},
-		true:  {"--set", "connectors.aws.enable=true", "--set", "connectors.aws.optionalData.costExplorer=true"},
+	for want, scenario := range map[bool]string{
+		false: "105-aws-connector-defaults",
+		true:  "106-aws-cost-explorer-on",
 	} {
-		files := renderChartFiles(t, chartScenario{name: "aws-cost-switch", args: args})
-		dir := t.TempDir()
-		for name, body := range files {
-			if filepath.Ext(name) == ".yaml" {
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-		loaded, err := loadConfigFromPath(filepath.Join(dir, "config.yaml"))
+		loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, scenario)))
 		if err != nil || loaded.Connectors.AWS.CostDataEnabled() != want {
 			t.Fatalf("chart switch %v: %v", want, err)
 		}

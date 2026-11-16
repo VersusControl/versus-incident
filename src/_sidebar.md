@@ -9,6 +9,9 @@
   - [Multi-Cluster](/agent/kubernetes/multi-cluster)
   - [Auto Detect Issue](/agent/kubernetes/auto-detect-issue)
 
+- AWS
+  - [Quickstart](/agent/aws/quickstart)
+
 - SRE Agent
   - [Introduction](/agent/agent-introduction)
   - [Training Mode](/agent/training-mode)
@@ -120,5 +123,3 @@
 - In Development
   - [AWS Harness](/in-development/aws-harness)
   - [AWS FinOps Agent](/in-development/aws-finops-agent)
-  - [Read your FinOps report](/in-development/aws-finops-report)
-  - [Tag your AWS cost for ownership](/in-development/aws-finops-tagging)

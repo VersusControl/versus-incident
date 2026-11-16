@@ -381,7 +381,10 @@ func classifyAPIError(apiError smithy.APIError) error {
 		return ErrThrottled
 	case "RequestTimeout", "RequestTimeoutException":
 		return ErrTimeout
-	case "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "UnrecognizedClientException", "MissingAuthenticationToken", "NoCredentialProviders":
+	case "ExpiredToken", "ExpiredTokenException", "InvalidClientTokenId", "UnrecognizedClientException", "MissingAuthenticationToken", "NoCredentialProviders",
+		// A wrong secret key signs the request with the wrong signature: the
+		// credentials are rejected, which is not a network fault.
+		"SignatureDoesNotMatch", "IncompleteSignature", "InvalidAccessKeyId", "MissingAuthenticationTokenException":
 		return ErrNoServerIdentity
 	case "AccessDenied", "AccessDeniedException":
 		if strings.Contains(message, "external id") || strings.Contains(message, "externalid") {

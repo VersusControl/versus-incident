@@ -368,7 +368,7 @@ func registerActionHistoryService(store storage.Provider) error {
 // service, the committed snapshot store every AWS read uses, and the
 // collector scheduler. The probes and the collectors share one limiter.
 // httpClient is the AWS transport override every AWS caller shares; it is nil
-// (the hardened default) except in a harness_fakeaws build.
+// (the hardened default) except in a harness_awsendpoint test build.
 type awsConnector struct {
 	settings   *awssettings.Service
 	snapshots  *awssnapshot.Store
@@ -407,8 +407,8 @@ func registerAWSSettingsController(app *fiber.App, store storage.Provider, cfg *
 			AppSources:      connector.Applications.EffectiveSources(),
 		}
 	}))
-	// harnessClient is nil except in a harness_fakeaws build pointed at the
-	// fake AWS endpoint.
+	// harnessClient is nil except in a harness_awsendpoint test build pointed at
+	// a local AWS endpoint (the fake AWS server or an emulator).
 	harnessClient := awsHarnessHTTPClient()
 	collector := awscollect.New(snapshots, limiter,
 		awscollect.WithHTTPClient(harnessClient),
@@ -457,7 +457,7 @@ const finopsDeployment = "default"
 
 // awsCostOptions maps the connector configuration onto one cost refresh's
 // options. Cost calls share the connector's limiter, inventory and AWS
-// transport, so a harness_fakeaws build redirects them with every other AWS
+// transport, so a harness_awsendpoint build redirects them with every other AWS
 // call; otherwise the cost adapter keeps its hardened default client.
 func awsCostOptions(conn c.AWSConnectorConfig, targets []awscost.Target, allowlist []string, connector awsConnector) awscost.Options {
 	opts := awscost.FromConfig(conn, targets, allowlist, finopsDeployment)

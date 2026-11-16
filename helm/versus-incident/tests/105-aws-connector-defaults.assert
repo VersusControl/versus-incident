@@ -1,0 +1,5 @@
+^        enable: true$
+cost_explorer: false
+max_generations: 48
+team_tag_key: "team"
+target_coverage: 0.8

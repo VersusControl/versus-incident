@@ -1,6 +1,6 @@
 package controllers
 
-// aws_parity_stack_test.go — HP surface parity for the AWS tools (AX §5).
+// aws_parity_stack_test.go — surface parity for the AWS tools.
 // One server, two interfaces: the web chat (browser gateway session on the
 // routes ui/src/lib/api.ts calls) and the versus-devops CLI binary (API v1,
 // gateway secret) against the same app on a loopback listener. The chat

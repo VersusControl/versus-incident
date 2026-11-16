@@ -165,7 +165,7 @@ function Freshness({ summary }: { summary: FinOpsSummaryView }) {
           {(sync.stale_detail?.days ?? []).length > 0 && (
             <p className="mt-1">Not loaded: {(sync.stale_detail?.days ?? []).map(fmtDay).join(", ")}</p>
           )}
-          {sync.next_refresh_at && <p className="mt-1">Next refresh {fmtStamp(sync.next_refresh_at)} UTC</p>}
+          {sync.next_refresh_at && <p className="mt-1">Next refresh {fmtStamp(sync.next_refresh_at)}</p>}
           {summary.meter.cap > 0 && (
             <p className="mt-1">
               Paid requests today: {summary.meter.used} of {summary.meter.cap}

@@ -161,6 +161,48 @@ data:
           timeout: "15s"
           auth:
             mode: ""
+      aws:
+        enable: false
+        accounts:
+          []
+        tags:
+          value_allowlist: ["Name","app","service","team","env"]
+        budgets:
+          max_requests_per_second: 2
+        optional_data:
+          cost_explorer: false
+          security_hub: false
+          config: false
+          trusted_advisor: false
+        health_check_interval: "5m"
+        collect:
+          enable: true
+          intervals:
+            inventory: "15m"
+            health: "2m"
+            changes: "5m"
+          history:
+            max_generations: 48
+            max_age: "168h"
+            change_retention: "336h"
+        applications:
+          sources: ["appregistry","cloudformation","tags"]
+          tag_keys: ["app","service"]
+        finops:
+          team_tag_key: "team"
+          min_increase_usd_per_month: 100
+          min_driver_usd: 50
+          target_coverage: 0.8
+          max_paid_requests_per_day: 20
+          refresh_time: "09:00"
+          cost_source_account: ""
+          budgets:
+            []
+          account_groups:
+            []
+          report:
+            timezone: "UTC"
+            slack_summary: false
 ---
 # Source: versus-incident/templates/kubernetes-reader-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -289,7 +331,7 @@ spec:
         app.kubernetes.io/name: versus-incident
         app.kubernetes.io/instance: versus-incident
       annotations:
-        checksum/config: 9ad4c7b1bf0904a8b19617a0bbc9d754ad4ad1b5b1c9303b26991b5ab479fb2b
+        checksum/config: 1ba5d0ce8a5a3f023cf55dfadd902626474ced680a7eb02044653e8989af5a36
         checksum/secret: 888d5137a55caef9d4c4940fe1365f9e77571c2ee215f4dcafb2c6570a67edf5
     spec:
       serviceAccountName: versus-incident

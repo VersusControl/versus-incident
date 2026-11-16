@@ -114,6 +114,63 @@ func TestCostCallerSeesOnlyItsOwnLines(t *testing.T) {
 	}
 }
 
+// TestCostStandaloneAccountAnswersAsTheCaller: a single-account data set is
+// the calling account's own cost, whatever its ID, the way Cost Explorer
+// answers a standalone account. Its lines, account names, budget filters and
+// recommendations carry the caller's ID; the data set's placeholder ID never
+// shows. An Organization data set still answers a member only its own lines.
+func TestCostStandaloneAccountAnswersAsTheCaller(t *testing.T) {
+	const caller = "111122223333"
+	server := New(t, ScenarioCostCredits)
+	pinCostClock(server)
+	client := costClient(server, caller)
+	out, err := client.GetCostAndUsage(context.Background(), &costexplorer.GetCostAndUsageInput{
+		TimePeriod:  &cetypes.DateInterval{Start: aws.String("2026-10-01"), End: aws.String("2026-10-02")},
+		Granularity: cetypes.GranularityDaily,
+		Metrics:     []string{"NetAmortizedCost"},
+		GroupBy:     []cetypes.GroupDefinition{{Type: cetypes.GroupDefinitionTypeDimension, Key: aws.String("LINKED_ACCOUNT")}},
+		Filter:      &cetypes.Expression{Dimensions: &cetypes.DimensionValues{Key: cetypes.DimensionLinkedAccount, Values: []string{caller}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sumMicros(t, out, caller) <= 0 || sumMicros(t, out, "111111111111") != 0 {
+		t.Fatalf("lines by account = %+v, want all cost under %s", out.ResultsByTime, caller)
+	}
+	if len(out.DimensionValueAttributes) != 1 || aws.ToString(out.DimensionValueAttributes[0].Value) != caller ||
+		out.DimensionValueAttributes[0].Attributes["description"] != "Production" {
+		t.Fatalf("account names = %+v", out.DimensionValueAttributes)
+	}
+	described, err := budgets.NewFromConfig(costConfig(server, caller)).DescribeBudgets(context.Background(), &budgets.DescribeBudgetsInput{AccountId: aws.String(caller)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var production []string
+	for _, budget := range described.Budgets {
+		if aws.ToString(budget.BudgetName) == "Production account" && budget.FilterExpression != nil && budget.FilterExpression.Dimensions != nil {
+			production = budget.FilterExpression.Dimensions.Values
+		}
+	}
+	if len(production) != 1 || production[0] != caller {
+		t.Fatalf("Production account budget filter = %v, want [%s]", production, caller)
+	}
+	hub, err := costoptimizationhub.NewFromConfig(costConfig(server, caller)).ListRecommendations(context.Background(), &costoptimizationhub.ListRecommendationsInput{})
+	if err != nil || len(hub.Items) == 0 {
+		t.Fatalf("hub = %+v, %v", hub, err)
+	}
+	for _, item := range hub.Items {
+		if aws.ToString(item.AccountId) != caller {
+			t.Fatalf("recommendation account = %s, want %s", aws.ToString(item.AccountId), caller)
+		}
+	}
+
+	organization := New(t, ScenarioCostOrganization)
+	pinCostClock(organization)
+	if outsider := sumMicros(t, dailyByService(t, costClient(organization, caller), "2026-10-01", "2026-10-02"), ""); outsider != 0 {
+		t.Fatalf("an account outside the Organization read %d of its cost", outsider)
+	}
+}
+
 func parseMust(t *testing.T, value string) int64 {
 	t.Helper()
 	micros, err := parseCostMicros(value)

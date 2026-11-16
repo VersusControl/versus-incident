@@ -21,7 +21,7 @@ const (
 // but no S3 or ECR endpoint. The change history also holds a route change
 // outside the window, an unrelated function update and a failed call, and
 // covers the whole window. The hub reports an unattached volume, both a
-// rightsize and a stop for the same instance i-0abc, and a Savings Plans
+// rightsize and a stop for the same instance i-0a1b2c3d4e5f67890, and a Savings Plans
 // purchase; every day of November is marked Estimated.
 func CostNatSpike() *CostScenario {
 	nat := series(prodAccount, "EC2 - Other", "USE1-NatGateway-Bytes", "Usage", "checkout", "GB",
@@ -47,9 +47,9 @@ func CostNatSpike() *CostScenario {
 		TagActive: true,
 		Budgets:   []Budget{},
 		Recommendations: []HubRecommendation{
-			{AccountID: prodAccount, ActionType: "Rightsize", CurrentResourceType: "Ec2Instance", ResourceID: "i-0abc", Region: usEast1,
+			{AccountID: prodAccount, ActionType: "Rightsize", CurrentResourceType: "Ec2Instance", ResourceID: "i-0a1b2c3d4e5f67890", Region: usEast1,
 				CurrentResourceSummary: "m6i.large", RecommendedResourceSummary: "m6i.medium", EstimatedMonthlySavings: 61.32},
-			{AccountID: prodAccount, ActionType: "Stop", CurrentResourceType: "Ec2Instance", ResourceID: "i-0abc", Region: usEast1,
+			{AccountID: prodAccount, ActionType: "Stop", CurrentResourceType: "Ec2Instance", ResourceID: "i-0a1b2c3d4e5f67890", Region: usEast1,
 				CurrentResourceSummary: "m6i.large", EstimatedMonthlySavings: 90},
 			{AccountID: prodAccount, ActionType: "Delete", CurrentResourceType: "EbsVolume", ResourceID: "vol-9", Region: usEast1,
 				EstimatedMonthlySavings: 8},
@@ -57,7 +57,7 @@ func CostNatSpike() *CostScenario {
 				RecommendedResourceSummary: "$4/hour with one year term (NoUpfront) in AWS account " + prodAccount + " (Linked account level)", EstimatedMonthlySavings: 610},
 		},
 		ComputeOptimizer: []ComputeOptimizerItem{
-			{Account: prodAccount, InstanceARN: arnEC2 + "instance/i-0abc", Name: "reporting", Current: "m6i.large", Target: "m6i.medium",
+			{Account: prodAccount, InstanceARN: arnEC2 + "instance/i-0a1b2c3d4e5f67890", Name: "reporting", Current: "m6i.large", Target: "m6i.medium",
 				Monthly: 42.5, Finding: "Overprovisioned"},
 			{Account: prodAccount, InstanceARN: arnEC2 + "instance/i-0def", Name: "api", Current: "c6i.large", Target: "c6i.large",
 				Monthly: 0, Finding: "Optimized"},

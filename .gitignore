@@ -3,6 +3,7 @@ tmp.txt
 *.sh
 !scripts/*.sh
 !scripts/aws/cli/*.sh
+!tests/awsemulator/*.sh
 !helm/**/*.sh
 .air.conf
 book

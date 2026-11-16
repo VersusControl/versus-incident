@@ -317,3 +317,58 @@ func TestConfigAccountWithAutoRegionsDiscoversOnFirstCheck(t *testing.T) {
 		t.Fatalf("budget = %d, want %d", row.APIUse.BudgetRPS, want)
 	}
 }
+
+// Credentials that sign in to another AWS account than the configured one
+// (a wrong account ID next to a working key) disconnect the account at once
+// with account_mismatch. The record stays under the configured ID, nothing
+// is probed, and neither the collectors nor cost read through those
+// credentials, so the other account's data is never filed under this one.
+func TestConfigAccountWithCredentialsOfAnotherAccountIsDisconnected(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	store.setClock(func() time.Time { return now })
+	configured := config.AWSAccountConfig{AccountID: "111122223333", Regions: []string{"us-east-1"}, Auth: config.AWSAuthConfig{Mode: "default_chain"}}
+	probed := false
+	connector := NewService(store,
+		WithConfig(collectingConfig(true, configured)),
+		WithClock(func() time.Time { return now }),
+		WithBaseProvider(staticBase),
+		WithIdentity(func(context.Context, aws.CredentialsProvider, string) (string, string, error) {
+			return "arn:aws:iam::444455556666:user/versus-quickstart", "444455556666", nil
+		}),
+		WithHTTPClient(probeRecorder{called: &probed}),
+	)
+
+	view, err := connector.Recheck(context.Background(), "default", "111122223333")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Status != StatusDisconnected || view.ErrorCode == nil || *view.ErrorCode != "account_mismatch" {
+		t.Fatalf("view status = %q, error code = %v", view.Status, view.ErrorCode)
+	}
+	if probed {
+		t.Fatal("services were probed through another account's credentials")
+	}
+	record, err := store.GetHealth("default", "111122223333")
+	if err != nil || record.AccountID != "111122223333" || record.ErrorCode != "account_mismatch" || len(record.ProbeResults) != 0 {
+		t.Fatalf("health record = %+v, err = %v", record, err)
+	}
+	if other, err := store.GetHealth("default", "444455556666"); err != nil || other.Status != StatusUnknown || !other.AttemptedAt.IsZero() {
+		t.Fatal("health was filed under the credentials' account")
+	}
+	if targets := connector.CollectTargets(context.Background()); len(targets) != 0 {
+		t.Fatalf("collect targets = %+v", targets)
+	}
+	targets := connector.CostTargets(context.Background())
+	if len(targets) != 1 || targets[0].Cause != CauseAccountMismatch || targets[0].Credentials != nil || !targets[0].Since.Equal(now) {
+		t.Fatalf("cost targets = %+v", targets)
+	}
+}
+
+// probeRecorder notes that a service probe reached the network.
+type probeRecorder struct{ called *bool }
+
+func (recorder probeRecorder) Do(*http.Request) (*http.Response, error) {
+	*recorder.called = true
+	return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(strings.NewReader(""))}, nil
+}

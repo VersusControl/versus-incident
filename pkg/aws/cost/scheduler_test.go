@@ -60,6 +60,70 @@ func TestSchedulerRetriesAFailedPayerTheSameDay(t *testing.T) {
 	}
 }
 
+// The first refresh of a fresh install runs before the refresh time, but
+// only once an account is ready to read cost through, and it stays within
+// the daily paid-call cap however many ticks follow. The cap is below the
+// six paid calls a full first read of this account makes.
+func TestSchedulerFirstRefreshStaysWithinTheCap(t *testing.T) {
+	sc := loadScenario(t, "single-account")
+	ready := false
+	h := newHarness(t, sc, func(o *Options) {
+		o.MaxPaidRequests = 4
+		o.Enabled = func() bool { return ready }
+	})
+	s := NewScheduler(h.adapter,
+		func() (bool, int, int, *time.Location) { return true, 9, 0, time.UTC },
+		nil, WithClock(h.clock.Now))
+	h.clock.set(at("2026-11-09", 7))
+	if s.RunDue(ctx) || h.fake.requests() != 0 {
+		t.Fatal("a refresh ran before any account was ready")
+	}
+	ready = true
+	for minute := 1; minute <= 3; minute++ {
+		h.clock.set(at("2026-11-09", 7).Add(time.Duration(minute) * time.Minute))
+		s.RunDue(ctx)
+	}
+	if paidCount(h.fake) == 0 {
+		t.Fatal("the first refresh did not run before the refresh time")
+	}
+	if used, paid := h.adapter.Meter().Used(ctx), paidCount(h.fake); used > 4 || paid > 4 {
+		t.Fatalf("early ticks spent past the cap: meter %d, paid requests %d", used, paid)
+	}
+}
+
+// A first read that fails because Cost Explorer is not ready is tried once
+// before the refresh time, not on every tick: 120 failing ticks before the
+// refresh time spend the paid calls of one attempt, and the refresh time
+// then tries again.
+func TestSchedulerEarlyFirstRefreshIsTriedOnceADay(t *testing.T) {
+	sc := loadScenario(t, "single-account")
+	h := newHarness(t, sc, nil)
+	s := NewScheduler(h.adapter,
+		func() (bool, int, int, *time.Location) { return true, 9, 0, time.UTC },
+		nil, WithClock(h.clock.Now))
+	h.fake.failures[callAccount] = fakeFailure{Type: "AccessDeniedException", Message: "User not enabled for cost explorer access"}
+
+	h.clock.set(at("2026-11-09", 7))
+	s.RunDue(ctx)
+	first := paidCount(h.fake)
+	if first == 0 {
+		t.Fatal("the early first refresh was not tried")
+	}
+	for minute := 1; minute < 120; minute++ {
+		h.clock.set(at("2026-11-09", 7).Add(time.Duration(minute) * time.Minute))
+		s.RunDue(ctx)
+	}
+	if paid := paidCount(h.fake); paid != first {
+		t.Fatalf("120 ticks before the refresh time made %d paid calls, want the %d of one attempt", paid, first)
+	}
+
+	h.clock.set(at("2026-11-09", 9))
+	s.RunDue(ctx)
+	if paidCount(h.fake) <= first {
+		t.Fatal("the refresh time did not try again")
+	}
+}
+
 // postgresReplicas opens a harness on its own Postgres schema and a second
 // adapter over the same storage, as a second replica of the deployment: it
 // shares the database and the fake AWS endpoint and has its own meter and
@@ -670,7 +734,7 @@ func TestScheduledTickNamesWhyCostIsNotRead(t *testing.T) {
 	}
 }
 
-// TestUnreachableRemovedPayerIsStillPurged (QA-411 T1): a payer the
+// TestUnreachableRemovedPayerIsStillPurged proves a payer the
 // settings list as unreachable is kept as configured, so losing access
 // never deletes its stored cost. A tombstone overrides that: a payer
 // removed at a revision the options are not newer than is purged by the

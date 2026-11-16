@@ -1,0 +1,13 @@
+# The Kubernetes quickstart command: the AWS keys from a Secret the user
+# created, one account with its region, and Cost Explorer on. The account ID
+# reaches helm as a number, the way --set reads it.
+--set
+connectors.aws.enable=true
+--set
+connectors.aws.credentials.existingSecret=versus-aws
+--set
+connectors.aws.accounts[0].accountId=111122223333
+--set
+connectors.aws.accounts[0].regions[0]=us-east-1
+--set
+connectors.aws.optionalData.costExplorer=true

@@ -417,7 +417,7 @@ func TestNoStorage(t *testing.T) {
 	}
 }
 
-// TestAsOfNeverReportsAVerificationAfterAsOf is the QA-370 repro: a
+// TestAsOfNeverReportsAVerificationAfterAsOf reproduces a bug: a
 // generation re-verified an hour later must not show that later time in a
 // read as of five minutes after its commit.
 func TestAsOfNeverReportsAVerificationAfterAsOf(t *testing.T) {

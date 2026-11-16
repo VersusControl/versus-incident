@@ -6,9 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/credentials"
+
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/finops"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"github.com/VersusControl/versus-incident/tests/fakeaws"
+	"github.com/VersusControl/versus-incident/tests/fixtures/storagefix"
 )
 
 func awsConfig(costSource string) config.AWSConnectorConfig {
@@ -78,19 +83,24 @@ func TestSchedulerRunsOnceADayAfterTheRefreshTime(t *testing.T) {
 		func(context.Context) error { prepared++; return nil },
 		WithClock(h.clock.Now), WithAfterRefresh(func(context.Context, RefreshResult) { after++ }))
 	h.clock.set(at("2026-11-09", 9))
-	if s.RunDue(ctx) || h.fake.requests() != 0 {
-		t.Fatal("nothing runs before the refresh time")
+	if !s.RunDue(ctx) || after != 1 || h.fake.requests() == 0 {
+		t.Fatal("a fresh install reads cost on the first tick, before the refresh time")
 	}
+	if ps := mustStatus(t, h).Payers["111111111111"]; ps == nil || !ps.hasData() {
+		t.Fatal("the first refresh stored no cost")
+	}
+	sent := h.fake.requests()
 	h.clock.set(at("2026-11-09", 10))
-	if !s.RunDue(ctx) || after != 1 {
-		t.Fatal("the refresh runs once the time has passed")
+	if s.RunDue(ctx) || after != 1 || h.fake.requests() != sent {
+		t.Fatal("a second tick the same day refreshes again, even after the refresh time")
 	}
-	if s.RunDue(ctx) || after != 1 {
-		t.Fatal("and only once a day")
+	h.clock.set(at("2026-11-10", 9))
+	if s.RunDue(ctx) || h.fake.requests() != sent {
+		t.Fatal("with cost stored, the next refresh runs before the refresh time")
 	}
 	h.clock.set(at("2026-11-10", 10))
-	if !s.RunDue(ctx) || prepared != 4 {
-		t.Fatalf("next day runs again; options refresh every tick (%d)", prepared)
+	if !s.RunDue(ctx) || after != 2 || prepared != 4 {
+		t.Fatalf("next day runs again after the refresh time; options refresh every tick (%d)", prepared)
 	}
 	off := NewScheduler(h.adapter, func() (bool, int, int, *time.Location) { return false, 0, 0, nil }, nil, WithClock(h.clock.Now))
 	h.clock.set(at("2026-11-11", 10))
@@ -187,5 +197,49 @@ func TestFromConfigMatchesTheTeamTagKeyExactly(t *testing.T) {
 	}
 	if !FromConfig(awsConfig(""), targets, []string{" team "}, "prod").TagAllowlisted {
 		t.Fatal(`"team" allowlists the "team" tag`)
+	}
+}
+
+// TestStandaloneAccountReadsItsOwnCostThroughFakeAWS: a standalone account
+// read as its own payer, under the account ID fake AWS reports for the caller
+// (the quickstart account), gets cost, an increase and savings from the
+// single-account data set.
+func TestStandaloneAccountReadsItsOwnCostThroughFakeAWS(t *testing.T) {
+	const account = "111122223333"
+	now := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	fake := fakeaws.New(t, fakeaws.ScenarioCostCredits)
+	fake.SetClock(func() time.Time { return now })
+	provider := storagefix.Provider(t)
+	adapter, err := New(provider, tenancy.DefaultOrgScope(), Options{
+		Deployment: "prod",
+		Payers: []Payer{{AccountID: account,
+			Credentials: credentials.NewStaticCredentialsProvider("ASIACOST"+account, "secret", "FwoGZXIvYXdzE"+account+"session")}},
+		Connected:       []string{account},
+		TagAllowlisted:  true,
+		MaxPaidRequests: 40,
+		HTTPClient:      fake.HTTPClient(),
+		Now:             func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.Refresh(ctx, KindScheduled); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewBackend(adapter, NewStore(provider, adapter.cache.scope), func() config.AWSConnectorConfig { return config.AWSConnectorConfig{} }).Service()
+	summary, err := svc.Summary(ctx, finops.Query{Period: "2026-10"})
+	if err != nil || summary.Total <= 0 {
+		t.Fatalf("October cost for %s = %d, %v; want the data set's cost", account, summary.Total, err)
+	}
+	if _, err := svc.SyncIncreases(ctx); err != nil {
+		t.Fatal(err)
+	}
+	increases, err := svc.Increases(ctx, finops.Query{Period: "2026-10", Status: "all"})
+	if err != nil || len(increases.Items) == 0 {
+		t.Fatalf("increases = %+v, %v; want the NAT step", increases.Items, err)
+	}
+	savings, err := svc.Savings(ctx, finops.Query{})
+	if err != nil || len(savings.Items) == 0 || savings.Total.Monthly <= 0 {
+		t.Fatalf("savings = %+v, %v; want the hub recommendations", savings.SavingsBody, err)
 	}
 }

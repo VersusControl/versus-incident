@@ -184,13 +184,13 @@ func TestSavingsFromInventoryHubAndBill(t *testing.T) {
 	if _, named := gaps[finops.SavingRightsize]; named {
 		t.Fatal("the hub answered; rightsizing is not a gap")
 	}
-	// The hub's stop and rightsize for i-0abc count once: the stop ($90)
+	// The hub's stop and rightsize for i-0a1b2c3d4e5f67890 count once: the stop ($90)
 	// with the rightsize as its alternative; the commitment is not summed.
 	stop := byTitle["Stop or remove 1 idle machine"]
-	if stop.Monthly != 90_000_000 || len(stop.Alternatives) != 1 || stop.Alternatives[0].Title != "Resize i-0abc to m6i.medium" {
+	if stop.Monthly != 90_000_000 || len(stop.Alternatives) != 1 || stop.Alternatives[0].Title != "Resize i-0a1b2c3d4e5f67890 to m6i.medium" {
 		t.Fatalf("stop %+v", stop)
 	}
-	if _, dup := byTitle["Resize i-0abc to m6i.medium"]; dup {
+	if _, dup := byTitle["Resize i-0a1b2c3d4e5f67890 to m6i.medium"]; dup {
 		t.Fatal("the rightsize of a stopped instance is an alternative, not an item")
 	}
 	var sum int64
@@ -463,7 +463,7 @@ func TestComputeOptimizerAnswersWhenTheHubIsOff(t *testing.T) {
 			co = &v.Items[i]
 		}
 	}
-	if co == nil || co.Title != "Resize i-0abc to m6i.medium" || co.Monthly != 42_500_000 || co.Guide == nil {
+	if co == nil || co.Title != "Resize i-0a1b2c3d4e5f67890 to m6i.medium" || co.Monthly != 42_500_000 || co.Guide == nil {
 		t.Fatalf("compute optimizer item %+v", co)
 	}
 	_, _, svc = natSpike(t, func(h *harness, _ *scenario) {
@@ -585,7 +585,7 @@ func TestRightsizeTitleShowsTheNameTagOnlyWhenAllowlisted(t *testing.T) {
 		h.fake.failures["hub"] = fakeFailure{Type: "OptInRequiredException", Message: "not enrolled"}
 	}
 	_, _, svc := natSpike(t, func(h *harness, _ *scenario) { hubOff(h) })
-	if got := rightsizeTitle(t, svc); got != "Resize i-0abc to m6i.medium" {
+	if got := rightsizeTitle(t, svc); got != "Resize i-0a1b2c3d4e5f67890 to m6i.medium" {
 		t.Fatalf("Name not allowlisted: title = %q", got)
 	}
 	h, _, svc := natSpike(t, func(h *harness, _ *scenario) {
@@ -603,7 +603,7 @@ func TestRightsizeTitleShowsTheNameTagOnlyWhenAllowlisted(t *testing.T) {
 	if err := h.adapter.Update(narrowed); err != nil {
 		t.Fatal(err)
 	}
-	if got := rightsizeTitle(t, svc); got != "Resize i-0abc to m6i.medium" {
+	if got := rightsizeTitle(t, svc); got != "Resize i-0a1b2c3d4e5f67890 to m6i.medium" {
 		t.Fatalf("allowlist narrowed after the refresh: title = %q", got)
 	}
 }
@@ -615,7 +615,7 @@ func TestRightsizeTitleNameAllowlistThroughSettingsIsCaseSensitive(t *testing.T)
 	targets := []Target{{AccountID: "111111111111", Credentials: testCreds}}
 	for _, c := range []struct{ key, want string }{
 		{"Name", "Resize reporting to m6i.medium"},
-		{"name", "Resize i-0abc to m6i.medium"},
+		{"name", "Resize i-0a1b2c3d4e5f67890 to m6i.medium"},
 	} {
 		allowed := FromConfig(awsConfig(""), targets, settings.SanitizeAllowlist([]string{" " + c.key + " ", "team"}), "prod")
 		_, _, svc := natSpike(t, func(h *harness, _ *scenario) {

@@ -142,7 +142,7 @@ func TestSchedulerPurgesRemovedAccounts(t *testing.T) {
 	}
 }
 
-// TestFirstSyncTotalIsFixedFromTheStart is the QA-373 repro: syncing only
+// TestFirstSyncTotalIsFixedFromTheStart reproduces a bug: syncing only
 // the health kind already registers every unit, so the progress total does
 // not grow as later kinds start.
 func TestFirstSyncTotalIsFixedFromTheStart(t *testing.T) {

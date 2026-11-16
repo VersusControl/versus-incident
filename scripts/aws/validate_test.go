@@ -7,10 +7,8 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -1525,78 +1523,91 @@ func TestCLIPoliciesUsePlaceholdersOnly(t *testing.T) {
 
 var accountID = regexp.MustCompile(`(?:^|[^0-9])[0-9]{12}(?:[^0-9]|$)`)
 
-// TestCreateScriptRefusesInvalidInput proves the validation runs before any
-// AWS call: AWS_PROFILE points at a profile that does not exist, so only a
-// local refusal can produce these messages.
+// createScriptAWSCall matches a script line that reaches for the AWS CLI: the
+// lookup of the binary or a call to it. Usage text and printed hints are not
+// calls and do not match.
+var createScriptAWSCall = regexp.MustCompile(`^\s*(?:if !?\s*)?(?:command -v aws\b|aws [a-z]|[a-z_]+=\$\(aws )`)
+
+// TestCreateScriptRefusesInvalidInput reads the reader-role script and proves
+// its input validation runs before any AWS call: every refusal sits above the
+// first line that reaches the AWS CLI, the principal pattern is the one the
+// template enforces, and the External ID is never printed. The script is read
+// as text, never run.
 func TestCreateScriptRefusesInvalidInput(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the script is a POSIX sh script")
+	body := readArtifact(t, cliDir, "create-versus-reader.sh")
+	lines := strings.Split(body, "\n")
+
+	if !strings.Contains(body, "\nset -eu\n") {
+		t.Error("create-versus-reader.sh must run with set -eu so a failed check stops it")
+	}
+	if !regexp.MustCompile(`printf 'error: %s\\n' "\$1" >&2\s*\n\s*exit 1`).MatchString(body) {
+		t.Error("fail() must print \"error: <reason>\" to stderr and exit non-zero")
 	}
 
-	const validARN = "arn:aws:iam::123456789012:role/versus-app"
-	const validExternalID = "versus-external-id-123"
-
-	cases := []struct {
-		name       string
-		principal  string
-		externalID string
-		want       string
-	}{
-		{
-			name:       "account root principal",
-			principal:  "arn:aws:iam::123456789012:root",
-			externalID: validExternalID,
-			want:       "account root",
-		},
-		{
-			name:       "short external id",
-			principal:  validARN,
-			externalID: "too-short",
-			want:       "at least 16",
-		},
-		{
-			name:       "non-role principal",
-			principal:  "arn:aws:iam::123456789012:user/versus",
-			externalID: validExternalID,
-			want:       "exact IAM role ARN",
-		},
-		{
-			name:       "external id with a space",
-			principal:  validARN,
-			externalID: "versus external id 123",
-			want:       "printable ASCII",
-		},
-		{
-			name:       "wildcard principal",
-			principal:  "arn:aws:iam::123456789012:role/versus-*",
-			externalID: validExternalID,
-			want:       "exact IAM role ARN",
-		},
+	firstCall := -1
+	for index, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if createScriptAWSCall.MatchString(line) {
+			firstCall = index
+			break
+		}
+	}
+	if firstCall < 0 {
+		t.Fatal("create-versus-reader.sh never calls the AWS CLI; the check below proves nothing")
 	}
 
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			cmd := exec.Command("sh", filepath.Join(cliDir, "create-versus-reader.sh"), testCase.principal, testCase.externalID)
-			cmd.Env = append(os.Environ(), "AWS_PROFILE=versus-profile-that-does-not-exist")
-
-			output, err := cmd.CombinedOutput()
-			text := string(output)
-			if err == nil {
-				t.Fatalf("script accepted %q; it must refuse before calling AWS", testCase.principal)
+	for _, refusal := range []struct{ name, check, message string }{
+		{"account root principal", `*:root)`, "not the account root ARN"},
+		{"non-role or wildcard principal", `awk -v re="$ROLE_ARN_PATTERN"`, "must be an exact IAM role ARN"},
+		{"short external id", `"${#external_id}" -lt 16`, "at least 16 characters"},
+		{"long external id", `"${#external_id}" -gt 1224`, "at most 1224 characters"},
+		{"external id outside printable ASCII", `LC_ALL=C tr -d '!-~'`, "printable ASCII without spaces"},
+	} {
+		t.Run(refusal.name, func(t *testing.T) {
+			checkLine, messageLine := -1, -1
+			for index, line := range lines {
+				if checkLine < 0 && strings.Contains(line, refusal.check) {
+					checkLine = index
+				}
+				if messageLine < 0 && strings.Contains(line, "fail \"") && strings.Contains(line, refusal.message) {
+					messageLine = index
+				}
 			}
-			if !strings.HasPrefix(text, "error: ") {
-				t.Errorf("output = %q, want a validation error before any AWS call", text)
+			if checkLine < 0 || messageLine < 0 {
+				t.Fatalf("create-versus-reader.sh lacks the check %q or its refusal %q", refusal.check, refusal.message)
 			}
-			if !strings.Contains(text, testCase.want) {
-				t.Errorf("error = %q, want it to mention %q", text, testCase.want)
-			}
-			if strings.Contains(text, "caller identity") {
-				t.Errorf("script reached the AWS caller-identity check before validating its input: %q", text)
-			}
-			if strings.Contains(text, testCase.externalID) {
-				t.Errorf("script echoed the External ID: %q", text)
+			if checkLine >= firstCall || messageLine >= firstCall {
+				t.Errorf("the %s check (line %d) must run before the first AWS call (line %d)", refusal.name, checkLine+1, firstCall+1)
 			}
 		})
+	}
+
+	match := regexp.MustCompile(`(?m)^ROLE_ARN_PATTERN='([^']*)'$`).FindStringSubmatch(body)
+	if match == nil {
+		t.Fatal("create-versus-reader.sh has no ROLE_ARN_PATTERN")
+	}
+	if match[1] != roleARNPattern {
+		t.Errorf("script principal pattern = %q, want the template's %q", match[1], roleARNPattern)
+	}
+	pattern := regexp.MustCompile(match[1])
+	for _, arn := range validRoleARNs {
+		if !pattern.MatchString(arn) {
+			t.Errorf("script pattern rejects the valid role ARN %q", arn)
+		}
+	}
+	for _, arn := range append([]string{"arn:aws:iam::123456789012:root", "arn:aws:iam::123456789012:user/versus"}, nonRolePrincipals...) {
+		if pattern.MatchString(arn) {
+			t.Errorf("script pattern accepts the non-role principal %q", arn)
+		}
+	}
+
+	printsSecret := regexp.MustCompile(`\b(?:printf|echo)\b[^|]*\$\{?external_id\b`)
+	for index, line := range lines {
+		if printsSecret.MatchString(line) && !strings.Contains(line, "|") {
+			t.Errorf("line %d prints the External ID: %s", index+1, strings.TrimSpace(line))
+		}
 	}
 }
 

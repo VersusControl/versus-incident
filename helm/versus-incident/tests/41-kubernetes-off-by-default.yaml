@@ -1,3 +1,3 @@
-# No values: the Kubernetes connector is off, so no connector settings and no
-# reader role are rendered.
+# No values: the Kubernetes connector is off, so no Kubernetes connector
+# settings and no reader role are rendered.
 {}

@@ -142,7 +142,7 @@ describe("every state renders from its fixture", () => {
     "09e-18-single-region": { has: ["No team tag", "Spend by service", "instances $8,700, EBS $1,700, IPs $500", "us-east-1", "no tag"] },
     "09e-19-single-region-tagged": { has: ["Spend by team", "Find untagged ›", "Unallocated", "us-east-1"] },
     "09e-20-organization": { has: ["Overview", "Accounts", "48", "Cost only", "Not connected", "Connect ›", "Unused Savings Plan", "Over budget by $12,000", "Cost source: management", "Not checked: rightsizing — needs usage detail (Organization)"] },
-    "09e-21-organization-accounts": { has: ["Connected", "Cost only", "New", "Closed", "billed until Nov 30", "Cost not readable", "6 accounts", "Search accounts or IDs", "Export CSV", "Cost source"] },
+    "09e-21-organization-accounts": { has: ["Connected", "Cost only", "New", "Closed", "billed until Nov 30", "Cost not readable", "access denied", "6 accounts", "Search accounts or IDs", "Export CSV", "Cost source"] },
     "09b-finops-why": { has: ["Network traffic in Production went up $1,980 in October", "Started Oct 9", "Owner: checkout", "Likely", "Oct 9 14:02", "github-actions-prod", "nat-1a", "All of it", "~$1,520/mo", "Mark expected…", "Rule: team=checkout tag on nat-1a", "Sent to alerts, Oct 12", "Read exact detail from AWS ›", "Possible", "Route table rtb-prod-private-1a changed", "platform-terraform"], not: ["acknowledged"] },
     "09b-finops-why-tied": {
       has: ["Network traffic in Production went up $1,980 in October", "Several changes fit;", "turn on resource-level data in Cost Explorer to narrow it ›", "Route table rtb-prod-private-1a changed"],
@@ -994,6 +994,32 @@ describe("real account shapes", () => {
       const h1 = await screen.findByRole("heading", { level: 1 });
       expect(h1.querySelector("span.font-mono")?.textContent).toBe("$69.33");
       expect(h1.textContent).toBe("Virtual machines in Harness account went up $69.33 from Oct 1–9");
+    });
+
+    it("names the days the cause amounts cover, without the partial day", async () => {
+      renderFixture(detail((d) => {
+        d.increase.started_on = "2026-10-25";
+        d.series = [
+          { day: "2026-10-24", amount_micros: 30_000_000 },
+          { day: "2026-10-25", amount_micros: 60_000_000 },
+          { day: "2026-11-11", amount_micros: 60_000_000 },
+          { day: "2026-11-12", amount_micros: 10_000_000, partial: true },
+        ];
+      }));
+      await screen.findByText(/Network traffic in Production went up/);
+      await settle();
+      const card = screen.getByRole("region", { name: "Where the increase came from" });
+      expect(within(card).getByText("Oct 25 – Nov 11")).toBeTruthy();
+      expect(card.textContent).not.toContain("Nov 12");
+    });
+
+    it("names the zone on status history times", async () => {
+      renderFixture(detail((d) => {
+        d.history = [{ at: "2026-11-16T07:12:00Z", by: "system", from: "open", to: "resolved" }];
+      }));
+      await screen.findByText(/Network traffic in Production went up/);
+      await settle();
+      expect(screen.getByText(/^Nov 16 07:12 UTC · system: /)).toBeTruthy();
     });
 
     it("keeps the last day label inside the chart", async () => {

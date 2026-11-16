@@ -213,7 +213,50 @@ data:
         name: checkout-logs
         type: loki
   connectors.yaml: |
-    # The Kubernetes connector is off (connectors.kubernetes.enabled=false).
+    connectors:
+      # The Kubernetes connector is off (connectors.kubernetes.enabled=false).
+      aws:
+        enable: false
+        accounts:
+          []
+        tags:
+          value_allowlist: ["Name","app","service","team","env"]
+        budgets:
+          max_requests_per_second: 2
+        optional_data:
+          cost_explorer: false
+          security_hub: false
+          config: false
+          trusted_advisor: false
+        health_check_interval: "5m"
+        collect:
+          enable: true
+          intervals:
+            inventory: "15m"
+            health: "2m"
+            changes: "5m"
+          history:
+            max_generations: 48
+            max_age: "168h"
+            change_retention: "336h"
+        applications:
+          sources: ["appregistry","cloudformation","tags"]
+          tag_keys: ["app","service"]
+        finops:
+          team_tag_key: "team"
+          min_increase_usd_per_month: 100
+          min_driver_usd: 50
+          target_coverage: 0.8
+          max_paid_requests_per_day: 20
+          refresh_time: "09:00"
+          cost_source_account: ""
+          budgets:
+            []
+          account_groups:
+            []
+          report:
+            timezone: "UTC"
+            slack_summary: false
   tools.yaml: |
     tools:
       tool_timeout: "20s"
@@ -301,7 +344,7 @@ spec:
         app.kubernetes.io/name: versus-incident
         app.kubernetes.io/instance: versus-incident
       annotations:
-        checksum/config: 79df5379ce275eca6bade3a7b3fee262baa96909736a78129842df9f05bde4dc
+        checksum/config: ad7509577a27cce03c2d07c95ecd599df9afd0a62f43b7032aa50447e460d9d2
         checksum/secret: 1bbae06c42104dcc2bf3571635413ba7a461f6639b9b95bae74639c9aa777863
     spec:
       serviceAccountName: versus-incident

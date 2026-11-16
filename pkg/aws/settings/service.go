@@ -60,6 +60,9 @@ var (
 	// ErrNoServerIdentity means the deployment has no AWS identity to assume
 	// roles with.
 	ErrNoServerIdentity = errors.New("no server identity")
+	// ErrAccountMismatch means the credentials work but belong to another
+	// AWS account than the one configured, so nothing is read through them.
+	ErrAccountMismatch = errors.New("account_mismatch")
 	// ErrOrganizationsUnavailable means Organizations discovery requires the
 	// enterprise module.
 	ErrOrganizationsUnavailable = errors.New("organizations unavailable")
@@ -197,6 +200,9 @@ type Service struct {
 	principal        string
 	principalChecked time.Time
 	verifies         map[string][]time.Time
+	// confirmed caches, per account, that this process saw its credentials
+	// sign in to it, so collectors and cost may read it.
+	confirmed map[string]string
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -218,6 +224,7 @@ func NewService(store *Store, options ...Option) *Service {
 		now:        time.Now,
 		templates:  DefaultTemplates(),
 		verifies:   make(map[string][]time.Time),
+		confirmed:  make(map[string]string),
 		stopped:    make(chan struct{}),
 	}
 	conn.assume = func(ctx context.Context, base aws.CredentialsProvider, roleARN, externalID, region string) (aws.CredentialsProvider, error) {
@@ -565,6 +572,9 @@ func errorCode(err error) string {
 	if errors.Is(err, ErrNoServerIdentity) {
 		return ErrNoServerIdentity.Error()
 	}
+	if errors.Is(err, ErrAccountMismatch) {
+		return ErrAccountMismatch.Error()
+	}
 	return awsauth.ErrNetwork.Error()
 }
 
@@ -635,23 +645,16 @@ func (conn *Service) checkAccount(ctx context.Context, account AccountRecord, fo
 		_, accountID, err := conn.identity(ctx, credentials, home)
 		if err != nil {
 			identityErr = err
-		} else if accountID != "" {
-			record.AccountID = accountID
+		} else if accountID != "" && accountID != account.AccountID {
+			// The credentials sign in, but to another account: reading
+			// through them would file that account's data under this one.
+			identityErr = ErrAccountMismatch
 		}
 	}
 
+	conn.setIdentityConfirmed(account, identityErr == nil)
 	if identityErr != nil {
-		record.ErrorCode = errorCode(identityErr)
-		record.ConsecutiveFailures++
-		if record.FailureSince.IsZero() {
-			record.FailureSince = now
-		}
-		if record.ConsecutiveFailures >= 2 {
-			record.Status = StatusDisconnected
-			record.DisconnectedSince = record.FailureSince
-		} else if record.Status == "" || record.Status == StatusUnknown {
-			record.Status = StatusChecking
-		}
+		recordIdentityFailure(&record, identityErr, now)
 		if saveErr := conn.store.SaveHealth(conn.storageOrg(), record); saveErr != nil {
 			return record, saveErr
 		}
@@ -692,6 +695,25 @@ func (conn *Service) checkAccount(ctx context.Context, account AccountRecord, fo
 		return record, saveErr
 	}
 	return record, nil
+}
+
+// recordIdentityFailure notes one failed identity check on record.
+func recordIdentityFailure(record *HealthRecord, identityErr error, now time.Time) {
+	record.AttemptedAt = now
+	record.AttemptOK = false
+	record.ErrorCode = errorCode(identityErr)
+	record.ConsecutiveFailures++
+	if record.FailureSince.IsZero() {
+		record.FailureSince = now
+	}
+	// A wrong account does not clear on a retry, so it disconnects at
+	// once; other failures wait for a second one in a row.
+	if record.ConsecutiveFailures >= 2 || errors.Is(identityErr, ErrAccountMismatch) {
+		record.Status = StatusDisconnected
+		record.DisconnectedSince = record.FailureSince
+	} else if record.Status == "" || record.Status == StatusUnknown {
+		record.Status = StatusChecking
+	}
 }
 
 func homeRegion(regions []string) string {

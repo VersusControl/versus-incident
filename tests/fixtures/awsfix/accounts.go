@@ -46,7 +46,7 @@ func SingleAccount() *CostScenario {
 	nat.ResourceID = "nat-1a"
 	compute := series(prodAccount, ec2Compute, "USE1-BoxUsage:m6i.large", "Usage", "checkout", "Hrs",
 		step("2026-10-01", "300.0000005", "48"))
-	compute.ResourceID = "i-0abc"
+	compute.ResourceID = "i-0a1b2c3d4e5f67890"
 	monthly := func(name, amount string) Budget {
 		return Budget{BudgetName: name, BudgetType: "COST", TimeUnit: "MONTHLY", BudgetLimit: Spend{Amount: amount, Unit: "USD"},
 			Metrics: []string{"NetAmortizedCost"}}
@@ -93,7 +93,7 @@ func SingleAccount() *CostScenario {
 		ExpectedSkipped: map[string]string{"Unblended total": "not_net_amortized", "Legacy amortized": "not_net_amortized",
 			"Two accounts": "filter_not_supported", "Transfer": "not_monthly_cost"},
 		Recommendations: []HubRecommendation{
-			{AccountID: prodAccount, ActionType: "Rightsize", ResourceID: "i-0abc", Region: usEast1, CurrentResourceSummary: "m6i.large",
+			{AccountID: prodAccount, ActionType: "Rightsize", ResourceID: "i-0a1b2c3d4e5f67890", Region: usEast1, CurrentResourceSummary: "m6i.large",
 				RecommendedResourceSummary: "m6i.medium", EstimatedMonthlySavings: 61.32, Tags: []HubTag{{Key: "team", Value: "checkout"}}},
 			{AccountID: prodAccount, ActionType: "Delete", ResourceID: "vol-1", Region: usEast1, EstimatedMonthlySavings: 8},
 		},

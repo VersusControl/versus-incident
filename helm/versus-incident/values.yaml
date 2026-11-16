@@ -484,7 +484,20 @@ connectors:
       auth: {mode: ""}
   aws:
     enable: false
+    # Accounts to read. auth.mode defaults to default_chain (the pod's AWS
+    # keys, IRSA or node role); regions defaults to auto. Quote the ID.
+    #   - accountId: "111122223333"
+    #     regions: [us-east-1]
     accounts: []
+    # AWS keys for default_chain accounts, from a Secret you create:
+    #   kubectl create secret generic versus-aws \
+    #     --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+    # They reach the container as env only, never the ConfigMap. The key names
+    # inside the Secret can be changed. Leave existingSecret empty with IRSA.
+    credentials:
+      existingSecret: ""
+      accessKeyIdKey: AWS_ACCESS_KEY_ID
+      secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
     tags:
       valueAllowlist: [Name, app, service, team, env]
     budgets:

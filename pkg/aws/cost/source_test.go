@@ -77,7 +77,7 @@ func TestResourceDetailRefinesUsageTypesWhenOn(t *testing.T) {
 	// Only the services asked for are read: the compute instance has a
 	// resource ID too but no open increase.
 	for _, l := range got {
-		if l.ResourceID == "i-0abc" {
+		if l.ResourceID == "i-0a1b2c3d4e5f67890" {
 			t.Fatal("a service without an open increase was read at resource level")
 		}
 	}

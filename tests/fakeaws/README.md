@@ -80,11 +80,17 @@ one-item probe pages and use the world only for collector-only calls.
 
 ### Pointing the server binary at the fixture
 
-Build the server with `-tags harness_fakeaws` and set
-`VERSUS_HARNESS_FAKEAWS_URL` to the fixture's URL (for example the
+Build the server with `-tags harness_awsendpoint` and set
+`VERSUS_HARNESS_AWS_ENDPOINT_URL` to the fixture's URL (for example the
 `tests/fakeaws/cmd/fakeaws` binary). Every AWS call the settings probes and
-the collectors make is then rewritten to that URL. A build without the tag
-has neither the variable nor the redirect.
+the collectors make is then rewritten to that URL. The request keeps its
+SigV4 signature and the real AWS `Host` header. The URL must be a bare
+`http(s)://host[:port]` whose host is loopback, a private address or a local
+name; anything else makes every AWS call fail. For an HTTPS endpoint with its
+own CA (an AWS API emulator), set `VERSUS_HARNESS_AWS_CA_BUNDLE` to the PEM
+file; only the redirected transport trusts it. The older `harness_fakeaws`
+tag and `VERSUS_HARNESS_FAKEAWS_URL` variable still work the same way. A
+build without either tag has none of these variables and no redirect.
 The FinOps cost refresh (Cost Explorer, Budgets, Cost Optimization Hub, Compute Optimizer) is redirected the same way.
 
 Per-request overrides (useful when one test needs two fixtures):
@@ -104,6 +110,13 @@ rounded like the product. Every day of the open month, by the fixture clock
 every Cost Explorer request except `ListCostAllocationTags`; `CostCalls()`
 counts billing calls per `service:Action`. Billing calls are answered only in a
 cost scenario.
+
+A single-account data set (every scenario above except the Organization ones)
+is the calling account's own cost, as Cost Explorer answers a standalone
+account: its lines, account names, budget `LINKED_ACCOUNT` filters and
+recommendations carry the caller's account ID, so the default caller
+`111122223333` sees the same cost as a test signing as `111111111111`.
+Organization scenarios keep their fixed IDs.
 
 ## Budget assertions
 

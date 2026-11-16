@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AwsAccount, AwsDraftService, AwsOptionalData } from "@/lib/api";
 import { ApiError, awsErrorFrom, awsErrorText } from "@/lib/api";
+import { fmtClock } from "@/lib/finops";
 import {
   AWS_SERVICE_CATALOG,
   AWS_SERVICE_TOTAL,
@@ -119,7 +120,7 @@ describe("awsSettingsAnswer precedence", () => {
       NOW,
     );
     expect(answer.kind).toBe("disconnected");
-    expect(answer.segments[0].text).toMatch(/^Staging disconnected since \d{2}:\d{2}$/);
+    expect(answer.segments[0].text).toBe("Staging disconnected since 13:05 UTC");
     expect(answer.segments[1].text).toBe("; 1 account still connected");
     // The denied service is still in the payload, but the worst problem wins.
     expect(answer.segments.map((s) => s.text).join("")).not.toContain("ElastiCache");
@@ -304,8 +305,22 @@ describe("account rows", () => {
       NOW,
     );
     expect(words.label).toBe("Disconnected");
-    expect(words.detail).toMatch(/^since \d{2}:\d{2}$/);
+    expect(words.detail).toBe("since 13:05 UTC");
     expect(words.connected).toBe(false);
+  });
+
+  it("names why a disconnected row lost access, in words", () => {
+    const mismatch = accountStatusWords(
+      account({ status: "disconnected", disconnected_since: "2026-11-04T13:05:00Z", error_code: "account_mismatch" }),
+      NOW,
+    );
+    expect(mismatch.detail).toBe("The AWS credentials belong to another account, since 13:05 UTC");
+    const noKey = accountStatusWords(
+      account({ status: "disconnected", disconnected_since: null, error_code: "no_server_identity" }),
+      NOW,
+    );
+    expect(noKey.detail).toBe("The Versus server has no AWS identity, reconnect to check again");
+    expect(noKey.detail).not.toContain("no_server_identity");
   });
 
   it("does not invent a time when the server sent none", () => {
@@ -349,6 +364,13 @@ describe("label maps", () => {
     expect(serviceLabel("elasticache")).toBe("ElastiCache");
     expect(serviceLabel("step-functions")).toBe("Step Functions");
     expect(serviceLabel("mystery")).toBe("mystery");
+  });
+
+  it("names the collector-only services properly", () => {
+    expect(serviceLabel("appregistry")).toBe("AppRegistry");
+    expect(serviceLabel("tagging")).toBe("Tagging");
+    expect(serviceLabel("vpc")).toBe("VPC");
+    expect(AWS_SERVICE_TOTAL).toBe(24);
   });
 
   it("keeps a probe failure in the not-checked vocabulary", () => {
@@ -428,7 +450,7 @@ describe("privacy and optional data lines", () => {
     ).toBe("Leak check: passing, 0 leaks in 24 h");
     expect(
       selfTestLine({ passing: false, last_run_at: "2026-11-04T14:15:00Z", leaks_24h: 1 }, NOW),
-    ).toMatch(/^Leak check: failing, last run \d{2}:\d{2}, 1 leak in 24 h$/);
+    ).toBe("Leak check: failing, last run 14:15 UTC, 1 leak in 24 h");
   });
 });
 
@@ -515,6 +537,17 @@ describe("refresh in progress wording", () => {
   });
 });
 
+describe("times of day", () => {
+  it("prints AWS settings times in UTC with the zone, the same way FinOps does", () => {
+    // 23:30 UTC is a different hour, and often a different day, in any
+    // other zone, so a local-time format cannot pass this by chance.
+    const late = new Date("2026-11-04T23:40:00Z");
+    const line = selfTestLine({ passing: true, last_run_at: "2026-11-04T23:30:00Z", leaks_24h: 0 }, late);
+    expect(line).toBe("Leak check: passing, last run 23:30 UTC, 0 leaks in 24 h");
+    expect(line).toContain(fmtClock("2026-11-04T23:30:00Z"));
+  });
+});
+
 describe("before the first health check", () => {
   // A config account with regions "auto" right after boot: no check has run,
   // so the server still reports zero counts and no regions.
@@ -532,7 +565,7 @@ describe("before the first health check", () => {
   it("waits instead of saying all good over zero counts", () => {
     const answer = awsSettingsAnswer({ enabled: true, accounts: [fresh()] }, NOW);
     expect(answer.kind).toBe("checking");
-    expect(answer.segments.map((s) => s.text).join("")).toBe("1 account connected; waiting for the first check");
+    expect(answer.segments.map((s) => s.text).join("")).toBe("Checking 1 account");
     expect(kinds(answer.segments)).toEqual([]);
   });
 
@@ -542,6 +575,33 @@ describe("before the first health check", () => {
     expect(row.servicesLabel).toBe("Waiting");
     expect(row.regionsLabel).toBe("Waiting");
     expect(row.regionsDetail).toBe("");
+  });
+
+  it("says the first sync is running, not all good, and waits for the readable count", () => {
+    const sync = {
+      state: "syncing" as const,
+      synced_at: "2026-11-04T14:20:58Z",
+      first_sync: true,
+      units_done: 6,
+      units_total: 26,
+      services: [],
+    };
+    // Synced units land before the access check: no readable count yet.
+    const early = { ...fresh(), services: { total: 24, readable: 0, not_used: 0, not_checked: 24 }, sync };
+    const checking = awsSettingsAnswer({ enabled: true, accounts: [early] }, NOW);
+    expect(checking.segments.map((s) => s.text).join("")).toBe("Checking 1 account");
+    expect(accountRow(early, NOW).servicesLabel).toBe("Waiting");
+
+    // The check is done but the first sync still runs.
+    const checked = { ...healthy("Harness", "123456789012"), sync };
+    const syncing = awsSettingsAnswer({ enabled: true, accounts: [checked] }, NOW);
+    expect(syncing.kind).toBe("syncing");
+    expect(syncing.segments.map((s) => s.text).join("")).toBe("First sync running");
+    expect(kinds(syncing.segments)).toEqual([]);
+    expect(accountRow(checked, NOW).servicesLabel).toBe("23 of 24 readable");
+
+    const done = { ...checked, sync: { ...sync, state: "ok" as const, first_sync: false, units_done: 26 } };
+    expect(awsSettingsAnswer({ enabled: true, accounts: [done] }, NOW).kind).toBe("ok");
   });
 
   it("counts again once the check has run", () => {

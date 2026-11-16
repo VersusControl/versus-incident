@@ -27,13 +27,21 @@ func collectingConfig(collect bool, accounts ...config.AWSAccountConfig) func() 
 
 func syncService(t *testing.T, collect bool, accounts ...config.AWSAccountConfig) (*Service, *Store, *snapshot.Store) {
 	t.Helper()
+	service, store, snapshots, _ := syncServiceWithFake(t, collect, accounts...)
+	return service, store, snapshots
+}
+
+// syncServiceWithFake is syncService that also returns the fake AWS, so a
+// test can count the calls made. Its server key signs in to 111122223333.
+func syncServiceWithFake(t *testing.T, collect bool, accounts ...config.AWSAccountConfig) (*Service, *Store, *snapshot.Store, *fakeaws.Server) {
+	t.Helper()
 	fake := fakeaws.New(t, "new-account-connect")
 	provider := storage.NewMemory()
 	store := NewStore(provider, tenancy.DefaultOrgScope())
 	snapshots := snapshot.New(provider, tenancy.DefaultOrgScope())
 	service := NewService(store, WithConfig(collectingConfig(collect, accounts...)), WithHTTPClient(fake.HTTPClient()),
 		WithBaseProvider(staticBase), WithLimiter(limit.NewManager(100)), WithSnapshots(snapshots))
-	return service, store, snapshots
+	return service, store, snapshots, fake
 }
 
 func syncUnit(service, region string) model.Unit {
@@ -109,10 +117,12 @@ func TestCollectTargetsSkipsUnusableAccounts(t *testing.T) {
 
 // An account set to "auto" regions has none until its first health check.
 // The collectors wait for them, but cost is global and is read through the
-// account at once. A disconnected account is never collected; cost lists it
-// with its cause and no credentials, so its stored cost stays visible.
-func TestCostTargetsIncludeAutoRegionAccountBeforeFirstHealthCheck(t *testing.T) {
-	service, store, _ := syncService(t, true,
+// account before its region check, once one free identity call has
+// confirmed the credentials sign in to that account. A disconnected account
+// is never collected; cost lists it with its cause and no credentials, so
+// its stored cost stays visible.
+func TestCostTargetsIncludeAutoRegionAccountBeforeRegionCheckAfterIdentity(t *testing.T) {
+	service, store, _, fake := syncServiceWithFake(t, true,
 		config.AWSAccountConfig{AccountID: "111122223333", Auth: config.AWSAuthConfig{Mode: "default_chain"}},
 		config.AWSAccountConfig{AccountID: "444455556666", Auth: config.AWSAuthConfig{Mode: "default_chain"}},
 	)
@@ -127,6 +137,46 @@ func TestCostTargetsIncludeAutoRegionAccountBeforeFirstHealthCheck(t *testing.T)
 	if len(targets) != 2 || targets[0].AccountID != "111122223333" || targets[0].Credentials == nil || targets[0].Cause != "" ||
 		targets[1].AccountID != "444455556666" || targets[1].Credentials != nil || targets[1].Cause != CauseAccountDisconnected {
 		t.Fatalf("cost targets = %+v", targets)
+	}
+	if got := fake.OperationCount("sts:GetCallerIdentity"); got != 1 {
+		t.Fatalf("identity calls = %d, want one before the first cost read", got)
+	}
+	if regions := fake.OperationCount("ec2:DescribeRegions"); regions != 0 {
+		t.Fatalf("region checks = %d; cost must not wait for one", regions)
+	}
+	// The confirmed identity is kept until the next health check.
+	service.CostTargets(ctx)
+	if got := fake.OperationCount("sts:GetCallerIdentity"); got != 1 {
+		t.Fatalf("identity calls after a second read = %d, want the cached answer", got)
+	}
+}
+
+// A config account whose server credentials sign in to another AWS account
+// is never read from boot on: before any health check, the collectors and
+// cost get no credentials for it, the only AWS call made is the identity
+// check, and the account is recorded as account_mismatch.
+func TestCredentialsOfAnotherAccountReadNothingFromBoot(t *testing.T) {
+	service, store, _, fake := syncServiceWithFake(t, true,
+		config.AWSAccountConfig{AccountID: "444455556666", Regions: []string{"us-east-1"}, Auth: config.AWSAuthConfig{Mode: "default_chain"}})
+	ctx := context.Background()
+
+	if targets := service.CollectTargets(ctx); len(targets) != 0 {
+		t.Fatalf("collect targets = %+v", targets)
+	}
+	targets := service.CostTargets(ctx)
+	if len(targets) != 1 || targets[0].Credentials != nil || targets[0].Cause != CauseAccountMismatch {
+		t.Fatalf("cost targets = %+v", targets)
+	}
+	identity := fake.OperationCount("sts:GetCallerIdentity")
+	if identity != 1 {
+		t.Fatalf("identity calls = %d, want 1", identity)
+	}
+	if total := fake.TotalRequests(); total != identity {
+		t.Fatalf("AWS requests = %d, identity calls = %d; nothing else may be called", total, identity)
+	}
+	health, err := store.GetHealth("default", "444455556666")
+	if err != nil || health.Status != StatusDisconnected || health.ErrorCode != "account_mismatch" {
+		t.Fatalf("health = %+v, err = %v", health, err)
 	}
 }
 
@@ -144,6 +194,7 @@ func TestCostTargetsNameWhyALostAccountCannotBeRead(t *testing.T) {
 		{"expired after working", HealthRecord{ErrorCode: "no_server_identity", CheckedAt: since.Add(-time.Hour)}, CauseCredentialsInvalid},
 		{"never had an identity", HealthRecord{ErrorCode: "no_server_identity"}, CauseNoServerIdentity},
 		{"role trust removed", HealthRecord{ErrorCode: "trust_denied", CheckedAt: since.Add(-time.Hour)}, CauseAccountDisconnected},
+		{"credentials of another account", HealthRecord{ErrorCode: "account_mismatch"}, CauseAccountMismatch},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -284,5 +335,54 @@ func TestSyncViewShowsAServiceMissingInARegionAsNotAvailable(t *testing.T) {
 	appregistry := view.Services[0]
 	if appregistry.State != SyncStateOK || len(appregistry.Gaps) != 1 || appregistry.Gaps[0] != "not_available_in_region" {
 		t.Fatalf("appregistry = %+v, want ok with the not-available gap", appregistry)
+	}
+}
+
+// A Connected record saved before a restart proves nothing about the key
+// the restarted server holds. With another account's key, the first collect
+// and cost reads after the restart get no credentials, make exactly one STS
+// call, and record account_mismatch.
+func TestSavedConnectedRecordDoesNotSkipIdentityAfterRestart(t *testing.T) {
+	service, store, _, fake := syncServiceWithFake(t, true,
+		config.AWSAccountConfig{AccountID: "444455556666", Regions: []string{"us-east-1"}, Auth: config.AWSAuthConfig{Mode: "default_chain"}})
+	checked := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+	if err := store.SaveHealth("default", HealthRecord{AccountID: "444455556666", Status: StatusConnected, AttemptOK: true,
+		AttemptedAt: checked, CheckedAt: checked}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if targets := service.CollectTargets(ctx); len(targets) != 0 {
+		t.Fatalf("collect targets = %+v", targets)
+	}
+	targets := service.CostTargets(ctx)
+	if len(targets) != 1 || targets[0].Credentials != nil || targets[0].Cause != CauseAccountMismatch {
+		t.Fatalf("cost targets = %+v", targets)
+	}
+	if identity, total := fake.OperationCount("sts:GetCallerIdentity"), fake.TotalRequests(); identity != 1 || total != 1 {
+		t.Fatalf("identity calls = %d, AWS requests = %d; want exactly one STS call", identity, total)
+	}
+	health, err := store.GetHealth("default", "444455556666")
+	if err != nil || health.Status != StatusDisconnected || health.ErrorCode != "account_mismatch" {
+		t.Fatalf("health = %+v, err = %v", health, err)
+	}
+}
+
+// A health check this process ran confirms the identity, so the reads that
+// follow it make no further STS call.
+func TestHealthCheckConfirmsIdentityForReads(t *testing.T) {
+	service, _, _, fake := syncServiceWithFake(t, true,
+		config.AWSAccountConfig{AccountID: "111122223333", Regions: []string{"us-east-1"}, Auth: config.AWSAuthConfig{Mode: "default_chain"}})
+	ctx := context.Background()
+	account := AccountRecord{AccountID: "111122223333", Regions: []string{"us-east-1"}, Source: SourceConfig}
+	if _, err := service.CheckAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	after := fake.OperationCount("sts:GetCallerIdentity")
+	if targets := service.CollectTargets(ctx); len(targets) != 1 || targets[0].Credentials == nil {
+		t.Fatalf("collect targets = %+v", targets)
+	}
+	if got := fake.OperationCount("sts:GetCallerIdentity"); got != after {
+		t.Fatalf("identity calls = %d after the health check's %d", got, after)
 	}
 }

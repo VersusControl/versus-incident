@@ -3473,6 +3473,7 @@ export type AwsServiceStatus =
 // never surfaced, because it can carry account ids and resource names.
 export type AwsErrorCode =
   | "no_server_identity"
+  | "account_mismatch"
   | "role_not_found"
   | "trust_denied"
   | "external_id_mismatch"
@@ -3674,8 +3675,14 @@ export const AWS_ERROR_TEXT: Record<AwsErrorCode, AwsErrorInfo> = {
     code: "no_server_identity",
     title: "The Versus server has no AWS identity",
     detail:
-      "Versus signs in with the instance profile, task role or profile of the machine it runs on.",
-    fix: "Attach an instance role, task role or profile that may call sts:AssumeRole, then restart Versus.",
+      "Versus signs in with the access key in its environment, or the instance profile, task role or profile of the machine it runs on. AWS found none, or rejected it.",
+    fix: "Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or attach an instance role, task role or profile, then restart Versus.",
+  },
+  account_mismatch: {
+    code: "account_mismatch",
+    title: "The AWS credentials belong to another account",
+    detail: "Versus signed in, but to a different AWS account than the one configured, so it reads nothing.",
+    fix: "Set the account ID to the account of the credentials (aws sts get-caller-identity), or use credentials of the configured account, then restart Versus.",
   },
   role_not_found: {
     code: "role_not_found",
@@ -4497,7 +4504,7 @@ export interface FinOpsReportRef {
 /** Tables the CSV export can write. */
 export type FinOpsCsvTable = "breakdown" | "increases" | "savings";
 
-/** Query parameters shared by the FinOps read routes (a8 §5.11). */
+/** Query parameters shared by the FinOps read routes. */
 export interface FinOpsQuery {
   period?: string;
   compare?: string;

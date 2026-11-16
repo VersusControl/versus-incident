@@ -3,6 +3,7 @@
 {{- include "versus-incident.validateAgent" . -}}
 {{- include "versus-incident.validateHA" . -}}
 {{- include "versus-incident.validateKubernetesReaderRBAC" . -}}
+{{- include "versus-incident.validateAWS" . -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -355,10 +356,10 @@ data:
   {{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict }}
   {{- $kubernetesAuth := $kubernetes.auth | default dict }}
   connectors.yaml: |
-    {{- if not (include "versus-incident.kubernetesConnectorEnabled" .) }}
-    # The Kubernetes connector is off (connectors.kubernetes.enabled=false).
-    {{- else }}
     connectors:
+      {{- if not (include "versus-incident.kubernetesConnectorEnabled" .) }}
+      # The Kubernetes connector is off (connectors.kubernetes.enabled=false).
+      {{- else }}
       kubernetes:
         {{- if $kubernetes.multiple }}
         {{- include "versus-incident.validateClusters" $kubernetes }}
@@ -443,6 +444,7 @@ data:
           auth:
             {{- include "versus-incident.connectorAuth" (dict "auth" ($actions.auth | default dict) "prefix" "KUBERNETES_ACTOR") | nindent 12 }}
           {{- end }}
+      {{- end }}
       {{- $aws := (.Values.connectors | default dict).aws | default dict }}
       {{- $awsTags := $aws.tags | default dict }}
       {{- $awsBudgets := $aws.budgets | default dict }}
@@ -459,7 +461,7 @@ data:
         {{- if $aws.accounts }}
         {{- range $account := $aws.accounts }}
         {{- $accountAuth := $account.auth | default dict }}
-          - account_id: {{ $account.accountId | quote }}
+          - account_id: {{ include "versus-incident.awsAccountId" $account.accountId | quote }}
             display_name: {{ $account.displayName | default "" | quote }}
             {{- if $account.owner }}
             owner: {{ $account.owner | quote }}

@@ -1,4 +1,4 @@
-//go:build !harness_fakeaws
+//go:build !harness_awsendpoint && !harness_fakeaws
 
 package main
 

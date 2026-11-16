@@ -207,7 +207,7 @@ export function FinOpsReport({ report, deployment }: { report: FinOpsReportView;
     ["Accounts", report.notes.coverage.accounts],
     ["Measure", report.notes.coverage.measure_label],
     ["Data", `To ${fmtDay(report.notes.coverage.last_complete_day)}, ${notFinal ? "not final" : "complete"}`],
-    report.frozen ? ["Frozen", `${fmtStamp(report.frozen.at)} UTC`] : ["Generated", `${fmtStamp(report.generated_at)} UTC`],
+    report.frozen ? ["Frozen", fmtStamp(report.frozen.at)] : ["Generated", fmtStamp(report.generated_at)],
   ];
   if ((report.notes.missing ?? []).length) about.push(["Missing", (report.notes.missing ?? []).join("; ")]);
   about.push(["Access", "Read only"]);

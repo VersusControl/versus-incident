@@ -2,7 +2,7 @@
 // Postgres database and drives the AWS settings and FinOps routes over HTTP,
 // the way a Helm deployment with two replicas runs them.
 //
-// The server binary is a harness_fakeaws build, so every AWS call goes to a
+// The server binary is a harness_awsendpoint build, so every AWS call goes to a
 // tests/fakeaws fixture served from this test process. Each replica reaches it
 // through its own front, which counts the Cost Explorer requests that replica
 // sent and can hold them, so a refresh can be kept in flight on one replica
@@ -11,7 +11,7 @@
 // The test is skipped unless these are set:
 //
 //	TEST_POSTGRES_DSN         an isolated, empty database (harness.sh pgtest)
-//	AWS_REPLICAS_SERVER_BIN   go build -tags harness_fakeaws -o <bin> ./cmd
+//	AWS_REPLICAS_SERVER_BIN   go build -tags harness_awsendpoint -o <bin> ./cmd
 //	AWS_REPLICAS_DIR          a writable folder for configs and server logs
 package awsreplicas
 
@@ -299,14 +299,14 @@ agent:
 	cmd.Dir = r.dir
 	// A minimal environment: nothing from the caller's shell, so no real AWS
 	// credential or profile can be picked up. The base credentials are fake;
-	// the harness_fakeaws build sends every AWS request to the front.
+	// the harness_awsendpoint build sends every AWS request to the front.
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + r.dir,
 		"TZ=UTC",
 		"GATEWAY_SECRET=" + gatewaySecret,
 		"POSTGRES_DSN=" + dsn,
-		"VERSUS_HARNESS_FAKEAWS_URL=" + r.front.server.URL,
+		"VERSUS_HARNESS_AWS_ENDPOINT_URL=" + r.front.server.URL,
 		"AWS_ACCESS_KEY_ID=ASIAVERSUSBASE00001",
 		"AWS_SECRET_ACCESS_KEY=versus-replica-base-secret",
 		"AWS_REGION=us-east-1",

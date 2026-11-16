@@ -40,38 +40,6 @@ const finopsConnectorsYAML = `connectors:
         slack_summary: true
 `
 
-// finopsHelmValuesYAML is Helm values exercising every connectors.aws.finops
-// key and an account owner.
-const finopsHelmValuesYAML = `connectors:
-  aws:
-    enable: true
-    optionalData:
-      costExplorer: true
-    accounts:
-      - accountId: "111122223333"
-        displayName: Production
-        owner: platform
-        auth:
-          mode: default_chain
-    finops:
-      teamTagKey: squad
-      minIncreaseUsdPerMonth: 250
-      minDriverUsd: 75
-      targetCoverage: 0.7
-      maxPaidRequestsPerDay: 30
-      refreshTime: "07:30"
-      costSourceAccount: "999988887777"
-      budgets:
-        - {name: AWS total, scope: deployment, monthlyUsd: 42000}
-        - {name: Checkout, scope: team, value: checkout, monthlyUsd: 5000}
-        - {name: Production, scope: account, value: "111122223333", monthlyUsd: 30000}
-      accountGroups:
-        - {name: Production, accounts: ["111122223333"]}
-      report:
-        timezone: Europe/Berlin
-        slackSummary: true
-`
-
 // writeTestFile writes content to name in a fresh temporary folder and
 // returns its path.
 func writeTestFile(t *testing.T, name, content string) string {
@@ -206,24 +174,14 @@ func TestAWSFinOpsCloneIsDeep(t *testing.T) {
 // into a config the loader accepts unchanged, and that its defaults are the
 // loader's defaults.
 func TestHelmChartRendersAWSFinOps(t *testing.T) {
-	requireRenderableChart(t)
-	load := func(name string, args ...string) *Config {
-		files := renderChartFiles(t, chartScenario{name: name, args: args})
-		dir := t.TempDir()
-		for file, body := range files {
-			if strings.HasSuffix(file, ".yaml") {
-				if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-		}
-		loaded, err := loadConfigFromPath(filepath.Join(dir, "config.yaml"))
+	load := func(scenario string) *Config {
+		loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, scenario)))
 		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+			t.Fatalf("%s: %v", scenario, err)
 		}
 		return loaded
 	}
-	full := load("aws-finops", "-f", writeTestFile(t, "values.yaml", finopsHelmValuesYAML))
+	full := load("107-aws-finops")
 	want := wantFinOps()
 	want.Budgets = append(want.Budgets, AWSFinOpsBudgetConfig{Name: "Production", Scope: "account", Value: "111122223333", MonthlyUSD: 30000})
 	if !reflect.DeepEqual(full.Connectors.AWS.FinOps, want) {
@@ -232,7 +190,7 @@ func TestHelmChartRendersAWSFinOps(t *testing.T) {
 	if full.Connectors.AWS.Accounts[0].Owner != "platform" || !full.Connectors.AWS.CostDataEnabled() {
 		t.Fatalf("chart aws = %+v", full.Connectors.AWS)
 	}
-	defaults := load("aws-finops-defaults", "--set", "connectors.aws.enable=true")
+	defaults := load("105-aws-connector-defaults")
 	var zero AWSFinOpsConfig
 	got := defaults.Connectors.AWS.FinOps
 	if len(got.Budgets) == 0 && len(got.AccountGroups) == 0 {

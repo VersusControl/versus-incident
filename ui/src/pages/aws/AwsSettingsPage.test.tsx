@@ -249,7 +249,7 @@ describe("AWS settings page", () => {
       awsSettings({ accounts: [awsAccount(), disconnected] }),
     );
     renderPage();
-    expect(await screen.findByText(/^Staging disconnected since \d{2}:\d{2}$/)).toBeTruthy();
+    expect(await screen.findByText(/^Staging disconnected since \d{2}:\d{2} UTC$/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
 
     const production = screen.getByLabelText("Production 111122223333");

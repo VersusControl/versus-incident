@@ -105,7 +105,8 @@ func (s *Scheduler) Start(ctx context.Context) {
 func (s *Scheduler) Stopped() <-chan struct{} { return s.stopped }
 
 // RunDue refreshes when today's refresh time has passed and today's
-// scheduled refresh has not run. It reports whether a refresh ran. Then,
+// scheduled refresh has not run, or at once when a payer has no stored cost
+// yet. It reports whether a refresh ran. Then,
 // at most once per refresh interval, it reconciles the cost rollups again,
 // also when the refresh failed, was not due or cost data is off: any writer
 // may have changed cost lines around the rollups since the last reconcile
@@ -184,11 +185,17 @@ func (s *Scheduler) runDue(ctx context.Context) bool {
 		loc = time.UTC
 	}
 	now := s.now().In(loc)
-	if now.Hour()*60+now.Minute() < hour*60+minute {
-		return false
-	}
 	st, err := s.adapter.cache.status()
 	if err != nil || st.ScheduledOn == finops.DateOf(now) {
+		return false
+	}
+	// A payer with no stored cost yet (a fresh install, or an account just
+	// added) is read on the first tick instead of waiting up to a day for
+	// the refresh time; once it has cost, the refresh keeps the daily time.
+	// The early read is tried once a day: a payer whose cost is not ready
+	// yet waits for the refresh time instead of spending paid calls on
+	// every tick.
+	if now.Hour()*60+now.Minute() < hour*60+minute && !s.adapter.payerWithoutCost(st, now) {
 		return false
 	}
 	res, err := s.adapter.refreshDue(ctx)
@@ -212,6 +219,28 @@ func (s *Scheduler) runDue(ctx context.Context) bool {
 		s.after(ctx, res)
 	}
 	return true
+}
+
+// payerWithoutCost reports whether a configured payer has never had cost
+// stored and has not been tried yet on now's day. Payers marked removed do
+// not count.
+func (a *Adapter) payerWithoutCost(st *statusRecord, now time.Time) bool {
+	removed := a.removedPayers(st)
+	today := finops.DateOf(now)
+	for _, p := range a.options().Payers {
+		if removed[p.AccountID] {
+			continue
+		}
+		ps := st.Payers[p.AccountID]
+		if ps == nil {
+			return true
+		}
+		if ps.hasData() || (!ps.LastAttempt.IsZero() && finops.DateOf(ps.LastAttempt.In(now.Location())) == today) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // disabledReasonText names why cost is not read, so the log never says

@@ -1,5 +1,4 @@
-// S10 — AWS Settings visual/browser acceptance (plans/status/aws-harness/a2-settings.md
-// §5.3, §5.4, §6 "Browser e2e + screenshots").
+// AWS Settings visual and browser acceptance, with screenshots.
 //
 // The browser drives the real SPA and signs in against the running instance like
 // an operator. The AWS HTTP handlers are answered with page.route fixtures

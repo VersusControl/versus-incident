@@ -1,5 +1,5 @@
 The Kubernetes connector is off
-!connectors:
+!^      kubernetes:$
 !mode: "in_cluster"
 !exclude_resources
 !kind: ClusterRole

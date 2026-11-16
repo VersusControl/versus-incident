@@ -5,7 +5,8 @@
 // The rule the whole screen follows: a value is never invented. A probe that
 // did not answer is "not checked" — never "denied", never zero.
 
-import { format } from "date-fns";
+import { fmtClock } from "@/lib/finops";
+import { awsErrorText } from "@/lib/api";
 import type {
   AwsAccountSync,
   AwsAccount,
@@ -67,9 +68,18 @@ export const AWS_SERVICE_TOTAL = AWS_SERVICE_CATALOG.length;
 
 const SERVICE_BY_KEY = new Map(AWS_SERVICE_CATALOG.map((s) => [s.key, s]));
 
+// Collection also reads a few services the access probe does not check. They
+// share the label table so the first-sync list never shows a raw key.
+const SERVICE_LABELS = new Map<string, string>([
+  ...AWS_SERVICE_CATALOG.map((s): [string, string] => [s.key, s.label]),
+  ["appregistry", "AppRegistry"],
+  ["tagging", "Tagging"],
+  ["vpc", "VPC"],
+]);
+
 /** Human name for a service key; an unknown key is shown as-is, never guessed. */
 export function serviceLabel(key: string): string {
-  return SERVICE_BY_KEY.get(key)?.label ?? key;
+  return SERVICE_LABELS.get(key) ?? key;
 }
 
 // ---------- Status vocabulary ----------
@@ -250,7 +260,7 @@ function clockTime(iso: string | null | undefined, now: Date): string | undefine
   if (!Number.isFinite(t)) return undefined;
   // A future timestamp is a clock skew, not a fact worth printing.
   if (t > now.getTime() + 60_000) return undefined;
-  return format(new Date(t), "HH:mm");
+  return fmtClock(iso);
 }
 
 function ageWords(iso: string | null | undefined, now: Date): string | undefined {
@@ -274,6 +284,7 @@ export type AwsAnswerKind =
   | "denied"
   | "regions"
   | "checking"
+  | "syncing"
   | "ok";
 
 export type AwsAnswerTone = "plain" | AwsTone;
@@ -395,20 +406,21 @@ export function awsSettingsAnswer(
     };
   }
 
-  // Before the first health check the counts are not known yet: never
-  // "All good" over zero counts.
+  // Before the first health check the counts are not known yet, and while
+  // the first sync runs the data is still filling in: never "All good" then.
   const unchecked = accounts.filter(awaitingFirstCheck).length;
   if (unchecked > 0) {
     return {
       kind: "checking",
       blocked: false,
-      segments: [
-        { text: `${countedAccounts(accounts.length)} connected`, tone: "plain" },
-        {
-          text: `; waiting for the first check${unchecked > 1 ? ` of ${unchecked} accounts` : ""}`,
-          tone: "plain",
-        },
-      ],
+      segments: [{ text: `Checking ${countedAccounts(unchecked)}`, tone: "plain" }],
+    };
+  }
+  if (accounts.some(firstSyncRunning)) {
+    return {
+      kind: "syncing",
+      blocked: false,
+      segments: [{ text: "First sync running", tone: "plain" }],
     };
   }
 
@@ -422,12 +434,13 @@ export function awsSettingsAnswer(
 }
 
 /**
- * A connected account whose first health check has not run: its services
- * and regions are not counted yet, so the page shows waiting words instead
- * of zeros.
+ * A connected account whose first health check has not finished: its
+ * services and regions are not counted yet, so the page shows waiting words
+ * instead of zeros. Synced data does not count as a check; the first sync
+ * can commit units before the access check lands.
  */
 export function awaitingFirstCheck(account: AwsAccount): boolean {
-  return account.status !== "disconnected" && !account.checked_at && !account.sync?.synced_at;
+  return account.status !== "disconnected" && !account.checked_at;
 }
 
 /** The only segment the answer line colours (plain text is never coloured). */
@@ -467,9 +480,12 @@ export function accountStatusWords(
 ): { label: string; detail: string; connected: boolean } {
   if (account.status === "disconnected") {
     const since = clockTime(account.disconnected_since, now);
+    const when = since ? `since ${since}` : "reconnect to check again";
+    // The reason in words, never the raw code.
+    const reason = account.error_code ? awsErrorText(account.error_code).title : "";
     return {
       label: ACCOUNT_STATUS_LABELS.disconnected,
-      detail: since ? `since ${since}` : "reconnect to check again",
+      detail: reason ? `${reason}, ${when}` : when,
       connected: false,
     };
   }

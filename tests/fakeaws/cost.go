@@ -246,6 +246,7 @@ func (s *Server) writeCostOperation(writer http.ResponseWriter, request awsReque
 		return true
 	}
 	caller := request.account.ID
+	own := standaloneAccount(data.CostScenario)
 	switch {
 	case request.scenario == ScenarioCostDeniedAccount && caller == CostDeniedAccount:
 		writeErrorFor(writer, request, http.StatusBadRequest, "AccessDeniedException",
@@ -281,24 +282,26 @@ func (s *Server) writeCostOperation(writer http.ResponseWriter, request awsReque
 		}
 		writeJSONBody(writer, mustJSON(map[string]any{"CostAllocationTags": []map[string]string{{"TagKey": "team", "Type": "UserDefined", "Status": status}}}))
 	case "ce:GetCostAndUsage", "ce:GetCostAndUsageWithResources":
-		writeJSONBody(writer, mustJSON(s.costAndUsage(data, request, caller)))
+		writeJSONBody(writer, mustJSON(s.costAndUsage(data, request, caller, own)))
 	case "budgets:DescribeBudgets":
-		budgets := data.Budgets
-		if budgets == nil {
-			budgets = []awsfix.Budget{}
+		budgets := []awsfix.Budget{}
+		for _, budget := range data.Budgets {
+			budget.FilterExpression = expressionAs(budget.FilterExpression, own, caller)
+			budgets = append(budgets, budget)
 		}
 		writeJSONBody(writer, mustJSON(map[string]any{"Budgets": budgets}))
 	case "cost-optimization-hub:ListRecommendations":
-		items := data.Recommendations
-		if items == nil {
-			items = []awsfix.HubRecommendation{}
+		items := []awsfix.HubRecommendation{}
+		for _, item := range data.Recommendations {
+			item.AccountID = accountAs(item.AccountID, own, caller)
+			items = append(items, item)
 		}
 		writeBody(writer, "application/x-amz-json-1.0", http.StatusOK, mustJSON(map[string]any{"items": items}))
 	case "compute-optimizer:GetEC2InstanceRecommendations":
 		recommendations := []any{}
 		for _, item := range data.ComputeOptimizer {
 			recommendations = append(recommendations, map[string]any{
-				"accountId": item.Account, "instanceArn": item.InstanceARN, "instanceName": item.Name,
+				"accountId": accountAs(item.Account, own, caller), "instanceArn": item.InstanceARN, "instanceName": item.Name,
 				"currentInstanceType": item.Current, "finding": item.Finding,
 				"recommendationOptions": []any{map[string]any{"instanceType": item.Target, "rank": 1,
 					"savingsOpportunity": map[string]any{"estimatedMonthlySavings": map[string]any{"currency": "USD", "value": item.Monthly}}}},
@@ -309,6 +312,60 @@ func (s *Server) writeCostOperation(writer http.ResponseWriter, request awsReque
 		writeErrorFor(writer, request, http.StatusBadRequest, "UnknownOperationException", "Unsupported billing operation")
 	}
 	return true
+}
+
+// standaloneAccount is the one account of a single-account data set, or ""
+// for an Organization data set. Real Cost Explorer answers a standalone
+// account's cost to whoever that account is, so the fixture serves these lines
+// as the calling account's own: the data set's account ID is only a
+// placeholder.
+func standaloneAccount(data *awsfix.CostScenario) string {
+	if len(data.Names) != 1 {
+		return ""
+	}
+	for id, name := range data.Names {
+		if name == "Management" {
+			return ""
+		}
+		for _, series := range data.Series {
+			if series.Account != id {
+				return ""
+			}
+		}
+		return id
+	}
+	return ""
+}
+
+// accountAs reads the standalone data set's account as the caller.
+func accountAs(id, own, caller string) string {
+	if own != "" && id == own {
+		return caller
+	}
+	return id
+}
+
+// expressionAs copies a budget filter with the standalone account's
+// LINKED_ACCOUNT values read as the caller.
+func expressionAs(expression *awsfix.Expression, own, caller string) *awsfix.Expression {
+	if expression == nil || own == "" {
+		return expression
+	}
+	out := *expression
+	if out.Dimensions != nil && out.Dimensions.Key == "LINKED_ACCOUNT" {
+		values := make([]string, len(out.Dimensions.Values))
+		for index, value := range out.Dimensions.Values {
+			values[index] = accountAs(value, own, caller)
+		}
+		out.Dimensions = &awsfix.KeyValues{Key: out.Dimensions.Key, Values: values}
+	}
+	if out.Or != nil {
+		out.Or = make([]awsfix.Expression, len(expression.Or))
+		for index := range expression.Or {
+			out.Or[index] = *expressionAs(&expression.Or[index], own, caller)
+		}
+	}
+	return &out
 }
 
 type costFilter struct {
@@ -359,8 +416,9 @@ func costDimension(row costRow, key string) string {
 // costAndUsage aggregates the rows the caller may see the way Cost Explorer
 // does. A management account (named "Management" in the data set) sees every
 // account; any other caller sees only its own lines. Every day of the open
-// month, by the fixture clock, is marked Estimated, like real AWS.
-func (s *Server) costAndUsage(data *costData, request awsRequest, caller string) map[string]any {
+// month, by the fixture clock, is marked Estimated, like real AWS. A
+// standalone data set's lines (own) are served as the caller's.
+func (s *Server) costAndUsage(data *costData, request awsRequest, caller, own string) map[string]any {
 	var input struct {
 		TimePeriod    struct{ Start, End string }
 		GroupBy       []struct{ Type, Key string }
@@ -383,6 +441,7 @@ func (s *Server) costAndUsage(data *costData, request awsRequest, caller string)
 	byDay := map[time.Time]map[string]*aggregate{}
 	accounts := map[string]bool{}
 	for _, row := range data.rows {
+		row.account = accountAs(row.account, own, caller)
 		if row.day.Before(start) || !row.day.Before(end) || !input.Filter.match(row) {
 			continue
 		}
@@ -486,7 +545,11 @@ func (s *Server) costAndUsage(data *costData, request awsRequest, caller string)
 	sort.Strings(ids)
 	attributes := []map[string]any{}
 	for _, id := range ids {
-		if name := data.Names[id]; name != "" {
+		name := data.Names[id]
+		if own != "" && id == caller {
+			name = data.Names[own]
+		}
+		if name != "" {
 			attributes = append(attributes, map[string]any{"Value": id, "Attributes": map[string]string{"description": name}})
 		}
 	}

@@ -73,6 +73,9 @@ const (
 	CauseCredentialsInvalid = "credentials_invalid"
 	// CauseNoServerIdentity: the server has no AWS identity at all.
 	CauseNoServerIdentity = "no_server_identity"
+	// CauseAccountMismatch: the server's credentials belong to another AWS
+	// account than the one configured.
+	CauseAccountMismatch = "account_mismatch"
 	// CauseAccountDisconnected: any other loss of access to the account.
 	CauseAccountDisconnected = "account_disconnected"
 )
@@ -195,10 +198,17 @@ func (conn *Service) targets(ctx context.Context, needRegions bool) []CollectTar
 			continue
 		}
 		credentials, err := conn.credentials(ctx, account.RoleARN, account.ExternalID, homeRegion(regions))
+		if err == nil {
+			err = conn.confirmIdentity(ctx, account, health, credentials, homeRegion(regions))
+		}
 		if err != nil {
 			if !needRegions {
+				code := awsauth.ErrorCode(err)
+				if errors.Is(err, ErrAccountMismatch) {
+					code = ErrAccountMismatch.Error()
+				}
 				targets = append(targets, CollectTarget{AccountID: account.AccountID,
-					Cause: lostAccessCause(awsauth.ErrorCode(err), health), Since: conn.now().UTC()})
+					Cause: lostAccessCause(code, health), Since: conn.now().UTC()})
 			}
 			continue
 		}
@@ -207,16 +217,74 @@ func (conn *Service) targets(ctx context.Context, needRegions bool) []CollectTar
 	return targets
 }
 
+// confirmIdentity makes sure a config account's credentials sign in to that
+// account before anything is read through them. Only a confirmation this
+// process saw counts: a saved Connected record may predate a restart with
+// another account's key. One STS GetCallerIdentity call (free and global,
+// so it needs no region check) confirms it, as does a successful health
+// check; the answer is kept until a health check fails or the account's
+// role changes. Credentials of another account are recorded as
+// account_mismatch, so the account disconnects and nothing is read.
+func (conn *Service) confirmIdentity(ctx context.Context, account AccountRecord, health HealthRecord, credentials aws.CredentialsProvider, region string) error {
+	if account.Source != SourceConfig {
+		return nil
+	}
+	if conn.identityConfirmed(account) {
+		return nil
+	}
+	_, accountID, err := conn.identity(ctx, credentials, region)
+	if err == nil && accountID != "" && accountID != account.AccountID {
+		err = ErrAccountMismatch
+	}
+	if err != nil {
+		if errors.Is(err, ErrAccountMismatch) {
+			record := health
+			record.AccountID = account.AccountID
+			recordIdentityFailure(&record, err, conn.now().UTC())
+			_ = conn.store.SaveHealth(conn.storageOrg(), record)
+		}
+		return err
+	}
+	conn.setIdentityConfirmed(account, true)
+	return nil
+}
+
+func identityKey(account AccountRecord) string {
+	return account.RoleARN + "\x00" + account.ExternalID
+}
+
+func (conn *Service) identityConfirmed(account AccountRecord) bool {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	key, ok := conn.confirmed[account.AccountID]
+	return ok && key == identityKey(account)
+}
+
+// setIdentityConfirmed records, for this process only, whether the
+// account's credentials were last seen signing in to the account.
+func (conn *Service) setIdentityConfirmed(account AccountRecord, confirmed bool) {
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if confirmed {
+		conn.confirmed[account.AccountID] = identityKey(account)
+		return
+	}
+	delete(conn.confirmed, account.AccountID)
+}
+
 // lostAccessCause names why an account cannot be read now. The health check
 // reports both a missing and a rejected server identity as
 // no_server_identity; an account that was checked successfully before had an
 // identity that worked, so its loss is credentials that stopped working.
+// Credentials of another AWS account read account_mismatch.
 func lostAccessCause(code string, health HealthRecord) string {
 	switch {
 	case code == awsauth.ErrNoServerIdentity.Error() && !health.CheckedAt.IsZero():
 		return CauseCredentialsInvalid
 	case code == awsauth.ErrNoServerIdentity.Error():
 		return CauseNoServerIdentity
+	case code == ErrAccountMismatch.Error():
+		return CauseAccountMismatch
 	}
 	return CauseAccountDisconnected
 }

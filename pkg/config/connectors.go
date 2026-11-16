@@ -884,7 +884,13 @@ func connectorShapeError(value any, target reflect.Type, path string) error {
 		if reflect.TypeOf(value).AssignableTo(target) {
 			return nil
 		}
-		if reflect.TypeOf(value).Kind() == reflect.String && (target.Kind() == reflect.Bool || target.Kind() == reflect.Int) {
+		if target.Kind() == reflect.Float64 {
+			switch reflect.TypeOf(value).Kind() {
+			case reflect.Int, reflect.Int64, reflect.Float32:
+				return nil
+			}
+		}
+		if reflect.TypeOf(value).Kind() == reflect.String && (target.Kind() == reflect.Bool || target.Kind() == reflect.Int || target.Kind() == reflect.Float64) {
 			if _, err := connectorScalar(reflect.TypeOf(value), target, value); err == nil {
 				return nil
 			}

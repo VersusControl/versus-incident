@@ -97,7 +97,7 @@ func TestServicesListsEveryUnitService(t *testing.T) {
 	}
 }
 
-// TestThrottlingIsRecognisedOnEveryProtocol is the QA-372 repro: the
+// TestThrottlingIsRecognisedOnEveryProtocol reproduces a bug: the
 // fixture's throttle replies use each service's real error shape, so EC2
 // (EC2 query), Lambda and EKS (REST-JSON), S3 (REST-XML), SQS (JSON) and
 // CloudWatch (CBOR) all record throttled, never network.

@@ -1,6 +1,6 @@
 package controllers
 
-// aws_finops_stack_test.go — the integration gate for AWS FinOps (A8). The
+// aws_finops_stack_test.go — the integration gate for AWS FinOps. The
 // settings service, snapshot store, cost adapter, backend, signal source and
 // daily scheduler are wired the way cmd/main.go registerAWSSettingsController
 // and registerAWSFinOps wire them; the live connector config is the
@@ -239,7 +239,7 @@ func newFinOpsStackWith(t *testing.T, scenario string, connector config.AWSConne
 }
 
 // seedInventory commits the scenario's inventory and change history into the
-// snapshot store through its write API (the A1 collectors' commit path).
+// snapshot store through its write API (the AWS collectors' commit path).
 func (stack *finopsStack) seedInventory(scenario *awsfix.CostScenario) {
 	t := stack.t
 	raw, err := json.Marshal(scenario)
@@ -375,7 +375,7 @@ func observeFinOps(group string, value any) {
 
 // ---- suite ----
 
-// TestAWSFinOpsStackE2E is the A8 integration verdict; it writes
+// TestAWSFinOpsStackE2E is the AWS FinOps integration verdict; it writes
 // results/aws-finops-verdict.json when the harness supplies
 // HARNESS_RESULTS_DIR.
 func TestAWSFinOpsStackE2E(t *testing.T) {

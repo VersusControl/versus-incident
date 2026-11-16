@@ -1,0 +1,30 @@
+# Every connectors.aws.finops key set, plus an account owner, so the Go check
+# can prove each one reaches the loaded config unchanged.
+connectors:
+  aws:
+    enable: true
+    optionalData:
+      costExplorer: true
+    accounts:
+      - accountId: "111122223333"
+        displayName: Production
+        owner: platform
+        auth:
+          mode: default_chain
+    finops:
+      teamTagKey: squad
+      minIncreaseUsdPerMonth: 250
+      minDriverUsd: 75
+      targetCoverage: 0.7
+      maxPaidRequestsPerDay: 30
+      refreshTime: "07:30"
+      costSourceAccount: "999988887777"
+      budgets:
+        - {name: AWS total, scope: deployment, monthlyUsd: 42000}
+        - {name: Checkout, scope: team, value: checkout, monthlyUsd: 5000}
+        - {name: Production, scope: account, value: "111122223333", monthlyUsd: 30000}
+      accountGroups:
+        - {name: Production, accounts: ["111122223333"]}
+      report:
+        timezone: Europe/Berlin
+        slackSummary: true

@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import clsx from "clsx";
 import { Check, ChevronDown, CircleSlash, Download, Plus, Receipt, Search } from "lucide-react";
 import type { FinOpsAccountRow, FinOpsAccountsView } from "@/lib/api";
-import { fmtDay, fmtMoney } from "@/lib/finops";
+import { accountErrorText, fmtDay, fmtMoney } from "@/lib/finops";
 import { Sparkline } from "@/components/Sparkline";
 import { Estimated } from "./parts";
 
@@ -46,7 +46,7 @@ function StatusCell({ a, costSource }: { a: FinOpsAccountRow; costSource: boolea
           <CircleSlash size={11} aria-hidden="true" />
           Cost not readable
         </span>
-        {a.error_code && <code className="font-mono text-2xs text-ink-300">{a.error_code}</code>}
+        {a.error_code && <span className="text-2xs text-ink-300">{accountErrorText(a.error_code)}</span>}
       </span>
     );
   }

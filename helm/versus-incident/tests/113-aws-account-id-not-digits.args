@@ -1,0 +1,7 @@
+# The second account carries an ID with letters in it.
+--set
+connectors.aws.enable=true
+--set
+connectors.aws.accounts[0].accountId=111122223333
+--set
+connectors.aws.accounts[1].accountId=prod-account
