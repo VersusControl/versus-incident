@@ -1,123 +1,75 @@
-# Introduction AI SRE Agent
+# SRE Agent
 
-The AI Agent is an SRE agent that watches your systems and points
-out anything that looks new or unusual. The plan is to cover the
-three signals an SRE cares about — **logs, metrics, and traces** —
-and over time take on more of the routine work an on-call engineer
-does.
+The SRE Agent watches your logs so you don't have to. It learns what your
+normal logs look like, stays quiet about the things that always happen, and
+tells you only when something **new or unexpected** shows up. When it does, it
+explains the problem in a short incident: what happened, which service, how
+bad, and what to check first.
 
-**Logs are the first thing it understands.** It reads your
-application logs, learns what your "normal" log lines look like, and
-flags lines it has never seen before. The idea is simple: most log
-lines repeat themselves. If a brand-new line shows up, it usually
-means something new is happening, and you probably want to know.
-Metrics and traces will follow in later releases.
+![Before and after: on the left, a noisy log stream of thousands of repeating lines with one new checkout timeout hidden among them; on the right, the same stream after the agent has learned normal, with the repeating lines grouped as known and a single incident raised for the new checkout timeout](../docs/images/sre-agent-concept.svg)
 
-![AI Agent](../docs/images/ai-agent.png)
+## What it does
 
-The agent is **off by default** (`agent.enable: false`). It will not
-read anything, save any files, or start any background work until
-you turn it on.
+| Step | In plain words |
+|---|---|
+| **Watch** | Reads new lines from your log sources: a file, Loki, Elasticsearch, CloudWatch Logs, Graylog, Splunk or SigNoz. See [Data Sources](./data-sources.md). |
+| **Learn normal** | Groups lines that look alike into patterns and counts how often each one happens. A pattern seen often enough becomes **known**. |
+| **Tell you about the unusual** | Raises an incident for a pattern it has never seen, or for a known pattern that suddenly fires far more than usual (a [spike](./spike.md)). |
+| **Explain** | Writes the incident summary, severity and next steps. With an AI key, the AI writes them; without one, the agent still raises the incident with a clear templated summary. |
 
-## Why this is useful
+Secrets in your logs (tokens, keys, emails) are masked before the agent stores
+or sends anything. See [Redaction](./redaction.md).
 
-Most logs in production are boring and repeat over and over. A handful
-of message shapes (templates) usually account for almost all of the
-volume. The agent learns those shapes from your real traffic and then
-points out anything that doesn't fit. You don't have to write rules
-upfront — you just let it watch for a while.
+The agent is **off by default** (`agent.enable: false`). It reads nothing
+until you turn it on.
 
-## How a log line is processed
+## The mode journey: Training → Shadow → Detect
 
-Each time the agent checks for new logs, every line goes through a
-short series of steps. If a step throws the line out, the next steps
-are skipped.
+You move the agent through three modes as you build trust in it.
 
-![How one log line is processed: read it, hide sensitive bits, decide whether it is worth learning from (if not, ignore it), group it with similar lines, remember the group in the catalog, then act on the agent mode: training just learns it, shadow pretends to alert, detect sends a real incident. The catalog keeps learning as traffic changes](../docs/images/ai-agent-pipeline-flow.svg)
+| Mode | What it does | Sends alerts? | Page |
+|---|---|---|---|
+| `training` | Learns your normal patterns. | No | [Training Mode](./training-mode.md) |
+| `shadow` | Keeps learning, and records what it *would* have alerted on so you can review it. | No | [Shadow Mode](./shadow-mode.md) |
+| `detect` | Raises real incidents for new patterns and spikes. Incidents go to your channels; high and critical ones also go to on-call when it is enabled. | Yes | [AI Detect Mode](./ai-detect-mode.md) |
 
-In plain words:
+A typical rollout:
 
-1. **Read** a new log line from one of your sources (a file, an
-   Elasticsearch index, etc.).
-2. **Hide secrets.** Tokens, API keys, passwords, and similar things
-   are replaced before anything else looks at the line.
-3. **Filter.** Boring lines (`200 OK`, health checks, debug noise) are
-   dropped so they don't fill up the catalog.
-4. **Group.** Lines that look the same are grouped together. The
-   agent doesn't keep every line — only one entry per "shape" of
-   message.
-5. **Save.** That group is saved, along with how many times it has
-   been seen.
-6. **Decide what to do** based on the agent's mode: just learn
-   (training), pretend to alert (shadow), or actually send an
-   incident when the line is brand new (detect).
+1. **Training** for a few days, until new patterns stop appearing often.
+2. **Shadow** for a release cycle. Review what it would have flagged and mark
+   the harmless ones as known.
+3. **Detect** when the shadow list is mostly real problems.
 
-## Parts of the agent
+In OSS you set the mode with `agent.mode` in `config.yaml` or the `AGENT_MODE`
+environment variable, then restart. What the agent has learned is kept across
+the switch. _Enterprise_ admins can also switch the mode from **Admin →
+Runtime mode** in the UI.
 
-Each part has its own page with the full settings and examples.
+```yaml
+agent:
+  enable: true
+  mode: training     # training | shadow | detect
+```
 
-### 1. [Log sources](./configuration.md#signal-sources)
-Where the agent reads logs from. Two kinds are supported today: a
-local file reader (for testing or simple setups) and an
-Elasticsearch reader (for production clusters). Both remember where
-they left off, so a restart never replays old lines or skips new
-ones.
+## Try it in minutes
 
-### 2. [Hiding secrets](./redaction.md)
-Before anything else, the agent replaces sensitive values (JWTs,
-AWS keys, bearer tokens, emails, UUIDs, user agents, etc.) with a
-placeholder. This runs first so secrets never reach the rest of
-the agent or any external AI model.
+The [AIOps SRE Quickstart](./quickstart.md) runs Versus next to a local Loki
+with Docker Compose. You watch training learn the demo logs, switch to detect,
+send an error the agent has never seen, and see the incident in the UI and in
+Slack.
 
-### 3. [Filter rules](./regex.md)
-A short list of named rules plus an optional catch-all
-(`default_pattern`) decide which lines are worth learning from. Any
-line that doesn't match anything is thrown away before grouping. Use
-`default_pattern: ".*"` if you want the agent to learn from every
-line.
+## More of the agent
 
-### 4. [Grouping (the miner)](./miner.md)
-The grouper looks at the words in each line and puts similar lines
-together. The result is a template like
-`GET /api/users/<*> 200`, where `<*>` stands for the parts that
-change (IDs, timestamps, IPs, etc.). You can tune how strict the
-grouping is.
+| Page | What it covers |
+|---|---|
+| [Spike Detection](./spike.md) | Paging on a known error that suddenly fires far more than usual. |
+| [AI Analyze](./ai-analyze-mode.md) | A deeper AI investigation of one incident, on demand. |
+| [DevOps Agent Chat](./devops-agent.md) | Ask questions about your system in a chat, with cited evidence. |
+| [Service Detection](./service-detection.md) | How each log line gets a service name. |
+| [Service Heatmap](./service-heatmap.md) | Every service's recent health on one screen. |
+| [Incident Reports](./incident-report.md) | A shareable summary card of your incidents. |
+| [Configuration](./configuration.md) | Every agent setting and environment variable. |
 
-### 5. [Catalog](./catalog.md)
-The agent's long-term memory. Every template it learns is saved
-with: when it was first seen, when it was last seen, how many times
-it has appeared, an average rate, the filter rule that matched it,
-and any labels you add. The catalog is saved to backend storage.
-
-### 6. The worker and modes
-The worker is the loop that runs everything on a timer. There are
-three modes:
-
-- **`training`** — just watch and learn. No alerts.
-- **`shadow`** — watch and learn, plus write a "would have alerted"
-  log entry every time a line would have triggered an alert. Still
-  no real alerts. Good for checking the agent's judgement before
-  going live.
-- **`detect`** — actually create incidents for lines the agent has
-  never seen before. An AI SRE triages each one and writes the
-  summary, severity, and suggested next steps before the incident
-  is sent through every configured channel.
-
-## Suggested rollout
-
-1. Run in **training** for a few days. Check that the catalog
-   stops growing quickly and the templates make sense.
-2. Switch to **shadow**. Watch the `agent[shadow]: would alert ...`
-   log lines for one release cycle.
-3. Switch to **detect**. Triage what the agent reports and keep
-   labeling patterns on the **Patterns** page in the admin UI.
-
-## Where to next
-
-- [Getting Started](./getting-started.md) — a short walkthrough
-  using the file reader and sample logs.
-- [Configuration](./configuration.md) — every setting, every
-  environment variable.
-- Deep dives: [Hiding secrets](./redaction.md) ·
-  [Filter rules](./regex.md) · [Grouping](./miner.md) ·
-  [Catalog](./catalog.md).
+How the agent masks, filters, groups and remembers lines is explained in the
+Core Concept pages: [Redaction](./redaction.md), [Regex](./regex.md),
+[Miner](./miner.md) and [Catalog](./catalog.md).

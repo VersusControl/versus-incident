@@ -198,7 +198,9 @@ curl -X POST http://localhost:3000/api/incidents \
 
 Final Result:
 
-![Slack Alert](../docs/images/versus-result-02.png)
+![One order-service alert rendered by its custom template in Slack, Telegram and Email, with Microsoft Teams, Viber and Lark listed as other channels](../docs/images/webhook-result-channels.svg)
+
+*One incident, a different template for each channel.*
 
 ## Advanced: Dynamic Channel Routing
 Override Slack channels per alert using query parameters:

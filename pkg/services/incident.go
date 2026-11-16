@@ -18,8 +18,48 @@ import (
 	m "github.com/VersusControl/versus-incident/pkg/models"
 )
 
+// CreateIncident ingests one inbound alert. It returns an error only when the
+// incident could not be recorded: once the record is stored, a channel or
+// on-call failure is written onto the incident instead of being returned, so a
+// sender that retries on error never turns one alert into many incidents.
 func CreateIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) error {
-	return createIncident(teamID, content, incidentCreateOptions{}, params...).Err
+	return IngestIncident(teamID, content, params...).Err
+}
+
+// IntakeOutcome is what an inbound alert produced. Stored reports whether the
+// incident record was written. NotifyStatus and NotifyError carry the channel
+// fan-out result ("sent", "partial", "failed", "none"), and OnCallError the
+// escalation failure, all of which are also persisted on the incident.
+type IntakeOutcome struct {
+	IncidentID   string
+	Stored       bool
+	NotifyStatus string
+	NotifyError  string
+	OnCallError  string
+	// Err is set only when the incident was not stored; retrying is then
+	// safe because nothing was recorded.
+	Err error
+}
+
+// IngestIncident is CreateIncident with the full outcome, for intake
+// endpoints that report the delivery result to the sender.
+func IngestIncident(teamID string, content *map[string]interface{}, params ...*map[string]string) IntakeOutcome {
+	result := createIncident(teamID, content, incidentCreateOptions{}, params...)
+	outcome := IntakeOutcome{
+		IncidentID:   result.IncidentID,
+		Stored:       result.Stored,
+		NotifyStatus: result.NotifyStatus,
+		NotifyError:  result.NotifyError,
+		OnCallError:  result.OnCallError,
+		Err:          result.Err,
+	}
+	if result.Stored {
+		if result.Err != nil {
+			log.Printf("incident: %s stored; delivery error recorded on the incident: %s", result.IncidentID, utils.SafeErrorText(result.Err))
+		}
+		outcome.Err = nil
+	}
+	return outcome
 }
 
 type incidentCreateOptions struct {
@@ -33,7 +73,10 @@ type incidentCreateOptions struct {
 type incidentCreateResult struct {
 	IncidentID   string
 	Decision     EmitDecision
+	Stored       bool
 	NotifyStatus string
+	NotifyError  string
+	OnCallError  string
 	Err          error
 }
 
@@ -70,7 +113,7 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 		return result
 	case EmitDivert:
 		if decision.DeliveryHandled && options.Detection != nil {
-			result.Err = decision.DeliveryError
+			result.Err = utils.SafeError(decision.DeliveryError)
 			if store != nil {
 				persistTerminalDetectionIncident(&result, teamID, *content, options, decision)
 			}
@@ -109,6 +152,10 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 	// persisted and still gets its AckURL / on-call per the normal rules — only
 	// the delivery channel set changes.
 	providers = applyEmitRouting(decision, providers)
+	attempted := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		attempted = append(attempted, provider.Name())
+	}
 
 	alert := core.NewAlert(providers...)
 
@@ -187,6 +234,7 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 		if !options.SkipOnCall {
 			rec.OnCallTriggered = !resolved && cfg.OnCall.Enable
 		}
+		rec.ChannelsEnabled = attempted
 		rec.NotifyStatus = "pending"
 		if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
 			if utils.IsKubernetesIssueIncident(contentClone) {
@@ -194,6 +242,8 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 				return result
 			}
 			log.Printf("incident: persist warning: %v", err)
+		} else {
+			result.Stored = true
 		}
 		result.NotifyStatus = rec.NotifyStatus
 	}
@@ -202,29 +252,34 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 	// legacy SendAlert) does NOT short-circuit on the first failure —
 	// a broken Slack must not silently mute Telegram or Email.
 	fanOut := alert.SendAllAlerts(incident)
-	sendErr := fanOut.Err
+	sendErr := utils.SafeError(fanOut.Err)
 
 	// Stamp the final fan-out outcome so the UI can show whether the
-	// alert actually reached its channels. ChannelsNotified is now
-	// the list of providers that SUCCEEDED, not the list of providers
-	// that were enabled in config.
+	// alert actually reached its channels. ChannelsEnabled is every
+	// channel the fan-out tried, ChannelsNotified the ones that
+	// succeeded; their difference is the failed set. "none" means there
+	// was no channel to try, which is not the same as a delivery.
 	if store != nil && rec != nil {
 		if options.Detection != nil {
 			if latest, err := store.GetIncident(rec.ID); err == nil {
 				rec = latest
 			}
 		}
+		rec.ChannelsEnabled = attempted
 		rec.ChannelsNotified = fanOut.Succeeded
 		switch {
+		case len(attempted) == 0:
+			rec.NotifyStatus = "none"
+			rec.NotifyError = ""
 		case sendErr == nil:
 			rec.NotifyStatus = "sent"
 			rec.NotifyError = ""
 		case len(fanOut.Succeeded) == 0:
 			rec.NotifyStatus = "failed"
-			rec.NotifyError = sendErr.Error()
+			rec.NotifyError = utils.SafeErrorText(sendErr)
 		default:
 			rec.NotifyStatus = "partial"
-			rec.NotifyError = sendErr.Error()
+			rec.NotifyError = utils.SafeErrorText(sendErr)
 		}
 		if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
 			if utils.IsKubernetesIssueIncident(contentClone) {
@@ -233,6 +288,7 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 			log.Printf("incident: persist status warning: %v", err)
 		}
 		result.NotifyStatus = rec.NotifyStatus
+		result.NotifyError = rec.NotifyError
 	}
 
 	// On-call escalation. We still kick this off even when *some*
@@ -257,7 +313,9 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 		} else {
 			workflow := core.GetOnCallWorkflow()
 			if err := workflow.StartContext(ctx, incident.ID, cfg.OnCall); err != nil {
+				err = utils.SafeError(err)
 				oncallErr = err
+				result.OnCallError = err.Error()
 				// Walk back the optimistic OnCallTriggered flag set at
 				// build time so the UI does not lie. Best-effort
 				// persistence; the alert outcome above is the source of
@@ -338,7 +396,7 @@ func buildHandledDetectionIncident(teamID string, content map[string]interface{}
 	notifyError := ""
 	if decision.DeliveryError != nil {
 		notifyStatus = "failed"
-		notifyError = decision.DeliveryError.Error()
+		notifyError = utils.SafeErrorText(decision.DeliveryError)
 	}
 	rec, err := store.GetIncident(options.IncidentID)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {

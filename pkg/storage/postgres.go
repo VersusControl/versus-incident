@@ -1341,8 +1341,9 @@ func (p *postgresProvider) CountIncidentsByServiceSinceForScope(scope tenancy.Or
 		FROM (
 			SELECT COALESCE(
 				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^(Severity|severity|level|priority)$" flag "i").value') #>> '{}',
-				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^(labels|commonLabels)$" flag "i").value.keyvalue() ? (@.key like_regex "^(Severity|severity|level|priority)$" flag "i").value') #>> '{}',
-				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^Trigger$" flag "i").value.keyvalue() ? (@.key like_regex "^Dimensions$" flag "i").value[*] ? (@.keyvalue() ? (@.key like_regex "^Name$" flag "i").value like_regex "^(Severity|severity|level|priority)$" flag "i").keyvalue() ? (@.key like_regex "^Value$" flag "i").value') #>> '{}'
+				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^(labels|commonLabels)$" flag "i").value.keyvalue() ? (@.key like_regex "^(Severity|severity|level|priority)$" flag "i").value', '{}', true) #>> '{}',
+				jsonb_path_query_first(content, '$ ? ((@.keyvalue() ? (@.key like_regex "^alerts$" flag "i")).value.type() == "array" && (!exists(@.keyvalue() ? (@.key like_regex "^commonLabels$" flag "i" && @.value.type() == "object")) || (@.keyvalue() ? (@.key like_regex "^alerts$" flag "i")).value.size() == 1)).keyvalue() ? (@.key like_regex "^alerts$" flag "i").value[0] ? (@.type() == "object").keyvalue() ? (@.key like_regex "^labels$" flag "i").value.keyvalue() ? (@.key like_regex "^(Severity|severity|level|priority)$" flag "i").value', '{}', true) #>> '{}',
+				jsonb_path_query_first(content, '$.keyvalue() ? (@.key like_regex "^Trigger$" flag "i").value.keyvalue() ? (@.key like_regex "^Dimensions$" flag "i").value[*] ? (@.keyvalue() ? (@.key like_regex "^Name$" flag "i").value like_regex "^(Severity|severity|level|priority)$" flag "i").keyvalue() ? (@.key like_regex "^Value$" flag "i").value', '{}', true) #>> '{}'
 			) AS severity
 			FROM vs_incidents
 			WHERE org_id = ANY($1) AND service = $2 AND created_at >= $3

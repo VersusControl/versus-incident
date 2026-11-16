@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/stats"
@@ -132,7 +133,7 @@ type spikeResult struct {
 // evalSpike scores one tick against the pre-fold baseline (mean/std for the
 // tick's time slot). It is pure: the same inputs always yield the same result.
 //
-//	rate  = tickFreq / pollSeconds (per-second; poll-independent)
+//	rate  = tickFreq / rateSeconds(pollSeconds, window) (per-second)
 //	z     = (rate − mean) / max(std, floor)
 //	spike = (confident && z ≥ Z) || (AbsCeiling>0 && tickFreq ≥ AbsCeiling)
 //
@@ -141,9 +142,16 @@ type spikeResult struct {
 // warmup gate (total sightings ≥ MinBaselineCount) holds the z-score until the
 // baseline is trustworthy.
 func evalSpike(mean, std float64, prevCount, tickFreq int, p spikeParams) spikeResult {
+	return evalSpikeOver(mean, std, prevCount, tickFreq, 0, p)
+}
+
+// evalSpikeOver is evalSpike for a tick whose read spans window of source
+// time. The rate divides by the same seconds the baseline fold uses for that
+// tick (rateSeconds), so a tick is always scored like it was learned.
+func evalSpikeOver(mean, std float64, prevCount, tickFreq int, window time.Duration, p spikeParams) spikeResult {
 	rate := float64(tickFreq)
-	if p.PollSeconds > 0 {
-		rate = float64(tickFreq) / p.PollSeconds
+	if secs := rateSeconds(p.PollSeconds, window); secs > 0 {
+		rate = float64(tickFreq) / secs
 	}
 	res := spikeResult{Z: stats.ZScore(rate, mean, std), Rate: rate}
 
@@ -165,6 +173,24 @@ func evalSpike(mean, std float64, prevCount, tickFreq int, p spikeParams) spikeR
 		res.Spike = true
 	}
 	return res
+}
+
+// rateSeconds is the divisor that turns a tick's line count into a per-second
+// rate: the source time the tick actually read when that is longer than one
+// poll, else the poll interval. A catch-up read (a fresh install or lost
+// cursor reading the lookback window, then a capped page catching up) covers
+// minutes of history in one tick; dividing it by one poll would learn several
+// times the real rate. Never shorter than a poll, so a burst landing inside a
+// single tick still scores at full strength and steady ticks score as before.
+// Zero poll seconds means raw-count mode and returns 0.
+func rateSeconds(pollSeconds float64, window time.Duration) float64 {
+	if pollSeconds <= 0 {
+		return 0
+	}
+	if w := window.Seconds(); w > pollSeconds {
+		return w
+	}
+	return pollSeconds
 }
 
 // spikeReason renders the deterministic, human-readable explanation stored in

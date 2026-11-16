@@ -15,7 +15,13 @@ import clsx from "clsx";
 import { api } from "@/lib/api";
 import { fmtAbs, fmtRel, incidentTitle } from "@/lib/format";
 import { incidentSeverity } from "@/lib/severity";
-import { deliveryErrorLabel, hasDeliveryError, safeIncidentHref } from "@/lib/incidentPresentation";
+import {
+  deliveryErrorLabel,
+  hasDeliveryError,
+  notifiedCardView,
+  notifyStatusDisplay,
+  safeIncidentHref,
+} from "@/lib/incidentPresentation";
 import { TopBar } from "@/components/TopBar";
 import { PageHeader } from "@/components/PageHeader";
 import { SeverityBadge } from "@/components/SeverityBadge";
@@ -88,6 +94,7 @@ export function IncidentDetailPage() {
     content,
     data?.highest_observed_severity,
     data?.highest_notified_severity,
+    data?.severity,
   );
   const category = pickString(content, "Category", "category");
   const confidence = pickNumber(content, "Confidence", "confidence");
@@ -107,7 +114,7 @@ export function IncidentDetailPage() {
 
   const isAgent = !!patternID || (data?.source ?? "").startsWith("agent:");
 
-  const channels = data?.channels_notified ?? [];
+  const notified = notifiedCardView(data ?? {});
 
   const statusPill = data ? (
     data.resolved ? (
@@ -340,19 +347,15 @@ export function IncidentDetailPage() {
                         </>
                       }
                     />
-                    {channels.map((c) => (
-                      <TimelineRow
-                        key={c}
-                        icon={
-                          data.notify_status === "failed" ? (
-                            <XCircle size={12} className="text-sev-critical" />
-                          ) : (
-                            <CheckCircle2 size={12} className="text-sev-ok" />
-                          )
-                        }
-                        label={`notified ${c}`}
-                      />
-                    ))}
+                    {notified.rows
+                      .filter((row) => row.outcome === "sent")
+                      .map((row) => (
+                        <TimelineRow
+                          key={row.channel}
+                          icon={<CheckCircle2 size={12} className="text-sev-ok" />}
+                          label={`notified ${row.channel}`}
+                        />
+                      ))}
                     {hasDeliveryError(data) && (
                       <TimelineRow
                         icon={<XCircle size={12} className="text-sev-critical" />}
@@ -473,7 +476,9 @@ export function IncidentDetailPage() {
                         </StateRow>
                       )}
                       <StateRow label="Notified">
-                        {data.notify_status === "sent" ? (
+                        {notifyStatusDisplay(data) === "nothing sent" ? (
+                          <span className="text-ink-400">nothing sent</span>
+                        ) : data.notify_status === "sent" ? (
                           <span className="inline-flex items-center gap-1 text-sev-ok">
                             <CheckCircle2 size={11} aria-hidden /> sent
                           </span>
@@ -518,36 +523,38 @@ export function IncidentDetailPage() {
                     <span className="card-title">Notified</span>
                   </div>
                   <div className="card-body">
-                    {channels.length === 0 && (
-                      <p className="text-xs text-ink-400">
-                        None enabled at the time.
-                      </p>
+                    {notified.empty && (
+                      <p className="text-xs text-ink-400">{notified.empty}</p>
                     )}
                     <ul className="space-y-1.5">
-                      {channels.map((c) => (
-                        <li
-                          key={c}
-                          className="flex items-center gap-2 text-xs text-ink-100"
-                        >
-                          <ChannelIcon id={c} size={13} />
-                          <span className="min-w-0 flex-1 truncate">{c}</span>
-                          {data.notify_status === "failed" ? (
-                            <span className="inline-flex items-center gap-1 text-sev-critical">
-                              <XCircle size={12} aria-hidden /> failed
-                            </span>
-                          ) : data.notify_status === "sent" || data.notify_status === "partial" ? (
-                            <span className="inline-flex items-center gap-1 text-sev-ok">
-                              <CheckCircle2 size={12} aria-hidden /> sent
-                            </span>
-                          ) : data.notify_status ? (
-                            <Pill>{data.notify_status}</Pill>
-                          ) : null}
+                      {notified.rows.map((row) => (
+                        <li key={row.channel} className="text-xs text-ink-100">
+                          <div className="flex items-center gap-2">
+                            <ChannelIcon id={row.channel} size={13} />
+                            <span className="min-w-0 flex-1 truncate">{row.channel}</span>
+                            {row.outcome === "failed" ? (
+                              <span className="inline-flex items-center gap-1 text-sev-critical">
+                                <XCircle size={12} aria-hidden /> failed
+                              </span>
+                            ) : row.outcome === "sent" ? (
+                              <span className="inline-flex items-center gap-1 text-sev-ok">
+                                <CheckCircle2 size={12} aria-hidden /> sent
+                              </span>
+                            ) : (
+                              <Pill>pending</Pill>
+                            )}
+                          </div>
+                          {row.reason && (
+                            <p className="mt-1 break-all rounded-md bg-sev-critical/10 p-2 font-mono text-2xs leading-snug text-sev-critical">
+                              {row.reason}
+                            </p>
+                          )}
                         </li>
                       ))}
                     </ul>
-                    {hasDeliveryError(data) && data.notify_error && (
+                    {notified.unattributedError && (
                       <p className="mt-2 break-all rounded-md bg-sev-critical/10 p-2 font-mono text-2xs leading-snug text-sev-critical">
-                        {data.notify_error}
+                        {notified.unattributedError}
                       </p>
                     )}
                   </div>
@@ -559,7 +566,17 @@ export function IncidentDetailPage() {
                     <span className="card-title">On-call</span>
                   </div>
                   <div className="card-body text-xs">
-                    {data.oncall_triggered ? (
+                    {data.oncall_error ? (
+                      <>
+                        <span className="inline-flex items-center gap-1.5 text-sev-critical">
+                          <XCircle size={12} aria-hidden />
+                          escalation failed
+                        </span>
+                        <p className="mt-2 break-all rounded-md bg-sev-critical/10 p-2 font-mono text-2xs leading-snug text-sev-critical">
+                          {data.oncall_error}
+                        </p>
+                      </>
+                    ) : data.oncall_triggered ? (
                       <span className="inline-flex items-center gap-1.5 text-sev-warn">
                         <PhoneCall size={12} aria-hidden />
                         escalation triggered

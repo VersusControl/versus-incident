@@ -2,135 +2,108 @@
 
 _Enterprise_
 
-Run the Enterprise SRE Agent as **multi-instance**. HA is the same binary you already run, just configured for more than one replica.
+## Concept
 
-> Pick the guide that matches how you deploy:
->
-> | Guide | Use it to | Entrypoint |
-> |---|---|---|
-> | [Docker Compose](./docker.md) | See HA on your laptop in ~2 minutes — 2 replicas + 1 Postgres + an nginx load balancer. | `docker compose up -d` |
-> | [Kubernetes](./kubernetes.md) | Apply raw manifests (StatefulSet, headless Service, PDB, NetworkPolicy) you can read top to bottom. | `kubectl apply -k .` |
-> | [Helm](./helm.md) | Install the production chart and flip HA on with one values file. | `helm install … -f values-ha.yaml` |
+High availability runs Versus Enterprise as several replicas behind one load
+balancer, all sharing one Postgres. If a replica stops, the others keep serving
+the UI, the API and incoming alerts.
 
-## Before you start
+The replicas split the agent's work between them: each data source and each
+scheduled job, such as the SLO check, runs on exactly one replica. So two
+replicas never read the same source twice or page you twice for the same
+incident. Sign-ins are shared too: log in once and every replica accepts your
+session, so the load balancer needs no sticky sessions.
 
-| You need | Why |
+![Enterprise runs as replicas on shared Postgres: load-balanced Versus Enterprise replicas own separate source and job shares while using shared Postgres for incidents, sessions, and managed secrets](../../docs/images/versus-incident-ha-overview.svg)
+
+## Example
+
+You run three replicas, `versus-0`, `versus-1` and `versus-2`, with five log
+and metric sources. Each source is read by one replica.
+
+- During a rolling upgrade, `versus-1` restarts. The load balancer sends your
+  requests to the other two; you stay signed in.
+- The sources owned by `versus-1` pause until it is back, then carry on. No
+  other replica picks them up in the meantime, so nothing is read or paged
+  twice.
+
+## What you see
+
+Each replica logs its place in the set when it starts:
+
+```text
+enterprise: HA mode — instance 1 of 3; partitioning signal sources and scheduler jobs by hash-ownership
+```
+
+The built-in admin password is printed once, by whichever replica starts
+first. In the UI nothing changes: every replica shows the same incidents,
+settings and members.
+
+## Turn it on
+
+Every replica needs:
+
+| Setting | Value |
 |---|---|
-| A **Versus Enterprise license** (`LICENSE_KEY`) | HA is an enterprise capability. The stack still boots without a key (community mode) so you can see the topology, but session/secret convergence needs a real key. |
-| The **enterprise image** | HA runs `ghcr.io/versuscontrol/versus-enterprise` (private). The OSS image does not include the HA path. |
-| **One shared Postgres** | Every replica reads and writes the SAME Postgres. `STORAGE_TYPE=postgres` is **required** for more than one replica (see below). |
+| Image | `ghcr.io/versuscontrol/versus-enterprise` |
+| `LICENSE_KEY` | Your license key. Every replica also needs outbound HTTPS to `versusincident.com` to renew it (see [Key renewal](../getting-started.md#key-renewal)). |
+| `STORAGE_TYPE` | `postgres`. Versus refuses to start with `file` storage and more than one replica. |
+| `POSTGRES_DSN` | The same database on every replica. |
+| `INSTANCE_COUNT` | The number of replicas, for example `3`. |
+| `POD_NAME` | This replica's name, ending in its number: `versus-0`, `versus-1`, … Each replica needs a different number. |
 
-## How HA works
+On Kubernetes, a StatefulSet sets `POD_NAME` for you. With Docker Compose you
+set it per service.
 
-![Load-balanced Versus Enterprise replicas own separate source and job shares while using shared Postgres for incidents, sessions, and managed secrets](../../docs/images/versus-incident-ha-overview.svg)
+Pick your deployment:
 
-The binary expects exactly four things — every guide here satisfies them:
+| Guide | What it runs | Start with |
+|---|---|---|
+| [Docker Compose](./docker.md) | 2 replicas, Postgres and an nginx load balancer on your laptop | `docker compose up -d` |
+| [Kubernetes](./kubernetes.md) | 3 replicas from plain manifests | `kubectl apply -k .` |
+| [Helm](./helm.md) | 3 replicas from the Versus chart | `helm install … -f values-ha.yaml` |
 
-### 1. Shared Postgres
+## Reference
 
-All replicas point at the **same** `POSTGRES_DSN`. Postgres is the single source
-of truth for incidents, sessions, and managed secrets.
+### Trade-off
 
-`STORAGE_TYPE=postgres` is **mandatory with more than one replica**. The file
-backend is single-node only, so the binary **refuses to start** when it sees a
-`file` store with `INSTANCE_COUNT` greater than 1 — it fails fast rather than let
-two replicas silently diverge.
+A source or job owned by a replica that is down waits until that replica comes
+back. Incidents, sign-ins and the UI stay available the whole time, because
+any replica can serve them. On Kubernetes the StatefulSet restarts the replica
+under the same name, so it takes back the same share.
 
-### 2. Instance identity
+### One source per signal
 
-Each replica needs a stable identity so the binary can divide work between them:
+Each source is read by one replica, so watch a given service signal from one
+source only. If two sources report the same service and metric, two replicas
+could learn the same signal.
 
-| Variable | What it is |
-|---|---|
-| `INSTANCE_COUNT` | The total number of replicas (e.g. `3`). |
-| `POD_NAME` | This replica's name; its **trailing ordinal** is the instance index — `versus-0` → 0, `versus-1` → 1, `versus-2` → 2. |
+### OSS
 
-On **Kubernetes** the StatefulSet supplies `POD_NAME` automatically through the
-Downward API. On **Docker Compose** you set it explicitly per replica
-(`POD_NAME: versus-0`, `POD_NAME: versus-1`). Either way the result is the same:
-each replica knows its own index out of `INSTANCE_COUNT`.
+The OSS image does not split work. Every instance would read every source and
+page for the same incident, and the instances would overwrite each other's
+learned log patterns. Run OSS as a single instance. Run HA on the Enterprise
+image with a license key: without one, there is no built-in admin and the
+Enterprise screens stay locked.
 
-### 3. No duplicate pages
+### Encryption key
 
-The binary partitions **signal sources** and the **SLO scheduler job** across
-replicas by hash-ownership: each unit of work is owned by exactly one replica,
-chosen by hashing its key over `INSTANCE_COUNT`. So three replicas split the
-sources between them and **never double-page** on the same incident.
+Versus generates its encryption key on the first licensed start and shares it
+with every replica through Postgres. To supply your own, set
+`VERSUS_ENTERPRISE_SECRET_KEY` (base64 of 32 bytes, for example from
+`openssl rand -base64 32`) to the same value on every replica.
 
-The agent's **learned log-pattern catalog** is HA-safe in the same spirit:
-Enterprise keeps each replica's learning separated so replicas **never overwrite
-each other's learned log patterns**. You get the agent's learning across every
-replica without clobbering.
+### Secrets
 
-### 4. Sessions and secrets converge through Postgres
-
-The managed secrets — the **SSO session key**, the **AI master key**, and the
-**break-glass admin-token hash** — are generated **once** by whichever replica
-wins the race, then shared with the others through Postgres. Because every
-replica reads the same keys:
-
-- A login (SSO or the built-in admin) on **one** replica is valid on **all** of
-  them — the load balancer can round-robin freely, no sticky sessions needed.
-- The default-admin password is printed **once**, by the replica that generated
-  it (see [Getting Started](../getting-started.md) for the bootstrap flow).
-
-The only secret env each replica needs is `LICENSE_KEY` (plus the optional
-[bring-your-own-key](#bring-your-own-encryption-key-optional) `VERSUS_ENTERPRISE_SECRET_KEY`).
-
-## The tradeoff
-
-HA spreads work across replicas; it does **not** auto-failover an individual
-scheduler job the instant its owner dies. A hash-owned job (for example the SLO
-evaluation) **pauses while its owning pod is down** and resumes once the pod is
-rescheduled and re-claims its partition. Incidents, sessions, and the console
-stay available throughout (they live in Postgres and any replica serves them);
-only that one owned job waits for its pod to come back. This is the accepted
-tradeoff for a simple, split-brain-free partitioning model.
-
-## Community / OSS behavior
-
-> **HA needs the enterprise image.** Instance partitioning — source ownership,
-> the single-owner SLO job, secret convergence, and the HA-safe log-pattern
-> catalog — only runs on `ghcr.io/versuscontrol/versus-enterprise` with a
-> `LICENSE_KEY`.
-
-The open-source / community binary has **no instance partitioning**, so running
-more than one OSS instance against the same store is **not supported for the
-agent**:
-
-- Every instance would poll **every** source, so you'd get duplicate work and
-  duplicate emits on the same incident.
-- The log-pattern catalog is written **last-writer-wins**, so the instances would
-  **clobber each other's learned log patterns**.
-
-This is expected community behavior, not a bug. Run the **OSS agent as a single
-instance**; use **Enterprise** when you need HA. Enterprise makes the agent's
-learning HA-safe across replicas, while OSS stays single-instance.
-
-## Bring-your-own encryption key (optional)
-
-By default the enterprise encryption key is generated automatically on first
-licensed boot and converges through Postgres. If your policy requires you to
-supply it, set `VERSUS_ENTERPRISE_SECRET_KEY` on every replica to the same value.
-Leave it unset to let Versus manage the key for you.
-
-## Secret handling
-
-- **Never commit a real `LICENSE_KEY` or DSN.** Every guide keeps them in a
-  gitignored `.env` (Compose / Kubernetes) or a Helm `--set` / existing Secret,
-  with a committed `.env.example` placeholder.
-- The license is mounted as an **env var from a Secret**. It is an offline-
-  verified JWT — never phoned home.
-- The Postgres password in the examples is a clearly-labelled **local dev
-  default**. For production, use a managed Postgres (e.g. RDS) and set
-  `sslmode=require` in the DSN.
+- Pass `LICENSE_KEY` and the DSN from the environment or a Kubernetes Secret.
+  Never commit them.
+- The example Postgres passwords are local development defaults. In production,
+  use a managed Postgres and `sslmode=require`.
+- The examples set `VERSUS_ENTERPRISE_COOKIE_INSECURE=1` so sign-in works over
+  plain HTTP on your laptop. Never set it in production.
 
 ## See also
 
-- [Docker Compose](./docker.md) — the fastest way to see HA work end to end.
-- [Kubernetes](./kubernetes.md) — raw manifests that mirror the chart.
-- [Helm](./helm.md) — the production install.
-- [Getting Started](../getting-started.md) — first-boot bootstrap and the
-  default admin.
-- [Single Sign-On (SSO)](../sso/overview.md) — the sessions that converge across
-  replicas.
+- [Getting Started](../getting-started.md): the license and the built-in admin.
+- [Single Sign-On](../sso/overview.md): sessions shared by every replica.
+- [Helm Chart](../../configuration/helm.md): the full chart reference.

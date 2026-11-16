@@ -24,10 +24,6 @@ docs
 examples
 *.md
 
-# Connector settings are mounted or written inline in config.yaml; a copy in
-# the image would replace inline connectors.
-config/connectors.yaml
-
 # Local dev data, scratch, and secrets
 local
 data

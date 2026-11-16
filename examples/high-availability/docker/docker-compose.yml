@@ -59,7 +59,7 @@ services:
       - ./config:/app/config:ro
       - versus-0-data:/app/data
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -93,7 +93,7 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5

@@ -73,7 +73,11 @@ func marshalToolError(code core.ToolErrorCode, message string) string {
 
 func (adapter *invokableTool) invoke(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
 	if adapter.timeout <= 0 {
-		return adapter.impl.Invoke(ctx, args)
+		result, err := adapter.impl.Invoke(ctx, args)
+		if err != nil && ctx.Err() != nil {
+			return nil, adapter.contextError(ctx.Err())
+		}
+		return result, err
 	}
 
 	timedCtx, cancel := context.WithTimeout(ctx, adapter.timeout)
@@ -82,23 +86,42 @@ func (adapter *invokableTool) invoke(ctx context.Context, args json.RawMessage) 
 	type invocation struct {
 		result *core.ToolResult
 		err    error
+		// ctxErr is the context state when the backend returned, so a
+		// cancellation that lands afterwards does not relabel the result.
+		ctxErr error
 	}
 	done := make(chan invocation, 1)
 	go func() {
 		result, err := adapter.impl.Invoke(timedCtx, args)
-		done <- invocation{result: result, err: err}
+		done <- invocation{result: result, err: err, ctxErr: timedCtx.Err()}
 	}()
 
 	select {
 	case <-timedCtx.Done():
-		if errors.Is(timedCtx.Err(), context.Canceled) {
-			return nil, core.NewToolError(core.ToolErrorCancelled, "tool run was cancelled", timedCtx.Err())
-		}
-		message := fmt.Sprintf("tool %q timed out after %s", adapter.impl.Name(), adapter.timeout)
-		return nil, core.NewToolError(core.ToolErrorTimeout, message, timedCtx.Err())
+		return nil, adapter.contextError(timedCtx.Err())
 	case result := <-done:
+		// A backend that fails after the context ended usually fails because of
+		// it, often with an unrelated message. Both select cases can be ready at
+		// once, so attribute that failure to the context rather than letting the
+		// random choice report it as a backend error.
+		if result.err != nil && result.ctxErr != nil {
+			return nil, adapter.contextError(result.ctxErr)
+		}
 		return result.result, result.err
 	}
+}
+
+// contextError turns a finished context into the structured cancelled or
+// timeout result the model sees.
+func (adapter *invokableTool) contextError(cause error) error {
+	if errors.Is(cause, context.Canceled) {
+		return core.NewToolError(core.ToolErrorCancelled, "tool run was cancelled", cause)
+	}
+	message := "tool timed out"
+	if adapter.timeout > 0 {
+		message = fmt.Sprintf("tool %q timed out after %s", adapter.impl.Name(), adapter.timeout)
+	}
+	return core.NewToolError(core.ToolErrorTimeout, message, cause)
 }
 
 func capToolOutput(value string, maxBytes int) string {

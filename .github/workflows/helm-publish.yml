@@ -31,12 +31,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Add Helm Dependencies
-        run: |
-          cd helm/versus-incident
-          helm repo add bitnami https://charts.bitnami.com/bitnami
-          helm dependency build
-
       - name: Set version variable
         id: version
         run: |

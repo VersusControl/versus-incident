@@ -1,0 +1,4 @@
+# EXPECT_FAIL: Bitnami Redis keys are refused with the way forward.
+redis.master and redis.architecture belong to the Bitnami Redis subchart
+redis.persistence
+redis.master=null --set redis.architecture=null

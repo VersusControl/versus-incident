@@ -1000,3 +1000,30 @@ func TestListFallbackCarriesEffectiveWindow(t *testing.T) {
 		t.Fatalf("count_window = %q open = %d, want 24h and 1", got.CountWindow, got.Counts.ByStatus.Open.Total)
 	}
 }
+
+// List rows carry the alert's severity, read with the same lookup as the
+// detail payload: top-level keys, the Alertmanager label maps, then the first
+// alert's labels.
+func TestSummarizeCarriesSeverity(t *testing.T) {
+	cases := []struct {
+		name    string
+		content map[string]interface{}
+		want    string
+	}{
+		{"top level", map[string]interface{}{"Severity": "critical"}, "critical"},
+		{"common labels", map[string]interface{}{"commonLabels": map[string]interface{}{"severity": "warning"}}, "warning"},
+		{"first alert labels", map[string]interface{}{"alerts": []interface{}{
+			map[string]interface{}{"labels": map[string]interface{}{"severity": "high"}},
+		}}, "high"},
+		{"none", map[string]interface{}{"title": "x"}, ""},
+		{"no content", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := summarize(&storage.IncidentRecord{ID: "i", Content: tc.content})
+			if got, ok := row["severity"]; !ok || got != tc.want {
+				t.Fatalf("severity = %v (present=%v), want %q", got, ok, tc.want)
+			}
+		})
+	}
+}

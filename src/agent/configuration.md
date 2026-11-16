@@ -1,14 +1,11 @@
 # Configuration
 
 This page is the reference for every knob the agent exposes. Pair it with
-[Getting Started](./getting-started.md) for a hands-on walkthrough.
+the [AIOps SRE Quickstart](./quickstart.md) for a hands-on walkthrough.
 
 Everything lives under the top-level
 `agent` key. The list of log sources lives in a sibling file
 `agent_sources.yaml` so it can be managed independently per environment.
-
-> **Reminder.** The agent is **off by default** (`agent.enable: false`).
-> Nothing about the agent runs until that flag flips.
 
 ## Top Level
 
@@ -25,8 +22,9 @@ agent:
   mode: training
   poll_interval: 30s
   lookback: 5m
-  batch_max: 1000
-  signal_max_bytes: 8192
+  batch_max: 5000
+  new_service_grace: 24h
+  service_patterns: [ … ]
   redaction:   { … }
   catalog:     { … }
   miner:       { … }
@@ -37,18 +35,19 @@ agent:
 |---|---|---|---|
 | `enable` | bool | `false` | Master switch. Env: `AGENT_ENABLE`. |
 | `mode` | string | `training` | One of `training` \| `shadow` \| `detect`. Env: `AGENT_MODE`. |
-| `poll_interval` | duration | `30s` | How often each source is pulled. Lower = more responsive, higher = less load on your log backend. |
-| `lookback` | duration | `5m` | Initial backfill window on first start (when there's no cursor yet). |
-| `batch_max` | int | `1000` | Safety cap on signals processed per tick per source. |
-| `signal_max_bytes` | int | `8192` | Truncates a single signal's `Raw` payload above this size. |
+| `poll_interval` | duration | `30s` | How often each source is read. Lower = more responsive, higher = less load on your log backend. |
+| `lookback` | duration | `5m` | How far back a source is read the first time the agent starts it. |
+| `batch_max` | int | `5000` | How many lines the agent processes at a time. Every line read is processed; a larger read is handled in several chunks of this size. |
+| `new_service_grace` | duration | `24h` (`30m` in the Helm chart) | How long a service seen for the first time is learned quietly before it can raise incidents or shadow entries. Env: `AGENT_NEW_SERVICE_GRACE`. |
+| `service_patterns` | regex list | 10 built-in patterns | How the service name is read from a log line; the first match wins. Leave the key out to use the built-in patterns; `[]` turns detection off and every line lands in `_unknown`. Env: `AGENT_SERVICE_PATTERNS` (comma-separated). See [Service Detection](./service-detection.md). |
 
 ## Modes
 
 | Mode | What it does | When to use |
 |---|---|---|
-| `training` | Observes only. New patterns are added to the catalog; nothing else. | First few days. Until the catalog stabilizes. |
-| `shadow` | Same as training, but logs `agent[shadow]: would alert …` for any signal it would have alerted on. | A release cycle of review before going live. |
-| `detect` | Treats unknown / spiking patterns as anomalies, asks the AI SRE to triage them, and emits a real incident through every configured channel. | Production, after you trust the catalog. |
+| `training` | Learns your normal patterns. Sends nothing. | The first few days, until new patterns stop appearing often. See [Training Mode](./training-mode.md). |
+| `shadow` | Keeps learning and records what it would have alerted on in **AI → Decisions → Shadow**. Sends nothing. | A release cycle of review before going live. See [Shadow Mode](./shadow-mode.md). |
+| `detect` | Raises a real incident for each new pattern or spike. Works without an AI key; with `agent.ai` set up, the AI writes the summary, severity and next steps. | Production, after you trust what it learned. See [AI Detect Mode](./ai-detect-mode.md). |
 
 ## Environment overrides
 
@@ -63,10 +62,12 @@ agent:
 | `AGENT_AI_ENABLE` | `agent.ai.enable` |
 | `AGENT_AI_API_KEY` | `agent.ai.api_key` |
 | `AGENT_AI_MODEL` | `agent.ai.model` |
+| `AGENT_AI_PROVIDER` | `agent.ai.provider` |
+| `AGENT_AI_BASE_URL` | `agent.ai.base_url` |
 
 ## Miner
 
-Drain-style log clusterer. The defaults work for most setups; tune only
+Groups similar log lines into patterns. The defaults work for most setups; tune only
 if you see related lines failing to merge into one template (lower
 `similarity_threshold`) or unrelated lines collapsing together (raise
 it). See [Miner](./miner.md).
@@ -118,7 +119,7 @@ catalog:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `persist_interval` | duration | `30s` | How often the in-memory catalog is flushed to backend storage. |
+| `persist_interval` | duration | `30s` | How often learned patterns are saved to storage. |
 | `auto_promote_after` | int | `100` | Number of sightings before a log pattern is auto-promoted to *known*. Default `100`. Any value `<= 0` (or a blank/unset key) is treated as the default `100`. To keep a pattern out of *known*, label/curate it instead. |
 
 The storage backend itself is selected at the **root** of `config.yaml`
@@ -181,73 +182,27 @@ Common keys for every source:
 
 | Key | Type | Description |
 |---|---|---|
-| `name` | string | Unique identifier. Used in cursor keys and admin views. |
-| `type` | string | `file`, `elasticsearch`, `loki`, or `cloudwatchlogs`. |
+| `name` | string | Unique name for the source, shown in the UI. Keep it stable: the agent uses it to remember where it stopped reading. |
+| `type` | string | `file`, `elasticsearch`, `loki`, `cloudwatchlogs`, `graylog`, `splunk` or `signoz`. _Enterprise_ adds metric and trace sources. |
 | `enable` | bool | Per-source switch. |
 
 For per-source field reference and troubleshooting, see the
 dedicated [Data Sources](./data-sources.md) guide:
 
-- [File](./data-sources/file.md)
+- [File](./data-sources/file.md): lines longer than `file.max_line_bytes` (default 64 KiB) are cut to that length.
 - [Elasticsearch](./data-sources/elasticsearch.md)
 - [Loki](./data-sources/loki.md)
 - [CloudWatch Logs](./data-sources/cloudwatch-logs.md)
+- [Graylog](./data-sources/graylog.md)
+- [Splunk](./data-sources/splunk.md)
+- [SigNoz](./data-sources/signoz.md)
 
-**`max_lines_per_pull` vs `agent.batch_max`**
+**`max_lines_per_pull`** (file source only, default `1000`)
 
-These two caps look similar but live at different layers and protect
-against different things. Both apply on every tick, in this order:
-
-1. **`max_lines_per_pull`** (per-source, file source only). The file
-   source stops reading after this many non-empty lines and persists
-   its byte offset there. Lines past the cap stay in the file and are
-   read on the next tick — nothing is lost.
-2. **`agent.batch_max`** (worker-wide, every source). After the source
-   returns, the worker truncates the slice to `batch_max` and **drops**
-   anything beyond it. The source's cursor has already advanced, so
-   dropped signals are gone. This is a backstop for runaway sources,
-   not a normal flow-control knob.
-
-The practical rule: keep `max_lines_per_pull ≤ agent.batch_max`. If you
-flip them around, the worker's hard truncation kicks in and you lose
-signals on every tick.
-
-**Worked example**
-
-Suppose you have a 50,000-line backlog, `poll_interval: 30s`,
-`max_lines_per_pull: 1000`, and `agent.batch_max: 1000`:
-
-| Tick | Lines read by file source | After `batch_max` | Cursor advances by | Remaining backlog |
-|---|---|---|---|---|
-| 1 | 1,000 | 1,000 | 1,000 | 49,000 |
-| 2 | 1,000 | 1,000 | 1,000 | 48,000 |
-| … | … | … | … | … |
-| 50 | 1,000 | 1,000 | 1,000 | 0 |
-
-Total drain time: 50 ticks × 30s ≈ **25 minutes**. Nothing is dropped.
-
-To drain faster, raise `max_lines_per_pull` *and* `agent.batch_max`
-together, e.g. both to `5000`:
-
-| Tick | Read | After `batch_max` | Cursor | Remaining |
-|---|---|---|---|---|
-| 1 | 5,000 | 5,000 | 5,000 | 45,000 |
-| … | … | … | … | … |
-| 10 | 5,000 | 5,000 | 5,000 | 0 |
-
-Drain time: 10 ticks × 30s ≈ **5 minutes**.
-
-What happens if you only raise one of them? With
-`max_lines_per_pull: 5000` but `agent.batch_max: 1000`:
-
-| Tick | Read | After `batch_max` | Cursor | Lost |
-|---|---|---|---|---|
-| 1 | 5,000 | 1,000 | **5,000** | **4,000** |
-| 2 | 5,000 | 1,000 | **5,000** | **4,000** |
-
-The cursor jumps 5,000 lines forward on every tick but only 1,000 are
-actually mined — the other 4,000 are silently discarded. Always raise
-the two caps together.
+The file source stops reading after this many lines on each read. The rest
+stay in the file and are read next time; nothing is lost. Raise it to work
+through a backlog faster: with a 50,000-line backlog and `poll_interval: 30s`,
+`1000` takes about 25 minutes and `5000` about 5 minutes.
 
 ## AI
 
@@ -255,13 +210,15 @@ The `agent.ai` block powers both the **detect** triage call and the
 on-demand **analyze** investigation. Shared keys apply to both; the
 `detect:` and `analyze:` overlays tune each task independently.
 
+Example (the defaults are in the table below):
+
 ```yaml
 agent:
   ai:
     enable: true
     provider: openai            # openai | deepseek | qwen | ollama | claude | gemini
     api_key: ${AGENT_AI_API_KEY}
-    model: gpt-4o-mini          # shared default for detect + analyze
+    model: gpt-4o-mini          # shared model for detect + analyze
     temperature: 0.2
     max_tokens: 1024
     base_url: ""                # optional OpenAI-compatible endpoint
@@ -280,7 +237,10 @@ temperature at `1` and reject any explicit value.
 | `provider` | string | `openai` | Model backend: `openai`, `deepseek`, `qwen`, `ollama`, `claude`, or `gemini`. An unknown value fails fast (no silent fallback). Env: `AGENT_AI_PROVIDER`. |
 | `base_url` | string | `""` | Custom OpenAI-compatible chat-completions base URL. When nonempty, takes precedence over `provider` for Detect, Chat, and Analyze. Env: `AGENT_AI_BASE_URL`; an empty env value restores provider selection. |
 | `api_key` | string | — | API key for the model provider. Env: `AGENT_AI_API_KEY`. |
-| `model` | string | — | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
+| `model` | string | `gpt-5.4-mini` | Shared default model for both tasks. Env: `AGENT_AI_MODEL`. |
+| `max_tokens` | int | `4096` | Longest response the model may write. |
+| `max_calls_per_hour` | int | `60` | Cap on detect AI calls. Past the cap, incidents are still raised with the templated summary. |
+| `cache_ttl` | duration | `1h` | The same pattern firing again within this time reuses the last AI finding. |
 | `temperature` | float | `0.2` | Randomness control. Set `-1` to omit the field for beta-limited / reasoning models that reject explicit temperature values. |
 | `analyze.model` | string | inherits `model` | Optional stronger model just for analyze. |
 
@@ -298,7 +258,7 @@ agent:
 **Worked example**
 
 A production setup using a cheap model for high-volume detect triage and
-a stronger model with bounded, concurrent tool calls for deep dives:
+a stronger model for deep dives:
 
 ```yaml
 agent:
@@ -310,11 +270,15 @@ agent:
     model: gpt-4o-mini          # cheap, fast — used for every detect call
     analyze:
       model: gpt-4o             # reserved for the on-demand analyze action
-      tool_timeout: 10s         # no single lookup may stall the 2-min budget
 ```
+
+How long a single tool lookup may run during an analysis (`tool_timeout`) is
+set in `tools.yaml`, not here. See the [Tool Reference](./tools/overview.md).
 
 ## Where to next
 
-- [Getting Started](./getting-started.md) — Docker walkthrough.
+- [AIOps SRE Quickstart](./quickstart.md) — Docker Compose walkthrough.
+- [Training Mode](./training-mode.md) · [Shadow Mode](./shadow-mode.md) ·
+  [AI Detect Mode](./ai-detect-mode.md) · [Spike Detection](./spike.md) — the modes.
 - [Redaction](./redaction.md) · [Regex](./regex.md) ·
   [Miner](./miner.md) · [Catalog](./catalog.md) — component deep-dives.

@@ -51,11 +51,14 @@ HIGH AVAILABILITY (enterprise) is ENABLED:
 
 {{- if .Values.redis.enabled }}
 8. Redis configuration:
-   - Using bundled Redis deployment
-   - Host: {{ .Release.Name }}-redis-master
+   - Using the bundled Redis ({{ include "versus-incident.redisImage" . }})
+   - Host: {{ include "versus-incident.redisFullname" . }}
    - Port: 6379
-   {{- if .Values.redis.auth.enabled }}
-   - Authentication is enabled
+   {{- if include "versus-incident.redisAuthEnabled" . }}
+   - Password: Secret {{ include "versus-incident.redisSecretName" . }}, key {{ include "versus-incident.redisSecretKey" . }}
+   {{- end }}
+   {{- if include "versus-incident.redisPersistenceEnabled" . }}
+   - Data: PersistentVolumeClaim {{ ((.Values.redis | default dict).persistence | default dict).existingClaim | default (printf "%s-data" (include "versus-incident.redisFullname" .)) }}
    {{- end }}
 {{- else if and (not .Values.redis.enabled) (or .Values.oncall.enable .Values.oncall.initializedOnly) }}
 8. Redis configuration:

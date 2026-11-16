@@ -1,273 +1,342 @@
 # Deploy on Kubernetes
 
-This page covers running Versus Incident as plain Kubernetes manifests.
-For the packaged distribution see [Helm Chart](./helm.md).
+Install Versus with one `kubectl apply`. Each setup below is a single manifest
+file, generated from the [Helm Chart](/configuration/helm). Pick the one that
+matches what you want Versus to do:
 
-> **TL;DR for production:** mount a `PersistentVolumeClaim` at
-> `/app/data` and set `GATEWAY_SECRET`. Without those two, the admin
-> dashboard is unavailable and incident history disappears on every
-> pod restart.
+| Setup | What runs | Manifest |
+| --- | --- | --- |
+| [Kubernetes in-cluster](#kubernetes-in-cluster) | Versus reads the cluster it runs in, with a read-only role. | `k8s-connector-in-cluster-enabled.yaml` |
+| [Agent only](#agent-only) | The SRE Agent reads one Loki log source and learns its patterns. | `agent-only.yaml` |
+| [Webhook only](#webhook-only) | Your monitoring tools send alerts to Versus, and Versus posts them to Slack and Microsoft Teams. | `webhook-only.yaml` |
 
-## Quick deploy
+The files are in
+[`examples/kubernetes/`](https://github.com/VersusControl/versus-incident/tree/main/examples/kubernetes).
+Each installs into the namespace `versus`, with one Deployment and one Service
+named `versus-incident`.
 
-### 1. Create the secrets
+## Before you start
+
+You need a Kubernetes cluster, with `kubectl` pointed at it:
 
 ```bash
-kubectl create secret generic versus-secrets \
-  --from-literal=gateway_secret=$GATEWAY_SECRET \
-  --from-literal=slack_token=$SLACK_TOKEN \
-  --from-literal=slack_channel_id=$SLACK_CHANNEL_ID
+kubectl get nodes
 ```
 
-### 2. ConfigMap with config
+Every setup needs the namespace and a sign-in secret. The manifests do not
+contain the secret, so create it first:
 
-```yaml
-# versus-config.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: versus-config
-data:
-  config.yaml: |
-    name: versus
-    host: 0.0.0.0
-    port: 3000
-    public_host: https://versus.example.com  # external URL the dashboard uses
-
-    gateway_secret: ${GATEWAY_SECRET}
-
-    storage:
-      type: file
-      file:
-        max_incidents: 1000
-
-    alert:
-      slack:
-        enable: true
-        token: ${SLACK_TOKEN}
-        channel_id: ${SLACK_CHANNEL_ID}
+```bash
+kubectl create namespace versus --save-config
 ```
 
 ```bash
-kubectl apply -f versus-config.yaml
+kubectl -n versus create secret generic versus-incident --from-literal=gateway_secret=$(openssl rand -hex 32)
 ```
 
-### Using custom templates
+Expected output: `namespace/versus created`, then
+`secret/versus-incident created`.
 
-If the default formatting doesn't suit your needs you can override any
-template by mounting your own file. Create a ConfigMap with your custom
-template(s) and mount them into the container:
+## Kubernetes in-cluster
 
-```yaml
-# versus-custom-templates.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: versus-custom-templates
-data:
-  slack_message.tmpl: |
-    *🚨 Incident in {{.ServiceName}}*
-    ----------
-    *Severity:* {{.Severity}}
-    *Environment:* {{.Environment}}
-    ```{{.Logs}}```
-    Owner <@{{.UserID}}> please investigate
+Versus runs in your cluster and reads it with its own ServiceAccount. The
+manifest turns on the Kubernetes connector and creates a cluster-wide,
+read-only ClusterRole for it. Versus does not read Secrets and never changes
+anything in the cluster. The agent and the alert channels stay off.
 
-  telegram_message.tmpl: |
-    🚨 <b>Incident in {{.ServiceName}}</b>
+```bash
+kubectl apply -f https://raw.githubusercontent.com/VersusControl/versus-incident/main/examples/kubernetes/k8s-connector-in-cluster-enabled.yaml
+```
 
-    <b>Severity:</b> {{.Severity}}
-    <b>Environment:</b> {{.Environment}}
-    <pre>{{.Logs}}</pre>
-    Owner please investigate
+The [AIOps Kubernetes Quickstart](/agent/kubernetes/quickstart) walks through
+this install step by step: the permissions you need, signing in, the first
+sync, and what to check. The result is the Kubernetes Overview:
+
+![The Kubernetes Overview after the first sync: Last synced in the top bar, two broken workloads with their changes on the timeline, CPU and memory capacity, and resource counts](../docs/images/kubernetes-quickstart-overview-dark.png)
+
+*The Overview after the first sync.*
+
+## Agent only
+
+The SRE Agent reads your logs, learns which log patterns are normal, and later
+raises an incident when a new pattern or a spike shows up. The Kubernetes
+connector stays off (no reader role is created) and no alert channel is on.
+
+`agent-only.yaml` sets:
+
+| Setting | Value |
+| --- | --- |
+| Agent | On, in `training` mode: it reads logs and builds the pattern catalog, and sends nothing. |
+| Log source | One Loki source named `checkout-logs`: address `http://loki.monitoring:3100`, query `{app="checkout"}`. |
+| AI | Off. Detect mode works without a model. |
+| Storage | A 1Gi PersistentVolumeClaim on the default StorageClass, so the learned patterns survive a restart. |
+
+**1. Download the manifest and point it at your Loki.**
+
+```bash
+curl -LO https://raw.githubusercontent.com/VersusControl/versus-incident/main/examples/kubernetes/agent-only.yaml
+```
+
+Open `agent-only.yaml`, find the `agent_sources.yaml` key of the ConfigMap, and
+change `address` to your Loki service (`http://<service>.<namespace>:3100`
+inside the cluster) and `query` to the streams to watch.
+
+**2. Apply it and wait until it is ready.**
+
+```bash
+kubectl apply -f agent-only.yaml
 ```
 
 ```bash
-kubectl apply -f versus-custom-templates.yaml
+kubectl -n versus rollout status deploy/versus-incident
 ```
 
-Then update the Deployment to mount the custom templates and point the
-config at them:
+**3. Check that the agent started.**
 
-```yaml
-# In the container spec:
-          volumeMounts:
-            - name: versus-config
-              mountPath: /app/config/config.yaml
-              subPath: config.yaml
-            - name: custom-templates
-              mountPath: /app/custom/slack_message.tmpl
-              subPath: slack_message.tmpl
-            - name: custom-templates
-              mountPath: /app/custom/telegram_message.tmpl
-              subPath: telegram_message.tmpl
-            - name: versus-data
-              mountPath: /app/data
-
-# In the volumes section:
-      volumes:
-        - name: versus-config
-          configMap:
-            name: versus-config
-        - name: custom-templates
-          configMap:
-            name: versus-custom-templates
-        - name: versus-data
-          persistentVolumeClaim:
-            claimName: versus-data
+```bash
+kubectl -n versus logs deploy/versus-incident | grep "starting worker"
 ```
 
-And reference the mounted paths in `config.yaml`:
+Expected output: `agent: starting worker mode=training sources=1 poll=30s`.
 
-```yaml
-alert:
-  slack:
-    enable: true
-    template_path: "/app/custom/slack_message.tmpl"
-  telegram:
-    enable: true
-    template_path: "/app/custom/telegram_message.tmpl"
+### What you'll see
+
+[Open the UI](#open-the-ui) and go to **Agent Learning → Logs**. Within a
+minute of the first matching lines, learned log patterns appear, grouped by
+service, each with its count.
+
+- **Which lines are learned.** Training learns only the lines that match the
+  learning pattern, plus a few named rules (out of memory, panics, HTTP 5xx).
+  By default that is lines containing `error`. While your service writes only
+  `info` and `warn` lines, the page stays empty. To learn every line, set
+  `default_pattern: ".*"` under `agent.regex` in the `config.yaml` key of the
+  ConfigMap in your copy of `agent-only.yaml`, apply it again, then restart
+  with `kubectl -n versus rollout restart deploy/versus-incident`. See
+  [Regex](/agent/regex).
+- **Which service.** The service name is read from the log line itself, such
+  as `service=checkout` or `app=checkout`, not from the Loki stream label in
+  your `query`. Lines without one are grouped under `—`.
+
+![Agent Learning → Logs during training: learned log templates grouped by service, each with its count and a known verdict](../docs/images/quickstart-sre-patterns-dark.png)
+
+### Switch to detect mode
+
+Leave the agent in training until the catalog has seen normal traffic. Then
+switch it to `detect`, or to `shadow` first, which only logs what it would
+have sent:
+
+```bash
+kubectl -n versus set env deploy/versus-incident AGENT_MODE=detect
 ```
 
-## Persistent data store
+This restarts the pod. Applying `agent-only.yaml` again sets the mode back to
+`training`, so change the `AGENT_MODE` value in your copy of the file as well.
 
-Versus persists three things to disk via the `file` storage backend:
+Detect-mode incidents reach Slack or another channel only when that channel is
+on. See [Notification Channels](/agent/channels).
 
-| File | Purpose |
-|------|---------|
-| `incidents.json` | Every incident received (rolling cap = `max_incidents`). |
-| `patterns.json`  | AI-agent pattern catalog + services map. |
-| `shadow.json`    | Append-only NDJSON log of shadow events. |
+### Loki credentials
 
-If you don't mount a volume, all three are written to the container's
-ephemeral filesystem and **disappear on every pod restart, redeploy, or
-rescheduling event**. The admin dashboard's incident history will look
-like it resets.
+For a multi-tenant Loki or a token-protected gateway, keep the token in a
+Secret and reference it from the source as `${VAR}`:
 
-### PersistentVolumeClaim
+```bash
+kubectl -n versus create secret generic loki-credentials --from-literal=LOKI_TOKEN=<token>
+```
 
-```yaml
-# versus-pvc.yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: versus-data
-spec:
-  accessModes: ["ReadWriteOnce"]
-  resources:
-    requests:
-      storage: 5Gi
-  # storageClassName: gp3        # uncomment / set to your cluster's class
+In your copy of `agent-only.yaml`, add `bearer_token: ${LOKI_TOKEN}` under
+`loki:` in the `agent_sources.yaml` key, apply the file again, then pass the
+Secret to the pod:
+
+```bash
+kubectl -n versus set env deploy/versus-incident --from=secret/loki-credentials
+```
+
+All Loki settings are on the [Loki](/agent/data-sources/loki) page. To learn
+how the modes work, read [Training Mode](/agent/training-mode),
+[Shadow Mode](/agent/shadow-mode) and [AI Detect Mode](/agent/ai-detect-mode).
+Other log sources are listed under [Data Sources](/agent/data-sources).
+
+## Webhook only
+
+Your monitoring tools (Alertmanager, Grafana, Sentry, CloudWatch, Fluent Bit)
+send alerts to `http://versus-incident.versus:3000/api/incidents`. Versus
+formats each alert with a template and posts it to Slack and Microsoft Teams.
+The agent and the Kubernetes connector stay off.
+
+`webhook-only.yaml` sets:
+
+| Setting | Value |
+| --- | --- |
+| Channels | Slack and Microsoft Teams on. |
+| Slack template | A custom template for Alertmanager and Grafana alerts: status, alert name, severity and summary. Teams uses the shipped template. |
+| On-call | Off. |
+
+**1. Create the channel secret.** The manifest reads the Slack and Teams
+credentials from a Secret named `versus-incident-secrets`, and does not contain
+it:
+
+```bash
+kubectl -n versus create secret generic versus-incident-secrets \
+  --from-literal=slack_token=$SLACK_BOT_TOKEN \
+  --from-literal=slack_channel_id=$SLACK_CHANNEL_ID \
+  --from-literal=msteams_power_automate_url=$TEAMS_POWER_AUTOMATE_URL
+```
+
+Using only Slack? Download the manifest, set `MSTEAMS_ENABLE` to `"false"`, and
+delete the `MSTEAMS_POWER_AUTOMATE_URL` entry. Then apply your copy in step 2.
+
+**2. Apply the manifest and wait until it is ready.**
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/VersusControl/versus-incident/main/examples/kubernetes/webhook-only.yaml
 ```
 
 ```bash
-kubectl apply -f versus-pvc.yaml
+kubectl -n versus rollout status deploy/versus-incident
 ```
 
-> **Replicas vs. RWO.** A `ReadWriteOnce` volume binds to a single
-> node. If you need `replicas > 1` either (a) switch to a
-> `ReadWriteMany` class (EFS, Filestore, Azure Files) so every pod
-> writes to the same directory, or (b) keep `replicas: 1` and use a
-> `Recreate` deployment strategy. Sharing one RWO PVC across multiple
-> pods will cause file corruption.
+**3. Send a test alert.** Forward the port. This command holds the terminal, so
+open a second one for the `curl`:
 
-## Deployment
+```bash
+kubectl -n versus port-forward svc/versus-incident 3000:3000
+```
+
+```bash
+curl -X POST http://localhost:3000/api/incidents \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"firing","alerts":[{"status":"firing","labels":{"alertname":"HighErrorRate","severity":"critical"},"annotations":{"summary":"5xx rate above 5% on checkout"}}]}'
+```
+
+Expected output: `{"incident_id":"<id>","notify_status":"sent","status":"Incident created"}`,
+with HTTP status 201. If a token or channel is wrong, the alert is still stored
+and the response shows `"notify_status":"failed"` (or `partial` when the other
+channel worked) with the channel's error in `notify_error`.
+
+### What you'll see
+
+In Slack, formatted by the custom template:
+
+```text
+*FIRING: HighErrorRate* (critical)
+5xx rate above 5% on checkout
+```
+
+In the UI ([Open the UI](#open-the-ui)), go to **Incidents**, pick the
+**Webhook / Alerts** tab, then the **All** filter. The alert's row shows the
+title `HighErrorRate` and severity **CRITICAL**.
+
+To turn on on-call escalation (PagerDuty, AWS Incident Manager and others),
+install with Helm: on-call needs Redis. See
+[Webhook only](/configuration/helm#webhook-only) on the Helm page.
+
+For the same flow on Docker, read the [Webhook Quickstart](/webhook/quickstart).
+To write your own templates, read [Template Syntax](/webhook/template-syntax)
+and [Advanced Template Tips](/webhook/advanced-template-tips).
+
+## Open the UI
+
+This works for every setup. The command holds the terminal; leave it running:
+
+```bash
+kubectl -n versus port-forward svc/versus-incident 3000:3000
+```
+
+Browse to `http://localhost:3000`. In a second terminal, print the sign-in
+secret and paste it into **Gateway secret**:
+
+```bash
+kubectl -n versus get secret versus-incident -o jsonpath='{.data.gateway_secret}' | base64 -d; echo
+```
+
+## Reference
+
+### Storage
+
+Versus keeps incidents, the pattern catalog and settings under `/app/data`.
+Only `agent-only.yaml` mounts a PersistentVolumeClaim there
+(`versus-incident-data`, 1Gi, `ReadWriteOnce`). The other two use an
+`emptyDir`, so their data is lost when the pod restarts. To keep it, use
+PostgreSQL, or install with Helm and set `storage.persistence.enabled=true`.
+
+Run one replica with file storage. Two pods on the same files disagree with
+each other.
+
+### PostgreSQL
+
+For durable history, store everything in PostgreSQL. Put the connection string
+in a Secret:
+
+```bash
+kubectl -n versus create secret generic versus-postgres --from-literal=POSTGRES_DSN='postgres://user:pass@host:5432/versus?sslmode=require'
+```
+
+Then, in your copy of the manifest, change the `STORAGE_TYPE` value of the
+`versus-incident` container to `"postgres"` and add the connection string next
+to it:
 
 ```yaml
-# versus-deployment.yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: versus-incident
-spec:
-  replicas: 1                    # see PVC note above before bumping this
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: versus-incident
-  template:
-    metadata:
-      labels:
-        app: versus-incident
-    spec:
-      containers:
-        - name: versus-incident
-          image: ghcr.io/versuscontrol/versus-incident
-          ports:
-            - containerPort: 3000
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 3000
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 3000
-          env:
-            - name: GATEWAY_SECRET
+            - name: STORAGE_TYPE
+              value: "postgres"
+            - name: POSTGRES_DSN
               valueFrom:
                 secretKeyRef:
-                  name: versus-secrets
-                  key: gateway_secret
-            - name: SLACK_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: versus-secrets
-                  key: slack_token
-            - name: SLACK_CHANNEL_ID
-              valueFrom:
-                secretKeyRef:
-                  name: versus-secrets
-                  key: slack_channel_id
-          volumeMounts:
-            - name: versus-config
-              mountPath: /app/config/config.yaml
-              subPath: config.yaml
-            - name: versus-data
-              mountPath: /app/data
-      volumes:
-        - name: versus-config
-          configMap:
-            name: versus-config
-        - name: versus-data
-          persistentVolumeClaim:
-            claimName: versus-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: versus-service
-spec:
-  selector:
-    app: versus-incident
-  ports:
-    - protocol: TCP
-      port: 3000
-      targetPort: 3000
+                  name: versus-postgres
+                  key: POSTGRES_DSN
 ```
+
+Apply your copy. A quick switch with
+`kubectl -n versus set env deploy/versus-incident STORAGE_TYPE=postgres --from=secret/versus-postgres`
+also works, but the next apply of the file sets `STORAGE_TYPE` back to `file`.
+
+See [PostgreSQL Storage](/configuration/postgres-storage) for creating the
+database and role.
+
+### Exposing the UI
+
+The Service `versus-incident` is a `ClusterIP` on port 3000. To reach the UI
+without port-forward, put an Ingress or a LoadBalancer in front of it, then set
+`public_host` to the exact URL users open in the browser, for example
+`public_host: https://versus.example.com`. Add it to the `config.yaml` key of
+the `versus-incident-config` ConfigMap and restart the pod:
 
 ```bash
-kubectl apply -f versus-deployment.yaml
+kubectl -n versus rollout restart deploy/versus-incident
 ```
 
-## Exposing the dashboard
+Versus uses `public_host` for links in alerts, secure cookies, and its
+same-origin checks behind a proxy that rewrites the host or terminates TLS.
 
-Set `public_host` in the config to the exact browser-visible HTTP(S) origin. It
-controls external links, secure cookies, and exact-origin CSRF checks when an
-Ingress rewrites the Host or terminates TLS. Forwarded host and protocol headers
-are not trusted. Then expose the Service via your preferred path — Ingress,
-LoadBalancer, or `kubectl port-forward` for local testing:
+### Upgrade
+
+The manifests use the image `ghcr.io/versuscontrol/versus-incident` with no tag,
+and a node keeps the copy it pulled first (`imagePullPolicy: IfNotPresent`).
+To run a given release, set the tag in your copy of the file, for example
+`ghcr.io/versuscontrol/versus-incident:v1.4.36`, and apply it again.
+
+Applying a file again resets every setting the file contains, so a value you
+changed with `kubectl set env` or `kubectl edit` (such as `AGENT_MODE` or
+`STORAGE_TYPE`) goes back to the file's value. Variables you added that are not
+in the file, such as `LOKI_TOKEN`, stay. To keep changes across upgrades, make
+them in your copy of the file, or install with [Helm](/configuration/helm).
+
+### Uninstall
+
+Delete with the same file you applied, for example:
 
 ```bash
-kubectl port-forward svc/versus-service 3000:3000
-# open http://localhost:3000/
+kubectl delete -f https://raw.githubusercontent.com/VersusControl/versus-incident/main/examples/kubernetes/k8s-connector-in-cluster-enabled.yaml
 ```
+
+This deletes the `versus` namespace too, with the secrets and any
+PersistentVolumeClaim in it. For the in-cluster setup it also deletes the
+reader ClusterRole and its binding.
 
 ## Next steps
 
-- [Admin Dashboard](./admin-ui.md) — what the UI surfaces and how to
-  rebuild the bundled assets.
-- [Configuration](./configuration.md) — every config key, env var, and
-  per-request query parameter.
-- [Helm Chart](./helm.md) — packaged install.
+- [Helm Chart](/configuration/helm): the same three setups with `helm install`.
+- [Configuration](/configuration/configuration): every config key and
+  environment variable.
+- [Kubernetes Configuration](/agent/kubernetes/configuration): connector
+  settings, optional kinds and namespace-only access.

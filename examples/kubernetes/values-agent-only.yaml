@@ -1,0 +1,85 @@
+# Versus as a log agent only.
+#
+# The agent reads one Loki log source, learns its log patterns and, in detect
+# mode, raises incidents for new patterns and spikes. The Kubernetes connector
+# stays off (no reader role is created) and no alert channel is on.
+#
+# Install:
+#   kubectl create namespace versus --save-config
+#   kubectl -n versus create secret generic versus-incident \
+#     --from-literal=gateway_secret=$(openssl rand -hex 32)
+#   helm install versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
+#     --namespace versus \
+#     -f values-agent-only.yaml \
+#     --set gatewaySecretExistingSecret=versus-incident
+#
+# The same install as one file for kubectl: agent-only.yaml.
+
+# Keep the learned pattern catalog across pod restarts. Uses the cluster's
+# default StorageClass.
+storage:
+  type: file
+  persistence:
+    enabled: true
+    size: 1Gi
+
+agent:
+  enable: true
+  # training: read logs and build the pattern catalog; nothing is sent.
+  # Leave it in training until the catalog has seen normal traffic, then
+  # switch to detect (or to shadow first, which only logs what it would have
+  # sent):
+  #   helm upgrade versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
+  #     --namespace versus --reset-then-reuse-values --set agent.mode=detect
+  # Then change this line to detect as well: a later upgrade with -f this
+  # file applies the mode below over the --set.
+  mode: training
+
+  # Training learns only the lines that match the learning pattern (plus a
+  # few named rules: out of memory, panics, HTTP 5xx). The default pattern
+  # learns lines containing "error"; info and warn lines are skipped. To learn
+  # every line, uncomment:
+  # regex:
+  #   defaultPattern: ".*"
+
+  # Detect mode works without a model: it classifies patterns and raises
+  # incidents but does not call an LLM. To add AI analysis, set ai.enable to
+  # true and pass the key at install time, never in this file:
+  #   --set agent.ai.enable=true --set-string agent.ai.apiKey=$OPENAI_API_KEY
+  ai:
+    enable: false
+
+  # One Loki source. Replace the address with your Loki service
+  # (<service>.<namespace>:3100 inside the cluster) and the query with the
+  # streams to watch. The query only selects streams: the service name of a
+  # line is read from the line itself (service=checkout, app=checkout), not
+  # from the stream label. These settings land in a ConfigMap: write
+  # credentials as ${VAR} and supply the value through extraEnv below.
+  sources:
+    - name: checkout-logs
+      type: loki
+      enable: true
+      loki:
+        address: http://loki.monitoring:3100
+        query: '{app="checkout"}'
+        severity_field: level
+        # Multi-tenant Loki or a token-protected gateway:
+        # tenant_id: ${LOKI_TENANT_ID}
+        # bearer_token: ${LOKI_TOKEN}
+
+# Credentials for ${VAR} references in the sources above, read from a Secret
+# you create, for example:
+#   kubectl -n versus create secret generic loki-credentials \
+#     --from-literal=token=<token>
+# extraEnv:
+#   - name: LOKI_TOKEN
+#     valueFrom:
+#       secretKeyRef:
+#         name: loki-credentials
+#         key: token
+
+# Where detect-mode incidents go. The chart keeps channel credentials in its
+# own Secret, so pass them at install time rather than writing them here:
+#   --set alert.slack.enable=true \
+#   --set-string alert.slack.token=$SLACK_BOT_TOKEN \
+#   --set-string alert.slack.channelId=$SLACK_CHANNEL_ID

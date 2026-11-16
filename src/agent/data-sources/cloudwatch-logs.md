@@ -1,11 +1,16 @@
-# CloudWatch Logs source
+# CloudWatch Logs
 
-Pulls events from AWS CloudWatch Logs using the `FilterLogEvents` API.
-Cheap, real-time, no async query lifecycle.
+## Concept
+
+The CloudWatch Logs source reads log events from one AWS CloudWatch Logs log
+group: Lambda, ECS, EKS, EC2 or anything else that writes there. You give it a
+region and a log group, and optionally a stream prefix and a CloudWatch filter
+pattern to read only the events you care about.
 
 ## Minimal config
 
 ```yaml
+# config/agent_sources.yaml
 sources:
   - name: lambda-prod
     type: cloudwatchlogs
@@ -13,69 +18,51 @@ sources:
     cloudwatchlogs:
       region: us-east-1
       log_group_name: /aws/lambda/my-function
-      page_size: 500
 ```
 
-## Narrowed query
+There are no keys in the file. Versus uses the standard AWS credential chain,
+in this order:
+
+1. `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
+2. `~/.aws/credentials`, with the profile from `AWS_PROFILE`.
+3. IRSA (IAM Roles for Service Accounts) on EKS.
+4. The ECS task role.
+5. The EC2 instance profile.
+
+A narrower source for a busy ECS service:
 
 ```yaml
-cloudwatchlogs:
-  region: us-east-1
-  log_group_name: /aws/ecs/api
-  log_stream_prefix: "ecs/api/"          # only recent task streams
-  filter_pattern: '?ERROR ?Exception ?panic'
-  page_size: 1000
+    cloudwatchlogs:
+      region: us-east-1
+      log_group_name: /aws/ecs/api
+      log_stream_prefix: "ecs/api/"
+      filter_pattern: '?ERROR ?Exception ?panic'
 ```
 
-## Full reference
+| Key | Default | What it does |
+|---|---|---|
+| `region` | required | AWS region of the log group. |
+| `log_group_name` | required | Exact log group name. Case-sensitive. |
+| `log_stream_prefix` | none | Read only streams whose name starts with this. |
+| `filter_pattern` | none | A [CloudWatch filter pattern](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/FilterAndPatternSyntax.html). Not a regex. |
+| `page_size` | `500` | Events read per poll, up to `10000`. |
+| `reorder_window` | none | Extra time each poll looks back, for events that arrive late, for example `1m`. |
 
-```yaml
-cloudwatchlogs:
-  region: us-east-1                       # REQUIRED.
-  log_group_name: /aws/lambda/my-fn       # REQUIRED. Exact log group name.
-  log_stream_prefix: ""                   # restrict to streams starting with this string
-  filter_pattern: ""                      # CloudWatch filter syntax — NOT regex
-  page_size: 500                          # max 10000
-  reorder_window: ""                      # e.g. "1m" — see below. Unset by default.
-```
+| Filter pattern | Matches |
+|---|---|
+| `ERROR` | events that contain `ERROR` |
+| `?ERROR ?Exception` | events that contain `ERROR` or `Exception` |
+| `"connection refused"` | the exact phrase |
+| `{ $.level = "error" }` | JSON events whose `level` is `error` |
 
-## Boundary events and `reorder_window`
+## What you see in the UI
 
-Each tick re-reads an **inclusive** span below the poll cursor and suppresses
-what it has already delivered by event id, so an event sharing the cursor's
-millisecond is recovered and still learned exactly once. CloudWatch timestamps
-are millisecond-precision and bursty, so that boundary case is rare but real.
+Patterns learned from the log group appear in **Agent Learning → Logs**,
+grouped by service. Incidents show `via cloudwatchlogs:<source name>`.
 
-`reorder_window` sets how much of that span is **lateness tolerance** — how far
-behind the cursor an event may arrive and still be picked up. Events arriving
-later than that are not recovered.
+## Permissions
 
-The span the agent actually scans is `reorder_window + agent.catalog.persist_interval`.
-The persist interval is added because delivered ids are only made durable after
-the flush that stored the events they describe, so the same span is what a
-restarted process re-reads to recover everything a killed one read but never
-stored. That is why a source with **no** `reorder_window` still re-reads one
-persist interval: with a strictly-after scan an abrupt restart would silently
-drop every event read since the last flush. The agent logs the effective span
-once at boot.
-
-The id set is persisted alongside the poll cursor when Redis is configured, so a
-restart resumes without re-learning the span; without Redis it is in-process
-only and a restart re-reads the span once.
-
-## Authentication
-
-The source uses the **standard AWS SDK credential chain** in this
-order:
-
-1. Environment variables: `AWS_ACCESS_KEY_ID`,
-   `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`.
-2. Shared credentials file: `~/.aws/credentials` (profile from
-   `AWS_PROFILE`, default `"default"`).
-3. ECS task role (when running in ECS / Fargate).
-4. EC2 instance profile / EKS IRSA (IAM Roles for Service Accounts).
-
-Required IAM policy:
+The identity Versus runs as needs `logs:FilterLogEvents` on the log group:
 
 ```json
 {
@@ -83,61 +70,41 @@ Required IAM policy:
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["logs:FilterLogEvents", "logs:DescribeLogStreams"],
+      "Action": ["logs:FilterLogEvents"],
       "Resource": "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/my-function:*"
     }
   ]
 }
 ```
 
-For multiple log groups, list each `Resource` ARN — wildcards work
-(`arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/*`).
+For several log groups, list each ARN, or use a wildcard such as
+`arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/*`.
 
-## Behavior
-
-- **Cursor** — The maximum event timestamp seen on the previous
-  tick. CloudWatch event timestamps are **milliseconds** since epoch.
-  The next call uses `startTime = cursor + 1ms` to avoid re-reading
-  the boundary event.
-- **Pagination** — Walks `NextToken` up to **20 pages** OR until
-  `page_size` events are collected, whichever happens first. Anything
-  beyond that is read on the next tick.
-- **Filter pattern syntax** — CloudWatch filter syntax, NOT regex:
-
-  | Pattern | Matches |
-  |---|---|
-  | `ERROR` | events containing the word `ERROR` |
-  | `?ERROR ?Exception` | events containing `ERROR` OR `Exception` |
-  | `"connection refused"` | exact phrase |
-  | `[time, level=ERROR, ...]` | space-delimited fields where `level == "ERROR"` |
-  | `{$.level = "error"}` | JSON event with `level: "error"` |
-
-  See the [AWS docs](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/FilterAndPatternSyntax.html)
-  for the full grammar.
-
-## Cost notes
-
-- `FilterLogEvents` is billed per GB scanned. **Always** set
-  `filter_pattern` and/or `log_stream_prefix` on chatty groups.
-- `page_size` controls the per-call cap; `agent.poll_interval`
-  controls the call rate. A noisy Lambda group with `poll_interval:
-  30s` makes ~120 calls/hour per source.
-- Use `log_stream_prefix` for ECS/EKS where each task creates a new
-  stream — you don't need to scan retired streams.
+**Cost.** CloudWatch bills `FilterLogEvents` by the data it scans. On a busy
+log group, set `filter_pattern` or `log_stream_prefix`, and keep
+`agent.poll_interval` at `30s` or more.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| `AccessDeniedException` | IAM policy missing `logs:FilterLogEvents` for the group ARN. |
+| `AccessDeniedException` | The policy is missing `logs:FilterLogEvents` for this log group. |
 | `ResourceNotFoundException` | Wrong `log_group_name` (case-sensitive) or wrong `region`. |
-| `ThrottlingException` | Lower `page_size` or raise `poll_interval`; CloudWatch quotas are per-account-per-region. |
-| Empty results despite events in console | `filter_pattern` is regex-style instead of CloudWatch syntax. |
+| `ThrottlingException` | Too many calls in the account and region. Lower `page_size` or raise `agent.poll_interval`. |
+| No events, but the console shows them | `filter_pattern` is written as a regex. Use CloudWatch filter syntax. |
+| `get identity: get credentials: failed to refresh cached credentials, no EC2 IMDS role found` | No credentials found in the chain above. |
 
-## Local testing without AWS
+## Run it against your AWS account
 
-The integration tests in
-[`pkg/signalsources/cloudwatchlogs_test.go`](https://github.com/VersusControl/versus-incident/blob/main/pkg/signalsources/cloudwatchlogs_test.go)
-use `httptest` + the SDK's `BaseEndpoint` option to point at a local
-mock — useful as a template if you want to wire your own integration
-tests.
+There is no local CloudWatch, so this source has no Docker Compose example.
+Run Versus anywhere that can reach AWS, with the source above in
+`config/agent_sources.yaml` and credentials in the environment:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+```
+
+On AWS, prefer a role (ECS task role, EC2 instance profile or IRSA) over keys.
+Then open **Agent Learning → Logs** and watch patterns from the log group
+appear.

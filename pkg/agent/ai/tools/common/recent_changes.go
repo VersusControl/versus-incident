@@ -10,14 +10,21 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/client"
 	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/plumbing/transport/server"
 	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
+	"github.com/go-git/go-git/v5/storage/filesystem"
 
 	aitools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	"github.com/VersusControl/versus-incident/pkg/core"
@@ -251,8 +258,14 @@ func (f *gitChangeFeed) Changes(ctx context.Context, since time.Time) ([]ChangeR
 
 // changesForRepo ensures the mirror exists, fetches the latest, and
 // walks the commit log from the configured branch since the given time.
-func (f *gitChangeFeed) changesForRepo(_ context.Context, repo GitRepo, since time.Time) ([]ChangeRecord, error) {
-	r, err := f.ensureMirror(repo)
+func (f *gitChangeFeed) changesForRepo(ctx context.Context, repo GitRepo, since time.Time) ([]ChangeRecord, error) {
+	path := f.cachePathFor(repo.URL)
+	// Hold the mirror's lock across fetch and log walk so a concurrent call
+	// never reads a mirror another call is still cloning or updating.
+	unlock := lockMirror(path)
+	defer unlock()
+
+	r, err := f.ensureMirror(ctx, repo, path)
 	if err != nil {
 		return nil, err
 	}
@@ -302,6 +315,9 @@ func (f *gitChangeFeed) changesForRepo(_ context.Context, repo GitRepo, since ti
 
 	var records []ChangeRecord
 	err = commitIter.ForEach(func(c *object.Commit) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		records = append(records, ChangeRecord{
 			Timestamp: c.Committer.When.UTC(),
 			Service:   service,
@@ -318,47 +334,124 @@ func (f *gitChangeFeed) changesForRepo(_ context.Context, repo GitRepo, since ti
 	return records, nil
 }
 
-// ensureMirror makes sure a local bare clone of the remote exists under
-// the cache directory and is up to date: it clones on first use and
-// fetches on subsequent calls. Returns the opened *git.Repository.
-func (f *gitChangeFeed) ensureMirror(repo GitRepo) (*git.Repository, error) {
-	path := f.cachePathFor(repo.URL)
+// mirrorLocks serialises work on each cache path. It is package-wide
+// rather than per feed because every feed built by NewGitChangeFeed shares
+// the same cache directory, and a rebuilt feed can overlap an old one.
+var mirrorLocks sync.Map
+
+// lockMirror takes the lock for one mirror path and returns its release.
+func lockMirror(path string) func() {
+	value, _ := mirrorLocks.LoadOrStore(path, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+// ensureMirror makes sure a local bare clone of the remote exists at path
+// and is up to date: it clones on first use and fetches on subsequent
+// calls. A mirror that can no longer be opened (for example one left
+// half-written by an older build or a crash) is discarded and cloned
+// again rather than failing every later call. The caller holds the
+// mirror's lock.
+func (f *gitChangeFeed) ensureMirror(ctx context.Context, repo GitRepo, path string) (*git.Repository, error) {
 	auth := gitAuth(repo)
 
 	if _, err := os.Stat(path); err == nil {
-		// Already cloned — open and fetch.
-		r, oerr := git.PlainOpen(path)
-		if oerr != nil {
-			return nil, fmt.Errorf("open mirror %q: %w", repo.URL, oerr)
+		r, usable := openMirror(path)
+		if usable {
+			remote, _ := r.Remote("origin")
+			ferr := remote.FetchContext(ctx, &git.FetchOptions{
+				Auth:  auth,
+				Force: true,
+				Tags:  git.NoTags,
+			})
+			if ferr != nil && ferr != git.NoErrAlreadyUpToDate {
+				return nil, fmt.Errorf("fetch %q: %w", repo.URL, ferr)
+			}
+			return r, nil
 		}
-		remote, rerr := r.Remote("origin")
-		if rerr != nil {
-			return nil, fmt.Errorf("remote origin %q: %w", repo.URL, rerr)
+		if err := os.RemoveAll(path); err != nil {
+			return nil, fmt.Errorf("discard unusable mirror %q: %w", repo.URL, err)
 		}
-		ferr := remote.Fetch(&git.FetchOptions{
-			Auth:  auth,
-			Force: true,
-			Tags:  git.NoTags,
-		})
-		if ferr != nil && ferr != git.NoErrAlreadyUpToDate {
-			return nil, fmt.Errorf("fetch %q: %w", repo.URL, ferr)
-		}
-		return r, nil
 	}
 
-	// First use — bare clone.
 	if err := os.MkdirAll(f.cacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("git cache dir %q: %w", f.cacheDir, err)
 	}
-	r, err := git.PlainClone(path, true, &git.CloneOptions{
+	// Clone beside the final path and rename into place so an interrupted
+	// clone never leaves a partial mirror where later calls look for one.
+	staging, err := os.MkdirTemp(f.cacheDir, filepath.Base(path)+".tmp-")
+	if err != nil {
+		return nil, fmt.Errorf("git staging dir %q: %w", f.cacheDir, err)
+	}
+	if _, err := git.PlainCloneContext(ctx, staging, true, &git.CloneOptions{
 		URL:  repo.URL,
 		Auth: auth,
 		Tags: git.NoTags,
-	})
-	if err != nil {
+	}); err != nil {
+		_ = os.RemoveAll(staging)
 		return nil, fmt.Errorf("clone %q: %w", repo.URL, err)
 	}
+	if err := os.Rename(staging, path); err != nil {
+		_ = os.RemoveAll(staging)
+		// Another process sharing the cache directory may have won the race.
+		if r, usable := openMirror(path); usable {
+			return r, nil
+		}
+		return nil, fmt.Errorf("install mirror %q: %w", repo.URL, err)
+	}
+	r, err := git.PlainOpen(path)
+	if err != nil {
+		return nil, fmt.Errorf("open mirror %q: %w", repo.URL, err)
+	}
 	return r, nil
+}
+
+// openMirror opens a cached mirror and reports whether it is usable: it
+// must open as a repository and still carry its origin remote.
+func openMirror(path string) (*git.Repository, bool) {
+	r, err := git.PlainOpen(path)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := r.Remote("origin"); err != nil {
+		return nil, false
+	}
+	return r, true
+}
+
+// go-git's default transport for local paths and file:// URLs runs the
+// git-upload-pack binary. Serving those repositories in-process instead
+// keeps the change feed free of any external git binary for every URL
+// form. This package is the only go-git user in the module, so replacing
+// the process-wide "file" transport affects nothing else.
+func init() {
+	client.InstallProtocol("file", server.NewServer(localRepoLoader{}))
+}
+
+// localRepoLoader opens a local repository's object storage for the
+// in-process transport. A path with a .git entry is a working tree: the
+// entry may be a directory or a "gitdir:" file (linked worktrees and
+// submodules), and go-git resolves both, including a shared common dir.
+// Otherwise the path must itself look like a bare repository (HEAD plus
+// objects/), so a working tree's own config/ folder is never mistaken
+// for repository metadata.
+type localRepoLoader struct{}
+
+func (localRepoLoader) Load(ep *transport.Endpoint) (storer.Storer, error) {
+	if _, err := os.Stat(filepath.Join(ep.Path, ".git")); err == nil {
+		r, oerr := git.PlainOpenWithOptions(ep.Path, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+		if oerr != nil {
+			return nil, transport.ErrRepositoryNotFound
+		}
+		return r.Storer, nil
+	}
+	head, herr := os.Stat(filepath.Join(ep.Path, "HEAD"))
+	objects, oerr := os.Stat(filepath.Join(ep.Path, "objects"))
+	if herr != nil || oerr != nil || head.IsDir() || !objects.IsDir() {
+		return nil, transport.ErrRepositoryNotFound
+	}
+	return filesystem.NewStorage(osfs.New(ep.Path), cache.NewObjectLRUDefault()), nil
 }
 
 // gitAuth returns the transport.AuthMethod for the given repo config.

@@ -1,0 +1,5 @@
+# The retired agent.tools.kubernetes key, in any form, is rejected.
+--set
+agent.enable=false
+--set
+agent.tools.kubernetes={}

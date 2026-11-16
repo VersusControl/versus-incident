@@ -1,0 +1,130 @@
+# Webhook quickstart: Versus + Redis, with a custom Slack template.
+#
+#   docker compose up -d                              # the stack
+#   curl ... -d @payloads/alertmanager.json           # send a sample alert
+#   docker compose --profile alertmanager up -d       # plus Prometheus and
+#                                                     # Alertmanager firing a demo rule
+#
+# Every setting has a default, so no edits are needed. Ports bind to
+# 127.0.0.1 only. See README.md for the walkthrough.
+
+services:
+  redis-tls-init:
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cd /tls
+        if [ -f server.crt ] && [ -f server.key ] && [ -f ca.crt ]; then
+          echo "TLS material already present; skipping."
+          exit 0
+        fi
+        apk add --no-cache openssl >/dev/null
+        openssl req -x509 -nodes -newkey rsa:2048 -days 3650 \
+          -keyout server.key -out server.crt \
+          -subj "/CN=redis" \
+          -addext "subjectAltName=DNS:redis,DNS:localhost,IP:127.0.0.1"
+        cp server.crt ca.crt
+        chmod 0644 server.crt server.key ca.crt
+        echo "Generated self-signed cert for redis."
+    volumes:
+      - redis-tls:/tls
+
+  redis:
+    image: redis:7-alpine
+    depends_on:
+      redis-tls-init:
+        condition: service_completed_successfully
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:-versus}
+      - --port
+      - "0"
+      - --tls-port
+      - "6379"
+      - --tls-cert-file
+      - /tls/server.crt
+      - --tls-key-file
+      - /tls/server.key
+      - --tls-ca-cert-file
+      - /tls/ca.crt
+      - --tls-auth-clients
+      - "no"
+    volumes:
+      - redis-data:/data
+      - redis-tls:/tls:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--tls", "--insecure", "-a", "${REDIS_PASSWORD:-versus}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  versus:
+    image: ${VERSUS_IMAGE:-ghcr.io/versuscontrol/versus-incident:latest}
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      PUBLIC_HOST: ${PUBLIC_HOST:-http://localhost:3000}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
+      # Slack is optional: export these three to receive the alert in Slack.
+      SLACK_ENABLE: ${SLACK_ENABLE:-false}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      # On-call is optional: adds the Acknowledge button and pages PagerDuty.
+      ONCALL_ENABLE: ${ONCALL_ENABLE:-false}
+      PAGERDUTY_ROUTING_KEY: ${PAGERDUTY_ROUTING_KEY:-}
+    volumes:
+      # Mount single files so the templates shipped in the image stay in place.
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      # The custom template folder. Edits apply to the next alert, no restart.
+      - ./templates:/app/templates:ro
+      - versus-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Optional (profile alertmanager): a Prometheus rule that always fires and an
+  # Alertmanager that posts it to Versus, the same way a real setup would.
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    profiles: ["alertmanager"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    profiles: ["alertmanager"]
+    depends_on:
+      versus:
+        condition: service_healthy
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  redis-tls:
+  versus-data:

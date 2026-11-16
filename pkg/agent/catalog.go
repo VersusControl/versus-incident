@@ -139,6 +139,11 @@ type Catalog struct {
 	services map[string]*ServiceInfo
 	dirty    bool
 	fold     BaselineFold
+	// foldTicks counts the ticks folded per pattern since this process
+	// started. It is the warm-up count for the global outlier hold-out when
+	// no seasonal buckets are kept; with seasonal buckets their persisted
+	// observation total is used instead.
+	foldTicks map[string]int
 }
 
 // BaselineFold configures how Catalog.Upsert folds a tick into a pattern's
@@ -148,7 +153,8 @@ type Catalog struct {
 // from the poll interval + spike settings via SetBaselineFold.
 type BaselineFold struct {
 	// PollSeconds is the tick duration; the folded value is tickCount /
-	// PollSeconds, a per-second rate. <= 0 folds the raw per-tick count (legacy).
+	// PollSeconds, a per-second rate (or over the tick's read window when that
+	// is longer, see rateSeconds). <= 0 folds the raw per-tick count (legacy).
 	PollSeconds float64
 	// RejectZ holds out a tick whose rate sits >= this many σ from the pre-fold
 	// baseline once the estimator is confident, so a burst can't drag the mean.
@@ -532,6 +538,13 @@ func sliceEnd(total int, opts CatalogPageOptions) int {
 //   - subsequently: only when a non-default named rule supersedes a previous
 //     default tag, or when the previous tag was empty
 func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alpha float64, ruleName, service string) *Pattern {
+	return c.UpsertOver(patternID, template, source, tickCount, 0, alpha, ruleName, service)
+}
+
+// UpsertOver is Upsert for a tick whose read spans window of source time. The
+// baseline folds tickCount over that window when it is longer than one poll
+// (see rateSeconds); a zero window folds per poll interval, exactly as Upsert.
+func (c *Catalog) UpsertOver(patternID, template, source string, tickCount int, window time.Duration, alpha float64, ruleName, service string) *Pattern {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now().UTC()
@@ -577,7 +590,7 @@ func (c *Catalog) Upsert(patternID, template, source string, tickCount int, alph
 	if alpha <= 0 {
 		alpha = 0.2
 	}
-	c.foldBaseline(p, tickCount, alpha, now, prevCount)
+	c.foldBaseline(p, tickCount, window, alpha, now, prevCount)
 	c.dirty = true
 	return p
 }
@@ -601,7 +614,7 @@ func (c *Catalog) SetBaselineFold(f BaselineFold) {
 // z-score needs, holds out a strong outlier once confident so a burst can't
 // drag the mean, and (when seasonal is enabled) folds the same rate into the
 // current time bucket.
-func (c *Catalog) foldBaseline(p *Pattern, tickCount int, alpha float64, now time.Time, prevCount int) {
+func (c *Catalog) foldBaseline(p *Pattern, tickCount int, window time.Duration, alpha float64, now time.Time, prevCount int) {
 	f := c.fold
 
 	// Legacy path: no fold config → the original mean-only fold of the raw
@@ -616,10 +629,12 @@ func (c *Catalog) foldBaseline(p *Pattern, tickCount int, alpha float64, now tim
 		return
 	}
 
-	// The value we fold: a per-second rate when a poll interval is configured.
+	// The value we fold: a per-second rate when a poll interval is configured,
+	// over the source time the tick actually read when that is longer than one
+	// poll (a catch-up read after a fresh start or a lost cursor).
 	value := float64(tickCount)
-	if f.PollSeconds > 0 {
-		value = float64(tickCount) / f.PollSeconds
+	if secs := rateSeconds(f.PollSeconds, window); secs > 0 {
+		value = float64(tickCount) / secs
 	}
 
 	// Global mean + variance. The first fold seeds the mean at the value (as
@@ -631,12 +646,30 @@ func (c *Catalog) foldBaseline(p *Pattern, tickCount int, alpha float64, now tim
 	} else {
 		std := math.Sqrt(math.Max(0, p.BaselineVariance))
 		confident := f.MinBaselineCount > 0 && prevCount >= f.MinBaselineCount
+		// A line-count gate alone is not enough: the first tick can read a
+		// whole lookback window of history (a fresh install against a source
+		// that already holds lines, or a lost cursor), so one tick carries
+		// enough lines to pass the gate while the mean is a single burst-rate
+		// sample with zero spread. Holding out the next ticks against that
+		// seed would freeze the baseline at the burst rate forever. Require a
+		// few folded ticks too, so the seed can move toward the real rate
+		// before the hold-out applies.
+		if confident && c.foldedTicks(p) < minConfidentTicks(f) {
+			confident = false
+		}
 		if !stats.ShouldReject(value, p.BaselineFrequency, std, confident, f.RejectZ) {
 			g := stats.EWMA{Mean: p.BaselineFrequency, Variance: p.BaselineVariance, Count: 2}
 			g.Observe(value, alpha)
 			p.BaselineFrequency = g.Mean
 			p.BaselineVariance = g.Variance
 		}
+	}
+
+	if f.SeasonalPeriod <= 0 {
+		if c.foldTicks == nil {
+			c.foldTicks = map[string]int{}
+		}
+		c.foldTicks[p.ID]++
 	}
 
 	// Seasonal buckets: fold the same rate into the current hour's bucket, with
@@ -657,14 +690,43 @@ func (c *Catalog) foldBaseline(p *Pattern, tickCount int, alpha float64, now tim
 			// accepted ticks the seasonal buckets are. The fold count is exactly
 			// the total seasonal observation count (every accepted tick bumps
 			// one bucket), so no separate counter column is needed and the
-			// backends stay byte-identical: avg += (value − avg) / n, where n is
-			// the seasonal total AFTER this tick. A strong outlier held out of
-			// the seasonal baseline is held out of the average too.
-			if n := seasonalCount(p.Seasonal); n > 0 {
-				p.BaselineAvg += (value - p.BaselineAvg) / float64(n)
+			// backends stay byte-identical. A strong outlier held out of the
+			// seasonal baseline is held out of the average too.
+			//
+			// The pattern's first tick only stands in until a second one
+			// arrives and is then left out: it may have read a whole lookback
+			// window of history in one tick, and at a 1/n weight such a burst
+			// would keep the average off the real rate for hours. So with n the
+			// seasonal total AFTER this tick, the average is over ticks 2..n:
+			// avg = value for n <= 2, else avg += (value − avg) / (n − 1).
+			if n := seasonalCount(p.Seasonal); n <= 2 {
+				p.BaselineAvg = value
+			} else {
+				p.BaselineAvg += (value - p.BaselineAvg) / float64(n-1)
 			}
 		}
 	}
+}
+
+// foldedTicks is how many ticks have folded into p's baseline before this one:
+// the persisted seasonal observation total when seasonal buckets are kept,
+// else the ticks this process has folded. Caller holds c.mu.
+func (c *Catalog) foldedTicks(p *Pattern) int {
+	if c.fold.SeasonalPeriod > 0 {
+		return seasonalCount(p.Seasonal)
+	}
+	return c.foldTicks[p.ID]
+}
+
+// minConfidentTicks is how many ticks must have folded into the baseline before
+// the global outlier hold-out may fire. It reuses the seasonal bucket warm-up
+// (a bucket is trusted after the same number of samples), with a floor of two
+// so the first-tick seed is never the only sample a later tick is judged by.
+func minConfidentTicks(f BaselineFold) int {
+	if f.MinBucketSamples > 2 {
+		return f.MinBucketSamples
+	}
+	return 2
 }
 
 // seasonalCount sums the observation counts across every seasonal bucket — the
@@ -734,6 +796,11 @@ func (c *Catalog) Label(patternID string, verdict *string, tags []string) bool {
 
 // Delete removes a pattern (e.g. operator marks a false-positive cluster).
 func (c *Catalog) Delete(patternID string) bool {
+	// A pattern relearned under the same ID starts a fresh baseline, so it
+	// must go through the warm-up again.
+	c.mu.Lock()
+	delete(c.foldTicks, patternID)
+	c.mu.Unlock()
 	if s := catalogStore(); s != nil {
 		return s.Curate(CatalogEdit{Kind: CatalogEditDelete, PatternID: patternID}) == nil
 	}
@@ -765,6 +832,7 @@ func (c *Catalog) ResetPatterns() (patterns int, err error) {
 
 	c.mu.Lock()
 	c.patterns = make(map[string]*Pattern)
+	c.foldTicks = nil
 	c.dirty = true
 	c.mu.Unlock()
 

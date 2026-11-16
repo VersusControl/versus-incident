@@ -1,94 +1,166 @@
-# Alert fatigue
+# Alert Fatigue
 
 _Enterprise_
 
-When the same low-signal alert fires over and over, it hides the important notifications. **Alert fatigue** keeps your on-call channel clean: once an
-alert has repeated several times in a short window, Versus treats it as
-&ldquo;spam&rdquo; and quietly sends the repeats to a separate **fatigue
-channel** instead of the channel your on-call watches. The noise is still
-recorded and still reachable — it just stops interrupting the people on call.
+## Concept
 
-It is **Enterprise** and **off by default**. Nothing is quietened until you
-turn it on, and turning it on is a deliberate choice you make from the admin UI.
+When the same low-priority alert fires again and again, on-call stops reading
+alerts. Alert fatigue spots an alert that repeats and stops the repeats from
+paging. The first one still reaches your channels. Every repeat is recorded, so
+you can review it. If an alert was not really noise, mark it **Not spam** and
+its future repeats page again; repeats already quieted are not re-sent.
 
-![Versus Fatigue](../docs/images/versus-fatigue.svg)
+- **Repeat:** the same alert again within 10 minutes. From the second one on,
+  the alert is **fatigued**.
+- **Where repeats go:** nowhere, by default; they are suppressed and only
+  recorded. You can send them to a separate **fatigue channel** instead, such as
+  a `#alert-noise` Slack channel.
+- **Never quieted:** critical and high alerts, and any alert with a priority of
+  80 or more, always page.
 
-> **First time running Enterprise?** Start with
-> [Getting Started — Running the Enterprise Agent](./getting-started.md). It
-> covers signing in as the default admin — the same admin role that unlocks the
-> controls on this page.
+It is off until an admin turns it on, and it needs Postgres.
 
-## What each setting means
+![Before: alert fatigue off, the alerts channel in Slack gets five identical DiskSpaceLow warning messages; after: alert fatigue on, one message is sent, the next four are suppressed, and the fingerprints table shows one row with WARN, 5 repeats, Fatigued and suppressed; critical and high alerts always page](../docs/images/alert-fatigue-concept.svg)
 
-Open **Alert fatigue** in the admin UI. As an admin you'll see one master
-switch; the rest of the controls only appear once it's on.
+## Example
 
-| Setting | What it does |
+Prometheus sends a warning `DiskSpaceLow` alert for the same disk five times in
+a few minutes.
+
+- **Off:** five Slack messages.
+- **On:** one Slack message. The next four are suppressed. **AI → Alert
+  fatigue** shows one row: severity **WARN**, **Repeats** 5, status
+  **Fatigued**, routed channel **suppressed**.
+
+If the same disk alert comes in as **critical**, it pages every time.
+
+## What you see in the UI
+
+Open **AI → Alert fatigue**.
+
+![The Alert fatigue screen with the feature on: Noise analytics shows 1 alert tracked and 1 suppressed, and the Fingerprints table has one WARN row with 5 repeats, status Fatigued, routed channel suppressed](../docs/images/quickstart-webhook-alert-fatigue-dark.png)
+
+| Part | What it shows |
 |---|---|
-| **Enable alert fatigue** | Turns the feature on or off for your org. Off by default — while it's off, every alert reaches your normal channels untouched. |
-| **Fatigue channel** | The channel where quietened (&ldquo;spam&rdquo;) alerts are sent instead of your on-call channel. Pick any of your configured [notification channels](../agent/channels.md). If you later disable that channel, the page warns you so the diverted alerts don't go nowhere. |
-| **Require review before spam** | Decides whether repeats are quietened automatically or only after you approve them. See below. |
+| **Enable alert fatigue** | The master switch. |
+| **Require review before spam** | When on, repeats keep paging until you confirm them. |
+| **Noise analytics** | For the last 7 or 30 days: **Alerts tracked**, **Noise ratio**, **Routed to channel**, **Suppressed**, **Reclaimed**, **Reclaim rate**. |
+| **Fingerprints** | One row per repeating alert: **Service**, **Source**, **Severity**, **Priority**, **Repeats**, **Occurrences**, **Last seen**, **Status**, **Routed channel**, **Actions**. Filter by **All**, **Tracking**, **Fatigued**, **Pending review**, **Reclaimed** or **Unreachable**. |
 
-### Require review before spam
+A row does not show the alert's name, and **Service** and **Source** show `—`
+when the alert does not carry them. Click a row to open the fingerprint and see
+the alert's content, with secrets masked.
 
-This toggle controls whether Versus quietens repeats on its own or waits for
-your sign-off:
+| Status | Meaning | Actions |
+|---|---|---|
+| **Tracking** | Seen, still paging. | **Mark as spam** |
+| **Fatigued** | Repeats no longer page. | **Not spam** |
+| **Pending review** | A repeat waiting for you. Still paging. | **Confirm spam**, **Not spam** |
+| **Reclaimed** | You marked it **Not spam**. It always pages. | **Mark as spam** |
+| **Unreachable** | A record from an older version that no alert can match. Ages out. | none |
 
-- **Off (the default)** — once an alert repeats enough, its repeats are
-  **auto-quietened** to the fatigue channel. No action needed from you.
-- **On** — nothing is quietened until **you** approve it. Repeat alerts land in
-  the review list marked **Pending review**, and they keep reaching your normal
-  channel until you confirm they really are spam.
+A critical or high row shows **Always pages** instead of **Mark as spam**.
 
-The page shows this note next to the toggle:
+## Turn it on
 
-> Alerts are auto-marked as spam by default — some alerts may stop being sent.
-> If you notice alerts missing and want to approve them before they're marked as
-> spam, enable pending review.
+1. Run the Enterprise image with a license key and Postgres storage.
+2. Sign in as an owner or admin.
+3. Open **AI → Alert fatigue** and switch on **Enable alert fatigue**.
+4. Optional: switch on **Require review before spam** to approve each
+   fatigued alert yourself. The page notes that, by default, alerts are
+   auto-marked as spam and some may stop being sent.
+5. Optional: in **Admin → Alert fatigue**, set up a fatigue channel, alert
+   grouping or downstream suppression (below). Changes apply to the next alert.
 
-## How to use it
+## Try it with Docker Compose
 
-1. **Turn it on.** Flip **Enable alert fatigue**. The channel picker and the
-   review controls appear below the switch.
-2. **Pick the fatigue channel.** Choose where quietened alerts should go. Use a
-   channel your on-call *doesn't* watch — a `#noise` or `#alert-fatigue` room is
-   ideal.
-3. **Choose auto or review.** Leave **Require review before spam** off to let
-   Versus quieten repeats automatically, or turn it on if you'd rather approve
-   each one first.
-4. **Open the review list.** Below the settings you'll find a list of the repeat
-   alerts Versus has recorded. Use the **Status** filter to switch between:
-   - **Fatigued** — repeats currently being sent to the fatigue channel.
-   - **Pending review** — repeats waiting for your approval (only when review is
-     on).
-   - **Reclaimed** — alerts you sent back to the on-call channel.
-5. **Act on an alert.** Each row offers the actions that fit its state:
-   - **Confirm spam** — approve a pending item so its repeats start going to the
-     fatigue channel.
-   - **Not spam** — pull an alert back to your on-call channel. Use this the
-     moment you spot something that was never really noise.
-   - **Mark as spam** — re-quieten an alert you'd previously reclaimed.
+The [Webhook Quickstart](../webhook/quickstart.md#8-quiet-repeats-with-alert-fatigue-enterprise)
+runs this example end to end. In short, from
+[`examples/quickstart/webhook/`](https://github.com/VersusControl/versus-incident/tree/main/examples/quickstart/webhook):
 
-Every row shows the service, source, severity, how many times it has repeated,
-and when it was last seen, so you can tell real noise from a signal at a glance.
+```bash
+export LICENSE_KEY=<your license key>
+docker compose -f docker-compose.yml -f docker-compose.enterprise.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.enterprise.yml logs versus | grep -i password
+```
 
-## What alert fatigue will never do
+Open `http://localhost:3000`. Use `localhost`, not `127.0.0.1`: turning the
+feature on from `127.0.0.1` fails with `CSRF validation failed`. Sign in as
+`admin`, open **AI → Alert fatigue**, switch on **Enable alert fatigue**, then
+send the warning alert five times:
 
-Quietening noise should never cost you a real page. Alert fatigue is built so
-that the worst it can do is send you *more* alerts, never fewer than you need:
+```bash
+for i in 1 2 3 4 5; do
+  curl -s -X POST http://localhost:3000/api/incidents \
+    -H 'Content-Type: application/json' \
+    -d @payloads/alertmanager-warning.json
+done
+```
 
-- **Critical and high alerts always reach you.** No matter how often they
-  repeat, critical- and high-severity alerts are never quietened — they always
-  page on your normal channel.
-- **When in doubt, it pages you.** If anything is uncertain — the feature is
-  off, a lookup fails, or the fatigue channel is unavailable — the alert is sent
-  to your on-call channel, not swallowed.
-- **Nothing is ever deleted.** Quietened alerts aren't dropped; they're recorded
-  and always visible in the review list, and any of them can be brought back
-  with **Not spam** at any time.
+Refresh the screen: the **Fingerprints** table has the WARN row from the
+picture above. Clean up with
+`docker compose -f docker-compose.yml -f docker-compose.enterprise.yml --profile alertmanager down -v`.
+
+## Reference
+
+All three settings below are in **Admin → Alert fatigue** and need an owner or
+admin.
+
+### Fatigue channel
+
+**Send fatigued alerts to a channel** sends repeats to a channel you set up
+here, instead of dropping them. Pick a channel type (Slack, Telegram, Email,
+Microsoft Teams, Lark or Viber) and fill in its fields; secrets are masked once
+saved. **Remove channel** goes back to suppressing. If a send to the fatigue
+channel fails, the repeat stays suppressed: the failure is logged and the row
+is marked as failed. It does not page instead.
+
+### Alert grouping
+
+**Enable same-service correlation** folds a storm of alerts from one service
+into one group. The first alert pages; other alerts from the same service
+within the **Correlation window** join its group and do not page. An alert
+more severe than the first still pages, and critical and high alerts are never
+grouped.
+
+| Setting | Default | Range |
+|---|---|---|
+| Correlation window | 5 minutes | 30 seconds to 1 hour |
+
+### Downstream suppression
+
+**Enable dependency-aware suppression** holds alerts from a service while a
+service it depends on has an open incident. You declare the dependencies as
+edges: *downstream* depends on *upstream*. When `checkout` depends on
+`payments` and `payments` has an open incident, `checkout`'s alerts are held:
+recorded and dropped. Nothing is released or re-sent when `payments` clears;
+`checkout`'s later alerts simply page again. The upstream incident itself, and
+any alert more severe than it, still page.
+
+| Setting | Default | Range |
+|---|---|---|
+| Open-incident lookback | 1 hour | 1 minute to 24 hours |
+
+### What it never does
+
+- It never quiets a critical or high alert, or one with priority 80 or more.
+- When it cannot decide (the feature is off or a lookup fails), the alert
+  pages.
+- It keeps a record of every quieted alert in the list. **Not spam** makes the
+  alert's future repeats page again; quieted repeats are not re-sent.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| **Alert fatigue is an Enterprise capability** | No `LICENSE_KEY`, or the key failed to verify. |
+| `CSRF validation failed` when switching it on | You opened the UI at `127.0.0.1`. Use `http://localhost:3000`. |
+| The fatigue channel form says it needs Postgres | Versus runs on file storage. Set `STORAGE_TYPE=postgres`. |
+| A repeat still paged | It is critical or high, its priority is 80 or more, it was reclaimed, or **Require review before spam** is on. |
+| **requires the admin role** | You are signed in as viewer or responder. |
 
 ## See also
 
-- New here? [Getting Started — Running the Enterprise Agent](./getting-started.md)
-- Where quietened alerts are sent: [Notification Channels](../agent/channels.md)
-- The other Enterprise tuning surface: [SLI/SLO auto-define](./slo.md)
+- [Webhook Quickstart](../webhook/quickstart.md): the example above, step by step.
+- [Notification Channels](../agent/channels.md)
+- [SLI/SLO](./slo.md): a service burning its error budget fast always pages.

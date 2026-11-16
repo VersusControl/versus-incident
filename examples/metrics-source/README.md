@@ -1,505 +1,268 @@
-> ### 🏢 Enterprise feature
->
-> The standing **`prometheus` / `traces` data source** and the
-> **standing-intelligence layer** (learned baselines + auto-SLO) demonstrated
-> here are **Versus Enterprise** capabilities (epics **X10**, **X16**, **X15**).
-> They require the **enterprise image** and a license carrying the
-> **`intelligence`** entitlement. On the OSS image, `type: prometheus` /
-> `type: traces` returns *"requires Versus Enterprise"*, and the intelligence
-> wedge is a no-op. OSS does not provide metric or trace read tools.
->
-# Enterprise SRE flow — metric/trace data source → detect → analyze → intelligence → on-call
+# Metrics and traces sources (Versus Enterprise)
 
-This is the **end-to-end Versus Enterprise SRE walkthrough**: stand up the
-stack, push synthetic traffic with the host-run generator, fire an anomaly, and
-watch it travel from a **standing metric data source** all the way to **paging a
-human** — with the **standing-intelligence layer** (learned baselines + auto-SLO
-+ burn-rate) sitting on top.
+The `prometheus` and `traces` sources are Enterprise features. This example
+runs the Enterprise image and needs a license key with the `intelligence`
+entitlement. Without a key the image starts in community mode and the sources
+stay off.
 
-Fake data is produced by **`scripts/generate_fake_metrics.py`** (host-run,
-stdlib only) pushing series to a **Prometheus Pushgateway** — the *same*
-fake-data UX as the OSS metrics example. There is no bespoke loadgen and no
-`curl /spike`.
+You need Git and Docker with Docker Compose v2. Clone the repository and go
+into this example's folder:
 
-> The generator here is the host-run
-> `scripts/generate_fake_metrics.py` in this example.
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident/examples/metrics-source
+```
 
-## Services
+Every command in this README runs from that folder,
+`versus-incident/examples/metrics-source`. If you open a new terminal, `cd`
+into it first.
 
-| Service | Port | What |
+Versus Enterprise reads a local Prometheus (and, with the traces overlay, a
+local Tempo), learns what normal looks like for each service, and raises an
+incident when a signal stays well outside what it learned.
+
+## What runs
+
+| Service | Address | What it does |
 |---|---|---|
-| versus (enterprise) | `3000` | the enterprise agent (license-gated source + intelligence) |
-| pushgateway | `9091` | the host generator PUSHes synthetic series here |
-| prometheus | `9090` | scrapes the pushgateway (`honor_labels`); queried by Versus |
-| tempo | `3200` / `4318` | trace backend (traces overlay only) |
-| signoz | `8080` / `4317` / `4318` | metrics + trace backend (SigNoz overlay only) |
-| redis | (internal) | state |
+| versus | <http://localhost:3000> | Versus Enterprise with the Prometheus source (plus the traces source in the overlay) |
+| prometheus | <http://localhost:9090> | scrapes the Pushgateway; Versus reads it |
+| pushgateway | `localhost:9091` | receives the demo series |
+| postgres, redis | internal | Versus storage |
+| tempo | `localhost:3200`, OTLP `localhost:4318` | trace backend (traces overlay only) |
+| metrics-generator | none | steady demo traffic (profile `fake-metrics`) |
+| metrics-spike | none | one 90-second error and latency spike (profile `metrics-spike`) |
 
-All fake data is produced by the **host-run** `scripts/generate_fake_metrics.py`
-— there is no in-compose traffic service.
+Every port binds to 127.0.0.1. The demo traffic comes from
+[scripts/generate_fake_metrics.py](scripts/generate_fake_metrics.py), run
+inside a `python:3.12-alpine` container, so you need no Python on your machine.
 
-## License
+## How it is configured
 
-This example **requires a Versus Enterprise license with the `intelligence`
-entitlement.** It is supplied to the binary via the `LICENSE_KEY` environment
-variable — an offline-verified Ed25519 JWT (no phone-home). **No license is
-committed to this repo**, and `.env` (where you put yours) is gitignored.
-
-1. Obtain a license key with the `intelligence` entitlement from Versus
-   (your enterprise dashboard / sales). It is the same offline JWT used by every
-   self-hosted enterprise deployment; the org and entitlements live inside the
-  token.
-2. Put it in your local `.env`:
-
-   ```bash
-   cp .env.example .env
-   # then edit .env and paste your key:
-   #   LICENSE_KEY=eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9....
-   ```
-
-`docker compose` reads `.env` automatically. Verify the key carries
-`intelligence` before running — without that entitlement the source refuses to
-build and the agent logs *"requires Versus Enterprise"* on the next tick.
-
-> A license with the wrong entitlements (e.g. `sso`/`rbac` only) authenticates
-> as enterprise but will **not** unlock the metric/trace source — the
-> `intelligence` feature is the specific gate.
-
-## Run it — the founder's 5-minute path
-
-### 1. Bring up the stack
-
-```bash
-cp .env.example .env          # then paste your LICENSE_KEY into .env
-docker compose up -d
-```
-
-Wait ~15s for Prometheus and Versus to go healthy. On boot the enterprise
-binary logs that it constructed the licensed source:
-
-```
-enterprise: agent started (mode=detect, sources=1)
-```
-
-### 2. Push normal traffic (the source stays quiet)
-
-The generator is **host-run** and needs no extra packages (Python 3 stdlib
-only). Point it at the published pushgateway:
-
-```bash
-python3 scripts/generate_fake_metrics.py --duration 60
-```
-
-You'll see:
-
-```
-pushing normal metrics to http://localhost:9091 (service=checkout, job=demo-traffic, 60s)
-done — 30 pushes, 612 requests (3 5xx) over 60s to http://localhost:9091/metrics/job/demo-traffic
-```
-
-Under normal traffic both anomaly rules evaluate to 0, so the agent stays
-quiet. Cross-check in Prometheus (<http://localhost:9090>) — run
-`sum by (service) (rate(demo_http_requests_total{code=~"5.."}[1m]))` and watch
-it sit near 0.
-
-### 3. Fire the anomaly (the one-liner)
-
-```bash
-python3 scripts/generate_fake_metrics.py --spike --duration 90
-```
-
-That drives ~45% `500`s and p95 latency past 500ms. Within one or two agent
-ticks (`poll_interval: 15s`) the enterprise `prometheus` source's two rules
-cross their thresholds. Watch the agent:
-
-```bash
-docker compose logs -f versus
-```
-
-```
-agent: tick prometheus:demo-prom signals=2 matched=2 patterns=2 verdicts=...
-agent[detect]: ... pattern=high-error-rate service=checkout verdict=unknown_pattern freq=...
-```
-
-That's the **DETECT path**: the standing source range-queried the rules, fired
-one signal per firing series, the worker classified them, and an **incident**
-was emitted. Inspect what the agent learned — the enterprise data plane has NO
-gateway secret, so authenticate with a live session from the built-in default
-admin (username `admin`; the password is printed ONCE in the logs on first boot):
-
-```bash
-docker compose logs versus | grep -A3 "DEFAULT ADMIN CREDENTIALS"
-# log in as the built-in default admin to mint a session cookie:
-curl -c cookies.txt -X POST http://localhost:3000/enterprise/api/auth/local/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"PASTE_FROM_LOGS"}'
-# then read the learned patterns with that session cookie:
-curl -b cookies.txt http://localhost:3000/api/agent/patterns | jq
-```
-
-### 4. Auto-revert (hands-off) and cleanup
-
-```bash
-# spike for 60s, then auto-revert to normal for the rest of the run:
-python3 scripts/generate_fake_metrics.py --spike --spike-duration 60 --duration 120
-
-# clear the pushed series from the pushgateway (the `/calm` analogue):
-python3 scripts/generate_fake_metrics.py --clear
-```
-
-Use `--list` to print the exact series/labels emitted plus sample PromQL.
-
-## Investigate with source-bound metric reads (the ANALYZE path)
-
-The detect path above works with **no API key**. To watch the agent pull the
-licensed source's `discover_metrics` and `read_metric_series` capabilities
-while *investigating* an incident, enable the AI analyzer in `.env`:
-
-```bash
-# in .env:
-#   AGENT_AI_ENABLE=true
-#   AGENT_AI_API_KEY=sk-...
-#   AGENT_AI_MODEL=gpt-4o-mini
-docker compose up -d --force-recreate versus
-python3 scripts/generate_fake_metrics.py --spike --duration 90
-docker compose logs -f versus      # inspect detection and any AI investigation
-```
-
-The source contributes bounded discovery and series reads to Chat and Analyze;
-an AI key permits investigation but does not guarantee a tool call for every
-incident. Use the tool catalog or investigation trace to check which capability
-was used. There is no separate metric endpoint in `tools.yaml`; see
-[Source-bound reads](#source-bound-reads).
-
-## Standing intelligence (X16 baseline → X15 auto-SLO → burn-rate)
-
-This is the wedge above the rule-based detector: instead of a hand-written
-PromQL threshold, the enterprise binary **learns a seasonal baseline per
-service (X16)**, **auto-derives an availability SLO (X15)**, and **pages on a
-multi-window error-budget burn rate** — emitting a finding through the *same* one
-emission path (`services.CreateIncidentFromFinding`) and out to on-call.
-
-**Honest scope — what runs in 5 minutes vs what needs a learning window:**
-
-| Stage | Runs in the quick demo? |
-|---|---|
-| Rule-based `prometheus` source fires an incident on `--spike` | ✅ Yes — immediate (this is the headline) |
-| Source-bound metric/trace discover and read during investigation | Available with licensed sources; AI-driven calls need an AI key |
-| **X15 auto-SLO derivation** (first scheduler pass derives + persists an SLO) | ⏳ After ~5m (the SLO job interval) |
-| **X16 learned-baseline anomaly** (confident seasonal model) | ⏳ Needs a learning window — tens of minutes to hours of samples |
-| **X15 multi-window burn-rate page** (1h + 6h windows, ≥14.4× / 6×) | ⏳ Needs a SUSTAINED spike across the policy windows |
-
-The burn-rate policy is the Google SRE-workbook 2-window page (fast 1h/5m at
-14.4×, slow 6h/30m at 6×). A 90s spike will **not** page on burn rate in a fresh
-stack — that's by design, and we don't fake it. The wedge is **automatic** with
-a valid intelligence `LICENSE_KEY` — there is nothing to configure. To **observe**
-it:
-
-1. The wedge registers on the scheduler at boot off the SAME single
-   `prometheus` data source — no per-service query list to author:
-
-   ```bash
-   docker compose up -d --force-recreate versus
-   ```
-
-   On boot you'll see:
-
-   ```
-   intel: SLO-burn evaluator registered against the agent metric source (objectives auto-derived from discovered RED signals; targets appear as services are discovered; slo=5m0s); X16 baseline runs on the agent worker tick via the per-type seam
-   enterprise: standing-intelligence wedge active (1 scheduler job(s))
-   ```
-
-   Until the metric brain discovers a service's availability SLI the evaluator
-   logs an explicit, rate-limited idle line — that is expected, not a
-   misconfiguration:
-
-   ```
-   intel: SLO-burn evaluator idle — no service has a discovered availability SLI (request_rate + error_rate) yet; nothing to evaluate (not a misconfiguration)
-   ```
-
-2. Keep traffic flowing so the brain discovers services and the learners have
-   samples (run the generator in a loop, or with a long `--duration 0` until
-   Ctrl+C). After the first SLO pass over a discovered service:
-
-   ```
-   intel: slo derived org=default service=checkout objective=0.99 window_days=30
-   ```
-
-3. Sustain a spike across the policy windows and the burn-rate rung fires a
-   finding that routes exactly like a detect incident:
-
-   ```
-   intel: slo burn org=default service=checkout window=fast long=18.2x short=21.0x
-   agent[detect]: ... source=intel:slo category=slo severity=critical
-   ```
-
-Without an `intelligence` license, neither this rule-based Enterprise source
-nor the standing-intelligence wedge runs; the example requires a licensed
-Enterprise binary.
-
-## On-call — the end of the flow (page a human)
-
-The point of the flow is to **page a human**. The example ships with
-notification channels **disabled by default** (no secrets committed), so the
-incident is created and the route is logged (a dry route you can see in the
-logs). To page for real, enable a channel in `.env`:
-
-```bash
-# in .env (Slack shown; Telegram is symmetric):
-#   SLACK_ENABLE=true
-#   SLACK_TOKEN=xoxb-...
-#   SLACK_CHANNEL_ID=C0123456789
-docker compose up -d --force-recreate versus
-python3 scripts/generate_fake_metrics.py --spike --duration 90
-```
-
-Now every emitted incident — whether from the rule-based source or the
-intelligence burn-rate finding — is delivered to your channel. The on-call
-provider config lives in [config/config.yaml](config/config.yaml) under
-`oncall:` (disabled by default; `aws_incident_manager` is the wired provider).
-
-## What you'll see — stage by stage
-
-| Stage | What you run | What you see |
-|---|---|---|
-| Connect | `docker compose up -d` | `enterprise: agent started (mode=detect, sources=1)` |
-| Fire | `generate_fake_metrics.py --spike` | source range-queries rules → fires N signals |
-| Detect | (automatic) | `agent: tick prometheus:demo-prom signals=2 matched=2` → incident emitted |
-| Investigate | enable AI key, re-spike | licensed source exposes bounded discover/read capabilities to Chat and Analyze; calls depend on the investigation |
-| Intelligence | (automatic, with license) wait | SLO derived; (sustained) burn-rate finding emitted |
-| On-call | enable a channel | incident delivered to Slack/Telegram (or logged dry route) |
-
-## Source-bound reads
-
-An enabled, licensed `prometheus` source contributes `discover_metrics` and
-`read_metric_series` to Chat and Analyze. With the Tempo overlay, an enabled,
-licensed `traces` source contributes `discover_trace_fields` and
-`read_trace_spans`. These capabilities use their configured source's address,
-auth, and read policy; this example needs no `tools.yaml` entry for them.
-
-The source configuration is in
-[config/agent_sources.yaml](config/agent_sources.yaml) (or the overlay's
-[config/agent_sources.traces.yaml](config/agent_sources.traces.yaml)). A source
-can detect without AI; interactive reads require the licensed source and a
-permitted caller. They do not expose arbitrary PromQL or TraceQL query tools.
-
-**No automatic config migration:** retired `query_metrics` / `query_traces`
-blocks in `tools.yaml` or inline `agent.tools` are rejected at startup. Remove
-them and explicitly move the backend connection and credentials into
-`agent_sources.yaml`; see the
-[migration guide](../../src/migration/migration-metric-trace-tools.md).
-
-### Note the new `options:` schema
-
-The source uses the generic **`options:`** block the X10 source reads — not the
-legacy nested `prometheus:` block:
+[config/agent_sources.yaml](config/agent_sources.yaml) holds the source:
 
 ```yaml
 sources:
   - name: demo-prom
     type: prometheus
     enable: true
-    options:                       # <-- generic options block
+    options:
       address: http://prometheus:9090
-      step: 30s
-      page_size: 500
-      queries:
-        - query: '...'
-          severity: critical
-          service_label: service
+      step: 15s                      # one sample every 15s
+      filter: '{service!=""}'        # learn only the demo series
+      discovery_interval: 1m         # look for new series every minute (default 1h)
 ```
 
-## The honest framing (no overclaiming)
+The traces overlay mounts
+[config/agent_sources.traces.yaml](config/agent_sources.traces.yaml) instead,
+which adds:
 
-Detection in the **base** example is **your PromQL rule** — the `prometheus`
-source is **rule-based**: each tick it range-queries the rules in
-`agent_sources.yaml` and emits a signal for every series with a sample `> 0`.
-Your PromQL threshold is the detector; there is no learned model deciding
-whether a metric is anomalous *in the base path*.
+```yaml
+  - name: demo-traces
+    type: traces
+    enable: true
+    options:
+      backend: tempo
+      address: http://tempo:3200
+      allow_private_networks: true   # Tempo is on the private Docker network
+      query: '{ resource.service.name = "checkout" }'
+      page_size: 100
+      discovery_interval: 1m
+```
 
-The **learned baseline / auto-SLO** is the layer above — the
-standing-intelligence wedge (epics **X16** learned baseline and **X15**
-auto-SLO) consumes this same metric source and decides anomalies from a learned
-seasonal model + an error-budget burn rate instead of a hand-written threshold
-(see [Standing intelligence](#standing-intelligence-x16-baseline--x15-auto-slo--burn-rate)).
-The `intelligence` entitlement unlocks both layers.
+Versus reads these files at start. After editing one, run
+`docker compose restart versus` (with the overlay files when you use them).
 
-## Optional: traces (Tempo)
-
-To also exercise the licensed `traces` source and its
-`discover_trace_fields` / `read_trace_spans` capabilities, bring up the overlay
-(adds Tempo and swaps in the source
-variant that adds the `traces` source):
+Licensed sources also give Chat and Analyze their read tools
+(`discover_metrics`, `read_metric_series`, `discover_trace_fields`,
+`read_trace_spans`); no `tools.yaml` entry is needed. Those tools are used when
+AI is on:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.traces.yml up -d
+export AGENT_AI_ENABLE=true AGENT_AI_API_KEY=<key> AGENT_AI_MODEL=gpt-4o-mini
+docker compose up -d versus
 ```
 
-Point the **same** generator at Tempo's OTLP endpoint so each push also emits a
-span (error spans during a spike):
+## Run it
+
+### 1. Start the stack and the demo traffic
 
 ```bash
-python3 scripts/generate_fake_metrics.py --spike --otlp http://localhost:4318 --duration 90
+export LICENSE_KEY=<your license key>     # never commit it
+docker compose --profile fake-metrics up -d
 ```
 
-The `traces` source searches Tempo for `{ status = error }` traces and emits a
-signal per matching trace; the source-bound reads let a permitted caller inspect
-bounded trace fields and spans during investigation. Tempo's API is on
-`:3200`, OTLP on `:4318`.
+You can also copy `.env.example` to `.env` and put the key there; `.env` is
+gitignored. Without `--profile fake-metrics` only the stack starts; run the
+same command with the profile later to add the traffic.
 
-## Optional: SigNoz (metrics + traces)
+The `metrics-generator` service pushes healthy traffic for the `checkout`
+service every 2 seconds: about 20 requests per push, a few `500`s, low
+latency.
 
-> ### 🏢 Enterprise feature
->
-> `signoz_metrics` and `signoz_traces` are **Versus Enterprise** standing data
-> sources, gated on the same **`intelligence`** entitlement as the
-> `prometheus` / `traces` pair. On the OSS image they return
-> *"requires Versus Enterprise"*.
+### 2. Sign in
 
-To run the same walkthrough against **SigNoz** instead of Prometheus + Tempo,
-bring up the SigNoz overlay. It adds a self-hosted SigNoz stack and swaps in the
-source variant that replaces both backends:
+Licensed, Versus uses the built-in admin account. Its password is printed once,
+on the first boot against an empty database:
+
+```bash
+docker compose logs versus | grep -A6 "DEFAULT ADMIN CREDENTIALS"
+```
+
+Open <http://localhost:3000> and sign in as `admin` with that password. Keep
+it: recreating the Versus container (for example with the traces overlay)
+does not print it again. `docker compose down -v` resets it.
+
+### 3. Let it learn (about 2 minutes)
+
+Within a minute the source finds the `checkout` series:
+
+```bash
+docker compose logs versus | grep demo-prom
+```
+
+```text
+agent: source demo-prom using "metrics" brain
+agent: standing metric source "demo-prom" discovered 6 signal(s) across 1 service(s) (label="service" generic=false metrics=0 notes=[])
+agent: new service discovered: "checkout"
+```
+
+The first discovery right after boot may report `generic=true` with
+Prometheus's own metric names; the next pass, a minute later, picks up the
+`service` label. The agent pages then list `checkout` with its learned
+request rate and error rate. Each baseline shows its sample count and turns
+confident after about 2 minutes. The same data is in the API:
+
+```bash
+curl -c cookies.txt -H 'Content-Type: application/json' -H 'Origin: http://localhost:3000' \
+  -d '{"username":"admin","password":"<from the logs>"}' \
+  http://localhost:3000/enterprise/api/auth/local/login
+curl -b cookies.txt 'http://localhost:3000/api/agent/baselines?type=metric'
+```
+
+```json
+{"service":"checkout","signal":"error_rate","kind":"errors","observations":6,"confident":true, ...}
+{"service":"checkout","signal":"request_rate","kind":"traffic","observations":7,"confident":true, ...}
+```
+
+### 4. Fire a spike
+
+Once the baselines are confident:
+
+```bash
+docker compose run --rm metrics-spike
+```
+
+For 90 seconds `checkout` returns about 45% `500`s and its latency goes above
+500 ms. The spike is pushed as its own job, so the steady traffic keeps
+running. After three agent ticks above the learned band (`poll_interval: 15s`)
+Versus raises an incident, about a minute into the spike:
+
+```text
+Anomaly: checkout — error_rate (... above baseline ...)
+```
+
+It appears in the Incidents list with source `demo-prom`. A spike fired
+before the baselines are confident is learned as normal and raises nothing.
+
+## Add traces (Tempo)
+
+The overlay adds Tempo and a second source that reads its spans. Use both
+files on every command:
+
+```bash
+export LICENSE_KEY=<your license key>
+docker compose -f docker-compose.yml -f docker-compose.traces.yml --profile fake-metrics up -d
+docker compose -f docker-compose.yml -f docker-compose.traces.yml run --rm metrics-spike
+```
+
+With the overlay both generators also send one span to Tempo per push
+(`POST /checkout` and `GET /orders`), about half of them errors during the
+spike. The `demo-traces` source reads the spans its `query` selects and learns
+their error rate and p99 latency. These baselines are listed under the service
+`_custom_` with the operation `service request`, and the logs show
+`agent: tick demo-traces signals=2 ...` every 15 seconds:
+
+```bash
+curl -b cookies.txt 'http://localhost:3000/api/agent/baselines?type=trace'
+```
+
+If you started the base stack first, this recreates Versus with the traces
+source; the learned metric baselines stay in Postgres. Tempo's search API is
+on <http://localhost:3200>.
+
+## Settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LICENSE_KEY` | empty | Enterprise license; turns the sources on |
+| `VERSUS_ENTERPRISE_IMAGE` | `ghcr.io/versuscontrol/versus-enterprise` | image to run |
+| `GATEWAY_SECRET` | `change-me` | admin API secret, used only in community mode (no license) |
+| `AGENT_MODE` | `detect` | `training`, `shadow` or `detect` |
+| `POSTGRES_PASSWORD`, `REDIS_PASSWORD` | `versus-dev`, `versus` | local storage passwords |
+| `AGENT_AI_ENABLE`, `AGENT_AI_API_KEY`, `AGENT_AI_MODEL` | off | optional AI analysis |
+| `SLACK_*`, `TELEGRAM_*` | off | optional notifications |
+
+Compose reads these from your shell or from `.env`. Variables already set in
+your shell, such as `AGENT_MODE`, override the defaults.
+
+## Generator options
+
+Run the generator by hand for other traffic shapes:
+
+```bash
+docker compose run --rm metrics-spike python3 /scripts/generate_fake_metrics.py --list
+docker compose run --rm metrics-spike python3 /scripts/generate_fake_metrics.py \
+  --job demo-spike --spike --spike-duration 60 --duration 120
+docker compose run --rm metrics-spike python3 /scripts/generate_fake_metrics.py --clear
+```
+
+With Python 3 on your machine you can also run it directly against the
+published Pushgateway: `python3 scripts/generate_fake_metrics.py --spike
+--duration 90` (add `--otlp http://localhost:4318` for spans).
+
+## Optional: SigNoz
+
+`docker-compose.signoz.yml` swaps Prometheus and Tempo for a self-hosted SigNoz
+and the `signoz_metrics` and `signoz_traces` sources
+([config/agent_sources.signoz.yaml](config/agent_sources.signoz.yaml)). It is
+heavy (ClickHouse, ZooKeeper, a collector and the SigNoz server; budget at
+least 4 GB of Docker memory) and must not be combined with the traces overlay,
+since both publish OTLP on `:4318`.
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.signoz.yml up -d
-```
-
-The overlay defaults `SIGNOZ_READ_ADDRESS` to `http://signoz:8080` on its trusted
-Docker network and explicitly opts that RFC1918 destination into the private
-network policy. HTTP sends the query API key in plaintext, so production
-deployments should override it with a final HTTPS origin and leave certificate
-verification enabled.
-
-> **Heavy.** SigNoz is ClickHouse + ZooKeeper + a schema migrator + an OTel
-> collector + the SigNoz server. Budget **at least 4 GB of Docker memory** on
-> top of the base stack. Do **not** combine this with
-> `docker-compose.traces.yml` — both publish OTLP/HTTP on `:4318`, and the two
-> source variants would fight over `agent_sources.yaml`. The base Prometheus and
-> Pushgateway keep running but sit idle in this mode.
-
-Point the **same** generator at the collector with `--backend signoz`. It pushes
-OTLP/HTTP metrics *and* spans, so SigNoz also derives its own
-`signoz_calls_total` span metric from the traffic:
-
-```bash
 python3 scripts/generate_fake_metrics.py --backend signoz --spike --duration 240
-```
-
-Within a couple of discovery passes:
-
-```
-agent: source demo-signoz-metrics using "metrics" brain
-agent: source demo-signoz-traces using "traces" brain
-enterprise: agent started (mode=detect, sources=2)
-agent: standing metric source "demo-signoz-metrics" discovered 1 signal(s) across 1 service(s) (label="service.name" generic=false metrics=2 notes=[])
-agent: tick demo-signoz-traces signals=2 matched=2 patterns=2 verdicts=map[known:2]
-```
-
-**The API key is minted for you.** SigNoz generates its key value server-side,
-so it cannot be a compose default. A `signoz-bootstrap` one-shot registers the
-first admin, creates a viewer-role service account, mints a key and hands it to
-the agent through a private volume. Dev defaults: `SIGNOZ_ADMIN_EMAIL`
-(`admin@versus.local`) and `SIGNOZ_ADMIN_PASSWORD` (`Versus-Dev-12345`); export
-`SIGNOZ_API_KEY` to bring your own. The SigNoz UI is on <http://localhost:8080>.
-
-**We pin the SigNoz images ourselves.** SigNoz deprecated its bundled Compose
-files at v0.130.0 in favour of the `foundryctl` generator, so this overlay pins
-`signoz/signoz:v0.129.0` + `signoz/signoz-otel-collector:v0.144.5` for
-determinism. SigNoz does not support this shape; bump the tags here if it drifts.
-The compatibility floor for the source is **SigNoz v0.87.0**, where
-`/api/v5/query_range` first appears.
-
-### Two differences from the Prometheus path
-
-**Provider-neutral read tools.** The licensed `signoz_metrics` and
-`signoz_traces` sources contribute `discover_metrics`, `read_metric_series`,
-`discover_trace_fields`, and `read_trace_spans` to Chat and Analyze. Add an OSS
-`signoz` logs source to contribute `discover_log_fields` and
-`read_log_records`. These six capability names are intentionally independent of
-the provider. They do not create generic Prometheus/Tempo query tools.
-
-**No operator-authored queries.** SigNoz's v5 API speaks filter expressions, not
-PromQL/TraceQL, so these sources discover their own watch-set instead of
-range-querying rules you wrote: services from a bounded sample of recent spans,
-metrics by probing the `metrics:` catalog. Connection details are the whole
-required config — see
-[config/agent_sources.signoz.yaml](config/agent_sources.signoz.yaml), which also
-explains why only `_total`-suffixed metrics are in that catalog.
-
-Tear down:
-
-```bash
 docker compose -f docker-compose.yml -f docker-compose.signoz.yml down -v
 ```
 
-## Optional: CloudWatch Metrics (AWS)
+A `signoz-bootstrap` one-shot creates the SigNoz admin
+(`admin@versus.local` / `Versus-Dev-12345` by default) and a read-only API key
+for Versus. The SigNoz UI is on <http://localhost:8080>.
 
-To watch a **real AWS account** instead of the local Prometheus stack, use the
-standalone CloudWatch variant. CloudWatch reads from AWS, so there is no local
-metric stack — this compose file runs just Redis and the enterprise agent:
-
-```bash
-cp .env.example .env      # paste LICENSE_KEY, then set AWS_REGION + credentials
-docker compose -f docker-compose.cloudwatch.yml up -d
-```
-
-The `cloudwatch_metrics` source needs only an **AWS region** (auth comes from the
-standard AWS SDK credential chain) and read-only CloudWatch access
-(`cloudwatch:ListMetrics` + `cloudwatch:GetMetricData`). It discovers every
-`AWS/*` metric it can attribute to a service, learns each one's baseline, and —
-in `detect` mode — pages on a real, sustained deviation. Unlike the Prometheus
-demo there is no synthetic spike: it watches your real AWS metrics. Full
-walkthrough: [CloudWatch Metrics guide](../../src/enterprise/metrics/cloudwatch-metrics.md).
-
-Tear down:
+## Clean up
 
 ```bash
-docker compose -f docker-compose.cloudwatch.yml down -v
+docker compose --profile fake-metrics down -v
+# with the traces overlay:
+docker compose -f docker-compose.yml -f docker-compose.traces.yml --profile fake-metrics down -v
 ```
 
-## Layout
+## Files
 
-```
+```text
 metrics-source/
-├── docker-compose.yml              # enterprise versus + redis + prometheus + pushgateway
-├── docker-compose.traces.yml       # optional overlay: + tempo
-├── docker-compose.signoz.yml      # optional overlay: + signoz (replaces prometheus/tempo as the source)
-├── docker-compose.cloudwatch.yml   # standalone: CloudWatch (AWS) — redis + versus, no local stack
-├── .env.example                    # copy to .env; holds LICENSE_KEY (gitignored)
+├── docker-compose.yml              Versus Enterprise, Prometheus, Pushgateway, Postgres, Redis, generators
+├── docker-compose.traces.yml       overlay: Tempo and the traces source
+├── docker-compose.signoz.yml       overlay: SigNoz instead of Prometheus and Tempo
+├── .env.example                    optional settings; copy to .env
 ├── config/
-│   ├── config.yaml                 # mode=detect, new_service_grace=0
-│   ├── agent_sources.yaml          # enterprise prometheus source (options: schema)
-│   ├── agent_sources.traces.yaml   # + traces source (traces overlay only)
-│   ├── agent_sources.signoz.yaml   # signoz_metrics + signoz_traces (signoz overlay only)
-│   └── agent_sources.cloudwatch.yaml # CloudWatch metrics source (cloudwatch compose only)
-│   #  NOTE: no tools.yaml — licensed sources contribute native discover/read tools
-├── prometheus/
-│   └── prometheus.yml              # scrapes the pushgateway (honor_labels: true)
-├── tempo/
-│   └── tempo.yaml                  # single-binary Tempo (overlay only)
-├── signoz/                         # signoz overlay support files
-│   ├── bootstrap.py                # mints the SigNoz query API key on first boot
-│   ├── otel-collector-config.yaml
-│   └── clickhouse/
-└── scripts/
-    └── generate_fake_metrics.py    # host-run fake-data generator (copy of the OSS one)
+│   ├── config.yaml                 Versus config (detect mode, 15s poll)
+│   ├── agent_sources.yaml          Prometheus source
+│   ├── agent_sources.traces.yaml   Prometheus and traces sources (traces overlay)
+│   └── agent_sources.signoz.yaml   SigNoz sources (SigNoz overlay)
+├── prometheus/prometheus.yml       scrapes the Pushgateway
+├── tempo/tempo.yaml                single-binary Tempo
+├── signoz/                         SigNoz overlay support files
+└── scripts/generate_fake_metrics.py  demo traffic generator
 ```
-
-## Cleanup
-
-```bash
-python3 scripts/generate_fake_metrics.py --clear   # drop the pushed series
-docker compose down -v
-# or, if you ran the traces overlay:
-docker compose -f docker-compose.yml -f docker-compose.traces.yml down -v
-# or, if you ran the SigNoz overlay:
-docker compose -f docker-compose.yml -f docker-compose.signoz.yml down -v
-# or, if you ran the CloudWatch variant:
-docker compose -f docker-compose.cloudwatch.yml down -v
-```
-
-## Reference
-
-- Enterprise metrics reference: [Metrics overview](../../src/enterprise/metrics/overview.md)
-- Enterprise trace reference: [Traces](../../src/enterprise/traces.md)
-

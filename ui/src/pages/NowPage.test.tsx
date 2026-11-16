@@ -124,6 +124,57 @@ describe("NowPage origin badges", () => {
   });
 });
 
+describe("NowPage notify cell", () => {
+  async function notifyRow(title: string): Promise<HTMLElement> {
+    const feed = await screen.findByRole("region", { name: /^Incident feed/ });
+    const cell = await within(feed).findByText(title);
+    return cell.closest<HTMLElement>("tr")!;
+  }
+
+  it("says nothing was sent when no channel was enabled", async () => {
+    setup([incident({ id: "none-row", title: "No channels row", notify_status: "none" })]);
+    renderPageAt();
+    const row = await notifyRow("No channels row");
+    expect(within(row).getByText("nothing sent")).toBeTruthy();
+  });
+
+  it("does not claim a delivery when sent names no channel", async () => {
+    setup([incident({ id: "sent-row", title: "Sent nowhere row", notify_status: "sent" })]);
+    renderPageAt();
+    const row = await notifyRow("Sent nowhere row");
+    expect(within(row).getByText("nothing sent")).toBeTruthy();
+    expect(within(row).queryByText("sent", { exact: true })).toBeNull();
+  });
+
+  it("counts the channels that received a sent alert", async () => {
+    setup([incident({
+      id: "slack-row",
+      title: "Delivered row",
+      notify_status: "sent",
+      channels_notified: ["slack", "email"],
+    })]);
+    renderPageAt();
+    const row = await notifyRow("Delivered row");
+    expect(within(row).getByText("2")).toBeTruthy();
+    expect(within(row).queryByText("nothing sent")).toBeNull();
+  });
+});
+
+describe("NowPage feed severity", () => {
+  it("shows the server-reported severity the Incidents list shows", async () => {
+    setup([
+      incident({ id: "crit-row", title: "Critical row", severity: "critical" }),
+      incident({ id: "warn-row", title: "Warning row", severity: "warning" }),
+    ]);
+    renderPageAt();
+    const feed = await screen.findByRole("region", { name: /^Incident feed/ });
+    const crit = (await within(feed).findByText("Critical row")).closest<HTMLElement>("tr")!;
+    const warn = within(feed).getByText("Warning row").closest<HTMLElement>("tr")!;
+    expect(within(crit).getByText("CRITICAL")).toBeTruthy();
+    expect(within(warn).getByText("WARN")).toBeTruthy();
+  });
+});
+
 describe("NowPage Agent pulse", () => {
   beforeEach(() => {
     setup();

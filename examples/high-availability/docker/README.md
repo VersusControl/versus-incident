@@ -1,5 +1,22 @@
 # HA on Docker Compose
 
+## Prerequisites
+
+- Git, and Docker + Docker Compose v2.
+- The enterprise image `ghcr.io/versuscontrol/versus-enterprise` (public; pulled
+  without `docker login`). Set `VERSUS_ENTERPRISE_IMAGE` in `.env` to pin a
+  release tag, for example `ghcr.io/versuscontrol/versus-enterprise:v<version>`.
+
+Clone the repository and go into this example's folder. Every command in
+this README runs from that folder.
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident/examples/high-availability/docker
+```
+
+## What runs
+
 See HA on your laptop in ~2 minutes: **two enterprise replicas + one Postgres +
 an nginx load balancer**. Hit one URL and watch sessions/identity work across
 both replicas.
@@ -20,18 +37,9 @@ both replicas.
                           └───────────┘  (secrets + sessions converge here)
 ```
 
-## Prerequisites
-
-- Docker + Docker Compose v2.
-- The enterprise image `ghcr.io/versuscontrol/versus-enterprise` (private —
-  `docker login ghcr.io` first, or set `VERSUS_ENTERPRISE_IMAGE` to a local build
-  in `.env`).
-
 ## Run it
 
 ```bash
-cd versus-incident/examples/high-availability/docker
-
 # 1. Provide your license (NEVER commit .env).
 cp .env.example .env
 #   edit .env: paste LICENSE_KEY (optional — empty boots community mode).

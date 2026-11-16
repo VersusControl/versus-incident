@@ -1,5 +1,16 @@
 # SigNoz-source example
 
+You need Git and Docker with Docker Compose v2; the traffic generator below
+also needs Python 3. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command in this README runs from that `versus-incident` folder, the
+repository root.
+
 Versus + Redis + a self-hosted [SigNoz](https://signoz.io) stack. The agent
 ingests log rows via SigNoz's v5 query API (`POST /api/v5/query_range`,
 signal `logs`) — the same endpoint and the same `SIGNOZ-API-KEY` header that
@@ -52,14 +63,14 @@ One deliberate deviation from SigNoz's own compose: the collector runs on its
 **static config only**, without `--manager-config`. With OpAMP enabled the
 collector pulls config from the SigNoz server and restarts its inner service
 twice during the first minute, dropping every OTLP connection in that window —
-so the first `generate_noisy_logs.py --target signoz` after `up -d` would fail.
+so the first `run_noisy_logs.sh --target signoz` batch after `up -d` would fail.
 The config here is fixed, so OpAMP buys nothing. The cost is that SigNoz's UI
 cannot push logs-pipeline changes to this collector.
 
 ## Run
 
 ```bash
-docker compose up -d
+docker compose -f examples/docker-compose/signoz/docker-compose.yml up -d
 ```
 
 The local example defaults `SIGNOZ_READ_ADDRESS` to `http://signoz:8080` on its
@@ -93,20 +104,17 @@ browse the same logs the agent is reading.
 ## Generate test traffic
 
 The bundled generator pushes over **OTLP/HTTP** to the collector, so the real
-ingest path is exercised — not a shortcut into ClickHouse. Run from the repo
-root:
+ingest path is exercised — not a shortcut into ClickHouse.
 
 ```bash
-# 500 mixed lines once:
-python3 scripts/generate_noisy_logs.py --target signoz --lines 500
-
-# Continuous — 20 lines every 5s, Ctrl+C to stop:
+# Training traffic — 20 lines every 5s, stamped with the current time.
+# Leave it running while the agent learns its baseline; Ctrl+C to stop:
 scripts/run_noisy_logs.sh --target signoz
 
-# Spike (test the spike detector):
+# Spike (test the spike detector) — one burst, then exits:
 scripts/run_noisy_logs.sh --target signoz --spike panic --spike-burst 80
 
-# Curated incident cluster (test detect mode):
+# Curated incident cluster (test detect mode) — one 60-line burst, then exits:
 scripts/run_noisy_logs.sh --target signoz --scenario db-outage
 ```
 
@@ -140,7 +148,7 @@ curl -X POST http://localhost:4318/v1/logs \
 ```bash
 SECRET=${GATEWAY_SECRET:-change-me}
 curl -H "X-Gateway-Secret: $SECRET" http://localhost:3000/api/agent/patterns | jq
-docker compose logs -f versus     # watch the per-tick line
+docker compose -f examples/docker-compose/signoz/docker-compose.yml logs -f versus     # watch the per-tick line
 ```
 
 A healthy tick looks like:
@@ -191,7 +199,7 @@ signoz/
 ## Cleanup
 
 ```bash
-docker compose down -v
+docker compose -f examples/docker-compose/signoz/docker-compose.yml down -v
 ```
 
 That drops every volume, including the minted API key and SigNoz's SQLite state,

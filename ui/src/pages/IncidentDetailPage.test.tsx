@@ -115,11 +115,64 @@ describe("IncidentDetailPage — shared Run analysis button", () => {
       notify_error: "msteams: MS Teams API returned 500 status code",
     }));
     renderDetail();
-    expect((await screen.findAllByText("msteams: MS Teams API returned 500 status code")).length).toBe(2);
+    expect(await screen.findByText("msteams: MS Teams API returned 500 status code")).toBeTruthy();
     const notified = screen.getByText("Notified", { selector: ".card-title" }).closest<HTMLElement>(".card")!;
     expect(within(notified).getAllByText("sent").length).toBe(2);
+    expect(within(notified).getByText("msteams")).toBeTruthy();
+    expect(within(notified).getByText("failed")).toBeTruthy();
+    expect(within(notified).getByText("MS Teams API returned 500 status code")).toBeTruthy();
     expect(within(notified).queryByText("partial")).toBeNull();
     expect(screen.getByText("Partial delivery")).toBeTruthy();
+  });
+
+  it("lists a failed channel with its reason instead of saying none was enabled", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({
+      notify_status: "failed",
+      notify_error: "slack: failed to post standard message: invalid_auth",
+    }));
+    renderDetail();
+    const title = await screen.findByText("Notified", { selector: ".card-title" });
+    const notified = title.closest<HTMLElement>(".card")!;
+    expect(within(notified).getByText("slack")).toBeTruthy();
+    expect(within(notified).getByText("failed")).toBeTruthy();
+    expect(within(notified).getByText("failed to post standard message: invalid_auth")).toBeTruthy();
+    expect(within(notified).queryByText(/None enabled/)).toBeNull();
+  });
+
+  it("lists enabled channels that did not succeed as failed, each with its reason", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({
+      notify_status: "partial",
+      channels_enabled: ["slack", "email", "telegram"],
+      channels_notified: ["email"],
+      notify_error: "slack: invalid_auth",
+    }));
+    renderDetail();
+    const title = await screen.findByText("Notified", { selector: ".card-title" });
+    const notified = title.closest<HTMLElement>(".card")!;
+    expect(within(notified).getByText("email")).toBeTruthy();
+    expect(within(notified).getByText("telegram")).toBeTruthy();
+    expect(within(notified).getAllByText("failed").length).toBe(2);
+    expect(within(notified).getByText("invalid_auth")).toBeTruthy();
+  });
+
+  it("says nothing was sent when no channel was enabled", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({ notify_status: "none" }));
+    renderDetail();
+    const title = await screen.findByText("Notified", { selector: ".card-title" });
+    const notified = title.closest<HTMLElement>(".card")!;
+    expect(within(notified).getByText("No channel was enabled at the time, so nothing was sent.")).toBeTruthy();
+    expect(screen.getByText("nothing sent")).toBeTruthy();
+    expect(screen.queryByText("none", { exact: true })).toBeNull();
+  });
+
+  it("does not claim a delivery when the status is sent but no channel received it", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({ notify_status: "sent" }));
+    renderDetail();
+    const title = await screen.findByText("Notified", { selector: ".card-title" });
+    const notified = title.closest<HTMLElement>(".card")!;
+    expect(within(notified).getByText("No channel was enabled at the time, so nothing was sent.")).toBeTruthy();
+    expect(screen.getByText("nothing sent")).toBeTruthy();
+    expect(screen.queryByText("sent", { exact: true })).toBeNull();
   });
 
   it("still renders the Run analysis action after the extraction", async () => {
@@ -144,6 +197,36 @@ describe("IncidentDetailPage — shared Run analysis button", () => {
     renderDetail();
     expect(await screen.findByText("500")).toBeTruthy();
     expect(screen.getByText("Last seen")).toBeTruthy();
+  });
+
+  it("shows a failed escalation with its error instead of not triggered", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({
+      oncall_triggered: false,
+      oncall_error: "pagerduty: 401 unauthorized",
+    }));
+    renderDetail();
+    const title = await screen.findByText("On-call", { selector: ".card-title" });
+    const card = title.closest<HTMLElement>(".card")!;
+    expect(within(card).getByText("escalation failed")).toBeTruthy();
+    expect(within(card).getByText("pagerduty: 401 unauthorized")).toBeTruthy();
+    expect(within(card).queryByText("Not triggered.")).toBeNull();
+  });
+
+  it("reads not triggered when escalation was never attempted", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail());
+    renderDetail();
+    const title = await screen.findByText("On-call", { selector: ".card-title" });
+    const card = title.closest<HTMLElement>(".card")!;
+    expect(within(card).getByText("Not triggered.")).toBeTruthy();
+  });
+
+  it("uses the server-reported severity the list shows", async () => {
+    vi.mocked(api.getIncident).mockResolvedValue(detail({
+      severity: "critical",
+      content: { Trigger: { Dimensions: [{ name: "Env", value: "prod" }] } },
+    }));
+    renderDetail();
+    expect(await screen.findByText("CRITICAL")).toBeTruthy();
   });
 
   it("prefers cumulative typed severity over stale content", async () => {

@@ -49,7 +49,7 @@ func TestDeterministicFinding_FieldPopulation(t *testing.T) {
 
 // TestDeterministicFinding_SeverityFromSigma covers the sigma→severity mapping,
 // including the baselineStd<=0 unknown-dispersion guard collapsing to medium.
-// The sigma is score / baselineStd per the detect design.
+// The score is already a z-score, so its magnitude is the sigma.
 func TestDeterministicFinding_SeverityFromSigma(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -181,5 +181,64 @@ func TestDeterministicFinding_ServiceFallback(t *testing.T) {
 	)
 	if !strings.Contains(fromPattern.Title, "pid-only") {
 		t.Fatalf("title should fall back to pattern id, got %q", fromPattern.Title)
+	}
+}
+
+// TestDeterministicFinding_MetricTitleUsesLearningUnits proves the title shows
+// the verdict's z-score as the σ (not divided by the spread a second time) and
+// renders the baseline in the unit Agent Learning shows.
+func TestDeterministicFinding_MetricTitleUsesLearningUnits(t *testing.T) {
+	sample := func(signal, unit string) []core.Signal {
+		fields := map[string]interface{}{core.FieldSignal: signal}
+		if unit != "" {
+			fields[core.FieldUnit] = unit
+		}
+		return []core.Signal{{Message: signal, Fields: fields}}
+	}
+	cases := []struct {
+		name   string
+		result core.AgentResult
+		score  float64
+		std    float64
+		want   string
+	}{
+		{
+			name:   "metric error rate fraction shown as percent",
+			result: core.AgentResult{SignalKind: "metrics", Baseline: 0.0042, SampleSignals: sample("error_rate", "")},
+			score:  354.2, std: 0.0014,
+			want: "Anomaly: checkout — error_rate (354.2σ above baseline 0.42±0.14%)",
+		},
+		{
+			name:   "trace latency already in milliseconds",
+			result: core.AgentResult{SignalKind: "traces", Baseline: 141.96, SampleSignals: sample("latency_p99", "")},
+			score:  82.3, std: 5.85,
+			want: "Anomaly: checkout — latency_p99 (82.3σ above baseline 141.96±5.85 ms)",
+		},
+		{
+			name:   "metric latency seconds shown as milliseconds",
+			result: core.AgentResult{SignalKind: "metrics", Baseline: 0.25, SampleSignals: sample("latency_p99", "")},
+			score:  6, std: 0.02,
+			want: "Anomaly: checkout — latency_p99 (6.0σ above baseline 250.00±20.00 ms)",
+		},
+		{
+			name:   "stated source unit kept and drop reads below",
+			result: core.AgentResult{SignalKind: "metrics", Baseline: 2048, SampleSignals: sample("network_in", "Bytes/Second")},
+			score:  -4.5, std: 100,
+			want: "Anomaly: checkout — network_in (4.5σ below baseline 2048.00±100.00 Bytes/Second)",
+		},
+		{
+			name:   "near-constant spread is shown at the floor the score used",
+			result: core.AgentResult{SignalKind: "metrics", Baseline: 0.5, SampleSignals: sample("saturation_cpu", "")},
+			score:  40, std: 0.0000001,
+			want: "Anomaly: checkout — saturation_cpu (40.0σ above baseline 0.5±0.005)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := deterministicFinding(tc.result, core.VerdictSpike, "checkout", tc.score, tc.std, "")
+			if f.Title != tc.want {
+				t.Fatalf("title = %q, want %q", f.Title, tc.want)
+			}
+		})
 	}
 }

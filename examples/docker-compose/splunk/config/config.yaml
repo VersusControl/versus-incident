@@ -55,7 +55,9 @@ agent:
 
   catalog:
     persist_interval: 30s
-    auto_promote_after: 50
+    # scripts/run_noisy_logs.sh sends each ordinary error once per 5-second
+    # batch, so a pattern is known about a minute after training starts.
+    auto_promote_after: 10
     # Spike detection: a known pattern is re-flagged when its per-second match
     # RATE jumps well above the learned normal. The bar is a z-score, so it
     # self-scales to each pattern's own volatility — a burst on a high-volume
@@ -73,7 +75,9 @@ agent:
     spike_z: 3.0
     spike_abs_ceiling: 0
     spike_sustain_ticks: 1
-    spike_min_frequency: 5
+    # 20 keeps a catch-up poll after a restart (a few batches of ordinary
+    # errors read at once) from looking like a spike.
+    spike_min_frequency: 20
     spike_min_baseline_count: 20
 
   miner:
@@ -98,7 +102,10 @@ agent:
     max_calls_per_hour: 60
     cache_ttl: "1h"
 
-  new_service_grace: 10m
+  # A service the agent has just met only learns for this long before it can
+  # raise incidents. Keep the training traffic running past it before
+  # switching to detect.
+  new_service_grace: 2m
 
   service_patterns:
     - '(?i)\bservice[._-]?name["\s:=]+"?([A-Za-z0-9._-]+)'

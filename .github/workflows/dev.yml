@@ -145,8 +145,9 @@ jobs:
         with:
           version: v3.15.3
 
-      # The scenario runner ends with a Go test that compares the rendered
-      # chart config with the application's default config.
+      # The scenario runner ends with Go checks that read its renders: the
+      # chart config through the application's config loader and key set, and
+      # the reader role against what the Kubernetes connector reads.
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -175,15 +176,23 @@ jobs:
           fi
           echo "Chart version and appVersion are both $version"
 
-      # charts/ is not committed; fetch the redis subchart at the version and
-      # digest pinned in Chart.lock.
-      - name: Build chart dependencies
-        run: |
-          helm repo add bitnami https://charts.bitnami.com/bitnami
-          helm dependency build helm/versus-incident
-
-      - name: One-file manifest is up to date
+      - name: One-file manifests are up to date
         run: scripts/render_kubernetes_manifest.sh --check
+
+      # Each example values file must lint and render on its own, with only
+      # the sign-in Secret reference the examples ask for at install time.
+      - name: Example values files lint and render
+        run: |
+          for values in examples/kubernetes/values-*.yaml; do
+            echo "== $values"
+            helm lint helm/versus-incident \
+              -f "$values" \
+              --set gatewaySecretExistingSecret=versus-incident
+            helm template versus-incident helm/versus-incident \
+              --namespace versus \
+              -f "$values" \
+              --set gatewaySecretExistingSecret=versus-incident >/dev/null
+          done
 
       - name: helm lint
         run: helm lint helm/versus-incident

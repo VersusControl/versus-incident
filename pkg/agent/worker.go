@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/scheduler"
@@ -260,20 +261,50 @@ func (w *Worker) effectiveMode(ctx context.Context) string {
 }
 
 // effectiveAIEnabled reports whether the detect path should call the AI on
-// this tick. It starts from "enabled" (today's behaviour) and lets a
-// registered AISettingsResolver disable it at runtime. It fails open: a nil
-// resolver or an ok=false result keeps today's behaviour, so the worker
-// runs the real detect call exactly as before. OSS registers no resolver,
-// so this is one nil-check returning true — byte-for-byte unchanged. The
-// resolver is read live, so a hot toggle takes effect on the next call
-// without a restart.
+// this tick. A registered AISettingsResolver decides at runtime and is read
+// live, so a hot toggle takes effect on the next call without a restart.
+// When the resolver has no answer (ok=false) the static agent config
+// decides: AI runs only when agent.ai.enable is on and a credential is
+// configured (or the provider needs none), so an unset runtime setting never
+// turns a disabled, keyless AI into an outbound model call. With no resolver
+// (OSS) the detect agent is only built when AI is enabled, so this returns
+// true and the w.ai.Detect nil-check decides.
 func (w *Worker) effectiveAIEnabled(ctx context.Context) bool {
+	return EffectiveAIEnabled(ctx, w.cfg.AI)
+}
+
+// EffectiveAIEnabled is the runtime "may this call reach the model" decision
+// shared by the detect worker and the on-demand analyze endpoints: the
+// registered AISettingsResolver's answer when it has one, else the static
+// config (enabled, plus a usable credential). With no resolver (OSS) the AI
+// agents are only built when AI is enabled, so the enable flag is left to the
+// caller's nil-agent check, but a configured model without a usable credential
+// is still off: it would send incident data to the provider unauthenticated.
+// ctx must already carry the request's org (see DecorateAIContext) for a
+// per-org resolver to answer.
+func EffectiveAIEnabled(ctx context.Context, ai config.AgentAIConfig) bool {
 	if r := aiSettingsResolver(); r != nil {
 		if enabled, ok := r.EffectiveEnabled(ctx); ok {
 			return enabled
 		}
+		return staticAIEnabled(ai)
 	}
-	return true
+	return !ai.Enable || aiCredentialUsable(ai)
+}
+
+// staticAIEnabled is the config-only answer to "may the agent call the AI".
+func staticAIEnabled(ai config.AgentAIConfig) bool {
+	return ai.Enable && aiCredentialUsable(ai)
+}
+
+// aiCredentialUsable reports whether a model call would be authenticated: an
+// API key is set, the provider needs none (Ollama), or a base_url points the
+// call at an endpoint the operator configured (which may authenticate by
+// network position) — the same rule the Enterprise runtime settings apply.
+func aiCredentialUsable(ai config.AgentAIConfig) bool {
+	return strings.TrimSpace(ai.APIKey) != "" ||
+		einowrap.IsKeylessProvider(ai.Provider) ||
+		strings.TrimSpace(ai.BaseURL) != ""
 }
 
 // Run drives the worker until ctx is canceled. It is intended to be called
@@ -497,14 +528,15 @@ func (w *Worker) tickSource(ctx context.Context, src core.SignalSource, mode str
 	}
 	for start := 0; start < len(signals); start += batchSize {
 		end := min(start+batchSize, len(signals))
-		if !w.processSourceBatch(ctx, src, mode, signals[start:end], newCursor) {
+		if !w.processSourceBatch(ctx, src, mode, signals[start:end], since, newCursor) {
 			return
 		}
 	}
 	w.saveCursor(ctx, src.Name(), newCursor)
 }
 
-func (w *Worker) processSourceBatch(ctx context.Context, src core.SignalSource, mode string, signals []core.Signal, newCursor time.Time) bool {
+func (w *Worker) processSourceBatch(ctx context.Context, src core.SignalSource, mode string, signals []core.Signal, since, newCursor time.Time) bool {
+
 	// Redact every payload before doing anything else with it.
 	for i := range signals {
 		if w.redactor != nil {
@@ -571,7 +603,9 @@ func (w *Worker) processSourceBatch(ctx context.Context, src core.SignalSource, 
 	// type it plugs into this exact lifecycle. The worker stays type-agnostic.
 	learner, detector := w.brainFor(src.Name())
 
-	observations, err := learner.Group(ctx, signals)
+	// The read range lets the log brain measure each pattern's own span of
+	// source time, so a catch-up read folds at the real rate (see readSpan).
+	observations, err := learner.Group(withReadRange(ctx, since, newCursor), signals)
 	if err != nil {
 		log.Printf("agent: grouping signals from %s failed: %v", src.Name(), err)
 		return false
@@ -1095,6 +1129,60 @@ func (w *Worker) preBrainMatcher(name string) *RegexMatcher {
 	default:
 		return nil
 	}
+}
+
+// readRange is the cursor range one pull covered: the cursor the read started
+// from and the cursor it advanced to.
+type readRange struct{ since, cursor time.Time }
+
+type readRangeKey struct{}
+
+// withReadRange attaches the pull's cursor range to ctx for the learner's
+// Group, which has every line of the batch and measures per-pattern spans.
+func withReadRange(ctx context.Context, since, cursor time.Time) context.Context {
+	return context.WithValue(ctx, readRangeKey{}, readRange{since: since, cursor: cursor})
+}
+
+// readRangeFrom returns the pull's cursor range, if the worker attached one.
+func readRangeFrom(ctx context.Context) (readRange, bool) {
+	r, ok := ctx.Value(readRangeKey{}).(readRange)
+	return r, ok
+}
+
+// readSpan is the source time a set of lines spans: from the earliest to the
+// latest timestamp, clipped to [since, newCursor] so a straggler older than
+// the cursor cannot stretch it. The log brain measures it per pattern, on that
+// pattern's own lines, so an unrelated old line in the batch, or a quiet gap
+// before a burst, never dilutes the burst's rate. Lines without a timestamp
+// are ignored; fewer than two timestamps, or a cursor that did not move, give
+// zero (unknown: rate per poll).
+func readSpan(signals []core.Signal, since, newCursor time.Time) time.Duration {
+	var lo, hi time.Time
+	for _, sig := range signals {
+		ts := sig.Timestamp
+		if ts.IsZero() {
+			continue
+		}
+		if lo.IsZero() || ts.Before(lo) {
+			lo = ts
+		}
+		if hi.IsZero() || ts.After(hi) {
+			hi = ts
+		}
+	}
+	if lo.IsZero() || !newCursor.After(since) {
+		return 0
+	}
+	if lo.Before(since) {
+		lo = since
+	}
+	if hi.After(newCursor) {
+		hi = newCursor
+	}
+	if !hi.After(lo) {
+		return 0
+	}
+	return hi.Sub(lo)
 }
 
 // -----------------------------------------------------------------------------

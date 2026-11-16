@@ -1,7 +1,7 @@
 # Notification Channels
 
 Every incident Versus raises — whether the [AI SRE Agent](./agent-introduction.md)
-detected it or a [webhook](../webhook/getting-started.md) delivered it — is fanned
+detected it or a [webhook](../webhook/send-alerts.md) delivered it — is fanned
 out to the **channels** you enable. Each channel is independent: turn on as
 many as you like, give each its own message template, and override the
 destination per request when you need to.

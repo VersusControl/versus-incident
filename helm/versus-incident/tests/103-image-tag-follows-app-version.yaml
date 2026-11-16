@@ -1,0 +1,2 @@
+# Default values on a chart whose appVersion differs from its version: the
+# default image tag must follow appVersion, not a pinned tag or the version.

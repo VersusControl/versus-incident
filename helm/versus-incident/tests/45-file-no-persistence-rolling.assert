@@ -1,0 +1,3 @@
+kind: Deployment
+!kind: PersistentVolumeClaim
+!type: Recreate

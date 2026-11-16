@@ -1,0 +1,5 @@
+# Install notes with the Kubernetes connector on.
+--namespace
+versus
+--set
+connectors.kubernetes.enabled=true

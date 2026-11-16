@@ -1,10 +1,26 @@
 # HA on Kubernetes (raw manifests)
 
+## Prerequisites
+
+- Git. A cluster (kind / minikube / any). `kubectl` + kustomize (built into
+  `kubectl` ≥ 1.14, i.e. `kubectl apply -k`).
+- The enterprise image `ghcr.io/versuscontrol/versus-enterprise` is public, so
+  the cluster pulls it without `imagePullSecrets`. Pin a release tag in
+  `30-versus-statefulset.yaml` for production.
+
+Clone the repository and go into this example's folder. Every command in
+this README runs from that folder.
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident/examples/high-availability/k8s
+```
+
+## What gets created (namespace `versus-ha`)
+
 Self-contained Kubernetes manifests that run **Versus Enterprise as 3 replicas
 sharing one Postgres** — the same topology the Helm chart produces, but plain
 YAML you can read top-to-bottom. Applied with `kubectl apply -k .` (kustomize).
-
-## What gets created (namespace `versus-ha`)
 
 | File | Resource | Why |
 |---|---|---|
@@ -17,19 +33,9 @@ YAML you can read top-to-bottom. Applied with `kubectl apply -k .` (kustomize).
 | `60-networkpolicy.yaml` | NetworkPolicy ×2 | default-deny ingress; Postgres reachable |
 | `kustomization.yaml` | secretGenerator | builds `versus-secrets` from a gitignored `.env` |
 
-## Prerequisites
-
-- A cluster (kind / minikube / any). `kubectl` + kustomize (built into
-  `kubectl` ≥ 1.14, i.e. `kubectl apply -k`).
-- The enterprise image `ghcr.io/versuscontrol/versus-enterprise` pullable by
-  the cluster (it is private — `imagePullSecrets` or a local load may be needed;
-  on kind: `kind load docker-image ghcr.io/versuscontrol/versus-enterprise`).
-
 ## Run it
 
 ```bash
-cd versus-incident/examples/high-availability/k8s
-
 # 1. Provide the license + secrets (NEVER commit .env).
 cp .env.example .env
 #   edit .env: paste LICENSE_KEY. The data plane / admin UI is authenticated by
@@ -70,7 +76,7 @@ kubectl -n versus-ha logs -l app.kubernetes.io/name=versus --tail=-1 \
 
 ```bash
 kubectl -n versus-ha port-forward svc/versus 3000:3000
-# in another shell:
+# in a second terminal, in the same folder (the port-forward keeps running):
 curl -fsS http://localhost:3000/healthz && echo OK
 ```
 

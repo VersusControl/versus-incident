@@ -1,0 +1,14 @@
+# Values for the Bitnami Redis subchart, as --reuse-values carries them over
+# from an older release: the install stops and names the new keys.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  architecture: standalone
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi

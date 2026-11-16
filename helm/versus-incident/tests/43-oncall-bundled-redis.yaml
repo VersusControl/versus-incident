@@ -1,0 +1,11 @@
+# On-call with the bundled Redis. The bundled Redis serves plain TCP, so the
+# app config must turn the client's default TLS off or the startup ping fails.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  auth:
+    password: "test-redis-password"

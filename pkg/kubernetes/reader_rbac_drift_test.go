@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -199,28 +198,32 @@ func readerMarkdownRole(t *testing.T, path, heading string) map[readerGrant]bool
 	return nil
 }
 
-// renderDefaultReaderChart renders the chart with the Kubernetes connector on
-// (connectors.kubernetes.enabled=true) and otherwise default values, which is
-// when the chart creates the reader role. It skips when Helm or the chart
-// dependencies are not available locally.
-func renderDefaultReaderChart(t *testing.T, args ...string) []byte {
+// chartRendersEnv names the directory where helm/versus-incident/tests/run.sh
+// keeps each chart scenario's `helm template` output as <scenario>.yaml. The
+// chart role tests read it from there and never run helm themselves; without
+// it they skip, and the chart CI job runs them.
+const chartRendersEnv = "VERSUS_CHART_RENDERS"
+
+// Chart scenarios with the Kubernetes connector on: default values, and the
+// opt-in Secret grant.
+const (
+	readerDefaultScenario = "21-kubernetes-default"
+	readerSecretsScenario = "31-kubernetes-secrets-list-only"
+)
+
+// readerChartRender returns the rendered chart of one scenario in
+// helm/versus-incident/tests.
+func readerChartRender(t *testing.T, scenario string) []byte {
 	t.Helper()
-	helm, err := exec.LookPath("helm")
+	directory := os.Getenv(chartRendersEnv)
+	if directory == "" {
+		t.Skip("needs the chart renders of helm/versus-incident/tests/run.sh, which runs this test; the committed manifest tests cover the default role")
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, scenario+".yaml"))
 	if err != nil {
-		t.Skip("helm is not installed; the committed manifest check covers the default role")
+		t.Fatalf("chart scenario %q has no render: %v", scenario, err)
 	}
-	if entries, _ := os.ReadDir(filepath.Join(readerChartDir, "charts")); len(entries) == 0 {
-		t.Skip("chart dependencies are not built; run `helm dependency build helm/versus-incident`")
-	}
-	base := []string{"template", "versus-incident", readerChartDir, "--namespace", "versus", "--set", "connectors.kubernetes.enabled=true"}
-	command := exec.Command(helm, append(base, args...)...)
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	output, err := command.Output()
-	if err != nil {
-		t.Fatalf("helm template with the connector on failed: %v\n%s", err, stderr.String())
-	}
-	return output
+	return raw
 }
 
 func sortedReaderGrants(grants map[readerGrant]bool) []string {
@@ -303,8 +306,8 @@ func TestReaderRoleOptionalReadsHaveReasons(t *testing.T) {
 }
 
 func TestDefaultChartReaderRoleCoversConnectorReads(t *testing.T) {
-	rendered := renderDefaultReaderChart(t)
-	granted := readerClusterRoleGrants(t, "helm template (default values)", rendered, func(name string) bool { return strings.HasSuffix(name, readerChartRoleName) })
+	rendered := readerChartRender(t, readerDefaultScenario)
+	granted := readerClusterRoleGrants(t, "chart scenario "+readerDefaultScenario, rendered, func(name string) bool { return strings.HasSuffix(name, readerChartRoleName) })
 	assertReaderRoleCoversCode(t, "chart default role", granted)
 }
 
@@ -315,8 +318,8 @@ func TestKubectlManifestReaderRoleCoversConnectorReads(t *testing.T) {
 func TestReaderRoleCopiesMatchTheChart(t *testing.T) {
 	manifest := readerManifestRole(t)
 	t.Run("chart", func(t *testing.T) {
-		rendered := renderDefaultReaderChart(t)
-		chart := readerClusterRoleGrants(t, "helm template (default values)", rendered, func(name string) bool { return strings.HasSuffix(name, readerChartRoleName) })
+		rendered := readerChartRender(t, readerDefaultScenario)
+		chart := readerClusterRoleGrants(t, "chart scenario "+readerDefaultScenario, rendered, func(name string) bool { return strings.HasSuffix(name, readerChartRoleName) })
 		assertReaderRolesMatch(t, readerManifestPath, manifest, "chart default role", chart)
 	})
 	t.Run("configuration guide", func(t *testing.T) {
@@ -330,8 +333,8 @@ func TestReaderRoleCopiesMatchTheChart(t *testing.T) {
 // The Secret opt-in grants list only. A get would let a describe fetch a whole
 // Secret, values included, while list is all Helm release discovery needs.
 func TestOptInSecretGrantIsListOnly(t *testing.T) {
-	rendered := renderDefaultReaderChart(t, "--set", "kubernetesReaderRBAC.secrets=true")
-	granted := readerClusterRoleGrants(t, "helm template (secrets opt-in)", rendered, func(name string) bool { return strings.HasSuffix(name, readerChartRoleName) })
+	rendered := readerChartRender(t, readerSecretsScenario)
+	granted := readerClusterRoleGrants(t, "chart scenario "+readerSecretsScenario, rendered, func(name string) bool { return strings.HasSuffix(name, readerChartRoleName) })
 	if !granted[readerGrant{resource: "secrets", verb: "list"}] {
 		t.Error("the Secret opt-in must grant list on secrets")
 	}

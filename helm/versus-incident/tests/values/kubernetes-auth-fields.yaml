@@ -1,0 +1,33 @@
+# The Kubernetes connector turned on with every authentication field set.
+# Scenarios pick the mode with --set-string connectors.kubernetes.auth.mode=…;
+# the rendered config must then carry only what that mode uses.
+connectors:
+  kubernetes:
+    enabled: true
+    endpoint: "https://cluster.example"
+    caFile: "/run/kubernetes/ca.crt"
+    serverName: "cluster.internal"
+    auth:
+      token: "fixture-token"
+      tokenFile: "/run/kubernetes/token"
+      clientCertificate:
+        certificateFile: "/run/kubernetes/client.crt"
+        keyFile: "/run/kubernetes/client.key"
+      kubeconfig:
+        path: "/run/kubernetes/config"
+        context: "production"
+      eks:
+        clusterName: "production"
+        region: "us-east-1"
+        roleARN: "arn:aws:iam::123456789012:role/reader"
+        profile: "production"
+      aks:
+        credentialMode: "client_secret"
+        serverID: "api://aks-server"
+        tenantID: "tenant"
+        clientID: "client"
+        clientSecret: "fixture-secret"
+        federatedTokenFile: "/run/azure/token"
+        environment: "government"
+      gke:
+        credentialsFile: "/run/google/credentials.json"

@@ -1,82 +1,77 @@
-# Analyze Mode
+# AI Analyze
 
-Analyze mode provides a **deep-dive investigation** for incidents. While detect mode identifies patterns and sends notifications, analyze mode helps you understand the root cause of an incident by gathering context and presenting structured insights directly in the dashboard.
+## Concept
 
-Analyze mode is designed to assist on-call engineers, post-incident reviewers, and anyone needing a detailed analysis of an incident.
+Detect tells you *that* something is wrong. **AI Analyze** helps you work out
+*why*. On any incident, click **Run analysis** and the AI investigates: it
+looks at the incident, related patterns, recent incidents and, through
+read-only tools, your connected data. It then writes root cause hypotheses,
+its confidence, and what to check next.
 
-## When to Use Analyze Mode
+Analyze only reads. It never sends notifications, changes an incident, or runs a
+fix. You can run it again at any time; earlier analyses stay on the incident.
 
-Analyze mode is available whenever `agent.ai.enable: true`. If AI is disabled, the **Analysis** card on the incident detail page will show "coming soon."
+## Example
 
-Typical scenarios for using analyze mode:
+At 14:07 an incident opens: `Anomaly: checkout-api — … acme-pay did not answer
+within 30s`. The on-call engineer has not worked on checkout before. They open
+the incident and click **Run analysis**.
 
-- **On-call troubleshooting**: Quickly generate a starting hypothesis for unfamiliar incidents.
-- **Correlating patterns**: Investigate incidents that resemble past patterns.
-- **Post-incident review**: Add structured AI insights to human-written notes.
+Seconds later the analysis is titled `checkout-api: calls to acme-pay time
+out`, rated high, and points at the dependency rather than `checkout-api`
+itself. It ranks three root cause hypotheses: acme-pay is slow or unreachable
+(78%), a recent `checkout-api` change lowered its timeout (34%), or the network
+path to acme-pay is degraded (21%). The next steps start with "check the
+acme-pay status page". The **Tool calls** section lists every lookup the AI
+made, so the engineer can see exactly which evidence it used.
 
-## How It Works
+## What you see in the UI
 
-1. **Trigger Analysis**: Click **Run analysis** on the incident detail page.
-2. **AI Investigation**: The AI gathers context, such as recent incidents, pattern history, and service summaries.
-3. **Insights Delivered**: The results are saved and displayed in the dashboard for review.
+Open an incident from **Incidents** and click **Run analysis**. When it
+finishes, an **Analysis complete** window shows the result:
 
-![AI Agent](../docs/images/ai-analysis.png)
+| Part | What it shows |
+|---|---|
+| Header | The analysis title, severity, category, confidence percentage and model. |
+| Summary | A short explanation of what is going on. |
+| **Root cause hypotheses** | Possible causes, each with its own likelihood and the reason for it. |
+| **Evidence** | What each tool lookup found, in one line per tool. |
+| **Next steps** | What to check or do first. |
+| **Tool calls** | Every lookup, with its arguments, output and duration. |
 
-Analyze mode runs within a 2-minute timeout to ensure responsiveness. Results are always saved, even if the analysis encounters errors.
+![The Analysis complete window for checkout-api: title checkout-api: calls to acme-pay time out with HIGH, dependency and 78% conf badges, a summary, three root cause hypotheses at 78%, 34% and 21%, evidence from get_related_logs, list_patterns and the incident snapshot, four next steps, and the start of the expanded Tool calls (2) list](../docs/images/sre-analyze-ui-dark.png)
 
-## Configuration
+Expand **Tool calls** to audit the lookups:
 
-Analyze mode uses the shared `agent.ai` settings. You can optionally point it at a stronger model for deep dives with the `analyze:` block:
+![The Tool calls (2) section of the same analysis: get_related_logs with arguments limit 20, service checkout-api and time_range_minutes 30 and its log output from loki:quickstart-loki, and list_patterns with arguments limit 20, query checkout-api and service checkout-api and its output of 2 matching patterns](../docs/images/sre-analyze-tools-ui-dark.png)
+
+Use **View full analysis** to open it on its own page. Every analysis is also
+listed under **AI → Analyses**, and earlier analyses stay on the incident.
+
+When AI is not set up, **Run analysis** is disabled and says that AI is not
+enabled.
+
+## Turn it on
+
+Analyze uses the same AI settings as detect. It works in any mode and on any
+incident, including webhook alerts.
 
 ```yaml
 agent:
   enable: true
-  mode: detect            # detect or shadow; analyze works in both
   ai:
     enable: true
     api_key: ${AGENT_AI_API_KEY}
-    model: gpt-4o-mini    # shared default for detect + analyze
-
+    model: gpt-4o-mini        # shared with detect
     analyze:
-      model: gpt-4o         # use a stronger model for deep dives
+      model: gpt-4o           # optional: a stronger model just for analyses
 ```
 
-The `analyze:` block only overrides the model. For beta-limited /
-reasoning models (`gpt-5.*`, o-series), set `temperature: -1` on the
-shared `ai` block to omit the parameter entirely.
+Which tools the AI may call during an analysis is set separately from Chat. See
+the [Tool Reference](./tools/overview.md).
 
-## Tool catalog
+## Reference
 
-During an analysis the AI can call read-only tools to pull supporting context
-from Versus and your connected data before forming a conclusion. Tools only
-read state; they never send notifications, mutate incidents, or run
-remediation.
-
-Chat and Analyze share the `versus`, `common`, and planned `k8s` tool groups,
-but each agent has an independent policy. Enabling a tool for Chat does not
-enable it for Analyze, and a tool is callable only when its data source,
-integration, or capability requirement is satisfied. Kubernetes tools are
-listed as planned and are not yet implemented.
-
-Each tool returns the same envelope so the AI can reason about results
-uniformly:
-
-- `found` — whether the lookup returned anything.
-- `data` — the tool-specific payload (only present on a hit).
-
-The full tool-call trail (which tools ran, their arguments, and what
-they returned) is recorded with every analysis and shown in the
-**Tool calls** section of the analysis result, so you can audit exactly
-what the AI looked at.
-
-See the [Tool Reference](./tools/overview.md) for the current catalog,
-availability requirements, `tools.yaml` configuration, authentication, and
-Docker examples.
-
-## Key Features
-
-- **Non-intrusive**: Analyze mode never sends notifications or modifies systems.
-- **Read-only tools**: Analyze can use policy-enabled tools from the shared catalog to gather context.
-- **Customizable**: Fine-tune the AI's behavior with optional settings.
-
-Analyze mode empowers you to make informed decisions by providing structured insights when you need them most.
+- [Configuration](./configuration.md): the `agent.ai` and `agent.ai.analyze` keys.
+- [Tool Reference](./tools/overview.md): the read-only tools and their policies.
+- [DevOps Agent Chat](./devops-agent.md): ask follow-up questions in a chat.

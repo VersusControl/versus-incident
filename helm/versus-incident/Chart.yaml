@@ -5,9 +5,3 @@ type: application
 version: 1.4.36
 appVersion: "1.4.36"
 
-# Dependencies
-dependencies:
-  - name: redis
-    version: "^21.0.0"
-    repository: "https://charts.bitnami.com/bitnami"
-    condition: redis.enabled

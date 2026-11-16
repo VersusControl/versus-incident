@@ -1,79 +1,73 @@
-# SSO — Google Workspace
+# SSO with Google Workspace
 
 _Enterprise_
 
-Set up single sign-on with **Google Workspace** (or Google accounts). The
-connection type is `google`; its OIDC issuer is fixed to
-`https://accounts.google.com`, so there is **no issuer field to fill** — you only
-register an OAuth client and paste its credentials.
+## Concept
 
-## What you'll need
+Your team signs in to Versus with their Google Workspace accounts. You create
+an OAuth client in Google Cloud and paste its ID and secret into Versus. There
+is no issuer to enter: Versus uses Google's (`https://accounts.google.com`).
+
+## Example
+
+Acme's Workspace domain is `acme.com`. After this setup, the Versus login
+screen shows **Sign in with Google**. `maria@acme.com` signs in and lands as a
+**viewer**. An account outside `acme.com` is refused.
+
+## What you need
 
 | Item | Where it comes from |
 |---|---|
-| A **Google Cloud project** | [console.cloud.google.com](https://console.cloud.google.com) |
-| The Versus **callback URL** | `https://<your-versus-host>/enterprise/api/sso/<org>/callback` (use `default` for a single-org deployment) |
-| Your **Workspace domain(s)** | e.g. `acme.com` — the allow-list of who may sign in |
+| A Google Cloud project | [console.cloud.google.com](https://console.cloud.google.com) |
+| The Versus redirect URL | **Admin → Identity providers → Add identity provider**, field **Redirect URL (callback)** |
+| Your Workspace domain | For example `acme.com` |
 
-## Step 1 — Create the OAuth client in Google Cloud
+## 1. Create the OAuth client in Google Cloud
 
-1. In the Google Cloud Console, open **APIs & Services → Credentials**.
-2. If prompted, configure the **OAuth consent screen** (Internal is fine for a
-   Workspace-only audience).
+1. Open **APIs & Services → Credentials**.
+2. If asked, set up the **OAuth consent screen**. **Internal** is fine when only
+   your Workspace signs in.
 3. Click **Create credentials → OAuth client ID**.
-4. Choose **Application type: Web application** and give it a name (e.g.
-   `Versus SRE Agent`).
-5. Under **Authorized redirect URIs**, add the Versus callback URL exactly:
+4. Pick **Web application** and give it a name, such as `Versus`.
+5. Under **Authorized redirect URIs**, add the Versus redirect URL exactly:
 
    ```text
    https://<your-versus-host>/enterprise/api/sso/<org>/callback
    ```
 
-6. Click **Create**. Google shows your **Client ID** and **Client secret** —
-   keep them for Step 2.
+6. Click **Create** and keep the **Client ID** and **Client secret**.
 
-## Step 2 — Add the connection in Versus
+## 2. Add the provider in Versus
 
-In the console open the **Agent** page → **Single Sign-On (SSO)** panel → **Add
-identity provider**, then fill in:
+In **Admin → Identity providers**, click **Add identity provider**:
 
 | Field | Value |
 |---|---|
-| **Provider** | `Google` |
-| **Connection ID** | A slug such as `google` (lowercase; used in the login URL). |
-| **Display name** | e.g. `Google` — the label on the sign-in button. |
-| **Client ID** | The OAuth **Client ID** from Step 1. |
-| **Client secret** | The OAuth **Client secret** from Step 1 (sealed on save). |
-| **Redirect URL (callback)** | The same callback URL you registered in Step 1. |
-| **Scopes** | `email, profile` (`openid` is always implied). |
-| **Allowed email domains** | Your Workspace domain(s), e.g. `acme.com`. **Required.** |
-| **Enabled** | Turn on to show the “Sign in with Google” button. |
+| **Provider** | Google |
+| **Connection ID** | `google` |
+| **Display name** | `Google` (the button reads **Sign in with Google**) |
+| **Client ID** | From step 1 |
+| **Client secret** | From step 1 |
+| **Redirect URL (callback)** | Keep the prefilled value; it must match step 1 |
+| **Scopes** | `email, profile` |
+| **Allowed email domains** | `acme.com` (required) |
+| **Enabled** | On |
 
-There is **no issuer or tenant field** for Google — it is derived automatically
-(`accounts.google.com`).
+Click **Add provider**. Versus shows only whether a secret is stored and its
+last four characters.
 
-Click **Save**. Versus seals the secret immediately and confirms with a masked
-summary (whether a secret is stored and its last four characters — never the
-secret itself).
+## 3. Test it
 
-## Step 3 — Test the login
+Sign out. The login screen now shows **Sign in with Google**. Sign in with a
+Workspace account; you land in Versus as a **viewer**. Promote someone to
+**admin** or **owner** in **Admin → Members & roles**, then disable the
+built-in admin (see [SSO overview](./overview.md#turn-it-on)).
 
-Once the connection is **enabled**, the console sign-in screen shows a **“Sign in
-with Google”** button. Click it (or visit the login URL directly):
+## Change it later
 
-```text
-https://<your-versus-host>/enterprise/api/sso/<org>/login/<connection-id>
-```
+Open the provider again to change the allowed domains, scopes or display name.
+To rotate the secret, create a new one in Google Cloud and paste it into
+**Client secret**. Leave the field blank to keep the stored secret.
 
-You'll be redirected to Google, sign in, and land back on Versus with a session.
-A user whose email domain isn't on your allow-list is refused — that's expected.
-
-The first SSO user signs in as **viewer**. Promote one to `admin`/`owner` from
-the **Members** panel, then [disable the built-in default admin](./overview.md#the-bootstrap-flow-who-creates-the-first-connection).
-
-## Editing or rotating later
-
-Re-open the connection any time to change the allowed domains, scopes, or display
-name. To **rotate** the client secret, create a new secret in Google Cloud and
-paste it into the **Client secret** field. Leave that field **blank** to keep the
-stored secret unchanged.
+See the [SSO overview](./overview.md#reference) for roles, URLs and login
+enforcement.

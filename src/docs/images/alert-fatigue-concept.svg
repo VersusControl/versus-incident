@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="782" viewBox="0 0 760 782" style="max-width:100%;height:auto" role="img" aria-label="Prometheus sends the same warning DiskSpaceLow alert five times in a few minutes; before, with alert fatigue off, the alerts channel in Slack gets five identical Versus messages, each saying FIRING DiskSpaceLow, 1 alert, WARNING on worker-03:9100, Disk /var is 91% full, so every repeat is sent and on call stops reading alerts; after, with alert fatigue on, the channel gets one message and the next four are suppressed and recorded, not sent; the Alert fatigue fingerprints table shows one row with severity WARN, repeats 5, status Fatigued and routed channel suppressed; a side note says critical and high alerts always page, and so do alerts with priority 80 or more">
+  <title>Alert fatigue turns five repeat messages into one</title>
+  <desc>Before: five identical DiskSpaceLow warning messages in a Slack channel; after: one message, the other four suppressed and shown as one fingerprint row with WARN severity, 5 repeats, status Fatigued and routed channel suppressed; critical and high alerts always page</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f15{font-size:15px}.f17{font-size:17px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}.amb{fill:#B54708}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .tag{font-size:10px;font-weight:700;fill:#5B6B78}
+      .ic{font-family:SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;fill:#E01E5A}
+      .code{fill:#F7F9FB;stroke:#D8E0E8}
+      .mock{fill:#FFFFFF;stroke:#C3CED8}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <symbol id="v" viewBox="24 18 64 55.1">
+      <path fill="#223947" fill-rule="evenodd" d="M53.55 23.74L56 27.98L58.45 23.74H77.96L74.71 29.38L65.76 44.89L62.51 50.52L59.25 56.16L56 61.79L52.75 56.16L49.5 50.52L37.29 29.38L34.04 23.74L30.78 18.11H24.28L27.53 23.74L30.78 29.38L46.24 56.16L52.75 67.42L56 73.06L59.25 67.42L62.51 61.79L65.76 56.16L69.01 50.52L81.21 29.38L84.47 23.74L87.72 18.11H50.3ZM47.04 23.74L43.79 18.11H37.29L40.54 23.74L43.79 29.38L52.75 44.89L56 50.52L59.25 44.89L62.51 39.25L68.2 29.38H61.7L59.25 33.62L56 39.25L50.3 29.38Z"/>
+    </symbol>
+    <!-- one message, rendered by templates/slack_message.tmpl from payloads/alertmanager-warning.json; y=0 is the top of its side bar -->
+    <g id="m">
+      <rect x="96" y="0" width="4" height="38" rx="2" fill="#C70039"/>
+      <rect class="code" x="203" y="19" width="109" height="18" rx="3"/>
+      <text x="108" y="14" class="f13">🔥</text>
+      <text x="130" y="14" class="f13"><tspan class="b">FIRING</tspan> · DiskSpaceLow (1 alert)</text>
+      <text x="108" y="32" class="f13">• <tspan class="b">WARNING</tspan> on <tspan class="ic" dx="4">worker-03:9100</tspan><tspan dx="4">: Disk /var is 91% full</tspan></text>
+    </g>
+  </defs>
+
+  <rect width="760" height="782" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">Alert fatigue stops repeats from paging</text>
+  <text x="24" y="64" class="f13 sec">Prometheus sends the same warning DiskSpaceLow alert five times in a few minutes</text>
+
+  <!-- panels -->
+  <rect x="20" y="84" width="720" height="362" rx="12" fill="#F2F5F8"/>
+  <rect x="20" y="476" width="720" height="286" rx="12" fill="#FFFFFF" stroke="#BACFE3" stroke-width="2"/>
+
+  <!-- BEFORE -->
+  <text x="36" y="108" class="zone">BEFORE: ALERT FATIGUE OFF</text>
+  <rect class="mock" x="36" y="120" width="470" height="310" rx="8"/>
+  <text x="52" y="144" class="f15 b"># alerts</text>
+  <path d="M37 156.5H505" stroke="#C3CED8"/>
+  <rect x="52" y="168" width="32" height="32" rx="6" fill="#FFFFFF" stroke="#C3CED8"/>
+  <use href="#v" x="56" y="174" width="24" height="21"/>
+  <text x="96" y="182" class="f15 b">Versus</text>
+  <rect x="156" y="170" width="30" height="16" rx="3" fill="#F2F5F8" stroke="#C3CED8"/>
+  <text x="171" y="182" class="tag mid">APP</text>
+  <text x="194" y="182" class="f12 sec">9:00 AM</text>
+  <use href="#m" y="192"/>
+  <use href="#m" y="238"/>
+  <use href="#m" y="284"/>
+  <use href="#m" y="330"/>
+  <use href="#m" y="376"/>
+
+  <text x="522" y="258" class="f17 b nm">Five Slack messages</text>
+  <text x="522" y="282" class="f12 sec">Every repeat is sent</text>
+  <text x="522" y="300" class="f12 sec">On call stops reading alerts</text>
+
+  <!-- AFTER -->
+  <text x="36" y="500" class="zone">AFTER: ALERT FATIGUE ON</text>
+  <rect class="mock" x="36" y="512" width="470" height="124" rx="8"/>
+  <text x="52" y="536" class="f15 b"># alerts</text>
+  <path d="M37 548.5H505" stroke="#C3CED8"/>
+  <rect x="52" y="560" width="32" height="32" rx="6" fill="#FFFFFF" stroke="#C3CED8"/>
+  <use href="#v" x="56" y="566" width="24" height="21"/>
+  <text x="96" y="574" class="f15 b">Versus</text>
+  <rect x="156" y="562" width="30" height="16" rx="3" fill="#F2F5F8" stroke="#C3CED8"/>
+  <text x="171" y="574" class="tag mid">APP</text>
+  <text x="194" y="574" class="f12 sec">9:00 AM</text>
+  <use href="#m" y="584"/>
+
+  <text x="522" y="560" class="f17 b nm">One Slack message</text>
+  <text x="522" y="584" class="f12 sec">The next four are suppressed</text>
+  <text x="522" y="602" class="f12 sec">and recorded, not sent</text>
+
+  <text x="36" y="664" class="zone">AI → ALERT FATIGUE: FINGERPRINTS</text>
+  <rect x="36" y="674" width="470" height="72" rx="10" fill="#FFFFFF" stroke="#C3CED8"/>
+  <text x="52" y="694" class="zone">SEVERITY</text>
+  <text x="148" y="694" class="zone">REPEATS</text>
+  <text x="236" y="694" class="zone">STATUS</text>
+  <text x="352" y="694" class="zone">ROUTED CHANNEL</text>
+  <path d="M37 702.5H505" stroke="#C3CED8"/>
+  <rect x="52" y="715" width="48" height="18" rx="9" fill="#FEF3E2" stroke="#B54708"/>
+  <text x="76" y="728" class="f11 b amb mid">WARN</text>
+  <text x="148" y="728" class="f13 b nm">5</text>
+  <rect x="236" y="714" width="72" height="20" rx="10" fill="#BACFE3" stroke="#12222F"/>
+  <text x="272" y="728" class="f12 b nm mid">Fatigued</text>
+  <text x="352" y="728" class="f13 nm">suppressed</text>
+
+  <rect x="522" y="674" width="202" height="72" rx="10" fill="#F2F5F8"/>
+  <text x="538" y="698" class="f13 b nm">Critical and high</text>
+  <text x="538" y="716" class="f13 b nm">always page</text>
+  <text x="538" y="736" class="f12 sec">Also priority 80 or more</text>
+
+  <!-- flow -->
+  <path class="flow" d="M380 452V469" marker-end="url(#a)"/>
+</svg>

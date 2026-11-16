@@ -85,7 +85,10 @@ services:
     environment:
       discovery.type: single-node
       bootstrap.memory_lock: "true"
-      plugins.security.disabled: "true"
+      # Turns the security plugin off and skips its demo installer, which on
+      # OpenSearch 2.12+ refuses to start without an admin password.
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
       OPENSEARCH_JAVA_OPTS: "-Xms1g -Xmx1g"
     ulimits:
       memlock:
@@ -95,7 +98,7 @@ services:
       - opensearch-data:/usr/share/opensearch/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -111,8 +114,10 @@ services:
       opensearch:
         condition: service_healthy
     environment:
-      # `admin` / ${GRAYLOG_PASSWORD:-admin} login. The password_secret
-      # value below is for dev only — rotate before any production use.
+      # `admin` / `admin` login. GRAYLOG_PASSWORD (used by versus and
+      # graylog-init) must match the hash below; change both together.
+      # The password_secret value is for dev only — rotate before any
+      # production use.
       GRAYLOG_PASSWORD_SECRET: somepasswordpepper
       # Default sha256("admin"); change to taste.
       GRAYLOG_ROOT_PASSWORD_SHA2: 8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
@@ -120,26 +125,55 @@ services:
       GRAYLOG_ELASTICSEARCH_HOSTS: http://opensearch:9200
       GRAYLOG_MONGODB_URI: mongodb://mongodb:27017/graylog
     ports:
-      - "9000:9000"   # web UI + REST API
-      - "12201:12201/udp"  # GELF UDP — send test logs here
-      - "5140:5140/udp"    # Syslog UDP (optional input)
+      - "127.0.0.1:9000:9000"   # web UI + REST API
+      - "127.0.0.1:12201:12201/udp"  # GELF UDP — send test logs here
+      - "127.0.0.1:5140:5140/udp"    # Syslog UDP (optional input)
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -u admin:${GRAYLOG_PASSWORD:-admin} http://localhost:9000/api/system/lbstatus || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS -u admin:${GRAYLOG_PASSWORD:-admin} http://127.0.0.1:9000/api/system/lbstatus || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 30
 
+  # One-shot: Graylog starts with no inputs, so create the global GELF UDP
+  # input on 12201 that the generator sends to. Skips when one already exists,
+  # so restarts and `up -d` reruns stay idempotent.
+  graylog-init:
+    image: curlimages/curl:8.10.1
+    container_name: versus-graylog-init
+    depends_on:
+      graylog:
+        condition: service_healthy
+    environment:
+      GRAYLOG_PASSWORD: ${GRAYLOG_PASSWORD:-admin}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        api=http://graylog:9000/api/system/inputs
+        if curl -fsS -u "admin:$${GRAYLOG_PASSWORD}" "$$api" | grep -q GELFUDPInput; then
+          echo "GELF UDP input already present"
+          exit 0
+        fi
+        curl -fsS -u "admin:$${GRAYLOG_PASSWORD}" -X POST "$$api" \
+          -H 'Content-Type: application/json' -H 'X-Requested-By: versus-init' \
+          -d '{"title":"GELF UDP","type":"org.graylog2.inputs.gelf.udp.GELFUDPInput","global":true,"configuration":{"bind_address":"0.0.0.0","port":12201,"recv_buffer_size":262144,"decompress_size_limit":8388608}}'
+        echo
+        echo "GELF UDP input created on 12201/udp"
+    restart: "no"
+
   versus:
-    image: ghcr.io/versuscontrol/versus-incident:latest
+    image: ${VERSUS_IMAGE:-ghcr.io/versuscontrol/versus-incident:latest}
     container_name: versus-graylog-app
     depends_on:
       redis:
         condition: service_healthy
       graylog:
         condition: service_healthy
+      graylog-init:
+        condition: service_completed_successfully
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
       REDIS_HOST: redis
@@ -162,7 +196,7 @@ services:
       - versus-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5

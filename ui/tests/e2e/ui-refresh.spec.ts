@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { env, openApp, primaryNav } from "./helpers";
-import { captureDir } from "./support/capture";
+import { captureDir, capturePath } from "./support/capture";
 
 // ui-refresh.spec.ts drives the Settings / Admin one-section layouts, the
 // Logs / Metrics / Traces filter panel and Flat / By service views, and the
@@ -9,6 +11,7 @@ import { captureDir } from "./support/capture";
 // `plans/harness-run/harness.sh e2e ui ui-refresh`; list cases skip, not pass, when
 // the stack has no learned rows yet (seed with `harness.sh gen ...`).
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const screenshotDir = captureDir();
 const MOBILE = { width: 390, height: 844 };
 
@@ -371,4 +374,451 @@ test.describe("Agent overview — heatmap scroll containment", () => {
     expect(navBox?.y ?? 0).toBeGreaterThanOrEqual(0);
     await shot(page, "agent-heatmap-scrolled-desktop");
   });
+});
+
+// Docs quickstart captures for the documentation pages. Each case
+// runs only against the matching examples/quickstart stack, selected with
+// E2E_DOCS_QUICKSTART=sre-patterns|sre-incident|webhook|alert-fatigue|
+// sre-shadow|sre-detect|sre-learning|sre-ai, and writes light and dark 1440-wide captures for versus-incident/src/docs/images/.
+const DOCS_QUICKSTART = process.env.E2E_DOCS_QUICKSTART ?? "";
+const DOCS_DESKTOP = { width: 1440, height: 1000 };
+const DOCS_THEMES = ["light", "dark"] as const;
+
+async function docsTheme(page: Page, theme: (typeof DOCS_THEMES)[number]): Promise<void> {
+  await page.emulateMedia({ colorScheme: theme });
+  await page.addInitScript((t) => localStorage.setItem("versus.theme", t), theme);
+  await page.setViewportSize(DOCS_DESKTOP);
+}
+
+async function docsShot(page: Page, surface: string, theme: string, state: string): Promise<void> {
+  await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: capturePath(surface, DOCS_DESKTOP.width, theme, state), fullPage: false, animations: "disabled" });
+}
+
+async function dismissToasts(page: Page): Promise<void> {
+  const dismiss = page.getByRole("button", { name: "Dismiss notification" });
+  while (await dismiss.count()) await dismiss.first().click();
+  await expect(dismiss).toHaveCount(0);
+}
+
+type DocsIncident = { id: string; title?: string; origin?: string; status?: string };
+
+async function findIncident(page: Page, match: (i: DocsIncident) => boolean): Promise<DocsIncident> {
+  let found: DocsIncident | undefined;
+  await expect.poll(async () => {
+    const res = await page.request.get("/api/admin/incidents?limit=200");
+    if (!res.ok()) return false;
+    const body = await res.json();
+    const items: DocsIncident[] = Array.isArray(body) ? body : body.incidents ?? body.items ?? [];
+    found = items.find(match);
+    return Boolean(found);
+  }, { timeout: 30_000 }).toBe(true);
+  return found!;
+}
+
+test.describe("Docs quickstart captures", () => {
+  for (const theme of DOCS_THEMES) {
+    test(`sre patterns learned in training ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-patterns", "needs the sre-agent quickstart stack in training");
+      await docsTheme(page, theme);
+      const state = await openList(page, "/agent/logs");
+      expect(state).toBe("rows");
+      await expect(page.getByRole("button", { name: /^View / }).nth(4)).toBeVisible();
+      await docsShot(page, "quickstart-sre-patterns", theme, "training");
+    });
+
+    test(`sre detected incident ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-incident", "needs the sre-agent quickstart stack after the error burst");
+      await docsTheme(page, theme);
+      await openApp(page, "/incidents");
+      const incident = await findIncident(page, (i) => i.origin === "ai_detect" && /acme-pay/.test(i.title ?? ""));
+      await page.goto(`/incidents/${incident.id}`);
+      await expect(page.getByText(/acme-pay/).first()).toBeVisible();
+      await docsShot(page, "quickstart-sre-incident", theme, "ai-detect");
+    });
+
+    test(`webhook HighErrorRate incident ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "webhook", "needs the webhook quickstart stack after the sample alert");
+      await docsTheme(page, theme);
+      await openApp(page, "/incidents?origin=webhook&status=all");
+      await expect(page.getByText("HighErrorRate").first()).toBeVisible();
+      await docsShot(page, "quickstart-webhook-incident", theme, "list");
+      const incident = await findIncident(page, (i) => /HighErrorRate/.test(i.title ?? ""));
+      await page.goto(`/incidents/${incident.id}`);
+      await expect(page.getByText("HighErrorRate").first()).toBeVisible();
+      await docsShot(page, "quickstart-webhook-incident", theme, "detail");
+    });
+
+    test(`webhook alert fatigue fingerprint ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "alert-fatigue", "needs the webhook Enterprise overlay after the warning alerts");
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/alert-fatigue");
+      const locked = page.getByText(/is an Enterprise capability/).first();
+      const config = page.getByTestId("alert-fatigue-config");
+      await expect(locked.or(config).first()).toBeVisible({ timeout: 30_000 });
+      if (await config.isVisible()) {
+        // README step 7: turn Alert fatigue on, then send the warning alert five times.
+        const enable = page.getByTestId("alert-fatigue-enable-toggle");
+        if ((await enable.getAttribute("aria-checked")) !== "true") await enable.click();
+        await expect(enable).toHaveAttribute("aria-checked", "true");
+        const rows = page.locator("table.ddt tbody tr");
+        const empty = page.getByText("No fingerprints yet");
+        await expect(rows.first().or(empty).first()).toBeVisible();
+        if (await empty.isVisible()) {
+          const payload = fs.readFileSync(path.resolve(__dirname, "../../../examples/quickstart/webhook/payloads/alertmanager-warning.json"), "utf8");
+          for (let i = 0; i < 5; i++) {
+            const res = await page.request.post("/api/incidents", { headers: { "Content-Type": "application/json" }, data: payload });
+            expect(res.status()).toBe(201);
+          }
+          await page.reload();
+        }
+        const fatigued = rows.filter({ hasText: "Fatigued" }).first();
+        await expect(fatigued).toBeVisible();
+        await expect(fatigued.locator("td").filter({ hasText: /^5$/ })).toHaveCount(1);
+        await docsShot(page, "quickstart-webhook-alert-fatigue", theme, "fatigued");
+        await fatigued.locator("td").first().locator("button").click();
+        await expect(page.getByText("Fingerprint detail").first()).toBeVisible();
+        await docsShot(page, "quickstart-webhook-alert-fatigue", theme, "fingerprint-detail");
+      } else {
+        await docsShot(page, "quickstart-webhook-alert-fatigue", theme, "locked");
+      }
+    });
+
+    test(`sre shadow decisions ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-shadow", "needs the sre-agent stack in shadow after the checkout burst and a known-pattern spike");
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/decisions?tab=shadow");
+      const table = page.locator("table.ddt tbody");
+      await expect(table.locator("tr").filter({ hasText: "checkout-api" }).first()).toBeVisible({ timeout: 30_000 });
+      await expect(table.getByText("unknown", { exact: true }).first()).toBeVisible();
+      await expect(table.getByText("spike", { exact: true }).first()).toBeVisible();
+      await docsShot(page, "sre-shadow", theme, "decisions");
+    });
+
+    test(`sre detect decisions with side panel ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-detect", "needs the sre-agent stack in detect after the checkout burst");
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/decisions?tab=detect");
+      const row = page.locator("table.ddt tbody tr").filter({ hasText: "checkout-api" }).filter({ hasText: "unknown" }).first();
+      await expect(row).toBeVisible({ timeout: 30_000 });
+      await row.getByRole("button", { name: /^View detect event / }).click();
+      await expect(page.getByText("Why it tripped").or(page.getByText("Sample", { exact: true })).first()).toBeVisible();
+      await expect(page.getByRole("link", { name: /Open full page/ })).toBeVisible();
+      await docsShot(page, "sre-detect", theme, "decisions-peek");
+    });
+
+    test(`sre spike decisions ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-detect", "needs shadow and detect spikes on the sre-agent stack");
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/decisions?tab=spike");
+      const table = page.locator("table.ddt tbody");
+      await expect(table.getByText("AI-detect", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+      await expect(table.getByText("Shadow", { exact: true }).first()).toBeVisible();
+      await docsShot(page, "sre-spike", theme, "decisions");
+    });
+
+    test(`sre spike pattern what's normal ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-detect", "needs a well-trained pattern on the sre-agent stack");
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/logs");
+      let id = "";
+      await expect.poll(async () => {
+        const res = await page.request.get("/api/agent/patterns?limit=500");
+        if (!res.ok()) return "";
+        const body = await res.json();
+        const items: Array<{ id: string; template?: string; count?: number }> = body.patterns ?? [];
+        id = items.find((p) => /failed to enqueue job/.test(p.template ?? "") && (p.count ?? 0) >= 20)?.id ?? "";
+        return id;
+      }, { timeout: 30_000 }).not.toBe("");
+      await page.goto(`/agent/logs/${encodeURIComponent(id)}`);
+      const normal = page.getByText("What's normal", { exact: true });
+      await expect(normal).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByLabel("Learned rate by hour of day")).toBeVisible();
+      await normal.evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await docsShot(page, "sre-spike-normal", theme, "pattern");
+    });
+
+    test(`sre services learning ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-learning", "needs the sre-agent stack with checkout-api, orders and payments-api");
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/services");
+      // payments-api is added by hand; orders is auto-discovered and its grace
+      // is restarted so the capture shows one service still in grace.
+      // Same-origin fetch from the app, exactly as the Services page sends it.
+      const post = (url: string, body: unknown) => page.evaluate(async ([u, b]) => {
+        const res = await fetch(u as string, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) });
+        return res.status;
+      }, [url, body] as const);
+      expect([200, 201, 409]).toContain(await post("/api/agent/services", { name: "payments-api" }));
+      expect(await post("/api/agent/services/orders/grace", { action: "restart" })).toBeLessThan(300);
+      await page.reload();
+      const table = page.locator("table tbody");
+      for (const name of ["checkout-api", "orders", "payments-api"]) {
+        await expect(table.locator("tr").filter({ has: page.getByText(name, { exact: true }) }).first()).toBeVisible({ timeout: 30_000 });
+      }
+      const orders = table.locator("tr").filter({ has: page.getByText("orders", { exact: true }) }).first();
+      await expect(orders.getByText("in grace")).toBeVisible();
+      const payments = table.locator("tr").filter({ has: page.getByText("payments-api", { exact: true }) }).first();
+      await expect(payments.getByText("Manual")).toBeVisible();
+      await expect(table.getByText("in grace", { exact: true })).toHaveCount(1);
+      await docsShot(page, "sre-services", theme, "list");
+    });
+
+    test(`sre service heatmap ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-learning", "needs the sre-agent stack with one active checkout-api incident");
+      test.setTimeout(180_000);
+      await docsTheme(page, theme);
+      await openApp(page, "/agent");
+      const canvas = page.locator(".heatmap-canvas").first();
+      await expect(canvas).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId("service-health-preview")).toHaveCount(0);
+      // A service with an active incident reads Degraded; the rest stay Normal.
+      const checkout = canvas.getByRole("button", { name: "Inspect checkout-api" });
+      await expect(checkout).toBeVisible({ timeout: 30_000 });
+      await expect(checkout.getByText("Degraded")).toBeVisible({ timeout: 30_000 });
+      await expect(canvas.getByText("Normal").first()).toBeVisible();
+      await expect.poll(async () => {
+        await page.getByRole("button", { name: "Refresh service health" }).click();
+        return canvas.locator('[data-impact="degraded"]').count();
+      }, { timeout: 120_000, intervals: [5_000] }).toBe(1);
+      await page.locator("#service-health-title").evaluate((el) => el.scrollIntoView({ block: "start" }));
+      await docsShot(page, "sre-heatmap", theme, "overview");
+    });
+
+    // Data-source pages (src/agent/data-sources/*.md). Select with a comma
+    // list such as E2E_DOCS_QUICKSTART=ds-elasticsearch or ds-prometheus,ds-settings.
+    const dsModes = new Set(DOCS_QUICKSTART.split(","));
+    const dsLogs = ["ds-file", "ds-elasticsearch", "ds-graylog", "ds-splunk", "ds-signoz"].find((m) => dsModes.has(m));
+
+    test(`data source learned log patterns ${theme}`, async ({ page }) => {
+      test.skip(!dsLogs, "needs one examples/docker-compose log stack after training");
+      await docsTheme(page, theme);
+      expect(await openList(page, "/agent/logs")).toBe("rows");
+      await expect(page.getByRole("button", { name: /^View / }).nth(2)).toBeVisible();
+      await docsShot(page, dsLogs!, theme, "logs");
+    });
+
+    // Enterprise getting-started and SSO pages (src/enterprise/). Needs a
+    // licensed stack with AI on in config (the harness mock model) so detect
+    // can be armed; the key typed below is a placeholder and is never saved.
+    test(`enterprise add an AI key ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("ent-admin"), "needs a licensed Enterprise stack");
+      await docsTheme(page, theme);
+      await openApp(page, "/admin?section=ai");
+      await expect(sectionHeading(page)).toHaveText("AI provider");
+      const enable = page.getByLabel("Enable AI for this org");
+      if (!(await enable.isChecked())) await enable.check();
+      await page.locator("#ai-provider").selectOption("openai");
+      await expect(page.locator("#ai-base-url")).toHaveCount(0);
+      await page.locator("#ai-api-key").fill("placeholder-key-1234");
+      await expect(page.locator("#ai-api-key")).toHaveAttribute("type", "password");
+      await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+      await docsShot(page, "enterprise-activate-ai-key", theme, "form");
+    });
+
+    test(`enterprise arm detect confirm ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("ent-admin"), "needs a licensed Enterprise stack with AI on");
+      await docsTheme(page, theme);
+      await openApp(page, "/admin?section=mode");
+      const modes = page.getByRole("group", { name: "Runtime mode" });
+      const detect = modes.getByRole("button", { name: "Detect" });
+      if ((await detect.getAttribute("aria-pressed")) === "true") {
+        await modes.getByRole("button", { name: "Shadow" }).click();
+        await expect(modes.getByRole("button", { name: "Shadow" })).toHaveAttribute("aria-pressed", "true");
+      }
+      await detect.click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.getByText("Arm detect mode?")).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Arm detect" })).toBeEnabled();
+      await dismissToasts(page);
+      await docsShot(page, "enterprise-arm-detect", theme, "confirm");
+      await dialog.getByRole("button", { name: "Arm detect" }).click();
+      await expect(detect).toHaveAttribute("aria-pressed", "true");
+    });
+
+    test(`intro incidents hero ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("intro-incidents"), "needs the sre-agent quickstart in detect after the checkout burst");
+      await docsTheme(page, theme);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await openApp(page, "/incidents");
+      const row = page.locator("table tbody tr").filter({ hasText: "checkout-api" }).first();
+      await expect(row).toBeVisible({ timeout: 30_000 });
+      const incident = await findIncident(page, (i) => i.origin === "ai_detect" && /checkout-api/.test(i.title ?? ""));
+      await page.goto(`/incidents/${incident.id}`);
+      await expect(page.getByText(/acme-pay/).first()).toBeVisible({ timeout: 30_000 });
+      await page.waitForLoadState("networkidle");
+      await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: capturePath("intro-incidents", 1440, theme, "detail"), animations: "disabled" });
+    });
+
+    test(`sre top bar detect chip 2x ${theme}`, async ({ browser }) => {
+      test.skip(!dsModes.has("sre-mode-detect-2x"), "needs the sre-agent quickstart in detect mode");
+      const context = await browser.newContext({ deviceScaleFactor: 2, viewport: { width: 1440, height: 900 }, colorScheme: theme });
+      const page = await context.newPage();
+      await page.addInitScript((t) => localStorage.setItem("versus.theme", t), theme);
+      await openApp(page, "/now");
+      await expect(page.locator("header").getByText("detect", { exact: true }).first()).toBeVisible({ timeout: 30_000 });
+      await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: capturePath("quickstart-sre-mode-detect-2x", 1440, theme, "chip"), clip: { x: 840, y: 0, width: 600, height: 56 }, animations: "disabled" });
+      await context.close();
+    });
+
+    test(`agent tool catalog ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("tool-catalog"), "needs a running OSS stack");
+      await docsTheme(page, theme);
+      await page.setViewportSize({ width: 1280, height: 720 });
+      await openApp(page, "/agent/tools");
+      await expect(page.getByRole("heading", { name: "Connectors & Tools" }).last()).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText("Kubernetes").first()).toBeVisible();
+      await page.waitForLoadState("networkidle");
+      await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(400);
+      await page.screenshot({ path: capturePath("agent-tool-catalog", 1280, theme, "catalog"), animations: "disabled" });
+    });
+
+    test(`ha docker sign-in page ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("ha-signin"), "needs examples/high-availability/docker behind its load balancer");
+      await docsTheme(page, theme);
+      await page.goto("/");
+      await expect(page.getByTestId("local-login-form")).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText(/Sign in with/)).toHaveCount(0);
+      await docsShot(page, "ha-docker-sign-in", theme, "login");
+    });
+
+    test(`sre top bar detect chip ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("sre-mode-detect"), "needs the sre-agent quickstart in detect mode");
+      await docsTheme(page, theme);
+      await openApp(page, "/now");
+      const chip = page.locator("header").getByText("detect", { exact: true }).first();
+      await expect(chip).toBeVisible({ timeout: 30_000 });
+      await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(400);
+      await page.screenshot({
+        path: capturePath("quickstart-sre-mode-detect", DOCS_DESKTOP.width, theme, "topbar"),
+        clip: { x: 0, y: 0, width: DOCS_DESKTOP.width, height: 120 },
+        animations: "disabled",
+      });
+    });
+
+    // ent-slo turns auto-define on; ent-slo-shot captures the first proposals
+    // once the advisor's first run (about 15 minutes after start) has landed.
+    test(`enterprise slo proposals ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("ent-slo") && !dsModes.has("ent-slo-shot"), "needs a licensed stack with AI on");
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/slo");
+      const toggle = page.getByTestId("slo-enable-toggle");
+      await expect(toggle).toBeEnabled({ timeout: 30_000 });
+      if ((await toggle.getAttribute("aria-checked")) !== "true") await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-checked", "true");
+      if (!dsModes.has("ent-slo-shot")) return;
+      await expect(page.getByTestId("slo-adopt-btn").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText("Adopt first", { exact: true }).first()).toBeVisible();
+      await dismissToasts(page);
+      await docsShot(page, "slo", theme, "proposals");
+    });
+
+    test(`enterprise google identity provider ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("ent-admin"), "needs a licensed Enterprise stack");
+      await docsTheme(page, theme);
+      await openApp(page, "/admin?section=sso");
+      await expect(sectionHeading(page)).toHaveText("Identity providers");
+      const addButton = page.getByRole("button", { name: "Add identity provider" });
+      await expect(addButton).toBeVisible();
+      await page.waitForLoadState("networkidle");
+      if (!(await page.getByRole("button", { name: "Edit Google" }).count())) {
+        await page.getByRole("button", { name: "Add identity provider" }).click();
+        await page.locator("#conn-type").selectOption("google");
+        await page.locator("#conn-id").fill("google");
+        await page.locator("#conn-name").fill("Google");
+        await page.locator("#conn-client-id").fill("000000000000-docs-example.apps.googleusercontent.com");
+        await page.locator("#conn-secret").fill("docs-example-secret");
+        await page.locator("#conn-domains").fill("acme.com");
+        await page.getByRole("button", { name: "Add provider" }).click();
+        await expect(page.getByText("Identity provider saved")).toBeVisible();
+      }
+      await expect(page.getByRole("button", { name: "Edit Google" })).toBeVisible();
+      await dismissToasts(page);
+      await docsShot(page, "admin-identity-providers", theme, "google");
+      await page.context().clearCookies();
+      await page.goto("/");
+      const google = page.getByRole("button", { name: "Sign in with Google" }).or(page.getByRole("link", { name: "Sign in with Google" }));
+      await expect(google.first()).toBeVisible({ timeout: 30_000 });
+      await docsShot(page, "sso-login", theme, "google");
+    });
+
+    for (const [mode, listPath] of [["ds-prometheus", "/agent/metrics"], ["ds-traces", "/agent/traces"], ["ent-metrics", "/agent/metrics"], ["ent-traces", "/agent/traces"]] as const) {
+      test(`data source ${mode} signals ${theme}`, async ({ page }) => {
+        test.skip(!dsModes.has(mode), "needs the licensed metrics-source example after training");
+        await docsTheme(page, theme);
+        expect(await openList(page, listPath)).toBe("rows");
+        await docsShot(page, mode, theme, "signals");
+      });
+    }
+
+    test(`data source settings cards ${theme}`, async ({ page }) => {
+      test.skip(!dsModes.has("ds-settings"), "needs a stack with two or more data sources");
+      await docsTheme(page, theme);
+      await openApp(page, "/settings?section=agent-sources");
+      await expect(sectionHeading(page)).toHaveText("Data sources");
+      await page.waitForLoadState("networkidle");
+      await docsShot(page, "ds-settings", theme, "cards");
+    });
+
+    test(`sre run analysis on the detected incident ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-ai", "needs the sre-agent stack with an AI model and an AI-detect incident");
+      test.setTimeout(120_000);
+      await docsTheme(page, theme);
+      await openApp(page, "/incidents");
+      const incident = await findIncident(page, (i) => i.origin === "ai_detect" && /acme-pay/.test(i.title ?? ""));
+      await page.goto(`/incidents/${incident.id}`);
+      await page.getByRole("button", { name: "Run AI analysis" }).first().click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.getByText("Analysis complete")).toBeVisible({ timeout: 90_000 });
+      await expect(dialog.getByText("Root cause hypotheses")).toBeVisible({ timeout: 30_000 });
+      await expect(dialog.getByText("Next steps")).toBeVisible();
+      await expect(dialog.getByText(/^\d+% conf$/)).toBeVisible();
+      const toolCalls = dialog.locator("summary").filter({ hasText: /^Tool calls \(\d+\)$/ });
+      await toolCalls.click();
+      await expect(toolCalls.locator("xpath=..")).toHaveAttribute("open", "");
+      // The "Analysis complete" toast covers the modal footer; dismiss it.
+      const dismiss = page.getByRole("button", { name: "Dismiss notification" });
+      while (await dismiss.count()) await dismiss.first().click();
+      await expect(dismiss).toHaveCount(0);
+      await docsShot(page, "sre-analyze", theme, "analysis");
+      // Second frame: the tool-call audit trail, every call with args and output.
+      const calls = toolCalls.locator("xpath=..").locator("li");
+      await expect(calls).toHaveCount(2);
+      await toolCalls.evaluate((el) => el.scrollIntoView({ block: "start" }));
+      for (const call of await calls.all()) {
+        await expect(call.getByText(/^args:/)).toBeInViewport();
+        await expect(call.getByText(/^output:/)).toBeInViewport();
+      }
+      await docsShot(page, "sre-analyze-tools", theme, "analysis");
+    });
+
+    test(`sre chat summary with evidence ${theme}`, async ({ page }) => {
+      test.skip(DOCS_QUICKSTART !== "sre-ai", "needs the sre-agent stack with an AI model");
+      test.setTimeout(120_000);
+      await docsTheme(page, theme);
+      await openApp(page, "/agent/chat");
+      await page.getByRole("button", { name: "Summarize unresolved incidents from the last 24 hours." }).click();
+      await page.getByRole("button", { name: "Send" }).click();
+      const log = page.getByRole("log", { name: "Conversation" });
+      const sources = log.getByLabel("Sources").last();
+      await expect(sources).toBeVisible({ timeout: 90_000 });
+      await expect(sources.getByRole("button").first()).toBeVisible();
+      const tool = log.locator('button[aria-expanded="false"]').filter({ has: page.getByLabel("Success") }).first();
+      await tool.click();
+      await expect(log.getByText("Arguments", { exact: true }).first()).toBeVisible();
+      await docsShot(page, "sre-chat", theme, "answer");
+    });
+  }
 });

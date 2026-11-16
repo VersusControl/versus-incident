@@ -1,26 +1,22 @@
-# OPTIONAL traces overlay. Run alongside the base file:
+# Traces overlay: adds Tempo and the Enterprise traces source. Use it together
+# with the base file:
 #
+#   export LICENSE_KEY=<your license key>           # never commit it
 #   docker compose -f docker-compose.yml -f docker-compose.traces.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.traces.yml \
+#     --profile fake-metrics up -d                  # traffic plus one span per push
+#   docker compose -f docker-compose.yml -f docker-compose.traces.yml \
+#     run --rm metrics-spike                        # error spans during the spike
 #
-# It adds Tempo and swaps in the `*.traces.yaml` source variant that adds the
-# enterprise `traces` source. The base metrics path is unchanged.
-#
-# Fake trace data comes from the SAME host-run generator as the metrics: run
-# it with `--otlp http://localhost:4318` and each push also POSTs one OTLP/HTTP
-# span to Tempo (error spans during a `--spike`). Tempo's OTLP/HTTP receiver is
-# published on :4318. There is no in-compose generator — all fake data comes
-# from scripts/generate_fake_metrics.py.
-#
-# No tools.yaml is needed: the licensed `traces` source contributes
-# `discover_trace_fields` and `read_trace_spans` to Chat and Analyze.
+# The generators send one OTLP span to Tempo with every push, so the traces
+# source has spans to read. The Prometheus source keeps running as before.
 services:
   tempo:
     image: grafana/tempo:2.5.0
-    container_name: versus-ent-metrics-tempo
     command: ["-config.file=/etc/tempo/tempo.yaml"]
     ports:
-      - "3200:3200"
-      - "4318:4318"
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4318:4318"
     volumes:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo-data:/var/tempo
@@ -33,16 +29,24 @@ services:
 
   versus:
     depends_on:
-      redis:
-        condition: service_healthy
-      prometheus:
-        condition: service_healthy
       tempo:
         condition: service_healthy
     volumes:
-      - ./config:/app/config:ro
       - ./config/agent_sources.traces.yaml:/app/config/agent_sources.yaml:ro
-      - versus-data:/app/data
+
+  metrics-generator:
+    depends_on:
+      tempo:
+        condition: service_healthy
+    environment:
+      OTLP_ENDPOINT: http://tempo:4318
+
+  metrics-spike:
+    depends_on:
+      tempo:
+        condition: service_healthy
+    environment:
+      OTLP_ENDPOINT: http://tempo:4318
 
 volumes:
   tempo-data:

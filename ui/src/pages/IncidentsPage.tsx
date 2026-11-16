@@ -16,7 +16,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
-import { deliveryErrorLabel, hasDeliveryError } from "@/lib/incidentPresentation";
+import { deliveryErrorLabel, hasDeliveryError, notifyStatusDisplay } from "@/lib/incidentPresentation";
 import { countWindowLabel } from "@/lib/countWindow";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { incidentSeverity } from "@/lib/severity";
@@ -872,7 +872,7 @@ function IncidentPeekBody({
             "—"
           )}
         </PeekField>
-        <PeekField label="Notify">{i.notify_status || "—"}</PeekField>
+        <PeekField label="Notify">{notifyStatusDisplay(i) || "—"}</PeekField>
         <PeekField label="ID">
           <span className="font-mono text-2xs" title={i.id}>
             {i.id.slice(0, 8)}
@@ -984,6 +984,7 @@ function IncidentRow({
               null,
               i.highest_observed_severity,
               i.highest_notified_severity,
+              i.severity,
             )}
           />
         </td>
@@ -1059,8 +1060,12 @@ function IncidentRow({
                 )}
               </Pill>
             </button>
-          ) : (
+          ) : notifyStatusDisplay(i) === "nothing sent" ? (
+            <span className="text-2xs text-ink-400">nothing sent</span>
+          ) : i.notify_status ? (
             <Pill tone="accent">{i.notify_status}</Pill>
+          ) : (
+            <EmptyValue />
           )}
         </td>
         <td>

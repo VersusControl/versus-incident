@@ -734,7 +734,7 @@ func (*analyzeContextResolver) EffectiveKey(context.Context) (string, bool) {
 }
 
 func (*analyzeContextResolver) EffectiveEnabled(context.Context) (bool, bool) {
-	return false, false
+	return true, true
 }
 
 func (resolver *analyzeContextResolver) DecorateAIContext(ctx context.Context, scope tenancy.OrgScope) context.Context {
@@ -912,5 +912,108 @@ func TestAnalyzeHandlersRejectForeignIncidentBeforeAgentRun(t *testing.T) {
 	}
 	if probe.ran {
 		t.Fatal("Analyze agent ran for a foreign incident scope")
+	}
+}
+
+// aiOffResolver is a runtime AI settings resolver with a fixed answer for the
+// enable flag; ok=false means it has no opinion and the static config decides.
+type aiOffResolver struct{ enabled, ok bool }
+
+func (aiOffResolver) EffectiveKey(context.Context) (string, bool) { return "", false }
+func (r aiOffResolver) EffectiveEnabled(context.Context) (bool, bool) {
+	return r.enabled, r.ok
+}
+
+// countingAnalyzeAgent records how many times the model path was entered.
+type countingAnalyzeAgent struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (a *countingAnalyzeAgent) Name() string          { return "analyze" }
+func (a *countingAnalyzeAgent) Kind() core.AITaskKind { return core.AITaskAnalyze }
+func (a *countingAnalyzeAgent) Run(context.Context, core.AITask) (*core.AICallResult, error) {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	return okResult(), nil
+}
+
+// With AI off at runtime — the resolver says off, or it has no opinion and
+// the static config is off — both analyze endpoints refuse with a clear 4xx,
+// never reach the model, and write no analysis record.
+func TestAnalyzeRefusesWithoutModelCallWhenAIIsOff(t *testing.T) {
+	loadGatewayConfig(t, "secret")
+	cases := []struct {
+		name     string
+		resolver aiOffResolver
+	}{
+		{"resolver turns AI off", aiOffResolver{enabled: false, ok: true}},
+		{"resolver has no opinion and static AI is off", aiOffResolver{enabled: true, ok: false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := storage.NewMemory()
+			seedStreamIncident(t, store)
+			probe := &countingAnalyzeAgent{}
+			agent.SetAISettingsResolver(tc.resolver)
+			services.SetStorage(store)
+			services.SetAnalyzeAgent(probe)
+			t.Cleanup(func() {
+				agent.SetAISettingsResolver(nil)
+				services.SetStorage(nil)
+				services.SetAnalyzeAgent(nil)
+			})
+
+			controller := NewIncidentAdminController()
+			app := fiber.New()
+			app.Post("/incidents/:id/analyze", controller.analyze)
+			app.Post("/incidents/:id/analyze/stream", controller.analyzeStream)
+
+			for _, path := range []string{"/incidents/inc-1/analyze", "/incidents/inc-1/analyze/stream"} {
+				resp, err := app.Test(httptest.NewRequest("POST", path, nil), 10_000)
+				if err != nil {
+					t.Fatalf("%s: %v", path, err)
+				}
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != fiber.StatusConflict || !strings.Contains(string(body), "AI is off") {
+					t.Fatalf("%s: status = %d body = %s, want 409 AI is off", path, resp.StatusCode, body)
+				}
+			}
+			if probe.calls != 0 {
+				t.Fatalf("model calls = %d, want 0", probe.calls)
+			}
+			if recs, err := store.ListAnalysesByIncident("inc-1", 0); err != nil || len(recs) != 0 {
+				t.Fatalf("analyses = %d (err %v), want none", len(recs), err)
+			}
+		})
+	}
+}
+
+// With the runtime resolver turning AI on, the sync analyze endpoint runs.
+func TestAnalyzeRunsWhenRuntimeAIIsOn(t *testing.T) {
+	loadGatewayConfig(t, "secret")
+	store := storage.NewMemory()
+	seedStreamIncident(t, store)
+	probe := &countingAnalyzeAgent{}
+	agent.SetAISettingsResolver(aiOffResolver{enabled: true, ok: true})
+	services.SetStorage(store)
+	services.SetAnalyzeAgent(probe)
+	t.Cleanup(func() {
+		agent.SetAISettingsResolver(nil)
+		services.SetStorage(nil)
+		services.SetAnalyzeAgent(nil)
+	})
+
+	app := fiber.New()
+	app.Post("/incidents/:id/analyze", NewIncidentAdminController().analyze)
+	resp, err := app.Test(httptest.NewRequest("POST", "/incidents/inc-1/analyze", nil), 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != fiber.StatusOK || probe.calls != 1 {
+		t.Fatalf("status = %d calls = %d, want 200 and one model call", resp.StatusCode, probe.calls)
 	}
 }

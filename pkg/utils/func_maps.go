@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -138,6 +139,11 @@ func GetTemplateFuncMaps() template.FuncMap {
 		"truncate": func(s string, n int) string {
 			if len(s) <= n {
 				return s
+			}
+			// Cut on a rune boundary so the result stays valid UTF-8;
+			// chat APIs reject a message ending in a split character.
+			for n > 0 && !utf8.RuneStart(s[n]) {
+				n--
 			}
 			return s[:n]
 		},

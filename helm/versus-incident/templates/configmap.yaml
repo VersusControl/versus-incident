@@ -220,12 +220,14 @@ data:
     # Redis Configuration Section - required for on-call functionality
     redis:
       {{- if .Values.redis.enabled }}
-      # Configuration for built-in Redis
+      # Configuration for built-in Redis. The bundled Redis serves plain TCP
+      # inside the release, so the client must not dial TLS (its default).
       insecure_skip_verify: false
       host: ${REDIS_HOST}
       port: ${REDIS_PORT}
       password: ${REDIS_PASSWORD}
       db: 0
+      tls: false
       {{- else }}
       # Configuration for external Redis
       insecure_skip_verify: {{ .Values.externalRedis.insecureSkipVerify }}

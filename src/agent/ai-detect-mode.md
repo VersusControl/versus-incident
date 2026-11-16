@@ -1,288 +1,125 @@
-# Detect Mode
+# AI Detect Mode
 
-Detect mode leverages AI to identify and alert on new or unusual patterns in real-time. It is designed for production environments where timely detection of anomalies is critical. Before enabling detect mode, ensure that your pattern catalog is well-curated and that shadow mode has been used to validate the system's behavior.
+## Concept
 
-Detect mode is the **go-live** step. The agent classifies log patterns the same way it does in [shadow](./shadow-mode.md), and when something new or unexpected or anomalous shows up it emits a real incident.
+Detect is the **go-live** mode. The agent judges every pattern the same way it
+does in [shadow](./shadow-mode.md), but now a new pattern or a
+[spike](./spike.md) becomes a **real incident**. Incidents go to your channels
+(Slack, Teams, Telegram, email, and others); high and critical ones also go to
+on-call when it is enabled.
 
-## When to Switch to Detect Mode
+Each incident explains itself: a title, the service, a severity, a short
+summary, sample lines with secrets masked, and suggested next steps.
 
-Switch to detect mode when:
+**An AI key is optional.** Detection itself does not use AI.
 
-- The catalog of patterns has stabilized, and new patterns are rare.
-- You have spent at least one release cycle in shadow mode and reviewed the results.
-- Noisy patterns have been labeled as `known` to prevent unnecessary alerts.
+| | Without an AI key | With an AI key |
+|---|---|---|
+| Is the incident raised? | Yes | Yes |
+| Summary | A templated summary marked `Heuristic detection — AI enrichment not configured or unavailable.` | Written by the AI from the pattern, its history and the sample lines. |
+| Severity | Medium for a new pattern. A large spike, or a severity field on the log lines that reads high or critical, can raise it. | Set by the AI. |
+| Next steps | Generic checks. | Specific suggestions from the AI. |
 
-Configuring an OpenAI-compatible API key is **optional** — it upgrades the emitted alerts from templated to AI-enriched, but detect mode pages with or without it.
+If the AI is over its hourly limit or returns an error, the agent still sends
+the templated incident. A real problem is never dropped because the AI is
+unavailable.
 
-Detect mode is ideal for production environments where real-time alerts for new or unusual patterns are critical.
+![Before and after detect mode: on the left, the trained log stream where a new acme-pay timeout appears among known checkout-api lines; on the right, one incident row in the Versus UI for checkout-api with severity, summary and next steps, and the same incident delivered to Slack and Teams, with on-call reached only for a high or critical incident](../docs/images/sre-detect-concept.svg)
 
-## How detect mode works
+## Example
 
-The pipeline is the same as shadow mode for the first few steps:
+`checkout-api` has been in shadow for a week and the list holds only real
+problems, so you switch to detect. That evening a dependency slows down and
+the service logs 60 lines of:
 
-![Detect mode: the shared pipeline reads logs, hides secrets, clusters them and updates the catalog. Three gates then run in order, known and calm, cache hit, and rate limit; any gate that trips drops the line. Only a line passing every gate reaches the AI SRE, which analyses it and emits an incident to Slack, Teams and on call, visible in the web UI](../docs/images/detect-mode.svg)
+```text
+checkout error: payment processor acme-pay did not answer within 30s
+```
 
-When a new or anomalous pattern reaches the detect step, the
-agent does the following:
+The agent has never seen this pattern. Within one poll it raises one incident:
 
-1. **Templated alert (no AI key)** — if the AI is not configured (or a
-   runtime toggle turned it off), the agent builds a **deterministic
-   finding** from the pattern — title, sigma-derived severity, and up to
-   three redacted sample lines — and emits it. The Summary carries a
-   `Heuristic detection — AI enrichment not configured or unavailable.`
-   marker so operators know no model looked at it.
-2. **Cache lookup** — if the same pattern was analyzed recently,
-   the previous AI finding is reused instead of calling the model
-   again (saves time and cost).
-3. **Rate guard** — `agent.ai.max_calls_per_hour` caps how many
-   times the model can be called. When the cap is hit the agent
-   **still alerts**, falling back to the templated finding.
-4. **Analyze (enrichment)** — the AI SRE reviews the redacted sample,
-   template, frequency, and baseline, then writes a triage
-   verdict. If the model call errors, the agent falls back to the
-   templated finding rather than dropping the page.
-5. **Emit** — the finding (severity, summary, category,
-   confidence, suggestions) becomes a real incident. All
-   per-channel templates and the on-call workflow trigger
-   unchanged — templated and AI-enriched incidents use the same path.
+- **Title:** `Anomaly: checkout-api — …`
+- **Summary:** the unknown pattern, how often it fired, three sample lines.
+- **With an AI key:** a summary such as "checkout-api cannot reach the acme-pay
+  payment processor; payments are timing out", plus next steps such as
+  "check acme-pay status and recent network changes".
 
-Each outcome — including templated fallbacks and failures — is recorded
-so you can spot misconfigured keys or channels at a glance on the
-**Detect** page.
+The error keeps coming for ten more minutes. Those repeats are added to the
+same open incident instead of opening new ones; if the problem gets more
+severe, Versus sends an update. Once you resolve the incident, the next
+occurrence opens a new one. If the error stops for 10 minutes, its next
+occurrence also opens a new incident, even when the old one is still open.
 
-## Configuration
+## What you see in the UI
 
-The detect-specific block lives under `agent.ai` in
-`config.yaml`:
+The incident is on the **Incidents** page, on the **AI Detected** tab.
+
+![The incident page for Anomaly: checkout-api: WARN and open badges, via loki:quickstart-loki, a summary with the heuristic detection note and three sample payment processor error lines, and suggested next steps](../docs/images/quickstart-sre-incident-dark.png)
+
+Every decision the agent made is listed in **AI → Decisions**, on the
+**Detect** tab: when it fired, the service, the verdict (`unknown` or `spike`),
+the severity, the pattern and its frequency. The **Outcome** column tells you
+whether the incident was sent, reused a recent AI finding, fell back to the
+templated summary, or failed to send. Open a row to see the full finding and,
+with an AI key, the prompt and the model's response.
+
+![AI → Decisions, Detect tab: decision rows for jobrunner and checkout-api, with the checkout-api row open in the side panel: title Anomaly: checkout-api ×60, pills for the emitted_basic outcome, unknown verdict and WARN severity, service, pattern, frequency 60/s, baseline 0.0/s and a sample acme-pay timeout line](../docs/images/sre-detect-ui-dark.png)
+
+In Slack the incident looks like this:
+
+![A Slack message from the Versus Agent: Anomaly: checkout-api with the payment processor error marked ×N, the heuristic detection summary with frequency N, three sample lines, the learned pattern and template, and suggestions](../docs/images/quickstart-sre-slack.svg)
+
+*An illustration of the Slack message.* Set up channels in
+[Notification Channels](./channels.md).
+
+## Turn it on
+
+Switch the mode and restart. Learned patterns are kept.
 
 ```yaml
 agent:
   enable: true
   mode: detect
-
-  ai:
-    enable: true                       # opt in to live AI calls
-    api_key: ${AGENT_AI_API_KEY}       # OpenAI-compatible bearer key
-    model: gpt-4o-mini                 # any chat-completions model
-    temperature: 0.2
-    max_tokens: 800
-    max_calls_per_hour: 60             # 0 = unlimited
-    cache_ttl: 30m                     # reuse the same finding for this long
 ```
 
-Use `temperature: -1` with beta-limited / reasoning models such as
-`gpt-5.*` and o-series models. Those providers fix temperature at `1`
-and reject any explicit value.
+Or set `AGENT_MODE=detect`. _Enterprise_ admins can also switch from
+**Admin → Runtime mode** in the UI.
 
-Every field is overridable by env var:
-
-| Env var | Maps to |
-|---|---|
-| `AGENT_AI_ENABLE` | `agent.ai.enable` |
-| `AGENT_AI_API_KEY` | `agent.ai.api_key` |
-| `AGENT_AI_MODEL` | `agent.ai.model` |
-
-The chat endpoint is hard-coded to
-`https://api.openai.com/v1/chat/completions`. If you point
-`AGENT_AI_API_KEY` at an OpenAI-compatible provider (Azure
-OpenAI, vLLM proxy, etc.), set `model` to a name your provider
-accepts.
-
-You almost always want a small **new-service grace** so the agent
-doesn't page on the first signal from a freshly-deployed
-service:
+To add AI summaries, set a key:
 
 ```yaml
 agent:
-  new_service_grace: 30m       # silence brand-new services for this long
-  service_patterns:            # how to extract a service from a log line
-    - 'service[._]name=([\w.-]+)'
-    - '"service"\s*:\s*"([^"]+)"'
-    - '^\[([\w.-]+)\]'
-```
-
-See [`config/config.yaml`](https://github.com/VersusControl/versus-incident/blob/main/config/config.yaml)
-for the full set of starter patterns covering Pino, Winston,
-Logback, Serilog, zap, slog, syslog, journald, Docker, Envoy,
-nginx, and friends.
-
-## What gets recorded
-
-Every emitted incident — AI-enriched, cached, or templated — is
-kept as a rolling history of the **most recent 500 events**; older
-entries are dropped automatically.
-
-Each event captures:
-
-- **Pattern context** — source, template, service, verdict,
-  frequency, baseline, sample log line.
-- **AI call** — model, the prompt sent, the raw response, and how
-  long it took.
-- **Parsed finding** — severity, summary, category, confidence,
-  suggestions.
-- **Outcome** — whether the incident was AI-enriched (`emitted`),
-  served from cache (`cached`), or emitted as a templated alert
-  because AI was off, over quota, or errored (`emitted_basic`,
-  `emitted_basic_quota`, `emitted_basic_error`).
-
-Look at it through the admin UI (the **Detect** page in the
-sidebar):
-
-![AI Agent](../docs/images/ai-detect-page.png)
-
-## Worked example: end-to-end test
-
-This walks through detect mode end to end on your laptop using the
-`generate_noisy_logs.py` helper. The key trick is the new
-`--scenario` flag, which emits a **curated cluster of correlated
-failures** (e.g. `db-outage` = `db_conn_refused` +
-`db_query_slow` + `db_deadlock` + `replication_lag` + …), not just
-one repeated line. That gives the AI SRE enough context to write a
-useful summary.
-
-### 1. Train the catalog
-
-Start with a clean catalog and a fat baseline of normal traffic so
-the agent learns what "boring" looks like.
-
-```bash
-# follow the steps in agent/getting-started.md to start the agent
-# in training mode reading from ./logs/my-app.log
-
-python3 scripts/generate_noisy_logs.py \
-  --output ./logs/my-app.log \
-  --lines 3000 --seed 42
-```
-
-Wait until the per-tick log stops adding new patterns — usually a
-minute or two for 3000 lines.
-
-### 2. Switch to detect mode
-
-Update `config.yaml` (or env vars) and restart the agent:
-
-```yaml
-agent:
-  enable: true
-  mode: detect
-  new_service_grace: 0          # disable grace for the demo
   ai:
     enable: true
+    provider: openai          # openai | deepseek | qwen | ollama | claude | gemini
     api_key: ${AGENT_AI_API_KEY}
     model: gpt-4o-mini
-    max_calls_per_hour: 30
-    cache_ttl: 30m
 ```
 
-```bash
-export AGENT_AI_API_KEY=sk-...
-docker restart versus-agent
-```
+Or with environment variables: `AGENT_AI_ENABLE=true`, `AGENT_AI_API_KEY`,
+and optionally `AGENT_AI_MODEL` and `AGENT_AI_PROVIDER`.
 
-You should see in stdout:
+| Setting | Default | What it does |
+|---|---|---|
+| `agent.ai.max_calls_per_hour` | `60` | Cap on AI calls. Past the cap, incidents use the templated summary. |
+| `agent.ai.cache_ttl` | `1h` | The same pattern firing again within this time reuses the last AI finding. |
+| `agent.new_service_grace` | `24h` (`30m` in the Helm chart) | A service seen for the first time is learned quietly for this long before it can raise incidents. |
 
-```
-agent: starting worker mode=detect sources=1 ai=enabled model=gpt-4o-mini
-```
+To see detect end to end on your machine, follow the
+[AIOps SRE Quickstart](./quickstart.md).
 
-### 3. Inject a curated incident
+## Tips
 
-Pick a scenario:
+- **One harmless pattern keeps raising incidents?** Mark it **known** on the
+  **Agent Learning → Logs** page. A known pattern only comes back if it
+  [spikes](./spike.md).
+- **Incidents carry a vague rule name?** Add a named [Regex](./regex.md) rule
+  for that kind of line.
+- **Want to see what detect would raise before it sends anything?** Stay in [Shadow Mode](./shadow-mode.md).
 
-```bash
-./scripts/run_noisy_logs.sh --list-scenarios
-# auth-attack        auth-login-fail, syslog-sshd, security-breach
-# cache-meltdown     redis-timeout, circuit-open, 5xx, worker-lag
-# db-outage          db-conn-refused, db-query-slow, db-deadlock, …
-# disk-full          disk-full, s3-upload-fail, cron-fail, panic
-# k8s-imagepull      k8s-kubelet, pod-restart, k8s-event-json
-# oom-cascade        kernel-oom-distinct, oom-killer, pod-restart, …
-# tls-expired        certificate-expired, tls-handshake-fail, oncall-fail
-```
+## Reference
 
-Then inject one — say, a database outage — into the file the
-agent is reading:
-
-```bash
-./scripts/run_noisy_logs.sh \
-  --output ./logs/my-app.log \
-  --scenario db-outage \
-  --scenario-burst 60
-```
-
-Within one poll interval (default 10s) you should see in the
-agent's stdout:
-
-```
-agent: tick my-app signals=60 matched=60 patterns=4 \
-  verdicts=map[learned:0 spike:3 unknown:1 emit_emitted:2 emit_cached:1]
-```
-
-`emit_emitted=2` means two AI calls produced a real incident
-(other patterns hit the cache).
-
-### 4. See what the AI wrote
-
-Open the admin UI at `http://localhost:3000` and click
-**Detect** in the sidebar. You'll see the new events at the top.
-Click into one to see:
-
-- The full **Prompt** (system + user) sent to the model.
-- The **Raw response** before JSON parsing.
-- The parsed **Finding** (severity, summary, category,
-  confidence, suggestions).
-
-And the resulting incident lands on the **Incidents** page (and
-in Slack / Telegram / wherever you have channels enabled), with
-the AI's summary, severity, and suggested next steps rendered by
-each channel's template.
-
-### 5. Try the other scenarios
-
-Each scenario stresses a different part of the AI's reasoning:
-
-```bash
-./scripts/run_noisy_logs.sh --scenario tls-expired
-./scripts/run_noisy_logs.sh --scenario disk-full
-./scripts/run_noisy_logs.sh --scenario oom-cascade
-```
-
-Watch the `category` and `severity` fields in the parsed finding
-move accordingly.
-
-## Cost & safety knobs
-
-- **`max_calls_per_hour`** — hard cap. With the cache TTL set to
-  30m and a sane catalog, even a noisy hour rarely calls the
-  model more than ~5–10 times.
-- **`cache_ttl`** — same `pattern_id` re-fires within this window
-  reuses the prior finding for free. Bump it during incident
-  storms; lower it if you want fresher analysis on long-running
-  issues.
-- **`new_service_grace`** — silences a brand-new service for the
-  configured duration. The window starts the first time the
-  agent sees the service, and is persisted in the catalog so
-  it survives restarts.
-- **Rotate the key** if it ever appears in a log line you fed the
-  agent — the [redactor](./redaction.md) scrubs common secret
-  shapes (`sk-…`, `xoxb-…`, AWS keys, JWTs, basic-auth URLs) but
-  treat it as defense-in-depth, not a guarantee.
-
-## Common questions
-
-**Q: Can I disable the AI but keep detect mode?**
-Yes. Set `agent.ai.enable: false`. The worker still classifies
-patterns and records what *would* have been analyzed on the
-**Detect** page, with no API spend.
-
-**Q: How do I stop a noisy pattern from being analyzed?**
-Open the pattern on the **Patterns** page and set its verdict to
-**known**. The worker then drops it before reaching the AI step.
-A spike on a known pattern still triggers (that's the whole
-point of spike detection); use `cache_ttl` to throttle repeats.
-
-**Q: My channel template renders `Unknown Alert (Unknown)` for
-AI incidents.**
-Update to the channel templates shipped with the latest release
-— they auto-detect the AI payload via the `PatternID` field and
-render a dedicated "Versus Agent" block.
+- [Configuration](./configuration.md): every `agent.ai` key, providers and custom
+  endpoints.
+- [Notification Channels](./channels.md): where incidents are sent.
+- [AI Analyze](./ai-analyze-mode.md): a deeper investigation of one incident.

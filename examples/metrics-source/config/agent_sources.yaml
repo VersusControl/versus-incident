@@ -1,35 +1,25 @@
-# Detect-path signal sources for the Versus Enterprise `metrics-source` example.
+# Prometheus source for the metrics-source example (Versus Enterprise).
 #
-# The `prometheus` type is an ENTERPRISE DATA SOURCE. It is
-# license-gated: the binary only builds it when LICENSE_KEY carries the
-# `intelligence` entitlement. On the OSS image (or an unlicensed enterprise
-# binary) `type: prometheus` returns "requires Versus Enterprise".
+# `type: prometheus` is an Enterprise source: it needs the Enterprise image and
+# a license with the `intelligence` entitlement, otherwise it reports
+# "requires Versus Enterprise".
 #
-# This source uses the NEW generic `options:` schema the source reads
-# (NOT the legacy nested `prometheus:` block). Each tick the source range-
-# queries every PromQL "anomaly rule" below and emits one signal per firing
-# series. Both rules evaluate to a value > 0 only when something is wrong, so
-# they stay silent under the generator's normal traffic and fire the moment
-# you hit `/spike`.
-#
-# Licensed Prometheus sources contribute `discover_metrics` and
-# `read_metric_series` to Chat and Analyze. Both route reads through the
-# configured source; no separate `tools.yaml` entry is needed.
+# The source finds each service (here from the `service` label), picks its
+# request rate, error rate and latency, learns a baseline for each, and raises
+# an incident when a signal stays well outside its baseline. It also gives
+# Chat and Analyze the `discover_metrics` and `read_metric_series` tools; no
+# tools.yaml entry is needed.
 sources:
   - name: demo-prom
     type: prometheus
     enable: true
     options:
       address: http://prometheus:9090
-      step: 30s
-      page_size: 500
-      queries:
-        # 5xx error rate above 0.5 req/s (silent at the ~0.5% normal error
-        # ratio; fires hard during a spike).
-        - query: 'sum by (service) (rate(demo_http_requests_total{code=~"5.."}[1m])) > 0.5'
-          severity: critical
-          service_label: service
-        # p95 request latency above 500ms.
-        - query: 'histogram_quantile(0.95, sum by (service, le) (rate(demo_http_request_duration_seconds_bucket[1m]))) > 0.5'
-          severity: high
-          service_label: service
+      # One sample every 15s, so a fresh baseline is ready in about 5 minutes.
+      step: 15s
+      # Learn only the demo series (they carry a `service` label), not
+      # Prometheus's own metrics.
+      filter: '{service!=""}'
+      # Look for new services every minute (the default is hourly), so series
+      # pushed after Versus starts are picked up quickly.
+      discovery_interval: 1m

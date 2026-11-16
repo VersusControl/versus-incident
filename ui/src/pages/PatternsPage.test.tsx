@@ -39,6 +39,9 @@ vi.mock("@/lib/api", async (importActual) => {
         .fn()
         .mockRejectedValue(new actual.ApiError(403, "community")),
       listServiceOverrides: vi.fn().mockResolvedValue([]),
+      getAgentConfig: vi
+        .fn()
+        .mockRejectedValue(new actual.ApiError(401, "unauthorized")),
       getSSODeployment: vi
         .fn()
         .mockRejectedValue(new actual.ApiError(403, "community")),
@@ -200,6 +203,32 @@ describe("PatternsPage — Verdict cell learning hint", () => {
 // the whole catalog. These pin the paged wiring: the whole-set total drives the
 // header, and a server-advertised next page surfaces a "Load more" control that
 // pulls the following page on demand.
+describe("PatternsPage — empty catalog", () => {
+  beforeEach(() => {
+    vi.mocked(api.listServiceOverrides).mockResolvedValue([]);
+    vi.mocked(api.listPatternsIndex).mockResolvedValue({ patterns: [], total: 0, next_offset: null });
+  });
+
+  it("names the configured learning pattern instead of saying logs are being catalogued", async () => {
+    vi.mocked(api.getAgentConfig).mockResolvedValueOnce({
+      regex: { default_pattern: "(?i).*error.*", rules: [] },
+    } as unknown as Awaited<ReturnType<typeof api.getAgentConfig>>);
+    renderPage();
+    expect(await screen.findByText("No patterns learned yet")).toBeTruthy();
+    expect(
+      await screen.findByText(/learns only log lines that match the learning pattern \(\?i\)\.\*error\.\* \(agent\.regex\.default_pattern\); other lines are read and skipped/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/builds the catalog as logs flow in/)).toBeNull();
+  });
+
+  it("still explains the skip when the agent config cannot be read", async () => {
+    renderPage();
+    expect(
+      await screen.findByText(/learns only log lines that match the learning pattern \(agent\.regex\.default_pattern\)/),
+    ).toBeTruthy();
+  });
+});
+
 describe("PatternsPage — server-side paging", () => {
   beforeEach(() => {
     vi.mocked(api.listServiceOverrides).mockResolvedValue([]);

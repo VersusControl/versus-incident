@@ -161,9 +161,11 @@ func canonicalDetectionIncidentSeverity(observed, notified string) string {
 	return severity
 }
 
+// detectionNotificationDelivered treats "none" (no channel enabled) like a
+// delivery: the incident is recorded and there is nothing left to retry.
 func detectionNotificationDelivered(outcome string) bool {
 	switch outcome {
-	case "sent", "partial", "diverted":
+	case "sent", "partial", "diverted", "none":
 		return true
 	default:
 		return false
@@ -172,7 +174,7 @@ func detectionNotificationDelivered(outcome string) bool {
 
 func detectionNotificationTerminal(outcome string) bool {
 	switch outcome {
-	case "sent", "partial", "suppressed", "grouped", "diverted":
+	case "sent", "partial", "suppressed", "grouped", "diverted", "none":
 		return true
 	default:
 		return false

@@ -59,6 +59,76 @@ func TestExtract_AlertmanagerNestedLabels(t *testing.T) {
 	}
 }
 
+func TestExtract_AlertmanagerFirstAlertFallback(t *testing.T) {
+	alerts := []interface{}{
+		map[string]interface{}{
+			"status":      "firing",
+			"labels":      map[string]interface{}{"alertname": "HighErrorRate", "severity": "critical", "service": "checkout"},
+			"annotations": map[string]interface{}{"summary": "5xx rate above 5% on checkout"},
+		},
+		map[string]interface{}{"labels": map[string]interface{}{"alertname": "Other", "severity": "info", "service": "web"}},
+	}
+	minimal := map[string]interface{}{"status": "firing", "alerts": alerts}
+	if got := ExtractTitle(minimal); got != "HighErrorRate" {
+		t.Errorf("title = %q, want the first alert's alertname", got)
+	}
+	if got := ExtractSeverity(minimal); got != "critical" {
+		t.Errorf("severity = %q, want the first alert's severity", got)
+	}
+	if got := ExtractService(minimal); got != "checkout" {
+		t.Errorf("service = %q, want the first alert's service", got)
+	}
+
+	summaryOnly := map[string]interface{}{"alerts": []interface{}{
+		map[string]interface{}{"labels": map[string]interface{}{"severity": "warning"}, "annotations": map[string]interface{}{"summary": "disk almost full"}},
+	}}
+	if got := ExtractTitle(summaryOnly); got != "disk almost full" {
+		t.Errorf("title = %q, want the first alert's summary annotation", got)
+	}
+
+	withCommon := map[string]interface{}{
+		"commonLabels": map[string]interface{}{"alertname": "GroupAlert", "severity": "warning", "service": "api"},
+		"alerts":       alerts,
+	}
+	if got := ExtractTitle(withCommon); got != "GroupAlert" {
+		t.Errorf("title = %q, want commonLabels to win over the first alert", got)
+	}
+	if got := ExtractSeverity(withCommon); got != "warning" {
+		t.Errorf("severity = %q, want commonLabels to win over the first alert", got)
+	}
+	if got := ExtractService(withCommon); got != "api" {
+		t.Errorf("service = %q, want commonLabels to win over the first alert", got)
+	}
+
+	// A grouped body whose common labels lack a field: the alerts disagree on
+	// it, so no single alert may name the group. Reordering the group must
+	// not change what is extracted.
+	grouped := func(first, second interface{}) map[string]interface{} {
+		return map[string]interface{}{"commonLabels": map[string]interface{}{"env": "prod"}, "alerts": []interface{}{first, second}}
+	}
+	for _, body := range []map[string]interface{}{grouped(alerts[0], alerts[1]), grouped(alerts[1], alerts[0])} {
+		if ExtractTitle(body) != "" || ExtractSeverity(body) != "" || ExtractService(body) != "" {
+			t.Errorf("grouped body %v should not read fields from its first alert", body)
+		}
+	}
+
+	single := map[string]interface{}{"commonLabels": map[string]interface{}{"env": "prod"}, "alerts": alerts[:1]}
+	if ExtractTitle(single) != "HighErrorRate" || ExtractSeverity(single) != "critical" || ExtractService(single) != "checkout" {
+		t.Errorf("a single-alert body with sparse common labels should read its alert's labels")
+	}
+
+	for _, empty := range []map[string]interface{}{
+		{"alerts": []interface{}{}},
+		{"alerts": "not a list"},
+		{"alerts": []interface{}{"not a map"}},
+		{"alerts": []interface{}{map[string]interface{}{"labels": "not a map"}}},
+	} {
+		if ExtractTitle(empty) != "" || ExtractSeverity(empty) != "" || ExtractService(empty) != "" {
+			t.Errorf("unusable alerts %v should resolve nothing", empty)
+		}
+	}
+}
+
 // TestExtractService_CloudWatchDimensions covers the CloudWatch-alarm-via-SNS
 // shape, where the service is only reachable through Trigger.Dimensions[].
 func TestExtractService_CloudWatchDimensions(t *testing.T) {

@@ -1,0 +1,12 @@
+# The Bitnami image named with its registry, as the old subchart default
+# carried it: refused the same way.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  image:
+    repository: docker.io/bitnami/redis
+    tag: 8.0.3-debian-12-r1

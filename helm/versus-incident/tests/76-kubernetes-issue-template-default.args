@@ -1,0 +1,13 @@
+# Every alert channel on with no Kubernetes issue template path set.
+--set
+alert.slack.enable=true
+--set
+alert.telegram.enable=true
+--set
+alert.viber.enable=true
+--set
+alert.email.enable=true
+--set
+alert.msteams.enable=true
+--set
+alert.lark.enable=true

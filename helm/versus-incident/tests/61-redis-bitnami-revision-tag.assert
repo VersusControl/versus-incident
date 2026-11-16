@@ -1,0 +1,2 @@
+# EXPECT_FAIL: a revision-suffixed tag on the default repository is refused.
+redis.image.tag="7.4.2-r0" is a Bitnami Redis tag

@@ -1,0 +1,9 @@
+# The connector and a separate action identity in client_certificate mode, agent off.
+-f
+values/kubernetes-auth-fields.yaml
+-f
+values/kubernetes-actor-without-agent.yaml
+--set-string
+connectors.kubernetes.auth.mode=client_certificate
+--set-string
+connectors.kubernetes.actions.auth.mode=client_certificate

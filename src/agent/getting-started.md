@@ -176,16 +176,23 @@ has two scripts in `scripts/`:
   interval, so the agent (which is reading the file) sees live
   traffic.
 
-Copy the scripts folder, then:
+The scripts need Git to fetch and Python 3 to run. Stay in the `versus-agent`
+folder and clone the repository there:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+```
+
+Then, still in `versus-agent`:
 
 ```bash
 # one-shot: write 2000 lines into the file the agent is reading
-python3 scripts/generate_noisy_logs.py \
+python3 versus-incident/scripts/generate_noisy_logs.py \
   --output ./logs/my-app.log \
   --lines 2000 --seed 42
 
 # OR live: append 20 lines every 5 seconds, forever (Ctrl+C to stop)
-./scripts/run_noisy_logs.sh \
+versus-incident/scripts/run_noisy_logs.sh \
   --output ./logs/my-app.log \
   --interval 5 --batch 20
 ```

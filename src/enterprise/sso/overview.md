@@ -2,180 +2,131 @@
 
 _Enterprise_
 
-Let your team sign in to the Enterprise SRE Agent with your own identity
-provider (IdP). SSO is configured **per organization, from the admin UI** —
-there is nothing to set in a config file and no SSO secret in the environment.
+## Concept
 
-An org can register **several** named IdP connections at once. Each connection
-becomes one **“Sign in with …”** button on the console login screen and runs the
-OpenID Connect **Authorization Code flow with PKCE**, fully validating the IdP's
-ID token (signature, issuer, audience, expiry, nonce) before it trusts a login.
+SSO lets your team sign in to Versus with the accounts they already have:
+Google Workspace, Microsoft Entra ID, or any OpenID Connect provider such as
+Okta, Auth0 or Keycloak. Each provider you add becomes a **Sign in with …**
+button on the Versus login screen.
 
-## Supported providers
+You set it up in the UI. There is nothing to add to a config file and no SSO
+secret in the environment. Each provider has a list of allowed email domains,
+so only your own people get in, and every new user starts read-only until an
+owner gives them more.
 
-Pick the page that matches your IdP:
+## Example
 
-| Provider | Connection type | When to use it |
-|---|---|---|
-| [Google Workspace](./google.md) | `google` | Google Workspace / Google accounts. Issuer is fixed (`accounts.google.com`). |
-| [Microsoft Entra ID (Azure AD)](./azure.md) | `azure` | Microsoft Entra ID / Azure AD. Issuer is derived from your **directory (tenant) ID**. |
-| [Generic OIDC](./oidc.md) | `oidc` | Any standards-compliant OpenID Connect issuer (Okta, Auth0, Keycloak, …). You supply the **issuer (discovery) URL**. |
+Acme runs Versus Enterprise. The first owner signs in as the built-in `admin`,
+adds Google with the allowed domain `acme.com`, and shares the URL.
 
-These are the only three connection types the agent supports. Every provider
-above is one of them — there is no separate SAML or LDAP path.
+- `maria@acme.com` clicks **Sign in with Google** and lands in Versus as a
+  **viewer**: she can read incidents but cannot change settings.
+- The owner promotes Maria to **admin** in **Admin → Members & roles**, then
+  disables the built-in `admin` account.
+- `someone@gmail.com` tries the same button and is refused, because
+  `gmail.com` is not an allowed domain.
 
-## Before you start
+## What you see in the UI
 
-| You need | Why |
+- **The login screen** keeps the built-in admin login and, below **Or sign in
+  with SSO**, one **Sign in with …** button per enabled provider, labelled with
+  the provider's display name.
+
+  ![The Versus login screen: the built-in admin username and password form, then Or sign in with SSO and a Sign in with Google button](../../docs/images/sso-login-ui-dark.png)
+
+- **Admin → Identity providers** lists every provider with its status
+  (**Enabled** or **Disabled**), an **Add identity provider** form, and the
+  **Login enforcement** switches once a provider is enabled.
+
+  ![Admin → Identity providers: a Google provider, Enabled, with issuer https://accounts.google.com, the Add identity provider button and the Enforce SSO checkbox](../../docs/images/admin-identity-providers-ui-dark.png)
+
+- **Admin → Members & roles** lists everyone who has signed in, with their
+  email, name, connection and role, and the **Disable default admin** button.
+
+## Turn it on
+
+1. Sign in as the built-in `admin` (see [Getting Started](../getting-started.md)).
+2. Open **Admin → Identity providers** and click **Add identity provider**.
+   Copy the **Redirect URL (callback)** shown in the form.
+3. Register an app at your provider with that redirect URL. Follow the page for
+   your provider:
+
+   | Provider | **Provider** in the form | Page |
+   |---|---|---|
+   | Google Workspace | Google | [Google Workspace](./google.md) |
+   | Microsoft Entra ID (Azure AD) | Microsoft Entra (Azure AD) | [Microsoft Entra ID](./azure.md) |
+   | Okta, Auth0, Keycloak, any OIDC provider | Generic OIDC (issuer URL) | [Generic OIDC](./oidc.md) |
+
+4. Paste the client ID and secret, set the allowed email domains, tick
+   **Enabled** and save.
+5. Sign out and test the new button.
+6. Promote a real user to **admin** or **owner**, then **Disable default
+   admin**.
+
+Versus supports these three provider types. There is no SAML or LDAP option.
+
+## Reference
+
+### URLs
+
+| URL | What it is |
 |---|---|
-| A **Versus Enterprise license** | SSO is an enterprise feature. Without a license the SSO panel stays locked (Enterprise upsell). |
-| The **built-in default admin** signed in | A brand-new deployment has no SSO connection yet, so you add the first one while logged in as the built-in `admin` (owner). See [the bootstrap flow](#the-bootstrap-flow-who-creates-the-first-connection) below. |
-| An **OAuth / OIDC application** registered in your IdP | You'll copy its **client ID** and **client secret** into Versus and register Versus's **callback URL** back in the IdP. |
+| `https://<your-versus-host>/enterprise/api/sso/<org>/callback` | Redirect (callback) URL. Register it at your provider. Every provider uses the same one. |
+| `https://<your-versus-host>/enterprise/api/sso/<org>/login/<connection-id>` | Login URL of one provider: the target of its button. |
 
-## The bootstrap flow (who creates the first connection)
+`<org>` is the organization in your license key. The form fills in the
+callback URL for you, from the address you opened Versus at; copy it from
+there.
 
-The admin UI that manages SSO is itself gated on a signed-in session, and a
-fresh deployment has no SSO connection — so the **first** connection is created
-by the built-in default admin, a non-SSO root account.
+### Form fields
 
-There is **no bootstrap env of any kind**. The flow is:
-
-1. **First licensed boot** prints a generated password for the built-in `admin`
-   **once** to the container log:
-
-   ```text
-   ================================================================================
-     DEFAULT ADMIN CREDENTIALS (shown once — copy them now)
-   --------------------------------------------------------------------------------
-     Username: admin
-     Password: <generated>
-   --------------------------------------------------------------------------------
-     Change or disable this account after your first login.
-   ================================================================================
-   ```
-
-   The password is generated with `crypto/rand`, stored only as a bcrypt hash,
-   and **never re-printed or regenerated** on reboot. Copy it from the log.
-
-2. **Log in as the built-in admin** at the console's local login (username
-   `admin` and the printed password). Behind the UI this is
-   `POST /enterprise/api/auth/local/login`, which mints the org-bound session
-   cookie. `admin` holds the **owner** role, so it can manage SSO.
-
-3. **Add your first SSO connection** in the UI — follow the
-   [provider page](#supported-providers) for your IdP.
-
-4. **Your team signs in over SSO.** A brand-new SSO user lands as the read-only
-   **viewer** role (least privilege).
-
-5. **Promote** one SSO user to **admin** or **owner** from the **Members** panel.
-
-6. **Disable the built-in admin** from the **Members** panel once a real
-   admin/owner exists. The server **refuses** while `admin` is the only
-   administrator (a no-lockout guard), and disabling it immediately invalidates
-   its session. You can re-enable it later for break-glass recovery.
-
-> See [Getting Started](../getting-started.md) for the full first-boot
-> walkthrough.
-
-## Shared concepts
-
-These apply to every provider page.
-
-### Deployment org
-
-This binary serves a single organization, derived from your `LICENSE_KEY`. The
-admin UI resolves it for you, so you never type it. A standard single-org
-deployment uses `default`. The org appears in the **redirect (callback) URL**
-you register at the IdP:
-
-```text
-https://<your-versus-host>/enterprise/api/sso/<org>/callback
-```
-
-All connections in an org **share** this one callback URL. The per-connection
-**login URL** (the button target) is:
-
-```text
-https://<your-versus-host>/enterprise/api/sso/<org>/login/<connection-id>
-```
-
-### Allowed email domains (fail closed)
-
-Every connection carries an **allow-list of email domains** (e.g. `acme.com`). A
-login only succeeds if the user's email domain is on the list — so a leaked link
-can't admit an outside account. The list is **required**: if it is empty, **every**
-login through that connection is rejected (fail closed).
+| Field | What to enter |
+|---|---|
+| **Provider** | Google, Microsoft Entra (Azure AD) or Generic OIDC (issuer URL). Cannot be changed later. |
+| **Connection ID** | A short ID used in the login URL: 1 to 64 characters of `a-z`, `0-9`, `-` and `_`. |
+| **Display name** | The text on the **Sign in with …** button. |
+| **Directory (tenant) ID** | Microsoft Entra only. |
+| **Issuer (IdP discovery URL)** | Generic OIDC only. |
+| **Client ID** | From your provider. |
+| **Client secret** | From your provider. Stored encrypted; Versus never shows it again. Leave it blank when editing to keep the stored one. |
+| **Redirect URL (callback)** | Prefilled. Must match what you registered at the provider. |
+| **Scopes** | `email, profile`. `openid` is always added. |
+| **Allowed email domains** | For example `acme.com`. **Required:** Versus refuses to save a provider with no domain. Only these domains can sign in. |
+| **Enabled** | Shows the provider's button on the login screen. |
 
 ### Roles
 
-| Role | What it can do |
+| Role | Can |
 |---|---|
-| `viewer` (default) | Read-only. **Every new SSO user starts here.** |
-| `responder` | Read-only for admin controls (operational role). |
-| `admin` / `owner` | Manage SSO connections, runtime mode, AI settings, members. |
+| `viewer` | Read incidents. Every new SSO user starts here. |
+| `responder` | Viewer, plus act on incidents. |
+| `admin` | Responder, plus manage SSO, roles, runtime mode, AI and channels. |
+| `owner` | Everything. The built-in `admin` account is an owner. |
 
-Promote a viewer to `admin`/`owner` from the **Members** panel; the built-in
-`admin` is `owner` and is used only to bootstrap (then disabled).
+### Login enforcement
 
-### Client-secret handling
+Once at least one provider is enabled, an owner or admin can tighten sign-in
+in **Admin → Identity providers → Login enforcement**:
 
-When you save a connection the client secret is **sealed at rest** (AES-256-GCM)
-the moment it is saved. Versus never shows it again, never logs it, and never
-returns it from the API — the masked view only shows whether a secret is stored
-and its **last four characters**. When editing a connection later, leave the
-client secret **blank** to keep the stored one; type a new value only when you
-rotate it at the IdP.
-
-## Where to configure it in the UI
-
-In the console, open the **Agent** page and find the **Single Sign-On (SSO)**
-panel (the *identity providers* control). It is editable only when you're signed
-in with `admin`/`owner`; a read-only role shows a **requires the admin role**
-notice.
-
-Click **Add identity provider** and you'll fill these fields (each provider page
-spells out the exact values):
-
-| Field | Notes |
+| Switch | Effect |
 |---|---|
-| **Provider** | `Google`, `Microsoft Entra (Azure AD)`, or `Generic OIDC (issuer URL)`. Fixed after creation. |
-| **Connection ID** | A lowercase slug (`[a-z0-9-_]`, 1–64 chars) used in the login URL. |
-| **Display name** | The label on the “Sign in with …” button. |
-| **Directory (tenant) ID** | Microsoft Entra only — see the [Azure page](./azure.md). |
-| **Issuer (IdP discovery URL)** | Generic OIDC only — see the [OIDC page](./oidc.md). |
-| **Client ID** | From your IdP application. |
-| **Client secret** | From your IdP application — sealed on save; leave blank when editing to keep it. |
-| **Redirect URL (callback)** | The shared callback URL above. Must match what you register at the IdP. |
-| **Scopes** | Comma/space separated. `openid` is always implied; `email` and `profile` are recommended. |
-| **Allowed email domains** | Comma/space separated. Required — empty rejects all logins. |
-| **Enabled** | Show this provider's button on the login screen. |
+| **Enforce single sign-on (SSO)** | People must sign in through a provider. The built-in `admin` stays available as a break-glass account. |
+| **Also require multi-factor sign-in (MFA)** | Sign-in still works, but a session your provider did not report as multi-factor cannot use privileged actions, such as changing settings. The built-in `admin` is exempt. Shown only while SSO is enforced. |
 
-## Enforcing SSO (optional)
+Versus refuses to enforce SSO while no provider is enabled, so you cannot lock
+everyone out. Policy changes are recorded in the audit trail.
 
-Once at least one connection is enabled, an owner can make SSO **mandatory** for
-the org from the same panel:
+### Sessions
 
-| Setting | Effect |
+A sign-in lasts 12 hours. Users can sign out at any time. In
+[High Availability](../ha/overview.md), a session works on every replica.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
 |---|---|
-| `require_sso` | Drops the non-SSO (gateway-secret) console login fallback — the provider button becomes the only way in. |
-| `require_mfa` | Records that the org expects multi-factor logins (from the IdP's `amr` claim). Only meaningful under `require_sso`. |
-
-You cannot turn on `require_sso` for an org that has no enabled connection — the
-request is rejected so you can't lock yourself out. Until SSO is enforced, the
-gateway-secret login stays available as a break-glass fallback. Every policy
-change and every blocked non-SSO attempt is written to the audit log.
-
-## Good to know
-
-- **No secrets in env.** The client secret lives only in Versus's encrypted
-  store, protected by an enterprise key generated automatically on first
-  licensed boot. There is **no** SSO secret env var.
-- **Per-organization.** Each org has its own connections, login URLs, and
-  callback URL. One org's login can never complete against another org's.
-- **Fail-closed by design.** A missing, disabled, or corrupt connection disables
-  **login only** — it never leaves the agent in a broken-auth state. While
-  `require_sso` is off, the gateway-secret login keeps console access available.
-- **Short-lived sessions.** A signed-in session is bound to the org, stored in a
-  signed `HttpOnly` cookie, and expires automatically. Users can log out; owners
-  can force-revoke every session for the org at once.
+| **Identity providers** shows the Enterprise card | No `LICENSE_KEY`, or the key failed to verify. |
+| **requires the admin role** | You are signed in as viewer or responder. Ask an owner to promote you. |
+| The provider rejects the redirect | The redirect URL registered at the provider differs from the one in the form. They must match exactly. |
+| You sign in at the provider but Versus refuses you | Your email domain is not in **Allowed email domains**. |
+| **Disable default admin** is refused | No other owner or admin exists yet. Promote one first. |

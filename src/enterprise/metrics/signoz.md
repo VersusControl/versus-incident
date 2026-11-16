@@ -1,314 +1,178 @@
-# SigNoz Metrics Guide
+# SigNoz Metrics
 
 _Enterprise_
 
-A hands-on walkthrough: point the `signoz_metrics` data source at
-[SigNoz](https://signoz.io/) — Cloud or self-hosted — let Versus
-**discover your services from recent spans**, **probe a metric catalog**
-against each one, **learn each signal's baseline**, and open a real
-incident when one clearly deviates and stays deviated.
+## Concept
 
-Unlike the [Prometheus](./prometheus.md), SigNoz exposes no way to
-*enumerate* metric names over its query API, so discovery works
-differently here — read [What it discovers](#3-what-it-discovers) before
-you decide this source sees everything you expect.
+Give Versus your [SigNoz](https://signoz.io/) address and a query API key, and
+it finds your services and the metrics worth watching for each. It learns each
+signal's normal by time of week and raises an incident when a signal moves far
+outside it and stays there. It works with SigNoz Cloud and self-hosted SigNoz,
+version 0.87.0 or later.
 
-## Prerequisites
+SigNoz cannot list its metric names, so Versus finds services from your recent
+traces and then checks a short list of metrics for each one. By default that
+list is SigNoz's own span metrics, which exist wherever traces flow. Add your
+own metrics to the list with `metrics:`.
 
-| Need | Why |
+## Example
+
+Your services send traces to SigNoz, so SigNoz keeps `signoz_calls_total` and
+`signoz_latency.bucket` for each. Versus finds `checkout` and `payments` in the
+traces, checks both metrics for each, and learns their traffic and p99 latency.
+When `checkout`'s latency stays far above its usual band, Versus raises one
+incident for `checkout`. `payments`, still normal, stays quiet.
+
+## What you see in the UI
+
+| Where | What |
 |---|---|
-| **SigNoz v0.87.0 or later** (Cloud or self-hosted) | the source reads `POST /api/v5/query_range`, which first appears in `v0.87.0` (verified at source level against the tagged releases) |
-| **Traces flowing into SigNoz** | services are discovered from recent spans, and SigNoz's default span metrics are derived from traces — without traces this source degrades to a global scope (see [limitations](#limitations)) |
-| A SigNoz **query API key** | authentication; created under **Settings → API Keys**, which needs the **Admin** role. Available on Cloud **and** self-hosted community |
-| A **Versus Enterprise license** with the **`intelligence`** entitlement, supplied via the `LICENSE_KEY` environment variable | the standing `signoz_metrics` source is gated on this feature |
-| An **AI API key** (e.g. OpenAI) | the detect AI that triages the anomaly and writes the incident summary |
+| **Agent Learning → Metrics** | Each service with its SigNoz metrics. **Ready** once a signal's normal is learned, **Still learning** before. |
+| **Incidents** | One incident per service and signal that stays out of its normal, naming the source. |
+| **AI → Decisions**, **Shadow** tab | What the source would have raised, in shadow mode. |
 
-> **First time running Enterprise?** Start with
-> [Getting Started — Running the Enterprise Agent](../getting-started.md). It
-> covers signing in as the default admin, turning on AI, and switching modes
-> from the UI — the controls this walkthrough uses.
-
-> **Use a query API key, not an ingestion key.** The source
-> authenticates with the **`SIGNOZ-API-KEY`** header, identical on Cloud
-> and self-hosted. The Cloud-only `signoz-ingestion-key` that shippers
-> use to *write* telemetry will **not** work for queries.
-
-## 1. Bring up SigNoz
-
-If you do not already run SigNoz, the OSS example at
-`examples/docker-compose/signoz/`
-([on GitHub](https://github.com/VersusControl/versus-incident/tree/main/examples/docker-compose/signoz))
-brings up a full stack with a direct internal HTTP reader:
-
-```bash
-docker compose up -d
-```
-
-The example explicitly trusts its Docker-private destination. HTTP sends the
-query API key in plaintext, so production deployments should set
-`SIGNOZ_READ_ADDRESS` to a verified HTTPS origin.
-
-> **It is a heavy stack** — ClickHouse, ClickHouse Keeper, Postgres and
-> an OTel collector. Budget **≥4 GB** of Docker memory.
-
-Then create the query key in the SigNoz UI under **Settings → API Keys**
-and export it:
-
-```bash
-export SIGNOZ_API_KEY=...    # never commit this
-```
-
-## 2. Configure the source
-
-Declare the enterprise `signoz_metrics` source in
-[config/agent_sources.yaml](../../../config/agent_sources.yaml) — the file
-Versus loads from next to `config.yaml`. The documented path is
-**connection-only**: an address and a key. You author no queries.
+## Turn it on
 
 ```yaml
+# config/agent_sources.yaml
 sources:
-  - name: demo-signoz-metrics
+  - name: prod-signoz-metrics
     type: signoz_metrics
     enable: true
     options:
-      address: https://signoz.example.internal # final HTTP(S) Query Service origin
-      # address: https://<region>.signoz.cloud
+      address: https://<region>.signoz.cloud   # or your self-hosted SigNoz
       api_key: ${SIGNOZ_API_KEY}
-      allow_private_networks: true         # trusted RFC1918/ULA self-hosting only
 ```
 
-## 3. What it discovers
+Create the key in SigNoz under **Settings → API Keys** (needs the Admin role).
+Use a **query** API key, not an ingestion key. For a self-hosted SigNoz on a
+private address, also set `allow_private_networks: true`.
 
-This is the part that differs from Prometheus, and it is worth
-understanding before you trust the watch-set.
+For SigNoz traces, add a `signoz_traces` source: see
+[Traces](../../agent/data-sources/traces.md#signoz-backend).
 
-**Services come from spans.** SigNoz's metrics signal has no list view,
-so the source enumerates services from a bounded sample of **raw spans**
-— the discovery lookback is split into 6 equal buckets and one small
-span query is issued per bucket, so the sample is spread across the
-window instead of pinned to the last few seconds of the busiest service.
-It reads the first attribute it finds of `service.name`,
-`resource.service.name`, `serviceName`, `service`.
+## Try it with Docker Compose
 
-**Metric names come from a catalog.** The v5 query API cannot enumerate
-metric names at all, so there is no honest way to find them
-automatically. The default catalog is SigNoz's **own span metrics**:
-
-| Metric | Why it is the default |
-|---|---|
-| `signoz_calls_total` | SigNoz derives it from ingested traces, so it exists wherever this source has anything to watch |
-| `signoz_latency.bucket` | same — the latency histogram behind SigNoz's own charts |
-
-**Mind the spelling: a DOT before a histogram component.** SigNoz stores
-the parts of a histogram family — `bucket`, `sum`, `count` — as **dotted**
-suffixes (`signoz_latency.bucket`,
-`http_server_duration.sum`), while a base counter keeps whatever the
-producer named it, which for Prometheus-style counters is `_total`
-(`signoz_calls_total`). Both spellings therefore live side by side on the
-same deployment. Naming the underscored form of a histogram component
-(`signoz_latency_bucket`) is not an error you will see: the v5 API answers
-an unknown metric with a **successful, empty** result, so the metric is
-simply never watched. Copy the name exactly as SigNoz stores it.
-
-**Every (service, metric) pair is probed once per discovery pass.** A
-pair that answers with no finite sample is never watched, so nothing is
-guessed onto the watch-set — every entry was observed. Probing is
-bounded at **500 probes per pass**; a large deployment stops there with
-a partial watch-set (and says so in the discovery notes) rather than
-turning a discovery pass into a request burst.
-
-**Anything outside the catalog is invisible** unless you name it in
-`metrics:`. Host metrics, custom application metrics and OTel receiver
-metrics are all in that category:
-
-```yaml
-options:
-  address: https://signoz.example.internal
-  api_key: ${SIGNOZ_API_KEY}
-  allow_private_networks: true
-  metrics:                                  # ADDED to the default catalog
-    - http_server_duration.bucket
-    - system_memory_usage
-```
-
-`metrics:` **adds to** the default catalog — it does not replace it, so
-naming one custom metric cannot silently switch off the span metrics the
-source relies on. Order is preserved and duplicates are dropped, so the
-probe order (and therefore which metrics survive the per-service cap) is
-deterministic.
-
-### Scoping with `filter:`
-
-`filter:` takes a **SigNoz v5 filter expression** and is ANDed into every
-probe and every sample, so one line narrows the whole source. Attribute
-names are **dotted** — this is not PromQL:
-
-```yaml
-options:
-  address: https://signoz.example.internal
-  api_key: ${SIGNOZ_API_KEY}
-  allow_private_networks: true
-  filter: "deployment.environment = 'prod' AND k8s.namespace.name = 'payments'"
-```
-
-Your expression is parenthesised before the generated `service.name`
-clause is appended, so a top-level `OR` scopes only what you wrote and
-cannot widen the watch-set. A malformed expression (unterminated quote,
-unbalanced parentheses) is refused **at boot** rather than at query time,
-because SigNoz answers a bad-but-parseable filter with an empty
-*successful* result — which would otherwise look like a source that
-quietly watches nothing.
-
-Use `filter:` to narrow by environment, namespace or tenant, and
-`metrics:` to add metrics the catalog does not already probe.
-
-**How each metric is read** is decided by its name suffix — the same
-shape heuristic the Prometheus path uses. It matters: reading a
-monotonic counter with the backend's default reducer would teach the
-brain a baseline that only ever climbs.
-
-| Name ends with | Read as | Golden signal |
-|---|---|---|
-| `.bucket` or `_bucket` | `p99` across series | latency |
-| `.sum` / `.count`, or `_total` / `_count` / `_sum` | `rate` over time, `sum` across series | traffic |
-| anything else | `avg` / `avg` | saturation |
-
-Both spellings are recognised because both occur: SigNoz writes histogram
-family components dotted, and base counters keep the producer's `_total`.
-
-## 4. Understand the three modes
-
-Versus Enterprise runs in one of three **agent modes**. You pick the mode
-via `AGENT_MODE`. SigNoz is a **standing baseline** source, so the
-sequence matters — always learn first:
-
-| Mode | What it does | Use when |
-|---|---|---|
-| `training` | Discovers signals and **learns their baseline** (normal behavior). No alerts, no incidents — pure observation. | First run — let it watch healthy traffic and build a model of "normal." |
-| `shadow` | Scores every signal against the learned baseline. Writes **"would have alerted"** verdicts to the UI — but **pages no one**. | Validating that the learned baseline is accurate before going live. |
-| `detect` | Opens a **real incident automatically** when a signal deviates from its baseline and stays deviated. A lightweight **AI classification** writes the incident's title, severity, and summary. | Production — the payoff mode. |
-
-Think of the agent like a new on-call engineer: first it *watches* and
-learns each service's normal rhythm, then it *double-checks* quietly,
-then it *acts*.
-
-## 5. Run the agent
-
-Start the Enterprise image in `training` mode. From the repo root:
+You need Git, Docker with Docker Compose v2, Python 3, and a Versus Enterprise
+license key. Clone the repository and go into it:
 
 ```bash
-docker run --rm --name versus-enterprise \
-  --network host \
-  -v "$PWD/config:/app/config" \
-  -v "$PWD/data:/app/data" \
-  -e REDIS_HOST=localhost -e REDIS_PORT=6379 -e REDIS_PASSWORD=versus \
-  -e LICENSE_KEY=... \
-  -e SIGNOZ_API_KEY=... \
-  -e AGENT_ENABLE=true \
-  -e AGENT_AI_ENABLE=true \
-  -e AGENT_AI_API_KEY=sk-... \
-  -e AGENT_AI_MODEL=gpt-4o-mini \
-  -e AGENT_MODE=training \
-  ghcr.io/versuscontrol/versus-enterprise:latest
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
 ```
 
-On boot you should see a discovery line and a clean start:
+Every command below runs from this `versus-incident` folder, the repository
+root.
 
-```text
-agent: standing metric source "demo-signoz-metrics" discovered 12 signal(s) across 6 service(s) (label="service.name" generic=false metrics=2 notes=[])
-enterprise: agent started (mode=training, sources=1)
+[`examples/metrics-source/`](https://github.com/VersusControl/versus-incident/tree/main/examples/metrics-source)
+has a SigNoz overlay, `docker-compose.signoz.yml`. It runs Versus Enterprise
+with a self-hosted SigNoz and both `signoz_metrics` and `signoz_traces` sources.
+A one-shot service creates the SigNoz admin and a query API key for Versus, so
+you set no key yourself.
+
+The stack is heavy (ClickHouse, ZooKeeper, a collector and SigNoz): give
+Docker at least 4 GB of memory. The demo traffic script needs Python 3 on your
+machine.
+
+```bash
+export LICENSE_KEY=<your license key>
+docker compose -f examples/metrics-source/docker-compose.yml \
+  -f examples/metrics-source/docker-compose.signoz.yml up -d
+docker compose -f examples/metrics-source/docker-compose.yml \
+  -f examples/metrics-source/docker-compose.signoz.yml \
+  logs versus | grep -A6 "DEFAULT ADMIN CREDENTIALS"
+python3 examples/metrics-source/scripts/generate_fake_metrics.py \
+  --backend signoz --spike --duration 240
 ```
 
-`sources=1` and **no** `requires Versus Enterprise` line confirm the
-license unlocked the source. `generic=false` confirms services were
-attributed; `generic=true` means it fell back to a global scope (see
-[limitations](#limitations)).
+Open `http://localhost:3000` and sign in as `admin`. **Agent Learning →
+Metrics** lists the demo services from SigNoz. The SigNoz UI is on
+`http://localhost:8080` (`admin@versus.local` / `Versus-Dev-12345`).
 
-For an unscoped source, the catalog also includes `discover_metrics` and
-`read_metric_series` for Chat and Analyze. A configured `filter:` disables only
-source-wide discovery; metric reads remain available and preserve that scope.
+Clean up:
 
-Then work through the modes exactly as in the
-[Prometheus guide](./prometheus.md#3-understand-the-three-modes):
-learn in `training`, review on the **Shadow** page, then switch to
-`detect` and let a real deviation page you. Baselines are **persisted**
-and reload across restarts — switching mode never starts the learning
-over.
+```bash
+docker compose -f examples/metrics-source/docker-compose.yml \
+  -f examples/metrics-source/docker-compose.signoz.yml down -v
+```
+
+Do not combine this overlay with the Tempo overlay: both use port `4318`.
+
+## How it chooses what to watch
+
+- **Services** come from recent spans. Versus reads the first of
+  `service.name`, `resource.service.name`, `serviceName` and `service`. With no
+  service attribute at all, it watches each metric across everything, under the
+  service `_all_`.
+- **Metrics** come from the list: `signoz_calls_total` and
+  `signoz_latency.bucket`, plus anything in `metrics:`. Each service and metric
+  pair is checked once per discovery; only pairs that return data are watched.
+- **Spelling matters.** SigNoz writes histogram parts with a dot
+  (`signoz_latency.bucket`, `http_server_duration.sum`) and counters as named
+  (`signoz_calls_total`). A misspelled name returns no data and is never
+  watched, without an error.
+- **How a metric is read** follows its name:
+
+  | Name ends with | Read as | Signal |
+  |---|---|---|
+  | `.bucket` or `_bucket` | p99 | latency |
+  | `.sum`, `.count`, `_total`, `_count` or `_sum` | rate | traffic |
+  | anything else | average | saturation |
+
+Add metrics and narrow the scope like this:
+
+```yaml
+    options:
+      address: https://signoz.example.internal
+      api_key: ${SIGNOZ_API_KEY}
+      allow_private_networks: true
+      metrics:                       # added to the default list
+        - http_server_duration.bucket
+        - system_memory_usage
+      filter: "deployment.environment = 'prod'"
+```
+
+`filter` is a SigNoz filter expression, not PromQL, with dotted attribute
+names. It applies to every read. A malformed one stops the source at start.
 
 ## Options
 
-All options live under `options:`. Only `address` and `api_key` are
-required; every other field defaults, so the documented path is
-connection-only.
+Only `address` and `api_key` are required.
 
-| Key | Default | Meaning |
+| Key | Default | What it does |
 |---|---|---|
-| `address` | — (required) | Final HTTP(S) SigNoz Query Service origin, self-hosted or `https://<region>.signoz.cloud`. Verified HTTPS is recommended for production; HTTP sends the API key in plaintext. |
-| `api_key` | — (required) | Sent as the `SIGNOZ-API-KEY` header. The **query** key from Settings → API Keys. |
-| `insecure_skip_verify` | `false` | Disable certificate verification for HTTPS. Ignored for HTTP. |
-| `allow_private_networks` | `false` | Trust RFC1918/ULA destinations for an explicitly trusted self-hosted deployment. |
-| `allow_loopback` | `false` | Trust loopback for local testing, independently of HTTP/TLS. |
-| `step` | `60s` | Sampling resolution (the v5 `stepInterval`). |
-| `metrics` | built-in catalog | Metric names **added to** the default catalog. Histogram components are dotted; base counters keep the producer's `_total`. |
-| `filter` | unset | SigNoz v5 filter expression ANDed into every read, e.g. `deployment.environment = 'prod'`. Dotted attribute names; not PromQL. |
-| `max_services` | `50` | Service-enumeration cap. |
-| `max_signals` | `200` | Per-tenant signal cap. |
-| `max_per_service` | `6` | Per-service signal cap. |
-| `discovery_interval` | `1h` | How often the watched set is rebuilt (cadence ceiling). |
-| `discovery_lookback` | `1h` | Window discovery samples over. Floored at `5m`. |
-| `discovery_samples` | `200` | Span rows per discovery bucket (6 buckets). Capped at `1000`. |
-| `org` | unset | Tenant scope for learned baselines. |
+| `address` | required | SigNoz URL, or `https://<region>.signoz.cloud`. Use HTTPS in production: over HTTP the key is sent in plain text. |
+| `api_key` | required | SigNoz query API key. |
+| `insecure_skip_verify` | `false` | Skip TLS verification. |
+| `allow_private_networks` | `false` | Allow a private address, such as a self-hosted SigNoz. |
+| `allow_loopback` | `false` | Allow `localhost`. |
+| `step` | `60s` | Sampling resolution. |
+| `metrics` | none | Metric names added to the default list. |
+| `filter` | none | SigNoz filter expression applied to every read. |
+| `max_services` | `50` | Most services watched. |
+| `max_signals` | `200` | Most signals watched in total. |
+| `max_per_service` | `6` | Most signals per service. |
+| `discovery_interval` | `1h` | How often Versus looks for services and metrics. |
+| `discovery_lookback` | `1h` | Time range of spans read to find services (at least `5m`). |
+| `discovery_samples` | `200` | Spans read per search, up to `1000`. Raise it on a quiet backend. |
 
-`address` and `api_key` are the documented surface; the caps and
-discovery knobs are optional bounds you reach for only when a large
-deployment needs them.
-
-## Cost and scale
-
-One discovery pass costs **6 span queries + (services × metrics)
-probes**, hard-bounded at 500 probes, and runs at most once per
-`discovery_interval`. Sampling costs **one request per watched signal
-per tick** — deliberately never a batched composite query, because a
-single rejected metric in a batch would blank the whole tick.
-
-Narrow the scope with `max_services` / `max_per_service` / `max_signals`
-before you reach for a longer `discovery_interval`.
-
-## Limitations
-
-These are real gaps in the first release, not configuration mistakes.
-
-- **Reads stay with their source.** A configured `signoz_metrics` source
-  contributes `discover_metrics` and `read_metric_series` for SigNoz.
-  Configure a separate `prometheus` source in `agent_sources.yaml` for
-  Prometheus-backed reads; there is no standalone query tool.
-- **Metric discovery is catalog-based.** Metrics outside the default
-  catalog are invisible unless you name them in `metrics:`. The v5 query
-  API cannot enumerate metric names, so there is no automatic
-  alternative today.
-- **Per-service attribution needs traces.** Services are discovered from
-  spans. With no `service.name` observed, discovery reports
-  `generic=true` and watches each catalog metric **globally** under an
-  `_all_` pseudo-service rather than going dark — useful, but you lose
-  per-service isolation.
+Each discovery checks at most 500 service and metric pairs. On a large
+deployment, lower `max_services` or add a `filter` so the checks cover what
+matters.
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| Symptom | Likely cause |
 |---|---|
-| `requires Versus Enterprise`, `sources=0` | The license is missing the **`intelligence`** feature (or you are on an OSS build). Mint a key that includes `intelligence`. OSS supports the `signoz` logs source and its log read tools; SigNoz metrics/traces sources and their four read tools require Enterprise. |
-| `401` / `403` on every read | An **ingestion** key was used instead of a **query** API key, or the key was revoked. |
-| `404` on `/api/v5/query_range` | SigNoz is older than **v0.87.0**. Upgrade. |
-| `discovered 0 signal(s)` | No spans in the discovery lookback, or none of the catalog metrics answered with a finite sample for any service. Confirm traces are flowing, then widen `discovery_lookback`. |
-| `generic=true` in the discovery line | No `service.name` was observed on sampled spans — the source degraded to a global scope. Check your instrumentation sets the resource attribute. |
-| A metric you care about is never watched | It is outside the default catalog — add it with `metrics:`. |
-| A metric you do not want learned | Add it to the org **Disable-Learn** policy (`metrics`, exact names or globs). Narrowing `filter:` stops it being read at all. |
-| `probe budget (500) spent; watch-set is partial` in the notes | The deployment is larger than one discovery pass can probe. Lower `max_services`, or narrow with `filter:` so the budget covers what matters. |
-| `discover_metrics` is absent | The source has a configured `filter:`; source-wide discovery is withheld because it cannot honestly apply that scope. `read_metric_series` remains available. |
+| `requires Versus Enterprise` | No `LICENSE_KEY`, or the key lacks the `intelligence` entitlement. |
+| `401` or `403` on every read | An ingestion key instead of a query API key, or a revoked key. |
+| `404` from SigNoz | SigNoz is older than 0.87.0. |
+| Nothing under **Agent Learning → Metrics** | No spans in the last `discovery_lookback`, or none of the listed metrics returned data. Check that traces reach SigNoz. |
+| Only a service called `_all_` | Your spans have no `service.name`. Set it in your instrumentation. |
+| A metric you want is never watched | It is not in the list. Add it under `metrics:`, spelled as SigNoz stores it. |
 
 ## See also
 
-- The Prometheus twin of this guide: [Prometheus Guide](./prometheus.md)
-- Enterprise metrics overview & licensing: [Overview](./overview.md)
-- SigNoz traces (Enterprise): [Traces](../../agent/data-sources/traces.md#signoz-backend)
-- SigNoz logs (OSS): [SigNoz source](../../agent/data-sources/signoz.md)
+- [Metrics overview](./overview.md) · [Prometheus Metrics](./prometheus.md)
+- [Traces](../traces.md), including SigNoz traces
+- [SigNoz logs source](../../agent/data-sources/signoz.md) (OSS)

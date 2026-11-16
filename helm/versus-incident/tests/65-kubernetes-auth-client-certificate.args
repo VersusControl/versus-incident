@@ -1,0 +1,5 @@
+# The Kubernetes connector in client_certificate mode with every other auth field set.
+-f
+values/kubernetes-auth-fields.yaml
+--set-string
+connectors.kubernetes.auth.mode=client_certificate

@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="410" viewBox="0 0 760 410" style="max-width:100%;height:auto" role="img" aria-label="On the left, the trained log stream in detect mode: known declined card and cart read lines stay quiet while a new line, checkout error: payment processor acme-pay did not answer within 30s, repeats 60 times; on the right, one incident, Anomaly: checkout-api, with WARN and open badges, a summary saying the new pattern repeated, with sample lines, and the next step check acme-pay status; the incident is sent to your channels, Slack and Teams, and a dashed branch shows it also goes to on call only when it is high or critical; without an AI key the summary is templated, with an AI key the AI writes the summary and next steps">
+  <title>Detect mode turns a new pattern into an incident</title>
+  <desc>Left: a trained log stream where a new acme-pay timeout appears among known checkout-api lines; right: one incident for checkout-api with severity, status, summary and next steps, sent to Slack and Teams, and to on call only when high or critical, with a templated summary when there is no AI key</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f10{font-size:10px}.f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f14{font-size:14px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}.amb{fill:#B54708}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .ch{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="410" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">Detect mode turns a new pattern into an incident</text>
+  <text x="24" y="64" class="f13 sec">One incident, sent to your channels</text>
+
+  <!-- panels -->
+  <rect x="20" y="84" width="340" height="306" rx="12" fill="#F2F5F8"/>
+  <rect x="400" y="84" width="340" height="306" rx="12" fill="#FFFFFF" stroke="#BACFE3" stroke-width="2"/>
+
+  <!-- LEFT: trained stream -->
+  <text x="36" y="108" class="zone">TRAINED LOGS IN DETECT MODE</text>
+  <rect x="36" y="120" width="308" height="176" rx="8" fill="#F7F9FB" stroke="#D8E0E8"/>
+  <rect x="39" y="163" width="3" height="29" rx="1.5" fill="#12222F"/>
+  <rect x="39" y="211" width="3" height="29" rx="1.5" fill="#12222F"/>
+  <text x="46" y="140" class="c f10 sec">payment declined for order 81723 (card_expired)</text>
+  <text x="46" y="156" class="c f10 sec">cart read for user 4410 took 12ms</text>
+  <text x="46" y="172" class="c f10">checkout error: payment processor acme-pay</text>
+  <text x="58" y="188" class="c f10">did not answer within 30s</text>
+  <text x="46" y="204" class="c f10 sec">payment declined for order 81731 (card_expired)</text>
+  <text x="46" y="220" class="c f10">checkout error: payment processor acme-pay</text>
+  <text x="58" y="236" class="c f10">did not answer within 30s</text>
+  <text x="46" y="252" class="c f10 sec">cart read for user 9022 took 9ms</text>
+  <text x="46" y="268" class="c f10 sec">payment declined for order 81802 (card_expired)</text>
+  <text x="46" y="284" class="c f10 sec">cart read for user 1187 took 14ms</text>
+  <text x="36" y="322" class="f12 sec">Known lines stay quiet</text>
+  <rect x="36" y="332" width="3" height="12" rx="1.5" fill="#12222F"/>
+  <text x="46" y="342" class="f12">The new acme-pay line repeats 60 times</text>
+
+  <!-- RIGHT: incident and fan out -->
+  <text x="416" y="108" class="zone">WHAT YOU GET</text>
+  <rect x="416" y="120" width="308" height="116" rx="12" fill="#BACFE3" stroke="#12222F" stroke-width="2"/>
+  <rect x="430" y="132" width="48" height="18" rx="9" fill="#FEF3E2" stroke="#B54708"/>
+  <text x="454" y="145" class="f11 b amb mid">WARN</text>
+  <rect x="486" y="132" width="44" height="18" rx="9" fill="#FFFFFF" stroke="#12222F"/>
+  <text x="508" y="145" class="f11 nm mid">open</text>
+  <text x="430" y="174" class="f14 b nm">Anomaly: checkout-api</text>
+  <text x="430" y="196" class="f12 nm">New pattern, repeated, with sample lines</text>
+  <text x="430" y="216" class="f12 nm">Next steps: check acme-pay status</text>
+
+  <rect class="ch" x="416" y="272" width="92" height="44" rx="10"/>
+  <rect class="ch" x="524" y="272" width="92" height="44" rx="10"/>
+  <rect x="632" y="272" width="92" height="44" rx="10" fill="#FFFFFF" stroke="#5B6B78" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="462" y="299" class="f13 b nm mid">Slack</text>
+  <text x="570" y="299" class="f13 b nm mid">Teams</text>
+  <text x="678" y="299" class="f13 b sec mid">On call</text>
+  <text x="678" y="330" class="f11 sec mid">high or critical</text>
+  <text x="678" y="343" class="f11 sec mid">only</text>
+
+  <text x="416" y="358" class="f12 sec">No AI key: templated summary</text>
+  <text x="416" y="376" class="f12 sec">AI key: summary and next steps written by AI</text>
+
+  <!-- flows -->
+  <path class="flow" d="M366 237H393" marker-end="url(#a)"/>
+  <path class="flow" d="M462 236V265" marker-end="url(#a)"/>
+  <path class="flow" d="M570 236V265" marker-end="url(#a)"/>
+  <path class="flow" d="M678 236V265" stroke-dasharray="6 4" marker-end="url(#a)"/>
+</svg>

@@ -1,0 +1,4 @@
+# EXPECT_FAIL: a Bitnami Redis image is refused with the way forward.
+redis.image.repository="bitnamilegacy/redis" is a Bitnami image
+If your old release values set redis.image
+--set redis.image=null

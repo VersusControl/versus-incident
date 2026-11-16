@@ -1,0 +1,21 @@
+# Versus reads the cluster it runs in.
+#
+# The Kubernetes connector signs in with the pod's ServiceAccount
+# (auth.mode=in_cluster), and the chart creates a cluster-wide, read-only
+# ClusterRole bound to that ServiceAccount. The agent and the alert channels
+# stay off; turn them on later with the other values files in this folder.
+#
+# Install:
+#   kubectl create namespace versus --save-config
+#   kubectl -n versus create secret generic versus-incident \
+#     --from-literal=gateway_secret=$(openssl rand -hex 32)
+#   helm install versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
+#     --namespace versus \
+#     -f values-kubernetes-in-cluster.yaml \
+#     --set gatewaySecretExistingSecret=versus-incident
+#
+# The same install as one file for kubectl: k8s-connector-in-cluster-enabled.yaml.
+
+connectors:
+  kubernetes:
+    enabled: true
