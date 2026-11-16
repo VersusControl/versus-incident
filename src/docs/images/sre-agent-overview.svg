@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="378" viewBox="0 0 760 378" style="max-width:100%;height:auto" role="img" aria-label="Three signals feed the SRE Agent: logs, the place to start, where it learns patterns and flags new patterns and spikes; metrics, an Enterprise feature, where it learns the normal of each service's request rate, error rate, latency, memory and CPU by time of week and flags a signal that moves far out of normal and stays there; and traces, also Enterprise, where it learns the normal latency and errors of operations such as POST /checkout and flags one that turns slow or starts failing; the SRE Agent learns normal and stays quiet about it, then raises one incident with context: service checkout, severity high, what changed, error rate from 1% to 45%, and what to check first, the payment dependency; the incident is sent to your channels and to on call">
+  <title>The SRE Agent learns normal from logs, metrics and traces and raises one incident</title>
+  <desc>Left: Logs tagged Start here, Metrics and Traces tagged Enterprise, each with a flat sketch: grey log lines with one new line in red, a line that jumps out of a dashed normal band, and a span waterfall with one long red span; middle: the SRE Agent learns normal and stays quiet; right: one open incident for checkout, severity high, with what changed and what to check first, sent to your channels and on call</desc>
+  <defs>
+    <style>
+      text{font-family:Inter,"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f15{font-size:15px}.f16{font-size:16px}
+      .b{font-weight:700}
+      .nm{fill:#12222F}
+      .sec{fill:#5B6B78}
+      .wh{fill:#FFFFFF}
+      .red{fill:#B42318}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <symbol id="i-bell" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></g></symbol>
+    <symbol id="i-belloff" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><path d="m2 2 20 20"/></g></symbol>
+  </defs>
+
+  <rect width="760" height="378" fill="#FFFFFF"/>
+
+  <g transform="translate(0 -12)">
+  <!-- group labels -->
+  <text x="28" y="42" class="zone">YOUR SIGNALS</text>
+  <text x="522" y="42" class="zone">ONE INCIDENT</text>
+
+  <!-- input cards -->
+  <rect x="28" y="56" width="248" height="96" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <rect x="28" y="164" width="248" height="96" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <rect x="28" y="272" width="248" height="96" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+
+  <!-- Logs -->
+  <text x="42" y="82" class="f15 b nm">Logs</text>
+  <rect x="180" y="66" width="84" height="22" rx="11" fill="#12222F"/>
+  <text x="222" y="81" class="f11 b wh mid">Start here</text>
+  <path d="M42 98H62M42 104H62M42 110H62M42 116H62M68 98H200M68 104H172M68 116H188" fill="none" stroke="#C3CED8" stroke-width="4"/>
+  <path d="M68 110H230" fill="none" stroke="#B42318" stroke-width="4"/>
+  <text x="42" y="136" class="f11 sec">new patterns and spikes</text>
+
+  <!-- Metrics -->
+  <text x="42" y="190" class="f15 b nm">Metrics</text>
+  <rect x="180" y="174" width="84" height="22" rx="11" fill="#12222F"/>
+  <text x="222" y="189" class="f11 b wh mid">Enterprise</text>
+  <path d="M42 212H262M42 224H262" fill="none" stroke="#9AA9B6" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <path d="M42 218L54 215L66 220L78 216L90 219L102 215L114 220L126 216L138 219L150 215L162 220L174 216L186 218" fill="none" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M186 218L194 204H262" fill="none" stroke="#B42318" stroke-width="2" stroke-linejoin="round"/>
+  <text x="42" y="244" class="f11 sec">rate, errors, latency, memory, CPU</text>
+
+  <!-- Traces -->
+  <text x="42" y="298" class="f15 b nm">Traces</text>
+  <rect x="180" y="282" width="84" height="22" rx="11" fill="#12222F"/>
+  <text x="222" y="297" class="f11 b wh mid">Enterprise</text>
+  <path d="M42 314H262" fill="none" stroke="#9AA9B6" stroke-width="4"/>
+  <path d="M50 320H104M108 326H134" fill="none" stroke="#C3CED8" stroke-width="4"/>
+  <path d="M138 332H262" fill="none" stroke="#B42318" stroke-width="4"/>
+  <text x="42" y="352" class="c f11">POST /checkout</text>
+  <text x="140" y="352" class="f11 sec">latency, errors</text>
+
+  <!-- SRE Agent -->
+  <rect x="324" y="148" width="150" height="128" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="2"/>
+  <text x="399" y="180" class="f16 b nm mid">SRE Agent</text>
+  <line x1="338" y1="194" x2="460" y2="194" stroke="#C3CED8"/>
+  <path d="M338 211H352M338 223H352" fill="none" stroke="#9AA9B6" stroke-width="1.5" stroke-dasharray="3 2"/>
+  <path d="M338 218L341 215L344 219L347 215L350 218L352 216" fill="none" stroke="#000000" stroke-width="1.5" stroke-linejoin="round"/>
+  <text x="360" y="222" class="f13 nm">learns normal</text>
+  <use href="#i-belloff" x="338" y="240" width="14" height="14" color="#5B6B78"/>
+  <text x="360" y="252" class="f13 nm">stays quiet</text>
+
+  <!-- Incident -->
+  <rect x="522" y="56" width="210" height="230" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="2"/>
+  <rect x="523" y="68" width="4" height="206" rx="2" fill="#B42318"/>
+  <use href="#i-bell" x="536" y="70" width="14" height="14" color="#B42318"/>
+  <text x="556" y="82" class="f15 b nm">Incident</text>
+  <rect x="670" y="66" width="48" height="22" rx="11" fill="#FFFFFF" stroke="#12222F"/>
+  <text x="694" y="81" class="f12 nm mid">open</text>
+  <line x1="536" y1="100" x2="718" y2="100" stroke="#C3CED8"/>
+  <text x="536" y="122" class="zone">SERVICE</text>
+  <text x="536" y="140" class="c f13">checkout</text>
+  <text x="536" y="162" class="zone">SEVERITY</text>
+  <rect x="536" y="168" width="50" height="22" rx="11" fill="#FDECEC" stroke="#B42318"/>
+  <text x="561" y="183" class="f12 b red mid">High</text>
+  <text x="536" y="212" class="zone">CHANGED</text>
+  <text x="536" y="230" class="f13 nm">error rate 1% → 45%</text>
+  <text x="536" y="252" class="zone">CHECK FIRST</text>
+  <text x="536" y="270" class="f13 nm">payment dependency</text>
+
+  <rect x="522" y="330" width="98" height="38" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <rect x="634" y="330" width="98" height="38" rx="6" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <text x="571" y="354" class="f13 b nm mid">Channels</text>
+  <text x="683" y="354" class="f13 b nm mid">On call</text>
+
+  <!-- flows -->
+  <path class="flow" d="M282 104H300V172H317" marker-end="url(#a)"/>
+  <path class="flow" d="M282 212H317" marker-end="url(#a)"/>
+  <path class="flow" d="M282 320H300V252H317" marker-end="url(#a)"/>
+  <path class="flow" d="M480 212H515" marker-end="url(#a)"/>
+  <path class="flow" d="M571 292V323" marker-end="url(#a)"/>
+  <path class="flow" d="M683 292V323" marker-end="url(#a)"/>
+  </g>
+</svg>

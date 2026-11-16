@@ -5,6 +5,31 @@ on:
     tags: [ "v*" ]
 
 jobs:
+  # A release tag must point at a commit on main. Unreleased work lives on
+  # dev, so a tag on a dev-only commit would ship it; this stops that.
+  on-main:
+    name: Tagged commit is on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the tagged commit is an ancestor of main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag $TAG points at $GITHUB_SHA, which is not on main. Release tags go on main only."
+            exit 1
+          fi
+          echo "Tag $TAG ($GITHUB_SHA) is on main"
+
   # The release tag must be "v" + the chart appVersion (and the chart version),
   # because the chart pulls the image tagged "v<appVersion>" by default. A
   # mismatch would publish a chart pointing at another image. The one-file
@@ -12,11 +37,12 @@ jobs:
   chart-version:
     name: Chart version matches tag
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Compare tag with Chart.yaml
         env:
@@ -31,25 +57,29 @@ jobs:
           fi
           echo "Tag $TAG matches Chart.yaml version and appVersion"
 
+  # The Dockerfile builds the UI and cross-compiles Go on the runner's own
+  # platform; only the small final stage runs under emulation for arm64, so
+  # both platforms fit in one bounded job.
   build-and-push:
-    needs: [chart-version]
+    needs: [on-main, chart-version]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v7
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: Set up QEMU
-      uses: docker/setup-qemu-action@v4
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
     - name: Login to GitHub Container Registry
-      uses: docker/login-action@v4
+      uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -57,7 +87,7 @@ jobs:
 
     - name: Extract metadata
       id: meta
-      uses: docker/metadata-action@v6
+      uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
       with:
         images: ghcr.io/versuscontrol/versus-incident
         tags: |
@@ -70,7 +100,7 @@ jobs:
           org.opencontainers.image.licenses=MIT
 
     - name: Build and Push
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
         context: .
         file: ./Dockerfile
