@@ -158,6 +158,13 @@ func build(snapshot index.Snapshot, maxNodes, maxEdges int) (Graph, bool) {
 				add(record.UID, target, RoutesTo)
 			}
 		}
+		if record.Kind == "HTTPRoute" {
+			// Traffic enters through the Gateway a route attaches to, then
+			// follows the route to its backends.
+			for _, name := range record.References["gateways"] {
+				add(byName["Gateway\x00"+record.Namespace+"\x00"+name], record.UID, RoutesTo)
+			}
+		}
 		for _, name := range record.References["config_maps"] {
 			add(byName["ConfigMap\x00"+record.Namespace+"\x00"+name], record.UID, Configures)
 		}

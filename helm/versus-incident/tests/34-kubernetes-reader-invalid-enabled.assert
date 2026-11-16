@@ -1,0 +1,2 @@
+# EXPECT_FAIL: kubernetesReaderRBAC.enabled must be a boolean or empty.
+kubernetesReaderRBAC.enabled must be true, false or empty

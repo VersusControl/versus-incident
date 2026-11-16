@@ -70,12 +70,12 @@ services:
     container_name: versus-loki
     command: -config.file=/etc/loki/local-config.yaml
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     volumes:
       - loki-data:/loki
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3100/ready"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3100/ready"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -87,7 +87,7 @@ services:
       loki:
         condition: service_healthy
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
@@ -98,7 +98,7 @@ services:
     restart: unless-stopped
 
   versus:
-    image: ghcr.io/versuscontrol/versus-incident:dev-5324869
+    image: ${VERSUS_IMAGE:-ghcr.io/versuscontrol/versus-incident:latest}
     container_name: versus-loki-app
     depends_on:
       redis:
@@ -106,7 +106,7 @@ services:
       loki:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
       REDIS_HOST: redis
@@ -128,7 +128,7 @@ services:
       - versus-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5

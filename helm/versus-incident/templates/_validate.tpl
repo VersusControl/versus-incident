@@ -7,11 +7,35 @@ choose exactly one of:
   - external Redis (redis.enabled=false AND externalRedis.host non-empty)
 
 Common misconfigurations caught here:
+  - the bundled Redis turned on with values for the Bitnami Redis subchart
+    the chart used to ship (redis.master, redis.architecture), which
+    --reuse-values carries over from an older release
+  - the bundled Redis turned on with a Bitnami image (bitnami/,
+    bitnamilegacy/ or bitnamisecure/, with or without a registry), or a
+    Bitnami-style tag (-debian-, -r<n>) on the official redis image, which an
+    older release may have set and --reset-then-reuse-values keeps; this chart
+    runs the official redis image with its own tag, so either fails to pull
   - on-call enabled but no Redis selected at all
   - redis.enabled=true alongside a non-empty externalRedis.host
     (the externalRedis.* block would be silently ignored — see issue #100)
 */}}
 {{- define "versus-incident.validateRedis" -}}
+{{- $redis := .Values.redis | default dict -}}
+{{- /* A key set to null (--set redis.master=null) stays in the values with
+       no value; only keys that still carry a value are refused. */}}
+{{- if and $redis.enabled (or $redis.master $redis.architecture) -}}
+  {{- fail "versus-incident: redis.master and redis.architecture belong to the Bitnami Redis subchart, which this chart no longer uses. Move redis.master.persistence.* to redis.persistence.* in your values file, remove redis.architecture, and upgrade with only -f <values> (no --reuse-values). With --reset-then-reuse-values, also add --set redis.master=null --set redis.architecture=null if you set those keys yourself. See \"Upgrading from the Bitnami Redis\" in the chart README." -}}
+{{- end -}}
+{{- $redisImage := $redis.image | default dict -}}
+{{- $redisRepo := toString ($redisImage.repository | default "redis") -}}
+{{- $redisTag := toString ($redisImage.tag | default "") -}}
+{{- $bitnamiFix := "Remove redis.image from your values file. If your old release values set redis.image (for example the bitnamilegacy/redis override), also add --set redis.image=null when you upgrade with --reset-then-reuse-values. See \"Upgrading from the Bitnami Redis\" in the chart README." -}}
+{{- if and $redis.enabled (regexMatch "(^|/)bitnami(legacy|secure)?/" $redisRepo) -}}
+  {{- fail (printf "versus-incident: redis.image.repository=%q is a Bitnami image, left from the Bitnami Redis subchart this chart no longer uses. The bundled Redis runs the official redis image, and the Bitnami one with this chart's tag cannot be pulled. %s" $redisRepo $bitnamiFix) -}}
+{{- end -}}
+{{- if and $redis.enabled (regexMatch "^(docker\\.io/)?(library/)?redis$" $redisRepo) (regexMatch "-debian-|-r[0-9]+$" $redisTag) -}}
+  {{- fail (printf "versus-incident: redis.image.tag=%q is a Bitnami Redis tag, left from the Bitnami Redis subchart this chart no longer uses. The official redis image has no such tag. %s" $redisTag $bitnamiFix) -}}
+{{- end -}}
 {{- $oncallNeeded := or .Values.oncall.enable .Values.oncall.initializedOnly -}}
 {{- if $oncallNeeded -}}
   {{- if and .Values.redis.enabled .Values.externalRedis.host -}}
@@ -33,9 +57,8 @@ Two backends are supported end-to-end:
 Caught here:
   - unsupported storage.type
   - postgres without a DSN (no storage.postgres.dsn / dsnExistingSecret)
-  - file backend with persistence + replicaCount > 1 + RWO access mode
-    (PVC cannot be mounted on >1 pod simultaneously, and even with RWX
-    multiple writers race on the same JSON files)
+  - file backend with replicaCount > 1 (each pod would keep its own state;
+    with a shared volume, multiple writers race on the same JSON files)
   - existingClaim set without persistence.enabled
 */}}
 {{- define "versus-incident.validateStorage" -}}
@@ -50,11 +73,8 @@ Caught here:
 {{- end -}}
 {{- if eq $type "file" -}}
   {{- $replicas := int (default 1 .Values.replicaCount) -}}
-  {{- if and .Values.storage.persistence.enabled (gt $replicas 1) -}}
-    {{- $access := .Values.storage.persistence.accessMode | default "ReadWriteOnce" -}}
-    {{- if eq $access "ReadWriteOnce" -}}
-      {{- fail (printf "versus-incident: storage.persistence.enabled=true with %d replicas and accessMode=ReadWriteOnce. The PVC cannot be mounted on more than one pod. Set replicaCount=1, use accessMode=ReadWriteMany, or switch to storage.type=postgres (ha.enabled=true)." $replicas) -}}
-    {{- end -}}
+  {{- if gt $replicas 1 -}}
+    {{- fail (printf "versus-incident: storage.type=file with %d replicas. The file backend keeps state inside each pod, so pages and settings would disagree between pods. Use storage.type=postgres for more than one replica, or set replicaCount=1." $replicas) -}}
   {{- end -}}
   {{- if and .Values.storage.persistence.existingClaim (not .Values.storage.persistence.enabled) -}}
     {{- fail "versus-incident: storage.persistence.existingClaim is set but storage.persistence.enabled is false. Set persistence.enabled=true to bind the existing claim." -}}
@@ -116,5 +136,36 @@ Caught here:
   {{- if and (eq $mode "detect") (not .Values.agent.ai.enable) -}}
     {{/* Not fatal — detect mode without AI is a valid dry-run. Just a hint. */}}
   {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Validate the Kubernetes reader role.
+
+With auth.mode=in_cluster the connector reads the cluster as the pod
+ServiceAccount, so it needs the reader role. Turning the role off without
+saying who grants that access leaves every page "permission denied".
+*/}}
+{{- define "versus-incident.validateKubernetesReaderRBAC" -}}
+{{- $rbac := .Values.kubernetesReaderRBAC | default dict -}}
+{{- if hasKey $rbac "gatewayAPI" -}}
+  {{- fail "versus-incident: kubernetesReaderRBAC.gatewayAPI was replaced by kubernetesReaderRBAC.optionalKinds (true by default: Gateway API, Argo CD, Argo Rollouts and Flux kinds). Remove gatewayAPI and set optionalKinds." -}}
+{{- end -}}
+{{- if and (include "versus-incident.kubernetesReaderRBACEnabled" .) (not .Values.serviceAccount.create) (not .Values.serviceAccount.name) -}}
+  {{- fail "versus-incident: the Kubernetes reader role is enabled but serviceAccount.create=false and serviceAccount.name is empty, so the role would be bound to the namespace's default ServiceAccount. Set serviceAccount.name to the ServiceAccount the pod uses, or set serviceAccount.create=true." -}}
+{{- end -}}
+{{- if and (include "versus-incident.kubernetesInCluster" .) (eq (include "versus-incident.kubernetesReaderRBACSetting" .) "false") (not $rbac.external) -}}
+  {{- fail "versus-incident: kubernetesReaderRBAC.enabled=false, but the Kubernetes connector uses auth.mode=in_cluster and needs read access to the cluster. Remove kubernetesReaderRBAC.enabled to let the chart create the read-only role, set kubernetesReaderRBAC.external=true if you bind the ServiceAccount to your own role, or set connectors.kubernetes.enabled=false to turn the connector off." -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Refuse excluding the kinds every Kubernetes view is built from.
+*/}}
+{{- define "versus-incident.validateExcludeResources" -}}
+{{- range $resource := . -}}
+{{- if has $resource (list "pods" "namespaces") -}}
+{{- fail (printf "versus-incident: connectors.kubernetes.excludeResources cannot exclude %q: every Kubernetes view is built from it." $resource) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

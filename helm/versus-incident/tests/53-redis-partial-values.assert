@@ -1,0 +1,4 @@
+name: versus-test-versus-incident-redis-data$
+redis-password: "[A-Za-z0-9+/]{64}"
+- name: REDISCLI_AUTH
+--appendonly yes

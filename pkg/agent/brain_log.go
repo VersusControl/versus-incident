@@ -130,9 +130,18 @@ func (b *logBrain) Group(ctx context.Context, batch []core.Signal) ([]core.Obser
 	}
 
 	now := time.Now().UTC()
+	rr, hasRange := readRangeFrom(ctx)
 	obs := make([]core.Observation, 0, len(buckets))
 	for _, id := range order {
 		bk := buckets[id]
+		// Each pattern's rate is measured over its own lines' span of source
+		// time (a catch-up read spans the lookback for a steady pattern; a
+		// burst spans only its own seconds). Without a read range from the
+		// worker it stays unknown and the rate is per poll.
+		var window time.Duration
+		if hasRange {
+			window = readSpan(bk.signals, rr.since, rr.cursor)
+		}
 		obs = append(obs, core.Observation{
 			Key:               id,
 			Service:           bk.service,
@@ -143,6 +152,7 @@ func (b *logBrain) Group(ctx context.Context, batch []core.Signal) ([]core.Obser
 			Samples:           bk.signals,
 			StrongestSeverity: strongestSeverity(bk.signals),
 			IsNew:             bk.isNew,
+			Window:            window,
 		})
 	}
 	return obs, nil
@@ -235,7 +245,7 @@ func (b *logBrain) Learn(ctx context.Context, obs []core.Observation) error {
 		if b.matcher != nil && len(o.Samples) > 0 {
 			ruleName = b.matcher.Match(o.Samples[0].Message).RuleName
 		}
-		b.catalog.Upsert(o.Key, o.Signal, b.source, o.Frequency, b.ewmaAlpha, ruleName, o.Service)
+		b.catalog.UpsertOver(o.Key, o.Signal, b.source, o.Frequency, o.Window, b.ewmaAlpha, ruleName, o.Service)
 		// Capture the representative POST-REDACTION example line for this
 		// pattern. o.Samples[0].Message was already scrubbed by the worker before
 		// Group ran; Signal.Raw is never read. RecordSample re-scrubs + caps it
@@ -287,7 +297,7 @@ func (b *logBrain) Classify(obs core.Observation, mean, std float64, confident b
 		//
 		// A known pattern can still spike — a steady drip suddenly flooding is
 		// exactly what detect-AI should see. Spike supersedes known.
-		res := evalSpike(mean, std, prevCount, tickFreq, b.params)
+		res := evalSpikeOver(mean, std, prevCount, tickFreq, obs.Window, b.params)
 		if b.confirmSpike(obs.Key, res) {
 			// Name the baseline the tick was scored against in the explanation.
 			// The scored mean/std are the pre-fold snapshot the worker captured

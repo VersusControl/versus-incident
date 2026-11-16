@@ -316,7 +316,23 @@ func (i *IncidentAdminController) get(c *fiber.Ctx) error {
 	if err != nil {
 		return incidentStorageError(c, "get incident", err)
 	}
-	return c.JSON(rec)
+	return c.JSON(incidentDetail{
+		IncidentRecord: rec,
+		OnCallError:    rec.OnCallError,
+		Severity:       services.ExtractSeverity(rec.Content),
+	})
+}
+
+// incidentDetail is the single-record response. It always carries
+// oncall_error (empty when the escalation did not fail): intake answers 201
+// even when on-call fails, so the record is where a failed escalation shows.
+// The outer field shadows the record's omitempty one when encoded. Severity
+// is read from the content the same way list rows read it, so the detail
+// page and the list agree.
+type incidentDetail struct {
+	*storage.IncidentRecord
+	OnCallError string `json:"oncall_error"`
+	Severity    string `json:"severity"`
 }
 
 // summarize drops the heavy Content map from a record for list views.
@@ -328,9 +344,12 @@ func summarize(r *storage.IncidentRecord) fiber.Map {
 		"source":                    r.Source,
 		"origin":                    r.EffectiveOrigin(),
 		"service":                   services.ServiceLabel(r),
+		"severity":                  services.ExtractSeverity(r.Content),
 		"resolved":                  r.Resolved,
+		"channels_enabled":          r.ChannelsEnabled,
 		"channels_notified":         r.ChannelsNotified,
 		"oncall_triggered":          r.OnCallTriggered,
+		"oncall_error":              r.OnCallError,
 		"notify_status":             r.NotifyStatus,
 		"notify_error":              r.NotifyError,
 		"created_at":                r.CreatedAt,
@@ -763,7 +782,8 @@ type analyzeRequest struct {
 
 // analyze runs the analyze-kind AI agent against one stored incident
 // and persists the resulting AnalysisRecord. Returns 503 when either
-// storage or the analyze agent is not configured.
+// storage or the analyze agent is not configured, and 409 without calling the
+// model when AI is off at runtime.
 func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 	store := services.Storage()
 	if store == nil {
@@ -796,6 +816,9 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(callerContext(c, c.UserContext()), analyzeRunTimeout)
 	defer cancel()
 	ctx = agent.DecorateAIContext(ctx, requestScope)
+	if !analyzeAIEnabled(ctx) {
+		return aiOffResponse(c)
+	}
 
 	analysis, runErr, saveErr := runAndPersistAnalysis(ctx, rec, body.RequestedBy)
 	if saveErr != nil {
@@ -807,6 +830,25 @@ func (i *IncidentAdminController) analyze(c *fiber.Ctx) error {
 		status = fiber.StatusBadGateway
 	}
 	return c.Status(status).JSON(analysis)
+}
+
+// analyzeAIEnabled applies the detect worker's runtime AI decision to an
+// on-demand analysis: AI turned off at runtime, or enabled with no API key
+// for a provider that needs one and no configured base_url, stops the analyze
+// endpoints from calling the model. With AI disabled in OSS config no analyze
+// agent is built, and the handlers answer 503 before reaching this check.
+func analyzeAIEnabled(ctx context.Context) bool {
+	var static config.AgentAIConfig
+	if cfg := config.GetConfigOrNil(); cfg != nil {
+		static = cfg.Agent.AI
+	}
+	return agent.EffectiveAIEnabled(ctx, static)
+}
+
+// aiOffResponse answers an analyze request while AI is off. Nothing is run
+// and no analysis record is written.
+func aiOffResponse(c *fiber.Ctx) error {
+	return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "AI is off: enable AI and configure a model credential to run an analysis"})
 }
 
 // analyzeRunTimeout is the hard ceiling on one analyze run, shared by the
@@ -918,6 +960,10 @@ func (i *IncidentAdminController) analyzeStream(c *fiber.Ctx) error {
 
 	runCtx, cancel := context.WithTimeout(callerContext(c, context.Background()), analyzeRunTimeout)
 	runCtx = agent.DecorateAIContext(runCtx, requestScope)
+	if !analyzeAIEnabled(runCtx) {
+		cancel()
+		return aiOffResponse(c)
+	}
 	go func() {
 		defer cancel()
 		defer close(events)

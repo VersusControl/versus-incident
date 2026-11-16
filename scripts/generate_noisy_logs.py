@@ -902,9 +902,77 @@ NAMED_TEMPLATES = {fn.__name__.removeprefix("t_").replace("_", "-"): fn
                    for fn, _ in TEMPLATES}
 
 
+# Templates the regular noise never emits. A --spike burst of one of these is
+# guaranteed to be a pattern the agent has never seen, so it is the reliable
+# way to demo detect mode after a training run. The service name is one the
+# regular noise already logs errors for, so an agent that learns only error
+# lines already knows the service and the burst is not held back by the
+# new-service grace period.
+def t_checkout_payment_timeout() -> tuple[str, str]:
+    order = random.randint(10000, 99999)
+    return "ERROR", (
+        f'service=checkout-api message="checkout error: payment processor '
+        f'acme-pay did not answer within 30s, charge aborted" order_id=ORD-{order}'
+    )
+
+
+FRESH_TEMPLATES = {fn.__name__.removeprefix("t_").replace("_", "-"): fn
+                   for fn in (t_checkout_payment_timeout,)}
+
+
+# -----------------------------------------------------------------------------
+# Steady training mix (--mix steady, the run_noisy_logs.sh live-tail default)
+#
+# The noisy mix sprinkles rare error templates at weight 1, so a ten-minute
+# training run sees each of them only a handful of times: they never reach
+# "known", and once detect starts they are raised as unknown incidents even
+# though they are ordinary traffic. The steady mix is what a healthy service
+# looks like instead: every batch carries exactly one line of each ordinary
+# error below (so each one is learned at the same, predictable rate and never
+# reaches a spike-sized count per poll), and the rest of the batch is filler
+# that the examples' match pattern ignores. The db-pool line puts db-pool in
+# the catalog during training, so a later `--scenario db-outage` burst is past
+# the new-service grace and its connection-refused and deadlock lines, which
+# the steady mix never sends, are raised as new patterns.
+# -----------------------------------------------------------------------------
+def t_db_pool_recycle() -> tuple[str, str]:
+    return "ERROR", (
+        f'service=db-pool message="pool connection recycled after idle timeout error" '
+        f'pool=primary active={random.randint(4, 40)} idle={random.randint(0, 8)} retried=true'
+    )
+
+
+STEADY_ERRORS = (
+    t_db_pool_recycle,
+    t_redis_timeout,
+    t_s3_upload_fail,
+    t_cron_fail,
+    t_node_pino_error,
+    t_go_zap_json,
+)
+
+# What the examples' agent matches: regex.default_pattern "(?i).*error.*" plus
+# the panic and out-of-memory rules. A filler template must never match it.
+_AGENT_MATCH = re.compile(r"(?i)error|panic:|out of memory")
+_STEADY_FILLER: list[tuple[callable, int]] | None = None
+
+
+def steady_filler() -> list[tuple[callable, int]]:
+    """Noisy-mix templates whose lines, level included, never match."""
+    global _STEADY_FILLER
+    if _STEADY_FILLER is None:
+        filler = []
+        for fn, weight in TEMPLATES:
+            samples = (fn() for _ in range(25))
+            if not any(_AGENT_MATCH.search(f"{lvl} {msg}") for lvl, msg in samples):
+                filler.append((fn, weight))
+        _STEADY_FILLER = filler
+    return _STEADY_FILLER
+
+
 def list_templates() -> None:
     """Print every named template, sorted, for use with --spike."""
-    for name in sorted(NAMED_TEMPLATES):
+    for name in sorted({**NAMED_TEMPLATES, **FRESH_TEMPLATES}):
         print(name)
 
 
@@ -977,7 +1045,7 @@ def pick_spike_template(name: str):
     """
     if name == "auto":
         return random.choice(list(NAMED_TEMPLATES.values()))
-    fn = NAMED_TEMPLATES.get(name)
+    fn = NAMED_TEMPLATES.get(name) or FRESH_TEMPLATES.get(name)
     if fn is None:
         raise SystemExit(
             f"unknown --spike template: {name!r}. "
@@ -1009,6 +1077,13 @@ class Sink:
     implement `flush`/`close`."""
 
     name = "base"
+    # True for backends that keep the level in a separate field. With
+    # --level-in-message those sinks also write the level at the start of the
+    # message, the way the file target's line carries it, so a match pattern
+    # applied to the message only sees the same text on every target. Off by
+    # default: the prefix makes every ERROR line match a plain `error`
+    # pattern, which changes what a detector tuned on the bare message sees.
+    level_in_message = False
 
     def write(self, ts: datetime, level: str, msg: str) -> None:
         raise NotImplementedError
@@ -1061,6 +1136,7 @@ class LokiSink(Sink):
     """
 
     name = "loki"
+    level_in_message = True
 
     def __init__(self, base_url: str, app_label: str = "noisy",
                  tenant: str | None = None, batch_size: int = 500):
@@ -1120,6 +1196,7 @@ class ElasticsearchSink(Sink):
     """
 
     name = "elasticsearch"
+    level_in_message = True
     _SERVICE_RE = re.compile(
         r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
     )
@@ -1263,6 +1340,7 @@ class GraylogSink(Sink):
     """
 
     name = "graylog"
+    level_in_message = True
     _SERVICE_RE = re.compile(
         r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
     )
@@ -1318,12 +1396,13 @@ class SplunkSink(Sink):
     """
 
     name = "splunk"
+    level_in_message = True
     _SERVICE_RE = re.compile(
         r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
     )
 
     def __init__(self, base_url: str, token: str, index: str = "main",
-                 sourcetype: str = "_json", insecure: bool = True,
+                 sourcetype: str = "noisy", insecure: bool = True,
                  batch_size: int = 500):
         self._url = base_url.rstrip("/") + "/services/collector/event"
         self._token = token
@@ -1411,6 +1490,7 @@ class SigNozSink(Sink):
     """
 
     name = "signoz"
+    level_in_message = True
     _SERVICE_RE = re.compile(
         r'(?i)(?:\bservice|\bsvc|\bapp|\bcomponent)\s*[:=]\s*"?([A-Za-z0-9._-]+)'
     )
@@ -1597,6 +1677,17 @@ def produce_records(args, ts: datetime):
                 args.spike_interval_min, args.spike_interval_max))
         return
 
+    if args.mix == "steady":
+        lines = [fn() for fn in STEADY_ERRORS][:args.lines]
+        filler = steady_filler()
+        lines += [weighted_choice(filler)() for _ in range(args.lines - len(lines))]
+        random.shuffle(lines)
+        for level, msg in lines:
+            yield ts, level, msg
+            ts += timedelta(seconds=random.uniform(
+                args.interval_min, args.interval_max))
+        return
+
     for _ in range(args.lines):
         level, msg = weighted_choice(TEMPLATES)()
         yield ts, level, msg
@@ -1649,17 +1740,27 @@ def main() -> int:
                     help="print every --scenario name and the templates it draws from, then exit")
     ap.add_argument("--list-templates", action="store_true",
                     help="print every template name usable with --spike, then exit")
+    ap.add_argument("--mix", default=os.getenv("MIX", "noisy"), choices=["noisy", "steady"],
+                    help="regular-traffic mix: noisy (weighted random, rare errors "
+                         "included) or steady (one line of each ordinary error per "
+                         "run, the rest never matches the agent; env: MIX)")
 
     # --- Sinks ---------------------------------------------------------
     # The default `file` target preserves the original behavior (write to
     # the local log file the file-source agent tails). The other targets
     # push the same generated lines into the matching backend so the
-    # loki / elasticsearch / cloudwatch docker-compose examples can be
+    # loki / elasticsearch / graylog / splunk / signoz docker-compose examples can be
     # exercised with identical training / spike / scenario flags.
     ap.add_argument("--target", default=os.getenv("TARGET", "file"),
                     choices=["file", "loki", "elasticsearch", "cloudwatch", "graylog", "splunk", "signoz"],
                     help="where to send generated logs (default: file; "
                          "env: TARGET)")
+    ap.add_argument("--level-in-message", action="store_true",
+                    default=os.getenv("LEVEL_IN_MESSAGE", "").strip().lower() in ("1", "true", "yes"),
+                    help="for backends that store the level in its own field "
+                         "(loki, elasticsearch, graylog, splunk, signoz), also "
+                         "write it at the start of the message, as the file "
+                         "target does (default: off; env: LEVEL_IN_MESSAGE=1)")
     ap.add_argument("--batch-size", type=int, default=500,
                     help="lines per network batch for non-file targets (default: 500)")
     # Loki
@@ -1704,8 +1805,10 @@ def main() -> int:
     ap.add_argument("--splunk-index", default=os.getenv("SPLUNK_INDEX", "main"),
                     help="target Splunk index (default: main; env: SPLUNK_INDEX)")
     ap.add_argument("--splunk-sourcetype",
-                    default=os.getenv("SPLUNK_SOURCETYPE", "_json"),
-                    help="HEC sourcetype (default: _json; env: SPLUNK_SOURCETYPE)")
+                    default=os.getenv("SPLUNK_SOURCETYPE", "noisy"),
+                    help="HEC sourcetype (default: noisy; env: SPLUNK_SOURCETYPE). "
+                         "Avoid _json: it parses each event as JSON at index "
+                         "time and drops the plain-text lines")
     ap.add_argument("--splunk-verify", action="store_true",
                     help="verify the Splunk TLS cert (off by default — the "
                          "example ships a self-signed cert)")
@@ -1755,6 +1858,8 @@ def main() -> int:
     last_ts = ts_start
     try:
         for ts, level, msg in produce_records(args, ts_start):
+            if args.level_in_message and sink.level_in_message:
+                msg = f"{level.strip()} {msg}"
             sink.write(ts, level, msg)
             written += 1
             last_ts = ts
@@ -1769,7 +1874,7 @@ def main() -> int:
         kind = (f"spike:{spike_label} × {args.spike_burst} "
                 f"(context={args.spike_context})")
     else:
-        kind = f"noisy × {args.lines} lines"
+        kind = f"{args.mix} × {args.lines} lines"
 
     action = "appended to" if args.append and args.target == "file" else "sent to"
     print(f"{action} {sink.summary()} — {kind} "

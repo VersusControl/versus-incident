@@ -1,0 +1,5 @@
+kind: ClusterRole
+resources: \["secrets"\]
+!gateway.networking.k8s.io
+!argoproj.io
+!toolkit.fluxcd.io

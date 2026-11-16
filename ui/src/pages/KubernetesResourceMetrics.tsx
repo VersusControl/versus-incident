@@ -20,6 +20,7 @@ import {
   resourceRestarts,
 } from "@/lib/kubernetesResourceDetail";
 import { counted } from "@/lib/kubernetesEvidence";
+import { historyOffMessage } from "@/lib/kubernetesNamespaceAccess";
 function metricValue(value: number | null, field: "cpu" | "memory") {
   if (value === null) return "Unavailable";
   if (field === "cpu") return `${Math.round(value * 1000)} mCPU`;
@@ -177,7 +178,7 @@ export function ResourceMetrics({
             className={`mt-2 text-lg font-semibold ${restarts === null ? "text-ink-400" : "text-ink-50"}`}
           >
             {restarts ?? "Unavailable"}
-            <span className="metric-restart-description">{crashesQuery.isError ? "Crash evidence unavailable" : lastCrash ? `shown ${lastCrash.reason || lastCrash.waiting_reason || "Termination"} ${new Date(lastCrash.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}` : crashesQuery.isFetching && !crashesQuery.data ? "Loading captured crashes" : "No captured crash on this page"}</span>
+            <span className="metric-restart-description">{crashesQuery.historyOff ? historyOffMessage : crashesQuery.isError ? "Crash evidence unavailable" : lastCrash ? `shown ${lastCrash.reason || lastCrash.waiting_reason || "Termination"} ${new Date(lastCrash.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}` : crashesQuery.isFetching && !crashesQuery.data ? "Loading captured crashes" : "No captured crash on this page"}</span>
           </p>
           <div
             className="relative mt-3 h-6 border-b border-ink-700"

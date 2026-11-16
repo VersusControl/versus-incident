@@ -1,0 +1,5 @@
+# The Kubernetes connector in in_cluster mode with every other auth field set.
+-f
+values/kubernetes-auth-fields.yaml
+--set-string
+connectors.kubernetes.auth.mode=in_cluster

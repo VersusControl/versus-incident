@@ -27,6 +27,32 @@ export const POD_LOG_CLOCK_SKEW_MS = 5_000;
 // rotations in a row that add no line the read stops and says so instead of
 // showing a live pill over a frozen output.
 export const POD_LOG_MAX_STALLED_ROTATIONS = 3;
+// A failure class is a machine word; the reader is shown a sentence. The
+// server's own message is preferred when it sent one, because it carries the
+// detail (which namespace, which node); the class sentence covers a failure
+// that arrived without one.
+const logFailureSentences: Record<string, string> = {
+  invalid_arguments: "The log request did not name a container this Pod accepts. Pick a container and retry.",
+  forbidden: "Permission to read these logs was denied.",
+  cluster_permission_denied: "Permission to read these logs was denied.",
+  unauthorized: "Cluster credentials are unavailable or were rejected.",
+  credential_unavailable: "Cluster credentials are unavailable or were rejected.",
+  previous_unavailable: "Previous container logs are unavailable because no previous container instance exists.",
+  log_stream_busy: "Too many log reads are open right now.",
+  upstream_unavailable: "The node serving these logs could not be reached.",
+  inventory_not_ready: "The cluster inventory is still syncing.",
+  not_found: "This Pod or container no longer exists.",
+  timeout: "The cluster took too long to answer.",
+};
+
+/** A failure as one plain sentence: never the raw failure class. */
+export function logFailureSentence(code?: string, message?: string): string {
+  const text = message?.trim();
+  // A bare machine word — the class repeated, or another code — is not a message.
+  if (text && text !== code && !/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(text)) return text;
+  return logFailureSentences[code ?? ""] ?? "Logs are unavailable right now.";
+}
+
 type DisplayLine = Pick<KubernetesPodLogLine, "text" | "container" | "timestamp"> & { pod?: string; pod_uid?: string; source_id?: string; neutral?: boolean };
 type BufferedLine = DisplayLine & { bytes: number; key: number };
 export interface PodLogBuffer {
@@ -191,6 +217,9 @@ export function usePodLogStream(options: ResourceLogOptions) {
   const [buffer, setBuffer] = useState(emptyBuffer);
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const [message, setMessage] = useState("");
+  // The failure class behind the current stop, so a reader can tell a request
+  // the server refused from one that never reached it.
+  const [failureCode, setFailureCode] = useState("");
   // The backend's own guidance for the stop, with whether asking again can
   // help. A reader must never replace it with advice of its own: only a real
   // API-server denial carries permission guidance.
@@ -262,6 +291,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
       session.current = emptySession(identity);
       setBuffer(session.current.buffer);
       setMessage("");
+      setFailureCode("");
       setNotice({ retryable: false });
       setReplayUncertain(false);
       setGap("");
@@ -361,6 +391,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
       let admitted = false;
       const uncertaintyIdentities = new Set<string>();
       setMessage("");
+      setFailureCode("");
       setStatus(rotatingRead && !previous ? "live" : retries ? "reconnecting" : "connecting");
       try {
         // Each attempt asks for its own resume point, so a clamp recorded by
@@ -426,7 +457,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
               sourceStatuses.add(key);
               // Bound notices independently from the display ring.
               if (sourceStatuses.size > 1000) sourceStatuses.delete(sourceStatuses.values().next().value!);
-              pending.push({ text: `logs not available: ${(event.message || event.code || event.reason || "unavailable").replace(/^logs not available:\s*/i, "")}`, container: event.container, pod: event.pod, pod_uid: event.pod_uid, source_id: event.source_id, neutral: true });
+              pending.push({ text: `logs not available: ${logFailureSentence(event.code, event.message).replace(/^logs not available:\s*/i, "")}`, container: event.container, pod: event.pod, pod_uid: event.pod_uid, source_id: event.source_id, neutral: true });
               scheduleFlush();
             }
           } else if (event.event === "line") {
@@ -511,8 +542,11 @@ export function usePodLogStream(options: ResourceLogOptions) {
             const stoppedStatus = event.event === "limit" ? "limited" : "error";
             const stoppedMessage = event.event === "limit"
               ? `Log read reached its ${event.reason === "duration" ? "duration safety limit" : event.reason === "bytes" || event.reason === "byte_limit" ? "byte safety limit" : "safety limit"}. Reload logs to start a new read.`
-              : [event.code, event.message, event.action, event.reason].filter(Boolean).join(" ") || "Pod log stream stopped.";
-            failureMessage = event.code === "previous_unavailable" && !event.message ? `${stoppedMessage} Previous container logs are unavailable because no previous container instance exists.` : stoppedMessage;
+              : event.code || event.message
+                ? [logFailureSentence(event.code, event.message), event.action].filter(Boolean).join(" ")
+                : "Pod log stream stopped.";
+            failureMessage = stoppedMessage;
+            if (event.event === "error") setFailureCode(event.code ?? "");
             if (!retryable) session.current.stopped = { status: stoppedStatus, message: failureMessage };
             setStatus(stoppedStatus);
             setMessage(failureMessage);
@@ -555,11 +589,12 @@ export function usePodLogStream(options: ResourceLogOptions) {
           admissionBusy = code === "log_stream_busy" && failure instanceof ApiError && (failure.status === 429 || failure.status >= 500);
           retryAfterMs = failure instanceof ApiError ? failure.retryAfterMs : undefined;
           retryable = code !== "previous_unavailable" && (!(failure instanceof ApiError) || failure.status === 429 || failure.status >= 500);
-          failureMessage = failure instanceof ApiError ? failure.message : "Pod log connection interrupted.";
+          const failureClass = typeof code === "string" ? code : "";
+          failureMessage = failure instanceof ApiError || failureClass ? logFailureSentence(failureClass, failure instanceof ApiError ? failure.message : undefined) : "Pod log connection interrupted.";
           const action = payload && typeof payload === "object" && "action" in payload && typeof payload.action === "string" ? payload.action : undefined;
           const retryableHint = payload && typeof payload === "object" && "retryable" in payload && typeof payload.retryable === "boolean" ? payload.retryable : undefined;
           retryable = retryable && retryableHint !== false && !["forbidden", "unauthorized", "invalid_arguments"].includes(String(code));
-          failureMessage = [code, failureMessage].filter(Boolean).join(" ");
+          setFailureCode(failureClass);
           if (!retryable) session.current.stopped = { status: "error", message: failureMessage };
           setNotice({ action, retryable });
           setStatus("error");
@@ -688,7 +723,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
   const current = session.current.identity === identity;
   return {
     buffer: current ? buffer : emptyBuffer(), status: current ? status : "connecting" as const,
-    message: current ? message : "", notice: current ? notice : { retryable: false },
+    message: current ? message : "", code: current ? failureCode : "", notice: current ? notice : { retryable: false },
     replayUncertain: current && replayUncertain, gap: current ? gap : "", pods: current ? pods : undefined,
     truncated: current && truncated, received: current && received, earlier: current ? earlier : "idle" as const, loadEarlier,
   };

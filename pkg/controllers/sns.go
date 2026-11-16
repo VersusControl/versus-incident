@@ -7,6 +7,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/services"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -88,22 +89,22 @@ func SNS(c *fiber.Ctx) error {
 			}
 
 			// If query parameters exist, get the value to overwrite the default configuration
-			var err error
-
+			overwriteVaule := map[string]string{}
 			if len(c.Queries()) > 0 {
-				overwriteVaule := c.Queries()
-				overwriteVaule["incident_source"] = "sns"
-				err = services.CreateIncident("", content, &overwriteVaule)
-			} else {
-				overwriteVaule := map[string]string{"incident_source": "sns"}
-				err = services.CreateIncident("", content, &overwriteVaule)
+				overwriteVaule = c.Queries()
+			}
+			overwriteVaule["incident_source"] = "sns"
+
+			// A stored incident answers 201 even when delivery failed, so SNS
+			// does not redeliver it as a new incident.
+			outcome := services.IngestIncident("", content, &overwriteVaule)
+			if outcome.Err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": utils.SafeErrorText(outcome.Err)})
 			}
 
-			if err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
-			}
-
-			return c.Status(fiber.StatusCreated).JSON(fiber.Map{"status": "Incident created"})
+			response := intakeOutcomeBody(outcome)
+			response["status"] = "Incident created"
+			return c.Status(fiber.StatusCreated).JSON(response)
 		}
 	}
 

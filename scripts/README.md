@@ -33,6 +33,17 @@ For **metrics** (rather than logs) there is a separate generator,
 synthetic Prometheus series to a Pushgateway — see
 [§3](#3-metrics-source--fake-prometheus-series).
 
+You need Git and Python 3, plus Docker for the helpers that start a local
+backend. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command in this README runs from that `versus-incident` folder, the
+repository root.
+
 ---
 
 ## 1. File source — local noisy logs
@@ -158,6 +169,21 @@ SPLUNK_HEC_TOKEN=... ./scripts/run_noisy_logs.sh --target splunk
 ```
 
 Stop with Ctrl+C. The script prints a summary count on exit.
+
+#### Traffic mix (`--mix` / `MIX=`)
+
+| Mix | What each batch holds | Use it for |
+|---|---|---|
+| `steady` (default) | One line of each ordinary error, plus filler lines the agent ignores. | Training: every pattern repeats in each batch, so it becomes known quickly and ordinary traffic never raises an incident in detect. |
+| `noisy` | The weighted random mix, with rare errors sprinkled in. | Exploring the catalog with realistic, uneven traffic. Rare templates stay "learning" for a long time and can raise incidents in detect. |
+
+```bash
+# the default, same as no flag
+./scripts/run_noisy_logs.sh --mix steady
+
+# the weighted random mix
+MIX=noisy ./scripts/run_noisy_logs.sh --target loki
+```
 
 ### One-shot spike via `run_noisy_logs.sh`
 
@@ -317,10 +343,11 @@ than receiving pushes, the script pushes a realistic, increasing
 time-series to a **Prometheus Pushgateway** that Prometheus then scrapes.
 A configured, licensed Enterprise `prometheus` source can detect anomalies
 and contribute source-bound `discover_metrics` and `read_metric_series` to
-Chat and Analyze. OSS has no metric read tools. Used by the
-[`metrics/`](../examples/docker-compose/metrics/) example.
+Chat and Analyze. OSS has no metric read tools. Used, as a copy with the same
+flags, by the [`metrics-source`](../examples/metrics-source/) example
+(_Enterprise_).
 
-It emits exactly the metric names that example's PromQL uses:
+It emits these series, which that example's Prometheus source learns:
 
 ```
 demo_http_requests_total{service,code}                 (counter)
@@ -350,7 +377,7 @@ Useful flags: `--target/-t` (env `PUSHGATEWAY_URL`), `--service/-s`,
 ### Spike mode
 
 Mirror the log generator's `--spike` UX — drive a 5xx + latency anomaly
-(~45% 500s, p95 > 500ms) so the PromQL anomaly rules cross their thresholds:
+(~45% 500s, p95 > 500ms) well outside the learned baseline:
 
 ```bash
 # 90s of anomaly
@@ -385,7 +412,7 @@ python3 scripts/generate_fake_metrics.py --backend signoz --spike --duration 240
 ```
 
 Used by the enterprise example's
-[SigNoz overlay](../examples/metrics-source/README.md#optional-signoz-metrics--traces).
+[SigNoz overlay](../examples/metrics-source/README.md#optional-signoz).
 
 **Why `--backend` and not `--target`?** In the *log* generator `--target` selects
 the backend; here `--target` already means "the pushgateway URL", so the backend
@@ -402,7 +429,7 @@ Two things to know when reading the results back out of SigNoz:
 
 ### Optional: traces (Tempo)
 
-When the `metrics/` example's traces overlay is up, point the same script at
+When the `metrics-source` example's traces overlay is up, point the same script at
 Tempo's OTLP/HTTP endpoint so it also emits best-effort spans (error spans
 during a `--spike`):
 
@@ -411,21 +438,14 @@ python3 scripts/generate_fake_metrics.py --spike \
   --otlp http://localhost:4318 --duration 90
 ```
 
-### How it fits the `metrics/` example (OSS)
+### How it fits the `metrics-source` example (_Enterprise_)
 
-On the OSS image the standing metric/trace **source** is Enterprise-only, so
-the example **triggers** incidents through the `file` log source and uses
-metrics only to **correlate**. Both fake-data steps are `scripts/`-based:
-
-```bash
-# 1. trigger the incident (status=503 error log lines)
-python3 scripts/generate_noisy_logs.py --append --start-time now \
-  --spike 5xx --spike-burst 80 \
-  --output examples/docker-compose/metrics/logs/app.log
-
-# 2. push the correlating metric anomaly
-python3 scripts/generate_fake_metrics.py --spike --duration 90
-```
+The example runs its copy of this generator inside Compose, so you need no
+Python on your machine: the `metrics-generator` service (profile
+`fake-metrics`) pushes steady traffic, and `docker compose run --rm
+metrics-spike` fires one 90-second spike once the baselines are confident.
+See the [example README](../examples/metrics-source/README.md) for the full
+walkthrough.
 
 ---
 

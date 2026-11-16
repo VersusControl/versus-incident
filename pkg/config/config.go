@@ -32,8 +32,9 @@ type Config struct {
 
 	// GatewaySecret is the shared secret required by every admin endpoint
 	// (`/api/admin/*` and `/api/agent/*`). Clients send the same value in
-	// the `X-Gateway-Secret` header. When empty, admin endpoints are NOT
-	// registered and the agent refuses to start.
+	// the `X-Gateway-Secret` header. When empty, every admin request is
+	// rejected as unauthorized and the agent refuses to start; with
+	// GATEWAY_SECRET_REQUIRED set, the process refuses to start instead.
 	GatewaySecret string `mapstructure:"gateway_secret"`
 
 	Alert  AlertConfig
@@ -469,6 +470,9 @@ func loadConfigFromPath(path string) (*Config, error) {
 	if secret := os.Getenv("GATEWAY_SECRET"); secret != "" {
 		loaded.GatewaySecret = secret
 	}
+	if err := requireGatewaySecret(loaded.GatewaySecret); err != nil {
+		return nil, err
+	}
 	if grace := os.Getenv("AGENT_NEW_SERVICE_GRACE"); grace != "" {
 		loaded.Agent.NewServiceGrace = grace
 	}
@@ -524,13 +528,18 @@ func loadConfigFromPath(path string) (*Config, error) {
 		loaded.Agent.Tools = tools
 	}
 
+	// A sibling connectors.yaml replaces inline `connectors:` only when it
+	// holds settings. An empty or comment-only file is ignored, so a
+	// placeholder file never switches off connectors configured inline.
 	connectorsPath := filepath.Join(filepath.Dir(path), "connectors.yaml")
 	if _, statErr := os.Stat(connectorsPath); statErr == nil {
-		connectors, err := loadConnectorsFile(connectorsPath)
+		connectors, present, err := loadSiblingConnectorsFile(connectorsPath)
 		if err != nil {
 			return nil, err
 		}
-		loaded.Connectors = connectors
+		if present {
+			loaded.Connectors = connectors
+		}
 	} else if !os.IsNotExist(statErr) {
 		return nil, fmt.Errorf("cannot access connectors file")
 	}
@@ -816,4 +825,21 @@ func applyParamsOverwrite(clonedCfg *Config, paramsOverwrite *map[string]string)
 			}
 		}
 	}
+}
+
+// requireGatewaySecret fails the load when GATEWAY_SECRET_REQUIRED is on and
+// no sign-in secret was supplied. Deployments that read the secret from a
+// separately created Secret set it, so a missing Secret stops the process with
+// one clear line instead of serving a UI nobody can sign in to.
+// GATEWAY_SECRET_HINT, when set, is appended to say how to create it.
+func requireGatewaySecret(secret string) error {
+	required, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("GATEWAY_SECRET_REQUIRED")))
+	if err != nil || !required || strings.TrimSpace(secret) != "" {
+		return nil
+	}
+	message := "sign-in secret is missing: GATEWAY_SECRET is empty and GATEWAY_SECRET_REQUIRED is set"
+	if hint := strings.TrimSpace(os.Getenv("GATEWAY_SECRET_HINT")); hint != "" {
+		message += "; " + hint
+	}
+	return fmt.Errorf("%s", message)
 }

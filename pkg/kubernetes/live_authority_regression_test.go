@@ -236,21 +236,57 @@ func TestAutonomousConfiguredNamespaceLiveDataUsesItsSuccessfulScope(t *testing.
 }
 
 func TestCurrentCollectionWitnessIsNotAStoredPermissionGrant(t *testing.T) {
-	ctx := context.WithValue(t.Context(), inventoryCollectionAuthorityKey{}, &inventoryCollectionAuthority{})
-	if hasCurrentInventoryMaterialWitness(ctx) {
+	at := time.Now().UTC()
+	generation := inventoryGeneration{
+		EvidenceScope: storage.EvidenceScope{OrgID: "org", ClusterID: "cluster", ClusterUID: "physical"},
+		View: kubeindex.Snapshot{
+			Records: []kubeindex.Record{{Kind: "Namespace", Name: "kube-system", UID: "physical"}},
+			Kinds:   map[string]kubeindex.KindStatus{"Namespace": {State: "ready", ObservedAt: at, LastAttemptAt: at}},
+		},
+	}
+	episode := func() context.Context {
+		return context.WithValue(t.Context(), inventoryCollectionAuthorityKey{}, &inventoryCollectionAuthority{})
+	}
+	ctx := episode()
+	if hasCurrentInventoryMaterialWitness(ctx) || currentInventoryIdentityWitness(ctx, generation, at, 1) {
 		t.Fatal("empty episode inherited authority")
 	}
-	recordInventoryMaterialResult(ctx, nil)
-	recordInventoryMaterialResult(ctx, ErrForbidden)
-	if hasCurrentInventoryMaterialWitness(ctx) {
-		t.Fatal("an earlier success overrode a later current denial")
+	recordInventoryMaterialResult(ctx, "Pod", 1, nil)
+	recordInventoryMaterialResult(ctx, "Secret", 1, ErrForbidden)
+	if currentInventoryIdentityWitness(ctx, generation, at, 1) {
+		t.Fatal("a cycle without its identity read proved authority")
 	}
-	recordInventoryMaterialResult(ctx, nil)
-	if !hasCurrentInventoryMaterialWitness(ctx) {
-		t.Fatal("validated current scoped LIST was not usable live evidence")
+	recordInventoryMaterialResult(ctx, "Namespace", 1, nil)
+	if !hasCurrentInventoryMaterialWitness(ctx) || !currentInventoryIdentityWitness(ctx, generation, at, 1) {
+		t.Fatal("validated current identity and scoped LIST were not usable live evidence")
 	}
-	next := context.WithValue(t.Context(), inventoryCollectionAuthorityKey{}, &inventoryCollectionAuthority{})
-	if hasCurrentInventoryMaterialWitness(next) {
+	// The same reads finishing in the opposite order prove the same thing.
+	reversed := episode()
+	recordInventoryMaterialResult(reversed, "Namespace", 1, nil)
+	recordInventoryMaterialResult(reversed, "Pod", 1, nil)
+	recordInventoryMaterialResult(reversed, "Secret", 1, ErrForbidden)
+	if !currentInventoryIdentityWitness(reversed, generation, at, 1) {
+		t.Fatal("a denial finishing last withdrew the identity witness")
+	}
+	if currentInventoryIdentityWitness(ctx, generation, at, 2) {
+		t.Fatal("reads made with a replaced credential proved the current one")
+	}
+	other := generation
+	other.EvidenceScope.ClusterUID = "other-physical"
+	if currentInventoryIdentityWitness(ctx, other, at, 1) {
+		t.Fatal("an identity read of another cluster proved this binding")
+	}
+	if currentInventoryIdentityWitness(ctx, generation, at.Add(time.Second), 1) {
+		t.Fatal("an identity read from another attempt proved this one")
+	}
+	invalid := episode()
+	recordInventoryMaterialResult(invalid, "Namespace", 1, nil)
+	recordInventoryMaterialResult(invalid, "Pod", 1, nil)
+	recordInventoryMaterialResult(invalid, "Deployment", 1, invalidInventoryList())
+	if hasCurrentInventoryMaterialWitness(invalid) || currentInventoryIdentityWitness(invalid, generation, at, 1) {
+		t.Fatal("an invalid LIST envelope still proved authority")
+	}
+	if next := episode(); hasCurrentInventoryMaterialWitness(next) || currentInventoryIdentityWitness(next, generation, at, 1) {
 		t.Fatal("a prior collection authorized a newer episode")
 	}
 }

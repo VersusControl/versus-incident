@@ -29,11 +29,14 @@ export function PodLogViewer({
   compact = false,
   onOpenFull,
   previousRequest,
+  resourcePending = false,
 }: {
   resource: KubernetesResource;
   compact?: boolean;
   onOpenFull?: () => void;
   previousRequest?: { id: string; container: string; podUID?: string };
+  /** Whether the full resource read that names the Pod's containers is still in flight. */
+  resourcePending?: boolean;
 }) {
   const workload =
     resource.kind === "Deployment" || resource.kind === "StatefulSet";
@@ -196,8 +199,22 @@ export function PodLogViewer({
     }),
     [stream.buffer],
   );
+  // A row-opened Pod reads before its containers are known. Until the resource
+  // read names them, the panel is waiting, not failing: a multi-container Pod
+  // refuses a read that names no container, and that refusal is answered by the
+  // container-adopting effect above starting a new read once the describe lands.
+  // The render in which the describe lands still has no container selected —
+  // the adopting effect runs after it — so known containers count as waiting
+  // too, or the refusal would flash for one frame.
+  const awaitingContainer =
+    !workload && !container && (resourcePending || summaryContainers.length > 0);
+  const containerlessRefusal =
+    !workload && !container && stream.status === "error" && stream.code === "invalid_arguments";
+  const waiting =
+    awaitingContainer && !stream.received && (stream.status === "connecting" || containerlessRefusal);
+  const readStatus = waiting ? "connecting" : stream.status;
   const blockingError =
-    stream.status === "error" || stream.status === "limited";
+    !waiting && (stream.status === "error" || stream.status === "limited");
   const onlyNeutralOutput = !stream.buffer.lines.some((line) => !line.neutral);
   // While the reader is away from the newest line, a busy read keeps pushing the
   // tail forward and a plain trailing slice trims the row they are reading out of
@@ -252,7 +269,9 @@ export function PodLogViewer({
     stream.status === "ended" ||
     limited ||
     (resource.kind === "Pod" && (phase === "Succeeded" || phase === "Failed"));
-  const emptyMessage = blockingError
+  const emptyMessage = waiting
+    ? "Waiting for logs…"
+    : blockingError
     ? stream.message || "Logs are unavailable. Reopen the resource or retry."
     : filter && stream.buffer.lines.length
       ? "No log lines match this filter."
@@ -349,7 +368,7 @@ export function PodLogViewer({
             : "Main container"}
         </option>
       )}
-      {!workload && !containers.length && <option value="">Default container</option>}
+      {!workload && !containers.length && <option value="">Default</option>}
       {allContainers.map((item) => (
         <option key={item.name} value={item.name}>
           {item.type === "init" ? "init:" : ""}
@@ -371,7 +390,7 @@ export function PodLogViewer({
         {compact ? (
           <>
             <h3 className="log-heading-title">Live logs</h3>
-            <LogStatus status={stream.status} previous={previous} paused={paused} stopped={stopped} limited={limited} message={stream.message} />
+            <LogStatus status={readStatus} previous={previous} paused={paused} stopped={stopped} limited={limited} message={stream.message} />
             <label className="log-container">
               <span className="sr-only">Container</span>
               <select
@@ -387,7 +406,7 @@ export function PodLogViewer({
         ) : (
           <>
             <div className="log-primary">
-              <LogStatus status={stream.status} previous={previous} paused={paused} stopped={stopped} limited={limited} message={stream.message} />
+              <LogStatus status={readStatus} previous={previous} paused={paused} stopped={stopped} limited={limited} message={stream.message} />
               {workload && (
                 <label className="log-pod">
                   <span className="sr-only">Pod</span>

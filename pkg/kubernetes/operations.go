@@ -379,6 +379,10 @@ func (service *Service) listAll(ctx context.Context, options ListOptions) (Resou
 			return result, err
 		}
 		pageLimit = effectiveLimit
+		if options.Namespace == "" && options.Continue == "" {
+			// A cluster-wide page was read, so the identity may list this API.
+			service.noteLiveListRead(options.ResourceID)
+		}
 		result.Truncated = result.Truncated || page.Truncated && page.Continue == ""
 		result.EncodedTruncated = result.EncodedTruncated || page.EncodedTruncated
 		for _, omitted := range page.Omitted {
@@ -717,9 +721,11 @@ func (service *Service) Workloads(ctx context.Context, options WorkloadListOptio
 		requiresAuthority = requiresAuthority || state.State == "ready" || !state.ObservedAt.IsZero()
 	}
 	if requiresAuthority && (indexErr == nil || errors.Is(indexErr, ErrInventoryNotReady)) {
-		if err := service.authorizeWorkloadRead(ctx, options.Namespace); err != nil {
+		proved, err := service.authorizeWorkloadScope(ctx, options.Namespace)
+		if err != nil {
 			return WorkloadPage{}, err
 		}
+		view.Records = keepProvedNamespaces(view.Records, proved)
 	}
 	if indexErr != nil {
 		// An unavailable or unauthorized cold snapshot is not an empty LIST.
@@ -1470,6 +1476,56 @@ func uniqueObjectRefs(values []ObjectRef) []ObjectRef {
 // A current scoped LIST witness distinguishes partial permission loss from a
 // deployment with no workload authority. Cached publication is not a grant.
 func (service *Service) authorizeWorkloadRead(ctx context.Context, namespace string) error {
+	_, err := service.authorizeWorkloadScope(ctx, namespace)
+	return err
+}
+
+// authorizeWorkloadScope proves a workload read and returns the namespaces
+// its rows may come from; nil means every namespace. An identity bound only
+// inside namespaces cannot read workloads cluster-wide, so an answer across all
+// namespaces is proved in each namespace it would serve, and rows are served
+// only from the namespaces proved now. A namespace whose proof is denied is
+// left out, and the inventory is asked to read the namespaces again so its
+// published state catches up.
+func (service *Service) authorizeWorkloadScope(ctx context.Context, namespace string) (map[string]bool, error) {
+	if namespace != "" {
+		return nil, service.authorizeNamespaceWorkloadRead(ctx, namespace)
+	}
+	readable := service.namespaceOnlyScope(ctx)
+	if len(readable) == 0 {
+		err := service.authorizeNamespaceWorkloadRead(ctx, "")
+		if !errors.Is(err, ErrForbidden) || len(service.namespaces) == 0 {
+			return nil, err
+		}
+		// Before the first sync has read the configured namespaces, a
+		// cluster-wide denial is expected for an identity bound inside them:
+		// the answer is proved in those namespaces instead.
+		readable = service.namespaces
+	}
+	proved := make(map[string]bool, len(readable))
+	var denied error
+	lost := false
+	for _, candidate := range readable {
+		err := service.verifyNamespaceRead(ctx, candidate)
+		switch {
+		case err == nil:
+			proved[candidate] = true
+		case errors.Is(err, ErrForbidden):
+			denied, lost = err, true
+		default:
+			return nil, err
+		}
+	}
+	if lost {
+		service.requestNamespaceReread()
+	}
+	if len(proved) == 0 {
+		return nil, denied
+	}
+	return proved, nil
+}
+
+func (service *Service) authorizeNamespaceWorkloadRead(ctx context.Context, namespace string) error {
 	if err := service.validateCredential(ctx); err != nil {
 		return err
 	}
@@ -1480,25 +1536,33 @@ func (service *Service) authorizeWorkloadRead(ctx context.Context, namespace str
 		namespace = service.client.namespace
 	}
 	binding := logIdentity(service.cacheKey() + "\x00" + namespace)
-	return service.workloadAuthority.verifyCurrentRead(ctx, binding, func() error {
-		proof, cancel := withOperationBudget(context.WithValue(ctx, captureReadContextKey{}, nil), 6*time.Second, 16, 2<<20, 10000)
-		defer cancel()
-		var unavailable error
-		for _, resource := range workloadResources {
-			err := service.authorizeLiveInventoryTarget(proof, inventoryAuthorityTarget{id: resource.ResourceID, namespace: namespace})
-			if err == nil {
-				return service.validateCredential(proof)
-			}
-			if errors.Is(err, ErrUnauthorized) {
-				return err
-			}
-			if !errors.Is(err, ErrForbidden) {
-				unavailable = err
-			}
+	return service.workloadAuthority.verifyCurrentRead(ctx, binding, func() error { return service.proveNamespaceWorkloadRead(ctx, namespace) })
+}
+
+// proveNamespaceWorkloadRead reads one item of each workload kind in a
+// namespace until one answers, proving the identity may read workloads there
+// now.
+func (service *Service) proveNamespaceWorkloadRead(ctx context.Context, namespace string) error {
+	if err := service.validateCredential(ctx); err != nil {
+		return err
+	}
+	proof, cancel := withOperationBudget(context.WithValue(ctx, captureReadContextKey{}, nil), 6*time.Second, 16, 2<<20, 10000)
+	defer cancel()
+	var unavailable error
+	for _, resource := range workloadResources {
+		err := service.authorizeLiveInventoryTarget(proof, inventoryAuthorityTarget{id: resource.ResourceID, namespace: namespace})
+		if err == nil {
+			return service.validateCredential(proof)
 		}
-		if unavailable != nil {
-			return unverifiedInventoryAuthority(unavailable)
+		if errors.Is(err, ErrUnauthorized) {
+			return err
 		}
-		return ErrForbidden
-	})
+		if !errors.Is(err, ErrForbidden) {
+			unavailable = err
+		}
+	}
+	if unavailable != nil {
+		return unverifiedInventoryAuthority(unavailable)
+	}
+	return ErrForbidden
 }

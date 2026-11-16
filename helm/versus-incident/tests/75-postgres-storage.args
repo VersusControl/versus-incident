@@ -1,0 +1,5 @@
+# The Postgres storage backend with a DSN.
+--set
+storage.type=postgres
+--set
+storage.postgres.dsn=postgres://versus:pass@pg:5432/versus?sslmode=require

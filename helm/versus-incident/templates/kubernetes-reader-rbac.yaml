@@ -1,4 +1,4 @@
-{{- if .Values.kubernetesReaderRBAC.enabled }}
+{{- if include "versus-incident.kubernetesReaderRBACEnabled" . }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -9,8 +9,13 @@ rules:
   - nonResourceURLs: ["/.well-known/openid-configuration", "/openid/v1/jwks"]
     verbs: ["get"]
   - apiGroups: [""]
-    resources: ["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "secrets", "persistentvolumeclaims", "persistentvolumes"]
+    resources: ["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "persistentvolumeclaims", "persistentvolumes"]
     verbs: ["get", "list"]
+  {{- if .Values.kubernetesReaderRBAC.secrets }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
@@ -41,9 +46,18 @@ rules:
   - apiGroups: ["metrics.k8s.io"]
     resources: ["nodes", "pods"]
     verbs: ["get", "list"]
-  {{- if .Values.kubernetesReaderRBAC.gatewayAPI }}
+  {{- if .Values.kubernetesReaderRBAC.optionalKinds }}
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "httproutes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "rollouts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
     verbs: ["get", "list"]
   {{- end }}
 ---

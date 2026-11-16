@@ -91,6 +91,8 @@ type PartialFailure struct {
 	Scope        string `json:"scope,omitempty"`
 	GroupVersion string `json:"group_version,omitempty"`
 	Class        string `json:"class"`
+	Kind         string `json:"kind,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
 // ProjectedResource is a bounded safe view, never an arbitrary raw object.
@@ -178,6 +180,10 @@ type Overview struct {
 	Omitted           []string         `json:"omitted_categories,omitempty"`
 	Partial           []PartialFailure `json:"partial_failures,omitempty"`
 	Sync              SyncStatus       `json:"sync"`
+	// ClusterWide is false when the connector identity reads workloads only
+	// inside some namespaces; ReadableNamespaces then lists them, sorted.
+	ClusterWide        bool     `json:"cluster_wide"`
+	ReadableNamespaces []string `json:"readable_namespaces,omitempty"`
 }
 
 // ResourceUsage is one bounded exact pod or node Metrics API sample.
@@ -215,6 +221,12 @@ type Usage struct {
 	Truncated    bool                `json:"truncated"`
 	Omitted      []string            `json:"omitted_categories,omitempty"`
 	Partial      []PartialFailure    `json:"partial_failures,omitempty"`
+	// Metrics says why usage is or is not shown, from discovery and the last
+	// reads: "available", "syncing", "not_installed" (the cluster does not
+	// serve metrics.k8s.io), "forbidden" (served, but this identity may not
+	// read it) or "unavailable" (served and readable, but the last read
+	// failed; it is retried).
+	Metrics string `json:"metrics"`
 }
 
 type PodLogs struct {
@@ -249,10 +261,22 @@ type Scrubber interface{ Scrub(string) string }
 
 // Service owns all Kubernetes path construction, decoding, projection, and relationships.
 type Service struct {
-	evidenceHeartbeat      time.Duration
-	historySaveGrace       time.Duration
-	cadenceDivisor         int
-	workloadAuthority      inventoryAuthorityProofState
+	evidenceHeartbeat time.Duration
+	historySaveGrace  time.Duration
+	cadenceDivisor    int
+	workloadAuthority inventoryAuthorityProofState
+	// namespaceReads holds one workload-read proof per namespace, for answers
+	// across all namespaces by an identity bound only inside namespaces.
+	namespaceReads *namespaceReadProofs
+	// registered marks a service a cluster registry serves. A registry starts
+	// capture before any reader can reach it, and until then its services serve
+	// no stored records they have not proved.
+	registered bool
+	// excluded holds the resources, by plural API name, configured never to
+	// be listed, and namespaces the namespaces configured to be read when the
+	// identity may read only inside some.
+	excluded               map[string]bool
+	namespaces             []string
 	observationClock       func() time.Time
 	inventoryRestore       *inventoryRestoreAuthority
 	recovery               *clusterRecovery
@@ -320,7 +344,7 @@ func newService(parent context.Context, client *Client, scope Scope, discoveryTT
 		ctx, cancel = client.credentialEpochContext()
 	}
 	configured := scope.CredentialID
-	service := &Service{inventoryRestore: &inventoryRestoreAuthority{}, client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewUnboundedRegistry(16), inventoryLog: newInventoryKindLog(), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
+	service := &Service{inventoryRestore: &inventoryRestoreAuthority{}, namespaceReads: &namespaceReadProofs{}, client: client, scope: scope, configuredCredentialID: configured, identity: &credentialEpoch{ctx: ctx, cancel: cancel}, ttl: discoveryTTL, mu: &sync.Mutex{}, cache: make(map[string]discoveryCacheEntry), discoveryCalls: map[string]*discoveryCall{}, indexes: kubeindex.NewUnboundedRegistry(16), inventoryLog: newInventoryKindLog(), changes: newChangeStoreState(), traffic: &trafficProviderState{}}
 	service.usageHistory = newUsageHistoryState()
 	if client != nil && client.credentials != nil {
 		initialization, stop := context.WithTimeout(parent, 10*time.Second)
@@ -358,7 +382,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 		configured = service.configuredCredentialID
 		scope.CredentialID = service.scope.CredentialID
 	}
-	scoped := &Service{client: service.client, scope: scope, identity: service.identity, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, inventoryLog: service.inventoryLog, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.breakLogSourceResolver()}
+	scoped := &Service{client: service.client, scope: scope, identity: service.identity, namespaceReads: service.namespaceReads, registered: service.registered, excluded: service.excluded, namespaces: service.namespaces, configuredCredentialID: configured, readOrgs: readOrgs, ttl: service.ttl, mu: service.mu, cache: service.cache, discoveryCalls: service.discoveryCalls, scrubber: service.scrubber, indexes: service.indexes, inventoryLog: service.inventoryLog, changes: service.changes, traffic: service.traffic, logStreamContext: service.logStreamContext, captureMode: service.captureMode, logSources: service.breakLogSourceResolver()}
 	scoped.inventoryRestore = service.inventoryRestore
 	scoped.persistentCredentialID = service.persistentCredentialID
 	scoped.observationClock = service.observationClock
@@ -459,6 +483,7 @@ func NewClusterRegistryWithScope(multiple bool, entries []ClusterEntry, scope te
 				registry.recoveries[entry.Info.ID] = r
 			}
 			entry.Service.recovery = r
+			entry.Service.registered = true
 			entry.Service.usageHistory = registry.usageHistory
 			entry.Service.readOrgs = tenancy.TrustedOrgScope(registry.bootScope, entry.Service.scope.OrgID).OrgIDs()
 			registry.services[entry.Service.cacheKey()] = entry.Service
@@ -519,7 +544,10 @@ func (registry *ServiceRegistry) LocalReportService(orgID, clusterID string) (*S
 		if entry.Info.ID != clusterID {
 			continue
 		}
-		if entry.Err != nil || entry.Service == nil {
+		if entry.Err != nil {
+			return nil, connectorBuildFailure(entry.Err)
+		}
+		if entry.Service == nil {
 			return nil, ErrClusterUnavailable
 		}
 		scope := entry.Service.scope
@@ -579,14 +607,23 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 	}
 	registry.mu.Lock()
 	var previous *Service
+	var buildErr error
 	for _, entry := range registry.entries {
-		if entry.Info.ID == clusterID && entry.Err == nil {
-			previous = entry.Service
-			break
+		if entry.Info.ID != clusterID {
+			continue
 		}
+		if entry.Err != nil {
+			buildErr = connectorBuildFailure(entry.Err)
+			continue
+		}
+		previous = entry.Service
+		break
 	}
 	closed := registry.closed
 	registry.mu.Unlock()
+	if !closed && previous == nil && buildErr != nil {
+		return nil, buildErr
+	}
 	if closed || previous == nil {
 		return nil, ErrClusterUnavailable
 	}
@@ -659,6 +696,8 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		fresh.SetChangeStorage(provider)
 		previous.changes.mu.Lock()
 		fresh.changes.evidenceEnabled = previous.changes.evidenceEnabled
+		fresh.registered = previous.registered
+		fresh.excluded, fresh.namespaces = previous.excluded, previous.namespaces
 		previous.changes.mu.Unlock()
 		registry.mu.Lock()
 		oldServices := []*Service{}
@@ -781,7 +820,7 @@ func (service *Service) Discover(ctx context.Context) (result Discovery, resultE
 			result, resultErr = Discovery{}, err
 		}
 	}()
-	ctx, cancel := withOperationBudget(ctx, defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
+	ctx, cancel := withOperationBudget(discoveryRead(ctx), defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
 	defer cancel()
 	key := service.cacheKey()
 	service.mu.Lock()
@@ -1171,7 +1210,10 @@ func (service *Service) Overview(ctx context.Context) (Overview, error) {
 	}
 	result.RequestedCPU, result.LimitedCPU, result.AllocatableCPU = rationalString(requestedCPU), rationalString(limitedCPU), rationalString(allocatableCPU)
 	result.RequestedMemory, result.LimitedMemory, result.AllocatableMemory = rationalString(requestedMemory), rationalString(limitedMemory), rationalString(allocatableMemory)
+	result.Partial = presentPartialFailures(result.Partial)
 	result.Sync.Partial = result.Sync.Partial || result.Truncated || len(result.Partial) > 0
+	clusterWide, readable := readableNamespaceScope(generation)
+	result.ClusterWide, result.ReadableNamespaces = clusterWide, readable
 	return result, nil
 }
 
@@ -1320,7 +1362,38 @@ func (service *Service) cachedUsage(ctx context.Context, namespace string, inclu
 	result.PodMetrics.Fresh = result.PodMetrics.Fresh && (result.PodMetrics.ObservedAt == nil || time.Since(*result.PodMetrics.ObservedAt) < 5*time.Minute)
 	result.NodeMetrics.Fresh = result.NodeMetrics.Fresh && (result.NodeMetrics.ObservedAt == nil || time.Since(*result.NodeMetrics.ObservedAt) < 5*time.Minute)
 	result.Fresh = result.Fresh && (result.PodMetrics.Total == 0 || result.PodMetrics.Fresh) && (result.NodeMetrics.Total == 0 || result.NodeMetrics.Fresh)
+	result.Metrics = metricsAPIState(generation.Usage, result.Availability)
 	return result, nil
+}
+
+// metricsAPIState names, in one word, why usage is or is not shown.
+func metricsAPIState(usage Usage, availability string) string {
+	if containsString(usage.Omitted, "metrics.k8s.io~v1beta1~pods") && containsString(usage.Omitted, "metrics.k8s.io~v1beta1~nodes") {
+		return "not_installed"
+	}
+	if availability == "syncing" {
+		return "syncing"
+	}
+	if usage.PodMetrics.Total > 0 || usage.NodeMetrics.Total > 0 {
+		return "available"
+	}
+	denied, failed := 0, 0
+	for _, failure := range usage.Partial {
+		if !strings.HasPrefix(failure.ResourceID, "metrics.k8s.io") {
+			continue
+		}
+		failed++
+		if failure.Class == "forbidden" {
+			denied++
+		}
+	}
+	switch {
+	case failed > 0 && denied == failed:
+		return "forbidden"
+	case failed > 0 || availability == "unavailable":
+		return "unavailable"
+	}
+	return "available"
 }
 
 func summarizeMetricsSource(metrics []ResourceUsage, observedAt time.Time) MetricsSourceStatus {
@@ -1496,7 +1569,18 @@ func (service *Service) podLogs(ctx context.Context, namespace, pod, container s
 		return PodLogs{}, err
 	}
 	defer release()
-	payload, truncated, err := service.client.getBounded(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/pods/"+url.PathEscape(pod)+"/log?"+query.Encode(), "*/*", int64(byteLimit))
+	logPath := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods/" + url.PathEscape(pod) + "/log?"
+	payload, truncated, err := service.client.getBounded(ctx, logPath+query.Encode(), "*/*", int64(byteLimit))
+	if err != nil && container == "" && errors.Is(err, ErrInvalidArguments) {
+		// Kubernetes refuses a container-less read of a Pod with several
+		// containers. The read is retried once against the container kubectl
+		// logs would choose; when none can be chosen the refusal stands.
+		if resolved := service.resolveLogContainer(ctx, namespace, pod); resolved != "" {
+			container = resolved
+			query.Set("container", container)
+			payload, truncated, err = service.client.getBounded(ctx, logPath+query.Encode(), "*/*", int64(byteLimit))
+		}
+	}
 	if err != nil {
 		return PodLogs{}, err
 	}
@@ -1590,6 +1674,9 @@ func (service *Service) resolveWithDiscovery(ctx context.Context, id string) (Re
 		if err != nil {
 			return ResourceDefinition{}, Discovery{}, err
 		}
+	}
+	if service.resourceExcluded(id) {
+		return ResourceDefinition{}, discovery, errResourceExcluded
 	}
 	for _, resource := range discovery.Resources {
 		if resource.ID == id {
@@ -2468,13 +2555,41 @@ func retainUnreadableVersions(discovery *Discovery, from int) {
 // group-version, or for /apis itself, leaves the group-version's contents
 // unknown, so a caller must report an error instead of an absent resource.
 func discoveryVersionFailed(discovery Discovery, resourceID string) bool {
+	_, failed := discoveryVersionFailure(discovery, resourceID)
+	return failed
+}
+
+// discoveryVersionFailure reports whether discovery could not read the API
+// version resourceID is pinned to, and the class of that failure. A failure
+// that names no group-version (the group list itself) covers only groups
+// discovery returned nothing for: a group it did return was read, so that
+// failure cannot leave its contents unknown.
+func discoveryVersionFailure(discovery Discovery, resourceID string) (string, bool) {
 	pinned := pinnedGroupVersion(resourceID)
+	group, _, _ := strings.Cut(pinned, "~")
+	if group == "core" {
+		group = ""
+	}
+	returned := false
+	for _, resource := range discovery.Resources {
+		returned = returned || resource.Group == group
+	}
 	for _, failures := range [][]PartialFailure{discovery.Partial, discovery.unlisted} {
 		for _, failure := range failures {
-			if failure.GroupVersion == "" || failure.GroupVersion == pinned {
-				return true
+			if failure.GroupVersion == pinned || failure.GroupVersion == "" && !returned {
+				return failure.Class, true
 			}
 		}
+	}
+	return "", false
+}
+
+// transientInventoryClass reports a failure that says nothing about what the
+// credential may read: the cluster did not answer in time or at all.
+func transientInventoryClass(class string) bool {
+	switch class {
+	case "timeout", "unavailable", "throttled", "budget_exhausted":
+		return true
 	}
 	return false
 }

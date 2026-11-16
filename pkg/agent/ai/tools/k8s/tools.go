@@ -357,6 +357,10 @@ func (tool *tool) Invoke(ctx context.Context, raw json.RawMessage) (*core.ToolRe
 		if errors.Is(err, kubernetes.ErrForbidden) {
 			return &core.ToolResult{Tool: tool.name, Found: false, Data: map[string]any{"status": "forbidden", "partial": true}}, nil
 		}
+		if detail := kubernetes.DiagnoseError(err); detail.Code == "helm_needs_secret_list" {
+			// The release may exist; the identity cannot list where Helm keeps it.
+			return &core.ToolResult{Tool: tool.name, Found: false, Data: map[string]any{"status": "unavailable", "access": kubernetes.HelmAccessNeedsSecretList, "access_message": detail.Message, "docs_url": kubernetes.HelmSecretAccessDocsURL}}, nil
+		}
 		if errors.Is(err, kubernetes.ErrNotFound) {
 			return &core.ToolResult{Tool: tool.name, Found: false, Data: map[string]any{"status": "unavailable"}}, nil
 		}
@@ -1156,6 +1160,11 @@ func compactHelmReleasePage(result kubernetes.HelmReleasePage, scope kubernetes.
 		data := map[string]any{"items": modelItems, "truncated": truncated}
 		if len(result.Partial) > 0 {
 			data["partial_failures"] = result.Partial
+		}
+		if result.Access != "" {
+			// An empty list here means the releases could not be read, not
+			// that the cluster has none.
+			data["access"], data["access_message"], data["docs_url"] = result.Access, result.AccessMessage, result.DocsURL
 		}
 		// Resume after the rows shown only when rows of this page were left
 		// out. On the last page a resume point would name the end of the

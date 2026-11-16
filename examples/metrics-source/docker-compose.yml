@@ -1,14 +1,21 @@
+# Metrics source example: Versus Enterprise reading a local Prometheus.
+#
+#   export LICENSE_KEY=<your license key>           # never commit it
+#   docker compose up -d                            # the stack
+#   docker compose --profile fake-metrics up -d     # plus steady demo traffic
+#   docker compose run --rm metrics-spike           # a 90s 5xx + latency spike,
+#                                                   # after ~2 min of learning
+#
+# The Prometheus and traces sources are Enterprise features, so this example
+# runs the Enterprise image. Without LICENSE_KEY it starts in community mode
+# and the sources stay off. Ports bind to 127.0.0.1 only. See README.md.
+
 services:
-  # Prometheus Pushgateway: the host-run generator
-  # (scripts/generate_fake_metrics.py) PUSHes synthetic series here, and
-  # Prometheus scrapes it. This is the SAME fake-data path the OSS metrics
-  # example uses — all fake data comes from the generator, never a bespoke
-  # in-compose loadgen + curl /spike. The UX is identical everywhere.
+  # The demo generator pushes its series here and Prometheus scrapes them.
   pushgateway:
     image: prom/pushgateway:v1.9.0
-    container_name: versus-ent-metrics-pushgateway
     ports:
-      - "9091:9091"
+      - "127.0.0.1:9091:9091"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9091/-/healthy"]
@@ -18,7 +25,6 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.53.1
-    container_name: versus-ent-metrics-prometheus
     depends_on:
       pushgateway:
         condition: service_healthy
@@ -26,7 +32,7 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.retention.time=1h
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -39,7 +45,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: versus-ent-metrics-redis
     command:
       - redis-server
       - --requirepass
@@ -53,62 +58,128 @@ services:
       timeout: 3s
       retries: 5
 
-  # The ENTERPRISE binary/image. The metric/trace DATA SOURCE is an
-  # enterprise-only capability, so this example MUST run the enterprise
-  # image (not the OSS one) AND supply a LICENSE_KEY carrying the
-  # `intelligence` entitlement (see README → "License"). Without it the
-  # `prometheus` source returns "requires Versus Enterprise".
+  # Enterprise keeps learned baselines in Postgres tables.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: versus
+      POSTGRES_USER: versus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-versus-dev}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "versus", "-d", "versus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   versus:
     image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise}
-    container_name: versus-ent-metrics-app
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
       prometheus:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      # --- Enterprise license (REQUIRED for the data source) ---------------
-      # Offline-verified Ed25519 JWT. MUST carry the `intelligence`
-      # entitlement. Supplied from your local .env — NEVER commit a real key.
+      # The license turns the sources on. Read from your shell or a local .env.
       LICENSE_KEY: ${LICENSE_KEY:-}
-      # --- Data-plane auth: built-in default admin (session) ----------------
-      # The enterprise data plane / admin UI is authenticated by a LIVE SESSION
-      # — the built-in default admin (username `admin`; password printed ONCE in
-      # the logs on first boot) or SSO. There is NO gateway secret. The shim
-      # below drops the Secure cookie attribute so that session cookie survives
-      # plain HTTP on localhost. Dev-only — NEVER set behind TLS in production.
+      # Licensed, you sign in as the built-in admin (the password is printed
+      # once in the logs). Without a license the image runs in community mode
+      # and this secret protects the admin API instead.
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      # Lets the session cookie work over plain HTTP on localhost. Local use only.
       VERSUS_ENTERPRISE_COOKIE_INSECURE: "1"
-      # --- OSS / shared config ---------------------------------------------
+      STORAGE_TYPE: postgres
+      POSTGRES_DSN: postgres://versus:${POSTGRES_PASSWORD:-versus-dev}@postgres:5432/versus?sslmode=disable
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}
-      # Local Redis is plaintext — dial without TLS (matches the run harness).
       REDIS_TLS: "false"
+      # training | shadow | detect
+      AGENT_ENABLE: "true"
+      AGENT_MODE: ${AGENT_MODE:-detect}
+      # AI is optional: the sources learn and detect without a key.
+      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
+      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
+      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
+      # Slack and Telegram are optional.
       SLACK_ENABLE: ${SLACK_ENABLE:-false}
       SLACK_TOKEN: ${SLACK_TOKEN:-}
       SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
       TELEGRAM_ENABLE: ${TELEGRAM_ENABLE:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-      AGENT_ENABLE: ${AGENT_ENABLE:-true}
-      AGENT_MODE: ${AGENT_MODE:-detect}
-      AGENT_AI_ENABLE: ${AGENT_AI_ENABLE:-false}
-      AGENT_AI_API_KEY: ${AGENT_AI_API_KEY:-}
-      AGENT_AI_MODEL: ${AGENT_AI_MODEL:-gpt-4o-mini}
-      PROM_ADDRESS: ${PROM_ADDRESS:-http://prometheus:9090}
     volumes:
-      - ./config:/app/config:ro
+      # Mount single files so the templates shipped in the image stay in place.
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - ./config/agent_sources.yaml:/app/config/agent_sources.yaml:ro
       - versus-data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
       interval: 10s
       timeout: 3s
-      retries: 5
+      retries: 10
+
+  # Optional demo traffic (profile fake-metrics): steady, healthy requests for
+  # the `checkout` service, pushed every 2 seconds. Runs the example's
+  # generator in a Python image, so no Python is needed on your machine.
+  metrics-generator:
+    image: python:3.12-alpine
+    profiles: ["fake-metrics"]
+    depends_on:
+      pushgateway:
+        condition: service_healthy
+    environment:
+      PUSHGATEWAY_URL: http://pushgateway:9091
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./scripts:/scripts:ro
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          python3 -B /scripts/generate_fake_metrics.py --duration 0 || echo "push failed, retrying"
+          sleep 5
+        done
+    restart: unless-stopped
+
+  # One-shot (profile metrics-spike): 90 seconds of 5xx errors and slow
+  # requests for the same service, pushed as a separate job so the steady
+  # traffic keeps running. Run it once the baselines are confident (about two
+  # minutes of steady traffic) and Versus raises an incident.
+  #   docker compose run --rm metrics-spike
+  metrics-spike:
+    image: python:3.12-alpine
+    profiles: ["metrics-spike"]
+    depends_on:
+      pushgateway:
+        condition: service_healthy
+    environment:
+      PUSHGATEWAY_URL: http://pushgateway:9091
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./scripts:/scripts:ro
+    command:
+      - python3
+      - -B
+      - /scripts/generate_fake_metrics.py
+      - --job
+      - demo-spike
+      - --spike
+      - --duration
+      - "90"
 
 volumes:
   redis-data:
+  postgres-data:
   versus-data:
   prometheus-data:

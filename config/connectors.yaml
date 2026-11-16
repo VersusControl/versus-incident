@@ -1,40 +1,17 @@
-connectors:
-  kubernetes:
-    auth:
-      mode: ""
-    actions:
-      enable: false
-      auth:
-        mode: ""
-
-  aws:
-    enable: false
-    accounts: []
-    tags:
-      value_allowlist: [Name, app, service, team, env]
-    budgets:
-      max_requests_per_second: 2
-    optional_data:
-      cost_explorer: false
-      security_hub: false
-      config: false
-      trusted_advisor: false
-    health_check_interval: 5m
-    # FinOps page; cost is read only when optional_data.cost_explorer is true.
-    finops:
-      team_tag_key: team
-      min_increase_usd_per_month: 100
-      min_driver_usd: 50
-      target_coverage: 0.8
-      max_paid_requests_per_day: 20   # paid Cost Explorer requests per day, $0.01 each
-      refresh_time: "09:00"           # once a day, report.timezone
-      cost_source_account: ""         # payer account ID; empty = each account reads its own
-      budgets: []                     # - {name: AWS total, scope: deployment, monthly_usd: 42000}
-      account_groups: []              # - {name: Production, accounts: ["111122223333"]}
-      report:
-        timezone: UTC
-        slack_summary: false
-
+# Optional connector settings. When this file holds settings it replaces any
+# inline `connectors:` block in config.yaml; while it holds only comments it is
+# ignored and the inline block is used. It is not shipped in the container
+# image: mount your own file at /app/config/connectors.yaml, or configure
+# `connectors:` inline in config.yaml.
+#
+# Single cluster, read with the pod ServiceAccount:
+# connectors:
+#   kubernetes:
+#     auth:
+#       mode: in_cluster
+#     actions:
+#       enable: false
+#
 # Multi-cluster form replaces the single connection block above.
 # connectors:
 #   kubernetes:

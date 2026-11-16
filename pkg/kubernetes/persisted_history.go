@@ -12,6 +12,11 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
+// persistedHistoryReadTimeout bounds one read of persisted cluster history, its
+// committed checkpoint, or the authority-denial overlay. A read that cannot
+// finish within it fails as a history timeout instead of holding a request.
+var persistedHistoryReadTimeout = 2 * time.Second
+
 var errHistoryUnavailable = errors.New("kubernetes: persisted history store unavailable")
 var errHistoryTimeout = errors.New("kubernetes: persisted history store timed out")
 var errHistoryUpgrading = errors.New("kubernetes: persisted history read models are converting")
@@ -223,7 +228,7 @@ func historyStoreError(err error) error {
 }
 
 func (service *Service) persistedHistoryQuery(ctx context.Context, query storage.EvidenceQuery) (storage.EvidencePage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, persistedHistoryReadTimeout)
 	defer cancel()
 	scope, checkpoint, err := service.persistedHistoryScope(ctx)
 	if err != nil {
@@ -357,10 +362,13 @@ func (service *Service) notifyEvidenceCommit() {
 // CommitStatus reads only the committed checkpoint. It is also used to recover
 // dropped notifications and commits made by another process.
 func (service *Service) CommitStatus(ctx context.Context) (CommitEvent, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, persistedHistoryReadTimeout)
 	defer cancel()
 	_, cp, err := service.persistedHistoryScope(ctx)
 	if err != nil {
+		if service.historyOffForNamespaceAccess(ctx, err) {
+			return CommitEvent{Kinds: []string{}, ClusterID: service.scope.ClusterID, History: HistoryOffNamespaceAccess}, nil
+		}
 		return CommitEvent{}, err
 	}
 	readable, denied := false, false
@@ -370,10 +378,14 @@ func (service *Service) CommitStatus(ctx context.Context) (CommitEvent, error) {
 		denied = denied || proof.State == "denied"
 	}
 	if !readable {
+		err := errHistoryNotEstablished
 		if denied {
-			return CommitEvent{}, errHistoryAuthority
+			err = errHistoryAuthority
 		}
-		return CommitEvent{}, errHistoryNotEstablished
+		if service.historyOffForNamespaceAccess(ctx, err) {
+			return CommitEvent{Kinds: []string{}, ClusterID: service.scope.ClusterID, History: HistoryOffNamespaceAccess}, nil
+		}
+		return CommitEvent{}, err
 	}
 	return CommitEvent{Revision: max(cp.CommitRevision, cp.OccurrenceRevision), EvidenceSequence: cp.HighSequence, Kinds: append([]string{}, cp.Kinds...), ClusterID: service.scope.ClusterID, At: cp.At}, nil
 }
@@ -384,6 +396,10 @@ type CommitEvent struct {
 	Kinds            []string  `json:"kinds"`
 	ClusterID        string    `json:"cluster_id"`
 	At               time.Time `json:"-"`
+	// History is "off_namespace_access" when the identity reads only inside
+	// namespaces: no history is kept, so no commit will ever arrive and the
+	// stream stays open only to say so.
+	History string `json:"history,omitempty"`
 }
 
 // persistedPodAuthority protects saved log excerpts without making a live LIST.
@@ -499,7 +515,7 @@ func (service *Service) denyHistoryAuthority(ctx context.Context, path string, u
 	}
 	scope := storage.EvidenceScope{OrgID: service.scope.OrgID, ClusterID: service.scope.ClusterID}
 	service.rememberHistoryDenials(scope, principal, proofs)
-	denialCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	denialCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistedHistoryReadTimeout)
 	defer cancel()
 	service.changes.mu.Lock()
 	cache := service.changes.inventories[service.indexScope()]

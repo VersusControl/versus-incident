@@ -117,6 +117,132 @@ func TestSplunk_PullBasic(t *testing.T) {
 	}
 }
 
+// fakeSplunkExport mimics the export endpoint of a stock Splunk install:
+// unless the request names an output_time_format, `_time` comes back in the
+// server's display format ("2026-11-15 08:40:23.294 GMT"), not RFC 3339. That
+// is the shape a real Splunk 9/10 container returned for `search index=main`.
+// The rows stream newest first, as export does for an event search.
+func fakeSplunkExport(t *testing.T, times []time.Time) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, err := parseForm(string(body))
+		if err != nil {
+			t.Errorf("parse form: %v", err)
+			return
+		}
+		format := func(ts time.Time) string {
+			switch form["output_time_format"] {
+			case "":
+				return ts.UTC().Format("2006-01-02 15:04:05.000") + " GMT"
+			case splunkOutputTimeFormat:
+				return fmt.Sprintf("%d.%06d", ts.Unix(), ts.Nanosecond()/1000)
+			default:
+				t.Errorf("unexpected output_time_format %q", form["output_time_format"])
+				return ""
+			}
+		}
+		var rows []map[string]interface{}
+		for i := len(times) - 1; i >= 0; i-- {
+			rows = append(rows, map[string]interface{}{
+				"_time":       format(times[i]),
+				"_raw":        fmt.Sprintf("service=api message=\"probe %d\"", i),
+				"_indextime":  fmt.Sprintf("%d", times[i].Unix()),
+				"_bkt":        "main~0~84E5C37B",
+				"_cd":         fmt.Sprintf("0:%d", i),
+				"_sourcetype": "noisy",
+			})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(splunkExportBody(t, rows))
+	}))
+}
+
+func TestSplunk_PullLearnsEventsFromStockSplunkExport(t *testing.T) {
+	since := time.Date(2026, 11, 15, 8, 40, 0, 0, time.UTC)
+	times := []time.Time{
+		since.Add(1*time.Second + 294836*time.Microsecond),
+		since.Add(2*time.Second + 500*time.Millisecond),
+		since.Add(3*time.Second + 123456*time.Microsecond),
+	}
+	ts := fakeSplunkExport(t, times)
+	defer ts.Close()
+
+	src, err := NewSplunkSource("t", config.AgentSplunkSourceConfig{
+		Address: ts.URL,
+		Search:  "search index=main",
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	signals, cursor, err := src.Pull(context.Background(), since)
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if len(signals) != len(times) {
+		t.Fatalf("got %d signals, want %d: a stock Splunk export must not be dropped", len(signals), len(times))
+	}
+	// Rows arrive newest first. Microsecond-exact timestamps only survive
+	// when Pull asks for the epoch rendering; Splunk's default display format
+	// carries milliseconds at most.
+	for i, sig := range signals {
+		if want := times[len(times)-1-i]; !sig.Timestamp.Equal(want) {
+			t.Errorf("signal %q timestamp = %v, want %v", sig.Message, sig.Timestamp, want)
+		}
+	}
+	if want := times[len(times)-1]; !cursor.Equal(want) {
+		t.Errorf("cursor = %v, want %v", cursor, want)
+	}
+}
+
+func TestSplunk_ParseTimeAcceptsSplunkRenderings(t *testing.T) {
+	want := time.Date(2026, 11, 15, 8, 40, 23, 294000000, time.UTC)
+	cases := []string{
+		"2026-11-15T08:40:23.294+00:00",
+		"2026-11-15T10:40:23.294+02:00",
+		"2026-11-15 08:40:23.294 GMT",
+		"2026-11-15 08:40:23.294 UTC",
+		"2026-11-15 08:40:23.294 +0000",
+		"2026-11-15 03:40:23.294 -05:00",
+		"1794732023.294000",
+		"1794732023.294",
+	}
+	for _, in := range cases {
+		if got := parseSplunkTime(in); !got.Equal(want) {
+			t.Errorf("parseSplunkTime(%q) = %v, want %v", in, got, want)
+		}
+	}
+	// A bare zone abbreviation other than GMT/UTC is ambiguous (Go would read
+	// it as offset zero); refuse it rather than misplace the event in time.
+	for _, in := range []string{"2026-11-15 08:40:23.294 PST", "", "not a time"} {
+		if got := parseSplunkTime(in); !got.IsZero() {
+			t.Errorf("parseSplunkTime(%q) = %v, want zero", in, got)
+		}
+	}
+}
+
+func TestSplunk_MalformedExportRecordDoesNotAdvanceCursor(t *testing.T) {
+	// Export streams newest first: keeping the rows before a bad record and
+	// advancing the cursor to their max would skip the older rows after it
+	// for good. A malformed stream fails the pull instead, so the next tick
+	// re-reads the whole window.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"preview":false,"offset":0,"result":{"_time":"2026-11-15T08:40:05.000+00:00","_raw":"newest"}}` + "\n" +
+			`{"preview":false,"offset":1,"result":` + "\n"))
+	}))
+	defer ts.Close()
+
+	src, _ := NewSplunkSource("t", config.AgentSplunkSourceConfig{Address: ts.URL, Search: "search index=main"})
+	since := time.Date(2026, 11, 15, 8, 40, 0, 0, time.UTC)
+	signals, cursor, err := src.Pull(context.Background(), since)
+	if err == nil {
+		t.Fatalf("expected an error for a truncated export stream, got %d signals", len(signals))
+	}
+	if len(signals) != 0 || !cursor.Equal(since) {
+		t.Errorf("malformed stream returned %d signals and cursor %v; want none and %v", len(signals), cursor, since)
+	}
+}
+
 func TestSplunk_FiltersResultsAtOrBeforeSince(t *testing.T) {
 	older := "2026-04-20T10:00:00.000+00:00"
 	newer := "2026-04-20T10:00:10.000+00:00"

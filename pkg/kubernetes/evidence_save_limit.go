@@ -154,8 +154,7 @@ func (fit *captureFit) drop(dropped *captureCandidate) {
 
 // records returns every kept record in capture order and what was dropped.
 func (fit *captureFit) records() ([]storage.EvidenceRecord, captureTrim) {
-	all := make([]*captureCandidate, 0, len(fit.always)+len(fit.kept))
-	all = append(append(all, fit.always...), fit.kept...)
+	all := slices.Concat(fit.always, fit.kept)
 	slices.SortFunc(all, func(a, b *captureCandidate) int { return cmp.Compare(a.order, b.order) })
 	records := make([]storage.EvidenceRecord, len(all))
 	for i, candidate := range all {

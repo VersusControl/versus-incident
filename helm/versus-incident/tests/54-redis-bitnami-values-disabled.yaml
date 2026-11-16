@@ -1,0 +1,9 @@
+# Bitnami Redis values carried over while the bundled Redis is off: nothing
+# reads them, so the chart renders and deploys no Redis.
+redis:
+  enabled: false
+  architecture: standalone
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi

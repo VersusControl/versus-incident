@@ -1,0 +1,12 @@
+# A Bitnami tag kept on the official repository, as when only the repository
+# was changed back: the official image has no such tag, so it is refused.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: 8.0.3-debian-12-r1

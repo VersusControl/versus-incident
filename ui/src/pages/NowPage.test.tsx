@@ -124,6 +124,57 @@ describe("NowPage origin badges", () => {
   });
 });
 
+describe("NowPage notify cell", () => {
+  async function notifyRow(title: string): Promise<HTMLElement> {
+    const feed = await screen.findByRole("region", { name: /^Incident feed/ });
+    const cell = await within(feed).findByText(title);
+    return cell.closest<HTMLElement>("tr")!;
+  }
+
+  it("says nothing was sent when no channel was enabled", async () => {
+    setup([incident({ id: "none-row", title: "No channels row", notify_status: "none" })]);
+    renderPageAt();
+    const row = await notifyRow("No channels row");
+    expect(within(row).getByText("nothing sent")).toBeTruthy();
+  });
+
+  it("does not claim a delivery when sent names no channel", async () => {
+    setup([incident({ id: "sent-row", title: "Sent nowhere row", notify_status: "sent" })]);
+    renderPageAt();
+    const row = await notifyRow("Sent nowhere row");
+    expect(within(row).getByText("nothing sent")).toBeTruthy();
+    expect(within(row).queryByText("sent", { exact: true })).toBeNull();
+  });
+
+  it("counts the channels that received a sent alert", async () => {
+    setup([incident({
+      id: "slack-row",
+      title: "Delivered row",
+      notify_status: "sent",
+      channels_notified: ["slack", "email"],
+    })]);
+    renderPageAt();
+    const row = await notifyRow("Delivered row");
+    expect(within(row).getByText("2")).toBeTruthy();
+    expect(within(row).queryByText("nothing sent")).toBeNull();
+  });
+});
+
+describe("NowPage feed severity", () => {
+  it("shows the server-reported severity the Incidents list shows", async () => {
+    setup([
+      incident({ id: "crit-row", title: "Critical row", severity: "critical" }),
+      incident({ id: "warn-row", title: "Warning row", severity: "warning" }),
+    ]);
+    renderPageAt();
+    const feed = await screen.findByRole("region", { name: /^Incident feed/ });
+    const crit = (await within(feed).findByText("Critical row")).closest<HTMLElement>("tr")!;
+    const warn = within(feed).getByText("Warning row").closest<HTMLElement>("tr")!;
+    expect(within(crit).getByText("CRITICAL")).toBeTruthy();
+    expect(within(warn).getByText("WARN")).toBeTruthy();
+  });
+});
+
 describe("NowPage Agent pulse", () => {
   beforeEach(() => {
     setup();
@@ -306,5 +357,26 @@ describe("NowPage Agent pulse", () => {
     expect(within(pulse).getByRole("heading", { name: "Signal activity" })).toBeTruthy();
     expect(within(pulse).queryByRole("link", { name: /Logs|Metrics|Traces|Shadow|Detect/ })).toBeNull();
     expect(api.listBaselines).not.toHaveBeenCalled();
+  });
+});
+
+describe("NowPage without the agent", () => {
+  it("never asks for agent status while the agent is off or its config is unknown", async () => {
+    vi.mocked(api.status).mockClear();
+    let finish!: (value: Awaited<ReturnType<typeof api.getAgentConfig>>) => void;
+    vi.mocked(api.getAgentConfig).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    renderPageAt();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(api.status).not.toHaveBeenCalled();
+    await act(async () => { finish({ enable: false } as Awaited<ReturnType<typeof api.getAgentConfig>>); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(api.status).not.toHaveBeenCalled();
+  });
+
+  it("asks for agent status once the config says the agent is on", async () => {
+    vi.mocked(api.status).mockClear();
+    vi.mocked(api.getAgentConfig).mockResolvedValue({ enable: true } as Awaited<ReturnType<typeof api.getAgentConfig>>);
+    renderPageAt();
+    await vi.waitFor(() => expect(api.status).toHaveBeenCalled());
   });
 });

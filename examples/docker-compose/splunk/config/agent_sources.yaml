@@ -8,7 +8,7 @@ sources:
       # The example uses HTTP Basic with the default `admin` user.
       # In production, prefer a Splunk auth token (`token:` field).
       username: admin
-      password: ${SPLUNK_PASSWORD:-Changeme1!}
+      password: ${SPLUNK_PASSWORD}
       insecure_skip_verify: true   # self-signed splunkd cert
       search: 'search index=main'
       time_field: _time

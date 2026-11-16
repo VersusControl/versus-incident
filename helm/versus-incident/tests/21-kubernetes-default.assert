@@ -1,0 +1,16 @@
+mode: "in_cluster"
+replicas: 1
+image: "ghcr.io/versuscontrol/versus-incident:v[0-9]
+kind: ClusterRole
+name: versus-test-versus-incident-kubernetes-reader
+nonResourceURLs: \["/.well-known/openid-configuration", "/openid/v1/jwks"\]
+resources: \["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"\]
+apiGroups: \["gateway.networking.k8s.io"\]
+resources: \["applications", "rollouts"\]
+apiGroups: \["kustomize.toolkit.fluxcd.io"\]
+apiGroups: \["helm.toolkit.fluxcd.io"\]
+!^ +resources: .*"secrets"
+exclude_resources: \["secrets"\]
+- name: GATEWAY_SECRET_REQUIRED
+!optional: true
+debug_body: false

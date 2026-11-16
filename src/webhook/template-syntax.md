@@ -1,281 +1,254 @@
-# Template Syntax Guide
+# Template Syntax
 
-This document explains the template syntax (Go template syntax) used for create a custom alert template in Versus Incident.
+A template turns the JSON body of an alert into a channel message. Templates
+use Go template syntax: text is copied as-is, and anything inside `{{ }}` is
+filled in from the alert.
 
-## Basic Syntax
-
-### Access Data
-
-Access data fields using double curly braces and dot notation, for example, with the data:
+The examples on this page use this Alertmanager alert:
 
 ```json
 {
-  "Logs": "[ERROR] This is an error log from User Service that we can obtain using Fluent Bit.",
-  "ServiceName": "order-service",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "severity": "critical",
+        "instance": "checkout-api:8080",
+        "app.kubernetes.io/name": "checkout-api"
+      },
+      "annotations": {
+        "summary": "5xx error rate above 5% for 5 minutes",
+        "error_rate": 7.5
+      },
+      "startsAt": "2026-11-15T09:00:00Z"
+    }
+  ],
+  "commonLabels": { "alertname": "HighErrorRate", "severity": "critical" }
 }
 ```
 
-Example template:
-```
-*Error in {{ .ServiceName }}*
-{{ .Logs }}
-```
+## Read a field
 
-### Variables
-You can declare variables within a template using the {{ $variable := value }} syntax. Once declared, variables can be used throughout the template, for example:
+Start with a dot and follow the JSON keys:
 
-```
-{{ $owner := "Team Alpha" }}
-Owner: {{ $owner }}
+```text
+{{ .status }} · {{ .commonLabels.alertname }}
 ```
 
-Output:
-```
-Owner: Team Alpha
-```
+Renders: `firing · HighErrorRate`
 
-### Pipelines
-Pipelines allow you to chain together multiple actions or functions. The result of one action can be passed as input to another, for example:
+| To read | Write | Renders |
+| --- | --- | --- |
+| A nested field | `{{ .commonLabels.severity }}` | `critical` |
+| An item in a list | `{{ (index .alerts 0).labels.instance }}` | `checkout-api:8080` |
+| A key with `-`, `.` or `/` in it | `{{ index (index .alerts 0).labels "app.kubernetes.io/name" }}` | `checkout-api` |
+| A field that may be missing | `{{ default .commonLabels.team "unassigned" }}` | `unassigned` |
 
-**upper**: Converts a string to uppercase.
+A field that is not in the alert renders as `<no value>`. Use `default` or an
+`if` to show something better.
 
-```
-*{{ .ServiceName | upper }} Failure*
-```
+## Variables
 
-**lower**: Converts a string to lowercase.
+Store a value once and reuse it:
 
-```
-*{{ .ServiceName | lower }} Failure*
-```
-
-**title**: Converts a string to title case (first letter of each word capitalized).
-
-```
-*{{ .ServiceName | title }} Failure*
+```text
+{{ $first := index .alerts 0 }}
+{{ $first.labels.alertname }} on {{ $first.labels.instance }}
 ```
 
-**default**: Provides a default value if the input is empty.
+Renders: `HighErrorRate on checkout-api:8080`
 
-```
-*{{ .ServiceName | default "unknown-service" }} Failure*
-```
+A variable can be changed later with `=`:
 
-**slice**: Extracts a sub-slice from a slice or string.
-
-```
-{{ .Logs | slice 0 50 }}  // First 50 characters
+```text
+{{ $icon := "🔥" }}{{ if eq .status "resolved" }}{{ $icon = "✅" }}{{ end }}{{ $icon }} {{ upper .status }}
 ```
 
-**replace**: Replaces occurrences of a substring.
+Renders: `🔥 FIRING`
 
-```
-{{ .Logs | replace "error" "issue" }}
-```
+## Conditions
 
-**trimPrefix**: Trims a prefix from a string.
-
-```
-{{ .Logs | trimPrefix "prod-" }}
-```
-
-**trimSuffix**: Trims a suffix from a string.
-
-```
-{{ .Logs | trimSuffix "-service" }}
-```
-
-**len**: Returns the length
-
-```
-{{ .Logs | len }}  // Length of the message
-```
-
-**urlquery**: Escapes a string for use in a URL query.
-
-```
-uri /search?q={{ .Query | urlquery }}
-```
-
-**split**: splits a string into array using a separator.
-
-```
-{{ $parts := split "apple,banana,cherry" "," }}
-
-{{/* Iterate over split results */}}
-{{ range $parts }}
-  {{ . }}
+```text
+{{ if eq .commonLabels.severity "critical" }}🔴 Page now
+{{ else if eq .commonLabels.severity "warning" }}🟡 Check today
+{{ else }}ℹ️ FYI
 {{ end }}
 ```
 
-**You can chain multiple pipes together**:
+Renders: `🔴 Page now`
 
-```
-{{ .Logs | trim | lower | truncate 50 }}
-```
+| Test | Example | True when |
+| --- | --- | --- |
+| `eq`, `ne` | `eq .status "firing"` | The two values are equal (`ne`: not equal). |
+| `and` | `and .status .commonLabels.alertname` | Every value is set. |
+| `or` | `or .commonLabels.team "unassigned"` | Any value is set. As a value, `or` returns the first one that is set. |
+| `not` | `not .commonLabels.team` | The value is empty or missing. |
+| `contains` | `contains .status "fir"` | The first string contains the second. |
+| `regexMatch` | `regexMatch "(?i)5xx" (index .alerts 0).annotations.summary` | The regular expression matches the string. |
+| `gt`, `lt` | `gt (len .alerts) 1` | Greater or less than, for whole numbers such as `len` results, and for strings. |
+| `ge`, `le` | `ge (index .alerts 0).annotations.error_rate 5.0` | Greater or equal, less or equal, for numbers from the JSON. |
 
-## Control Structures
+Numbers in the alert JSON are decimals. Compare them with `ge` and `le`, and
+write the other side with a decimal point (`5.0`, not `5`). `gt`, `lt` and
+`eq` do not match a JSON number against a literal like `5`. To test a number
+for equality, compare it as text: `eq (toString .count) "5"`.
 
-### Conditionals
+## Loops
 
-The templates support conditional logic using if, else, and end keywords.
+`range` repeats its body for each item in a list. Inside, `.` is the current
+item:
 
-```
-{{ if .IsCritical }}
-🚨 CRITICAL ALERT 🚨
-{{ else }}
-⚠️ Warning Alert ⚠️
+```text
+{{ range .alerts }}
+• {{ .labels.alertname }} on {{ .labels.instance }}: {{ .annotations.summary }}
 {{ end }}
 ```
 
-and:
+Renders: `• HighErrorRate on checkout-api:8080: 5xx error rate above 5% for 5 minutes`
 
-```
-{{ and .Value1 .Value2 .Value3 }}
-```
+To get the position too, name both: `{{ range $i, $alert := .alerts }}`.
+`range` over an object gives each key and value:
 
-or:
-
-```
-{{ or .Value1 .Value2 "default" }}
+```text
+{{ range $key, $value := .commonLabels }}{{ $key }}={{ $value }} {{ end }}
 ```
 
-**Best Practices**
+Renders: `alertname=HighErrorRate severity=critical`
 
-Error Handling:
+## Whitespace and comments
 
+`{{-` trims the spaces and newlines before a tag, and `-}}` trims those after
+it. Use them to keep logic lines out of the message:
+
+```text
+{{- if eq .status "firing" -}}
+FIRING
+{{- end }}
 ```
-{{ If .Error }}
-  {{ .Details }}
-{{ else }}
-  No error details
+
+Renders `FIRING` with no blank lines around it.
+
+`{{/* … */}}` is a comment and renders nothing:
+
+```text
+{{/* Owner: platform team. Used by the checkout alerts. */}}
+```
+
+## Functions
+
+Call a function with its arguments after it, separated by spaces:
+
+```text
+{{ replace .commonLabels.alertname "Rate" " rate" }}
+```
+
+Renders: `HighError rate`
+
+A pipe `|` passes a value as the **last** argument. It reads well with
+one-argument functions, and with `format`:
+
+```text
+{{ .status | upper }} at {{ (index .alerts 0).startsAt | format "15:04" }}
+```
+
+Renders: `FIRING at 09:00`
+
+Most other functions take the text first, so call them directly instead of
+piping into them: `{{ trimPrefix .x "prod-" }}`, not `{{ .x | trimPrefix "prod-" }}`.
+
+### Text
+
+| Function | Example | Renders |
+| --- | --- | --- |
+| `upper` | `{{ upper .status }}` | `FIRING` |
+| `lower` | `{{ lower "CRITICAL" }}` | `critical` |
+| `title` | `{{ title "checkout api" }}` | `Checkout Api` |
+| `default` | `{{ default .commonLabels.team "unassigned" }}` | `unassigned` when `team` is missing or empty |
+| `toString` | `{{ toString (index .alerts 0).annotations.error_rate }}` | `7.5` |
+| `replace` (also `replaceAll`) | `{{ replace "aws.ec2" "aws." "" }}` | `ec2` |
+| `trimPrefix` | `{{ trimPrefix "prod-checkout" "prod-" }}` | `checkout` |
+| `trimSuffix` | `{{ trimSuffix "checkout-service" "-service" }}` | `checkout` |
+| `truncate` | `{{ truncate (index .alerts 0).annotations.summary 14 }}` | `5xx error rate` |
+| `slice` | `{{ slice .status 0 4 }}` | `firi` (characters 0 to 3) |
+| `split` | `{{ index (split "checkout-api:8080" ":") 0 }}` | `checkout-api` |
+| `join` | `{{ join (split "a,b,c" ",") " / " }}` | `a / b / c` |
+| `printf` | `{{ printf "%.1f%%" (index .alerts 0).annotations.error_rate }}` | `7.5%` |
+| `len` | `{{ len .alerts }}` | `1` (works on text, lists and objects) |
+| `urlquery` | `https://grafana.example.com/search?query={{ urlquery .commonLabels.alertname }}` | the name, escaped for a URL |
+| `escapeHTML` | `{{ escapeHTML "<5xx>" }}` | `&lt;5xx&gt;`, safe in a Telegram HTML message |
+
+`truncate` and `slice` count bytes, so they can cut an emoji or accented
+letter in half. If `slice` is given positions outside the text, it returns the
+whole text.
+
+### Time
+
+| Function | Example | Renders |
+| --- | --- | --- |
+| `formatTime` | `{{ formatTime (index .alerts 0).startsAt }}` | `2026-11-15 09:00:00` |
+| `format` | `{{ (index .alerts 0).startsAt \| format "Jan 2, 15:04 MST" }}` | `Nov 15, 09:00 UTC` |
+| `now` | `{{ now \| format "2006-01-02" }}` | today's date |
+
+`formatTime` reads RFC 3339 times like `2026-11-15T09:00:00Z`. `format` also
+reads the common forms `2006-01-02 15:04:05` and `2006-01-02`. Layouts are
+written with the reference time `Mon Jan 2 15:04:05 MST 2006`.
+
+### Lists, objects and numbers
+
+| Function | Example | Renders |
+| --- | --- | --- |
+| `index` | `{{ index .commonLabels "severity" }}` | `critical` |
+| `list`, `append` | `{{ $names := list }}{{ $names = append $names "api" }}` | builds a list |
+| `stringSlice` | `{{ join (stringSlice $names) ", " }}` | joins a built list: `api` |
+| `dict` | `{{ $icons := dict "critical" "🔴" "warning" "🟡" }}{{ index $icons .commonLabels.severity }}` | `🔴` |
+| `add` | `{{ add (len .alerts) 1 }}` | `2` |
+
+### Environment
+
+`{{ env "DEFAULT_RUNBOOK_URL" }}` reads an environment variable of the Versus
+container. The built-in templates use it for a default runbook link. Any
+variable is readable, so never print one that holds a secret.
+
+## Microsoft Teams templates
+
+Write Teams templates in Markdown. Versus turns the message into an Adaptive
+Card and sends it through your Power Automate workflow. Teams shows:
+
+| Markdown | Shows as |
+| --- | --- |
+| `#`, `##`, `###` at the start of a line | Headings |
+| A line that is all `**bold**` | A bold line |
+| `-` or `*` items, and `1.` items | Lists |
+| `[text](url)` | A link. The first link on a line opens when the line is clicked. |
+| A line with only ```` ``` ```` above and below the text | A code block |
+
+Put the code fences on their own lines. A fence on the same line as text
+drops that text.
+
+The first heading (or the first line, if there is no heading) becomes the
+notification summary, and a plain-text copy is sent for clients that cannot
+show cards. You do not add these yourself.
+
+````markdown
+# {{ .commonLabels.alertname }} is {{ upper .status }}
+
+**Severity**: {{ .commonLabels.severity }}
+
+{{ range .alerts -}}
+- {{ .labels.instance }}: {{ .annotations.summary }}
 {{ end }}
 ```
-
-Whitespace Control:
-
-```
-{{- if .Production }}  // Remove preceding whitespace
-PROD ALERT{{ end -}}   // Remove trailing whitespace
+{{ (index .alerts 0).annotations.summary }}
 ```
 
-Template Comments:
+[Open the dashboard](https://grafana.example.com/d/checkout)
+````
 
-```
-{{/* This is a hidden comment */}}
-```
+## Next steps
 
-Negates a boolean value:
-
-```
-{{ if not .IsCritical }}
-  This is not a critical issue.
-{{ end }}
-```
-
-Checks if two values are equal:
-
-```
-{{ if eq .Status "critical" }}
-  🚨 Critical Alert 🚨
-{{ end }}
-```
-
-Checks if two values are not equal:
-
-```
-{{ if ne .Env "production" }}
-  This is not a production environment.
-{{ end }}
-```
-
-Returns the length of a string, slice, array, or map:
-
-```
-{{ if gt (len .Errors) 0 }}
-  There are {{ len .Errors }} errors.
-{{ end }}
-```
-
-Checks if a string has a specific prefix:
-
-```
-{{ if .ServiceName | hasPrefix "prod-" }}
-  Production service!
-{{ end }}
-```
-
-Checks if a string has a specific suffix:
-
-```
-{{ if .ServiceName | hasSuffix "-service" }}
-  This is a service.
-{{ end }}
-```
-
-Checks if a message contains a specific strings:
-
-```
-{{ if contains .Logs "error" }}
-  The message contains error logs.
-{{ else }}
-  The message does NOT contain error.
-{{ end }}
-```
-
-### Loops
-
-Iterate over slices/arrays with range:
-
-```
-{{ range .ErrorStack }}
-- {{ . }}
-{{ end }}
-```
-
-## Microsoft Teams Templates
-
-Microsoft Teams templates support Markdown syntax, which is automatically converted to Adaptive Cards when sent to Teams. As of April 2025 (with the retirement of Office 365 Connectors), all Microsoft Teams integrations use Power Automate Workflows.
-
-### Supported Markdown Features
-
-Your template can include:
-
-- **Headings**: Use `#`, `##`, or `###` for different heading levels
-- **Bold Text**: Wrap text with double asterisks (`**bold**`)
-- **Code Blocks**: Use triple backticks to create code blocks
-- **Lists**: Create unordered lists with `-` or `*`, and ordered lists with numbers
-- **Links**: Use `[text](url)` to create clickable links
-
-### Automatic Summary and Text Fields
-
-Versus Incident now automatically handles two important fields for Microsoft Teams notifications:
-
-1. **Summary**: The system extracts a summary from your template's first heading (or first line if no heading exists) which appears in Teams notifications.
-2. **Text**: A plain text version of your message is automatically generated as a fallback for clients that don't support Adaptive Cards.
-
-You don't need to add these fields manually - the system handles this for you to ensure proper display in Microsoft Teams.
-
-### Example Template
-
-Here's a complete example for Microsoft Teams:
-
-```markdown
-# Incident Alert: {{.ServiceName}}
-
-### Error Information
-**Time**: {{.Timestamp}}
-**Severity**: {{.Severity}}
-
-## Error Details
-```{{.Logs}}```
-
-## Action Required
-1. Check system status
-2. Review logs in monitoring dashboard
-3. Escalate to on-call if needed
-
-[View Details](https://your-dashboard/incidents/{{.IncidentID}})
-```
-
-This will be converted to an Adaptive Card with proper formatting in Microsoft Teams, with headings, code blocks, formatted lists, and clickable links.
+- [Advanced Template Tips](./advanced-template-tips.md): one template for
+  several tools, and severity-based formatting.
+- [Send Alerts from Your Tools](./send-alerts.md): where templates are set and
+  how to see the payload your tool sends.

@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"sort"
 	"strings"
@@ -42,6 +43,11 @@ type GitOpsAppPage struct {
 	// match, and a non-zero Limit marks Total as present.
 	Total int `json:"total,omitempty"`
 	Limit int `json:"limit,omitempty"`
+	// Access is "not_readable" when GitOps APIs are installed but this
+	// identity may list none of them, so an empty list is never read as "no
+	// applications". AccessMessage says so in a sentence.
+	Access        string `json:"access,omitempty"`
+	AccessMessage string `json:"access_message,omitempty"`
 	// resume mints cursors inside the page for callers that show fewer rows.
 	resume snapshotResume
 }
@@ -77,6 +83,24 @@ type RolloutPage struct {
 	Next      string           `json:"next,omitempty"`
 	Truncated bool             `json:"truncated"`
 	Partial   []PartialFailure `json:"partial_failures,omitempty"`
+	// Access is "not_readable" when Argo Rollouts is installed but this
+	// identity may not list Rollouts.
+	Access        string `json:"access,omitempty"`
+	AccessMessage string `json:"access_message,omitempty"`
+}
+
+// AccessNotReadable marks a list of an installed API this identity may not
+// list, so its empty answer is never read as "none exist".
+const AccessNotReadable = "not_readable"
+
+// onlyDenied reports partial failures that are all permission denials.
+func onlyDenied(failures []PartialFailure) bool {
+	for _, failure := range failures {
+		if failure.Class != "forbidden" {
+			return false
+		}
+	}
+	return len(failures) > 0
 }
 
 // GitOpsApps lists only discovered GitOps APIs and safely projected status.
@@ -118,6 +142,9 @@ func (service *Service) GitOpsApps(ctx context.Context, options GitOpsAppOptions
 	}
 	if !result.Available {
 		result.Reason = "GitOps APIs are not discovered"
+	}
+	if result.Available && len(result.Items) == 0 && onlyDenied(result.Partial) {
+		result.Access, result.AccessMessage = AccessNotReadable, "GitOps applications are installed but not readable with this connector's permissions."
 	}
 	sort.Slice(result.Items, func(i, j int) bool {
 		left, right := gitOpsStatusRank(result.Items[i]), gitOpsStatusRank(result.Items[j])
@@ -204,14 +231,21 @@ func (service *Service) Rollouts(ctx context.Context, options RolloutListOptions
 			continue
 		}
 		result.Available = true
+		rolloutsDenied := func() RolloutPage {
+			result.Access, result.AccessMessage = AccessNotReadable, "Argo Rollouts is installed but Rollouts are not readable with this connector's permissions."
+			return result
+		}
 		if !definition.Available {
 			result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Class: "forbidden"})
-			return result, nil
+			return rolloutsDenied(), nil
 		}
 		page, listErr := service.List(ctx, ListOptions{ResourceID: definition.ID, Namespace: options.Namespace, Limit: options.Limit, Continue: options.Cursor})
 		if listErr != nil {
 			result.Partial = append(result.Partial, PartialFailure{ResourceID: definition.ID, Class: errorClass(listErr)})
 			result.Truncated = true
+			if errors.Is(listErr, ErrForbidden) {
+				return rolloutsDenied(), nil
+			}
 			return result, nil
 		}
 		for _, resource := range page.Items {

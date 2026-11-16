@@ -5,7 +5,34 @@ on:
     tags: [ "v*" ]
 
 jobs:
+  # The release tag must be "v" + the chart appVersion (and the chart version),
+  # because the chart pulls the image tagged "v<appVersion>" by default. A
+  # mismatch would publish a chart pointing at another image. The one-file
+  # manifests in examples/kubernetes/ pull the image without a tag.
+  chart-version:
+    name: Chart version matches tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Compare tag with Chart.yaml
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          chart=helm/versus-incident/Chart.yaml
+          version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$chart")
+          app_version=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$chart")
+          if [ "$TAG" != "v$app_version" ] || [ "$version" != "$app_version" ]; then
+            echo "::error file=$chart::Tag $TAG needs Chart.yaml version and appVersion ${TAG#v} (found version $version, appVersion $app_version)"
+            exit 1
+          fi
+          echo "Tag $TAG matches Chart.yaml version and appVersion"
+
   build-and-push:
+    needs: [chart-version]
     runs-on: ubuntu-latest
     permissions:
       contents: read

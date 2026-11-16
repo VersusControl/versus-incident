@@ -1,0 +1,159 @@
+{{- include "versus-incident.validateRedis" . -}}
+{{- $redis := .Values.redis | default dict }}
+{{- if $redis.enabled }}
+{{- $auth := $redis.auth | default dict }}
+{{- $persistence := $redis.persistence | default dict }}
+{{- $authEnabled := include "versus-incident.redisAuthEnabled" . }}
+{{- $persistenceEnabled := include "versus-incident.redisPersistenceEnabled" . }}
+{{- if and $authEnabled (not $auth.existingSecret) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "versus-incident.redisFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "versus-incident.redisLabels" . | nindent 4 }}
+type: Opaque
+data:
+  redis-password: {{ include "versus-incident.redisPasswordData" . | quote }}
+---
+{{- end }}
+{{- if and $persistenceEnabled (not $persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "versus-incident.redisFullname" . }}-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "versus-incident.redisLabels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ $persistence.size | default "1Gi" }}
+  {{- with $persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "versus-incident.redisFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "versus-incident.redisLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+  selector:
+    {{- include "versus-incident.redisSelectorLabels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "versus-incident.redisFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "versus-incident.redisLabels" . | nindent 4 }}
+spec:
+  replicas: 1
+  # One Redis on one volume: stop the old pod before starting the new one.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "versus-incident.redisSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "versus-incident.redisSelectorLabels" . | nindent 8 }}
+      annotations:
+        # Restart with the Versus pods whenever the password changes.
+        checksum/redis-password: {{ include "versus-incident.redisPasswordChecksum" . }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $redis.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redis
+          image: {{ include "versus-incident.redisImage" . | quote }}
+          imagePullPolicy: {{ include "versus-incident.redisImagePullPolicy" . }}
+          {{- with $redis.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # The password goes into a config file on a private volume, never
+          # into the command line, where any process listing would show it.
+          # Inside double quotes redis.conf reads \\ and \" as escapes, so
+          # those two characters are escaped; a line break cannot be written
+          # on one config line and is refused.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              umask 077
+              : > /etc/redis-run/redis.conf
+              if [ -n "${REDIS_PASSWORD:-}" ]; then
+                if [ "$(printf '%s' "$REDIS_PASSWORD" | wc -l)" -ne 0 ]; then
+                  echo "The Redis password must not contain a line break." >&2
+                  exit 1
+                fi
+                escaped="$(printf '%s' "$REDIS_PASSWORD" | sed 's/[\\"]/\\&/g')"
+                printf 'requirepass "%s"\n' "$escaped" >> /etc/redis-run/redis.conf
+                unset escaped
+              fi
+              unset REDIS_PASSWORD
+              exec redis-server /etc/redis-run/redis.conf --dir /data --appendonly {{ if $persistenceEnabled }}yes{{ else }}no{{ end }} --save ""
+          {{- if $authEnabled }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.redisSecretName" . }}
+                  key: {{ include "versus-incident.redisSecretKey" . }}
+            {{- include "versus-incident.redisCliAuthEnv" . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "redis-cli ping | grep -q PONG"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "redis-cli ping | grep -q PONG"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+          {{- with $redis.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: run
+              mountPath: /etc/redis-run
+      volumes:
+        - name: data
+          {{- if $persistenceEnabled }}
+          persistentVolumeClaim:
+            claimName: {{ $persistence.existingClaim | default (printf "%s-data" (include "versus-incident.redisFullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: run
+          emptyDir:
+            medium: Memory
+{{- end }}

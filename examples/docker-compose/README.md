@@ -1,33 +1,38 @@
 # Docker Compose examples
 
 Each subfolder is a self-contained example for one AI-agent data
-source or backend. Most start Versus and Redis with a local
-`agent_sources.yaml`; the metrics example starts only backing services for a
-separately configured Enterprise agent.
+source or backend. Each starts Versus and Redis with a local
+`agent_sources.yaml`. For metrics and traces sources (_Enterprise_), see
+[metrics-source/](../metrics-source/).
 
 | Example | Brings up | When to pick |
 |---|---|---|
 | [file/](./file/) | versus + redis | Quickest start; tail a local log file |
 | [loki/](./loki/) | versus + redis + **loki** + **grafana** | Test the `loki` source against a real Loki |
-| [metrics/](./metrics/) | prometheus + **pushgateway** (optional Tempo overlay; no Versus container) | Host-run generators push synthetic series and optional traces. A separately configured, licensed Enterprise `prometheus` / `traces` source can detect anomalies and provide source-bound `discover_metrics` / `read_metric_series` and `discover_trace_fields` / `read_trace_spans` to Chat and Analyze. OSS has no metric/trace read tools. |
 | [elasticsearch/](./elasticsearch/) | versus + redis + **elasticsearch** + **kibana** | Test the `elasticsearch` source against a real ES |
-| [cloudwatch/](./cloudwatch/) | versus + redis | Test the `cloudwatchlogs` source against your AWS account |
 | [graylog/](./graylog/) | versus + redis + **graylog** + mongodb + opensearch | Test the `graylog` source against a real Graylog |
 | [splunk/](./splunk/) | versus + redis + **splunk** | Test the `splunk` source against a real Splunk Enterprise |
 | [signoz/](./signoz/) | versus + redis + **signoz** + clickhouse + zookeeper + otel-collector | Test the `signoz` source against a real SigNoz. **Heavy — needs ≥4 GB of Docker memory.** |
 
 ## Workflow per example
 
-For the metrics backend-only example, follow its
-[own run instructions](./metrics/README.md) instead; there is no `versus`
-service to tail or recreate in that Compose stack.
+You need Git and Docker with Docker Compose v2; the traffic generator also
+needs Python 3. Clone the repository and go into it:
 
 ```bash
-cd <example>
-docker compose up -d              # all settings have sane defaults
-docker compose logs -f versus
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command in this README and in each example's README runs from that
+`versus-incident` folder, the repository root. Point Compose at the example
+with `-f`, here the Loki one:
+
+```bash
+docker compose -f examples/docker-compose/loki/docker-compose.yml up -d     # all settings have sane defaults
+docker compose -f examples/docker-compose/loki/docker-compose.yml logs -f versus
 # ... interact ...
-docker compose down -v            # cleanup, drops volumes
+docker compose -f examples/docker-compose/loki/docker-compose.yml down -v   # cleanup, drops volumes
 ```
 
 Every value is set via `${VAR:-default}` in the compose file, so
@@ -41,12 +46,9 @@ export GATEWAY_SECRET=my-real-secret
 export SLACK_ENABLE=true
 export SLACK_TOKEN=xoxb-...
 export SLACK_CHANNEL_ID=C01234567
-docker compose up -d --force-recreate versus
+docker compose -f examples/docker-compose/loki/docker-compose.yml \
+  up -d --force-recreate versus
 ```
-
-CloudWatch additionally requires `CW_LOG_GROUP_NAME` and AWS
-credentials — see [cloudwatch/README.md](./cloudwatch/) for the
-list.
 
 Examples that start Versus expose it on `http://localhost:3000`. The Loki and
 Elasticsearch examples additionally expose their respective UIs
@@ -64,8 +66,9 @@ backend. The same template / `--spike` / `--scenario` flags work
 across all four targets — only the destination flag changes.
 
 ```bash
-# from the repo root, with the file stack running:
-scripts/run_noisy_logs.sh                                # tail to logs/app.log
+# with the matching stack running:
+OUTPUT=examples/docker-compose/file/local/logs/app.log \
+  scripts/run_noisy_logs.sh                              # append to the file example's log
 scripts/run_noisy_logs.sh --target loki                  # push to local Loki
 scripts/run_noisy_logs.sh --target elasticsearch         # push to local ES
 TARGET=cloudwatch CW_LOG_GROUP_NAME=/aws/lambda/foo \
@@ -86,7 +89,8 @@ variable and fill in tokens, then restart just Versus:
 
 ```bash
 SLACK_ENABLE=true SLACK_TOKEN=xoxb-... SLACK_CHANNEL_ID=C0123 \
-  docker compose up -d --force-recreate versus
+  docker compose -f examples/docker-compose/loki/docker-compose.yml \
+  up -d --force-recreate versus
 ```
 
 If you turn channels on, copy the corresponding `*_message.tmpl`

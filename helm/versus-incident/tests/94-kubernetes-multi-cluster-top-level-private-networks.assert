@@ -1,0 +1,3 @@
+# EXPECT_FAIL: the setting belongs under each cluster; no value is echoed.
+configure each cluster under clusters
+!sensitive-value

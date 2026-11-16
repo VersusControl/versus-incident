@@ -1,0 +1,3 @@
+# EXPECT_FAIL: a registry-prefixed Bitnami image is refused too.
+redis.image.repository="docker.io/bitnami/redis" is a Bitnami image
+--set redis.image=null

@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="350" viewBox="0 0 760 350" style="max-width:100%;height:auto" role="img" aria-label="On the left, three raw checkout-api lines, payment declined for order 81723, 81731 and 81802 with card_expired, at three different times, with the time and the order ID highlighted as the only parts that change; on the right, the Agent Learning Logs rows built from them: after these three lines the pattern payment declined for order star (card_expired) has a count of 3 and the verdict Still learning 3 of 100; after a day of training the same pattern has a count of 129,600, a normal rate of about one and a half per second, and the verdict Known">
+  <title>Training turns repeating lines into patterns</title>
+  <desc>Left: three raw checkout-api lines that differ only by order ID and time; right: the Logs page row for the learned pattern, first Still learning with a count of 3, then Known after a day with a normal rate of about one and a half per second</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f10{font-size:10px}.f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .hl{fill:#BACFE3}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="350" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">Training turns repeating lines into patterns</text>
+  <text x="24" y="64" class="f13 sec">Lines that differ only by an ID or a time become one pattern with a normal rate</text>
+
+  <!-- panels -->
+  <rect x="20" y="84" width="340" height="246" rx="12" fill="#F2F5F8"/>
+  <rect x="400" y="84" width="340" height="246" rx="12" fill="#FFFFFF" stroke="#BACFE3" stroke-width="2"/>
+
+  <!-- LEFT: raw lines -->
+  <text x="36" y="108" class="zone">RAW LINES FROM CHECKOUT-API</text>
+  <rect x="36" y="120" width="308" height="130" rx="8" fill="#F7F9FB" stroke="#D8E0E8"/>
+  <rect class="hl" x="44" y="131" width="52" height="12" rx="2"/>
+  <rect class="hl" x="206" y="147" width="34" height="12" rx="2"/>
+  <rect class="hl" x="44" y="171" width="52" height="12" rx="2"/>
+  <rect class="hl" x="206" y="187" width="34" height="12" rx="2"/>
+  <rect class="hl" x="44" y="211" width="52" height="12" rx="2"/>
+  <rect class="hl" x="206" y="227" width="34" height="12" rx="2"/>
+  <text x="46" y="140" class="c f10">14:02:07</text><text x="108" y="140" class="c f10 sec">checkout-api</text>
+  <text x="46" y="156" class="c f10">payment declined for order 81723 (card_expired)</text>
+  <text x="46" y="180" class="c f10">14:02:09</text><text x="108" y="180" class="c f10 sec">checkout-api</text>
+  <text x="46" y="196" class="c f10">payment declined for order 81731 (card_expired)</text>
+  <text x="46" y="220" class="c f10">14:02:12</text><text x="108" y="220" class="c f10 sec">checkout-api</text>
+  <text x="46" y="236" class="c f10">payment declined for order 81802 (card_expired)</text>
+  <text x="36" y="276" class="f13">Only the order ID and the time change</text>
+  <text x="36" y="296" class="f12 sec">Highlighted: the parts the agent blanks out</text>
+
+  <!-- RIGHT: Logs page rows -->
+  <text x="416" y="108" class="zone">AGENT LEARNING: LOGS</text>
+
+  <text x="416" y="132" class="f12 sec">After these 3 lines</text>
+  <rect x="416" y="142" width="308" height="66" rx="10" fill="#FFFFFF" stroke="#C3CED8"/>
+  <text x="428" y="162" class="f12 b nm">checkout-api</text>
+  <rect x="562" y="149" width="150" height="18" rx="9" fill="#F2F5F8" stroke="#9AA9B6"/>
+  <text x="637" y="162" class="f11 nm mid">Still learning 3 / 100</text>
+  <rect class="hl" x="588" y="173" width="22" height="12" rx="2"/>
+  <text x="428" y="182" class="c f10">payment declined for order &lt;*&gt; (card_expired)</text>
+  <text x="428" y="200" class="f11 sec">Count 3</text>
+
+  <text x="416" y="230" class="f12 sec">After a day of training</text>
+  <rect x="416" y="240" width="308" height="66" rx="10" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <text x="428" y="260" class="f12 b nm">checkout-api</text>
+  <rect x="662" y="247" width="50" height="18" rx="9" fill="#BACFE3" stroke="#12222F"/>
+  <text x="687" y="260" class="f11 b nm mid">Known</text>
+  <rect class="hl" x="588" y="271" width="22" height="12" rx="2"/>
+  <text x="428" y="280" class="c f10">payment declined for order &lt;*&gt; (card_expired)</text>
+  <text x="428" y="298" class="f11 sec">Count 129,600</text>
+  <text x="540" y="298" class="f11 b nm">Normal ≈ 1.5/s</text>
+
+  <!-- flow -->
+  <path class="flow" d="M366 207H393" marker-end="url(#a)"/>
+</svg>

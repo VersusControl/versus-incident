@@ -1,0 +1,12 @@
+groups:
+  - name: quickstart
+    rules:
+      # Always true, so it fires about 30 seconds after Prometheus starts.
+      - alert: QuickstartDemoAlert
+        expr: vector(1) > 0
+        labels:
+          severity: warning
+          instance: demo-host:9100
+        annotations:
+          summary: Demo alert from the quickstart Prometheus rule
+          description: This rule always fires. Stop it with docker compose --profile alertmanager stop prometheus.

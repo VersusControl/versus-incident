@@ -176,6 +176,74 @@ func TestNativeDeploymentOmittedZeroAvailability(t *testing.T) {
 	}
 }
 
+func TestDeploymentStartingWithinProgressDeadlineIsNotBroken(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	at := func(offset time.Duration) string { return now.Add(offset).Format(time.RFC3339Nano) }
+	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)
+	project := func(kind string, raw map[string]any) kubeindex.Record {
+		raw["kind"] = kind
+		projected := service.projectResource(ResourceDefinition{Kind: kind}, raw)
+		encoded, _ := json.Marshal(projected)
+		if err := json.Unmarshal(encoded, &projected); err != nil {
+			t.Fatal(err)
+		}
+		return indexRecord(projected)
+	}
+	deployment := func(replicas, available float64, reason string) kubeindex.Record {
+		progressing := map[string]any{"type": "Progressing", "status": "True", "reason": reason}
+		if reason == "ProgressDeadlineExceeded" {
+			progressing["status"] = "False"
+		}
+		status := map[string]any{"replicas": replicas, "updatedReplicas": replicas, "availableReplicas": available, "unavailableReplicas": replicas - available, "conditions": []any{map[string]any{"type": "Available", "status": "False", "reason": "MinimumReplicasUnavailable"}, progressing}}
+		return project("Deployment", map[string]any{"apiVersion": "apps/v1", "metadata": map[string]any{"name": "app", "namespace": "ops", "uid": "root"}, "spec": map[string]any{"replicas": replicas}, "status": status})
+	}
+	replicaSet := project("ReplicaSet", map[string]any{"apiVersion": "apps/v1", "metadata": map[string]any{"name": "app-1", "namespace": "ops", "uid": "rs", "ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "name": "app", "uid": "root", "controller": true}}}})
+	pod := func(name string, ready bool, readyChangedAt time.Duration, container map[string]any) kubeindex.Record {
+		readyStatus := "False"
+		if ready {
+			readyStatus = "True"
+		}
+		container["name"] = "app"
+		container["ready"] = ready
+		return project("Pod", map[string]any{"metadata": map[string]any{"name": name, "namespace": "ops", "uid": name, "creationTimestamp": at(-90 * time.Second), "ownerReferences": []any{map[string]any{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "app-1", "uid": "rs", "controller": true}}}, "status": map[string]any{"phase": "Running", "conditions": []any{map[string]any{"type": "Ready", "status": readyStatus, "lastTransitionTime": at(readyChangedAt)}}, "containerStatuses": []any{container}}})
+	}
+	running := func(startedAt time.Duration, restarts float64) map[string]any {
+		return map[string]any{"restartCount": restarts, "state": map[string]any{"running": map[string]any{"startedAt": at(startedAt)}}}
+	}
+	healthy := pod("app-ok", true, -60*time.Second, running(-80*time.Second, 0))
+	crashed := func(name string) kubeindex.Record {
+		container := running(-10*time.Second, 4)
+		container["lastState"] = map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": float64(1), "startedAt": at(-40 * time.Second), "finishedAt": at(-15 * time.Second)}}
+		return pod(name, false, -15*time.Second, container)
+	}
+	for _, test := range []struct {
+		name     string
+		records  []kubeindex.Record
+		wantRule string
+	}{
+		{"first start before readiness", []kubeindex.Record{deployment(1, 0, "NewReplicaSetCreated"), replicaSet, pod("app-new", false, -20*time.Second, running(-18*time.Second, 0))}, ""},
+		{"first start creating container", []kubeindex.Record{deployment(1, 0, "ReplicaSetUpdated"), replicaSet, pod("app-new", false, -5*time.Second, map[string]any{"restartCount": float64(0), "state": map[string]any{"waiting": map[string]any{"reason": "ContainerCreating"}}})}, ""},
+		{"first start without pods listed", []kubeindex.Record{deployment(1, 0, "FoundNewReplicaSet")}, ""},
+		{"crash loop between restarts", []kubeindex.Record{deployment(3, 1, "ReplicaSetUpdated"), replicaSet, healthy, crashed("app-a"), crashed("app-b")}, "workload.unavailable"},
+		{"readiness flap", []kubeindex.Record{deployment(1, 0, "ReplicaSetUpdated"), replicaSet, pod("app-flap", false, -10*time.Second, running(-80*time.Second, 0))}, "workload.unavailable"},
+		{"rollout complete then pods lost", []kubeindex.Record{deployment(1, 0, "NewReplicaSetAvailable")}, "workload.unavailable"},
+		{"progress deadline exceeded", []kubeindex.Record{deployment(1, 0, "ProgressDeadlineExceeded")}, "workload.rollout_stalled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			items := kubebreaks.Classify(test.records, now)
+			if test.wantRule == "" {
+				if len(items) != 0 {
+					t.Fatalf("starting rollout reported broken: %+v", items)
+				}
+				return
+			}
+			if len(items) != 1 || items[0].Root.UID != "root" || items[0].Rule != test.wantRule {
+				t.Fatalf("broken roots = %+v, want one %s on the Deployment", items, test.wantRule)
+			}
+		})
+	}
+}
+
 func TestNativeFailedJobPodCurrentTerminationBeforeReady(t *testing.T) {
 	now := time.Date(2026, 10, 16, 8, 3, 0, 0, time.UTC)
 	service := NewService(nil, Scope{ClusterID: "cluster"}, 0)

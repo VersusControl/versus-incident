@@ -771,8 +771,9 @@ function Field({
 // a configured IdP; the built-in default admin stays available as a break-glass
 // account, and the gateway secret is OSS machine/data-plane only (never a human
 // login on a licensed binary). With SSO enforced, "require MFA" is the LIVE
-// multi-factor gate — it rejects any SSO login the IdP did not report as
-// multi-factor across the privileged surfaces. It reads/writes
+// multi-factor gate. Sign-in is never refused: a session the IdP did not report
+// as multi-factor keeps its role but is denied privileged actions, and the
+// built-in admin is exempt. It reads/writes
 // /enterprise/api/sso/:org/policy over the SSO session cookie, authorized by the
 // caller's RBAC role (sso:manage), the same as the connections list. Mounted
 // only when at least one IdP is enabled, so the server's `sso_not_configured`
@@ -871,9 +872,11 @@ function SSOEnforcementControl({
               Also require multi-factor sign-in (MFA)
             </span>
             <span className="mt-0.5 block text-2xs text-ink-400">
-              Only IdP logins reported as multi-factor (via the{" "}
-              <span className="font-mono text-ink-300">amr</span> claim) are
-              accepted.
+              Everyone can still sign in. Sessions the IdP does not report as
+              multi-factor (via the{" "}
+              <span className="font-mono text-ink-300">amr</span> claim) keep
+              their role but cannot perform privileged actions. The
+              built-in admin is exempt.
             </span>
           </span>
         </label>

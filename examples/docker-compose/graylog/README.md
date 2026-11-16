@@ -1,5 +1,16 @@
 # Graylog-source example
 
+You need Git and Docker with Docker Compose v2; the traffic generator below
+also needs Python 3. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command in this README runs from that `versus-incident` folder, the
+repository root.
+
 Versus + Redis + Graylog 5 + MongoDB + OpenSearch. The agent ingests
 through Graylog's `search/universal/absolute` REST endpoint.
 
@@ -12,51 +23,55 @@ through Graylog's `search/universal/absolute` REST endpoint.
 |---|---|
 | versus-incident | `3000` |
 | graylog (web + REST) | `9000` |
-| graylog GELF UDP input (after setup) | `12201/udp` |
+| graylog GELF UDP input (created by `graylog-init`) | `12201/udp` |
 | mongodb / opensearch | (internal) |
 | redis | (internal) |
 
 ## Run
 
 ```bash
-docker compose up -d
+docker compose -f examples/docker-compose/graylog/docker-compose.yml up -d
 ```
 
 Wait ~60s for Graylog to finish bootstrap, then sign in at
-<http://localhost:9000> with `admin` / `admin` (or whatever you set
-in `GRAYLOG_PASSWORD`).
+<http://localhost:9000> with `admin` / `admin`.
 
-The default password ships with this example as the SHA-256 of
-`admin`. Override both values before any non-throwaway use:
+Graylog's login comes from `GRAYLOG_ROOT_PASSWORD_SHA2` in
+`docker-compose.yml`, which ships as the SHA-256 of `admin`.
+`GRAYLOG_PASSWORD` only tells Versus and `graylog-init` which password
+to use. Setting it alone does not change the login, and both then get
+401 from Graylog. To use another password, change both together:
 
 ```bash
 export GRAYLOG_PASSWORD=my-real-password
-# regenerate the hash and edit docker-compose.yml:
-echo -n my-real-password | shasum -a 256
-docker compose up -d --force-recreate graylog versus
+# Put this hash in GRAYLOG_ROOT_PASSWORD_SHA2 in
+# examples/docker-compose/graylog/docker-compose.yml:
+printf '%s' "$GRAYLOG_PASSWORD" | shasum -a 256 | cut -d' ' -f1
+docker compose -f examples/docker-compose/graylog/docker-compose.yml \
+  up -d --force-recreate graylog graylog-init versus
 ```
 
 ## Generate test traffic
 
-Graylog ships without any inputs enabled. From the web UI:
-
-1. *System* → *Inputs* → select *GELF UDP* → *Launch new input* →
-   pick the `graylog` node → save with defaults (UDP port `12201`).
-
-Then push synthetic logs from your host using the bundled generator
-(run from the repo root):
+Graylog ships without any inputs enabled. The one-shot `graylog-init`
+service creates a global *GELF UDP* input on port `12201` once Graylog
+is healthy (and skips it if one already exists). Check it ran:
 
 ```bash
-# 500 mixed lines once into Graylog:
-python3 scripts/generate_noisy_logs.py --target graylog --lines 500
+docker compose -f examples/docker-compose/graylog/docker-compose.yml logs graylog-init
+```
 
-# Continuous — 20 lines every 5s, Ctrl+C to stop:
+Then push synthetic logs from your host using the bundled generator:
+
+```bash
+# Training traffic — 20 lines every 5s, stamped with the current time.
+# Leave it running while the agent learns its baseline; Ctrl+C to stop:
 scripts/run_noisy_logs.sh --target graylog
 
-# Spike (test the spike detector):
+# Spike (test the spike detector) — one burst, then exits:
 scripts/run_noisy_logs.sh --target graylog --spike db-conn-refused --spike-burst 80
 
-# Curated incident cluster (test detect mode):
+# Curated incident cluster (test detect mode) — one 60-line burst, then exits:
 scripts/run_noisy_logs.sh --target graylog --scenario db-outage
 ```
 
@@ -95,7 +110,7 @@ graylog/
 ## Cleanup
 
 ```bash
-docker compose down -v
+docker compose -f examples/docker-compose/graylog/docker-compose.yml down -v
 ```
 
 ## Reference

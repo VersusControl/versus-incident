@@ -52,7 +52,7 @@ server-side request forgery.
 | `POST /api/incidents` (the generic webhook) | **Unaffected.** This is where hand-crafted and test payloads belong. |
 
 If you had scripts or synthetic checks poking `/sns`, point them at
-[`/api/incidents`](../webhook/getting-started.md) instead.
+[`/api/incidents`](../webhook/send-alerts.md) instead.
 
 ### 2. `queue.sns.topic_arn` is now required when SNS is enabled
 

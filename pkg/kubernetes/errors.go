@@ -42,6 +42,92 @@ var ErrConnectorNotConfigured = errors.New("kubernetes: connector not configured
 // caller sees names no identity, path, or endpoint.
 var ErrConnectorCredentialUnresolved = errors.New("kubernetes: connector credential cannot be resolved")
 
+// connectorSetupError is a connector configuration fault found while the
+// connector is built. Its text is a fixed sentence written in this package; it
+// never carries a credential, a token, a file path or file contents, so it is
+// safe to show to an operator together with the action that fixes it.
+type connectorSetupError struct {
+	text, action string
+}
+
+func (err *connectorSetupError) Error() string { return "kubernetes: " + err.text }
+
+// setupError returns a connector configuration fault with the action that
+// fixes it.
+func setupError(text, action string) error {
+	return &connectorSetupError{text: text, action: action}
+}
+
+// NewSetupError returns a connector configuration fault for a caller that
+// builds the connector. The text and action must be fixed sentences: they are
+// shown to operators as written.
+func NewSetupError(text, action string) error { return setupError(text, action) }
+
+// connectorBuildError reports a cluster whose connector could not be built at
+// start. It reads as an unavailable cluster to every caller that only tests for
+// one, and keeps the build fault so the answer can say what to change. The
+// fault itself is never unwrapped: a build failure is a state of this server,
+// not a bad request.
+type connectorBuildError struct {
+	cause error
+}
+
+func (err *connectorBuildError) Error() string { return "kubernetes: connector could not be built" }
+
+func (err *connectorBuildError) Is(target error) bool { return target == ErrClusterUnavailable }
+
+// connectorBuildFailure wraps a connector build fault, or returns nil.
+func connectorBuildFailure(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &connectorBuildError{cause: err}
+}
+
+// endpointRefusedError reports an API-server address the network policy
+// refused, and the setting that would allow it. The address is the one the
+// operator configured or the endpoint resolved to; nothing else is carried.
+type endpointRefusedError struct {
+	address net.IP
+	reason  string
+	setting string
+}
+
+func (err *endpointRefusedError) Error() string {
+	return "kubernetes: endpoint address " + err.address.String() + " refused (" + err.reason + ")"
+}
+
+func (err *endpointRefusedError) Unwrap() error { return ErrInvalidEndpoint }
+
+func (err *endpointRefusedError) detail() ErrorDetail {
+	address := err.address.String()
+	message := "Versus refused the Kubernetes API address " + address + " because it is " + err.reason + "."
+	action := "This address is never allowed. Configure an endpoint that resolves to a routable API-server address."
+	switch err.setting {
+	case "allow_loopback":
+		action = "Set connectors.kubernetes.allow_loopback: true to allow it, then restart Versus."
+	case "allow_private_networks":
+		action = "Set connectors.kubernetes.allow_private_networks: true, or add a CIDR that contains " + address + " to connectors.kubernetes.endpoint_cidrs, then restart Versus."
+	}
+	return ErrorDetail{Code: "connector_endpoint_refused", Message: message, Action: action, Retryable: false}
+}
+
+// HelmSecretAccessDocsURL is the docs section that explains why listing Helm
+// releases needs list access to Secrets.
+const HelmSecretAccessDocsURL = "https://docs.versusincident.com/#/agent/kubernetes/configuration?id=helm-releases-need-secret-access"
+
+// HelmAccessNeedsSecretList marks a Helm release answer that could not be read
+// because the connector identity may not list Secrets.
+const HelmAccessNeedsSecretList = "needs_secret_list"
+
+// helmSecretAccessMessage is the sentence shown in place of an empty release
+// list when Secrets cannot be listed.
+const helmSecretAccessMessage = "Helm releases need list access to Secrets. Versus reads only their labels, never their contents."
+
+// errHelmNeedsSecretList reports a Helm release read refused because the
+// identity cannot list Secrets, which is where Helm stores its releases.
+var errHelmNeedsSecretList = errors.Join(errors.New("kubernetes: helm releases need list access to secrets"), ErrForbidden)
+
 const (
 	// inventoryFreshness is how old the newest listing of a kind may be before
 	// a read that depends on it waits for the next cycle.
@@ -364,7 +450,15 @@ func DiagnoseError(err error) ErrorDetail {
 	var throttled *ErrThrottled
 	var notReady *inventoryNotReadyError
 	var denied *permissionDeniedError
+	var build *connectorBuildError
+	var refused *endpointRefusedError
 	switch {
+	case errors.As(err, &build):
+		return connectorBuildDetail(build.cause)
+	case errors.As(err, &refused):
+		return refused.detail()
+	case errors.Is(err, errHelmNeedsSecretList):
+		return ErrorDetail{Code: "helm_needs_secret_list", Message: helmSecretAccessMessage, Action: "Grant the connector identity list on secrets to show Helm releases. See " + HelmSecretAccessDocsURL, Retryable: false}
 	case errors.Is(err, errHistoryNotEstablished):
 		return ErrorDetail{Code: "history_not_established", Message: "Saved history authority has not been established yet.", Action: "Wait for the first authorized collection and retry.", Retryable: true}
 	case errors.Is(err, errHistoryMismatch):
@@ -449,4 +543,34 @@ func DiagnoseError(err error) ErrorDetail {
 		}
 		return ErrorDetail{Code: "read_failed", Message: "The Kubernetes read failed.", Action: "Check the connector configuration and Versus server log for the safe Kubernetes error code.", Retryable: true}
 	}
+}
+
+// connectorBuildDetail explains why a connector could not be built. A fault
+// this package wrote for an operator is shown as written; any other fault is
+// named only by its class, because its text may come from outside this package.
+func connectorBuildDetail(cause error) ErrorDetail {
+	var setup *connectorSetupError
+	var refused *endpointRefusedError
+	switch {
+	case errors.As(cause, &setup):
+		return ErrorDetail{Code: "connector_configuration_invalid", Message: sentence(setup.text), Action: setup.action, Retryable: false}
+	case errors.As(cause, &refused):
+		return refused.detail()
+	case errors.Is(cause, ErrInvalidEndpoint), errors.Is(cause, ErrCredentialUnavailable):
+		return DiagnoseError(cause)
+	}
+	return ErrorDetail{Code: "connector_configuration_invalid", Message: "The Kubernetes connector could not be started from its configuration.", Action: "Check the connectors.kubernetes settings and restart Versus. The server log names the setting at start.", Retryable: false}
+}
+
+// sentence capitalizes a fixed fault text and ends it with a period.
+func sentence(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return text
+	}
+	text = strings.ToUpper(text[:1]) + text[1:]
+	if !strings.HasSuffix(text, ".") {
+		text += "."
+	}
+	return text
 }

@@ -142,7 +142,7 @@ func (provider *delayedUsageProvider) CompareAndSwapBlob(key string, expected, r
 
 func waitUsageInterestCount(t *testing.T, service *Service, count int) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(scaledTimeout(3 * time.Second))
 	for time.Now().Before(deadline) {
 		entries, _, err := readUsageManifest(service.usageProvider(), usageBridgePrefix(service.cacheKey())+"interest")
 		if err != nil {
@@ -158,7 +158,7 @@ func waitUsageInterestCount(t *testing.T, service *Service, count int) {
 
 func waitUsageInterestIdle(t *testing.T, service *Service) *usageInterestWorker {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(scaledTimeout(3 * time.Second))
 	for time.Now().Before(deadline) {
 		service.usageHistory.Lock()
 		worker := service.usageHistory.workers[service.cacheKey()]

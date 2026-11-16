@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="448" viewBox="0 0 760 448" style="max-width:100%;height:auto" role="img" aria-label="The AI SRE Agent reads your data sources: logs from Loki, Elasticsearch, Graylog, Splunk, SigNoz, a file or CloudWatch Logs, and with Enterprise, metrics from Prometheus or CloudWatch Metrics and traces from Tempo or SigNoz; in Training it learns what is normal, in Shadow it checks quietly without alerting, and in Detect it alerts on new patterns and spikes; optional AI analysis adds a summary, severity and next steps, then an incident is created, visible in the web UI, sent to your channels such as Slack and Teams, and escalated to on call when nobody acknowledges it">
+  <title>AI SRE Agent</title>
+  <desc>Log sources, plus Enterprise metric and trace sources, feed the agent, which learns normal in Training, checks quietly in Shadow and alerts on new patterns and spikes in Detect, optional AI analysis enriches the finding, and the incident appears in the web UI, goes to your channels and escalates to on call without an ACK</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <symbol id="v" viewBox="24 18 64 55.1">
+      <path fill="#223947" fill-rule="evenodd" d="M53.55 23.74L56 27.98L58.45 23.74H77.96L74.71 29.38L65.76 44.89L62.51 50.52L59.25 56.16L56 61.79L52.75 56.16L49.5 50.52L37.29 29.38L34.04 23.74L30.78 18.11H24.28L27.53 23.74L30.78 29.38L46.24 56.16L52.75 67.42L56 73.06L59.25 67.42L62.51 61.79L65.76 56.16L69.01 50.52L81.21 29.38L84.47 23.74L87.72 18.11H50.3ZM47.04 23.74L43.79 18.11H37.29L40.54 23.74L43.79 29.38L52.75 44.89L56 50.52L59.25 44.89L62.51 39.25L68.2 29.38H61.7L59.25 33.62L56 39.25L50.3 29.38Z"/>
+    </symbol>
+  </defs>
+  <style>
+    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;fill:#000000}
+    .m{text-anchor:middle}
+    .name{font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .tag{font-size:10px;font-weight:700;fill:#5B6B78}
+    .d{fill:#5B6B78}
+    .dk{fill:#12222F}
+    .e{fill:#E51400}
+    .logo{font-weight:700;fill:#223947;letter-spacing:2.5px}
+    .btn{font-size:11px;font-weight:700;fill:#FFFFFF}
+    .grp{fill:none;stroke:#000000;stroke-width:1.5;stroke-dasharray:6 5}
+    .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
+    .opt{fill:#FFFFFF;stroke:#000000;stroke-width:2;stroke-dasharray:6 4}
+    .chip{fill:#FFFFFF;stroke:#000000;stroke-width:1.5}
+    .pill{fill:#F2F5F8;stroke:#C3CED8}
+    .flow{fill:none;stroke:#000000;stroke-width:2;marker-end:url(#a)}
+  </style>
+
+  <rect width="760" height="448" fill="#FFFFFF"/>
+
+  <!-- groups -->
+  <rect class="grp" x="16" y="44" width="230" height="346"/>
+  <rect class="grp" x="296" y="44" width="228" height="346"/>
+  <rect class="grp" x="560" y="256" width="184" height="104"/>
+
+  <!-- source chips -->
+  <rect class="chip" x="28" y="80" width="98" height="26" rx="6"/>
+  <rect class="chip" x="136" y="80" width="98" height="26" rx="6"/>
+  <rect class="chip" x="28" y="112" width="98" height="26" rx="6"/>
+  <rect class="chip" x="136" y="112" width="98" height="26" rx="6"/>
+  <rect class="chip" x="28" y="144" width="98" height="26" rx="6"/>
+  <rect class="chip" x="136" y="144" width="98" height="26" rx="6"/>
+  <rect class="chip" x="28" y="176" width="206" height="26" rx="6"/>
+  <rect class="pill" x="96" y="214" width="70" height="16" rx="8"/>
+  <rect class="chip" x="28" y="238" width="206" height="26" rx="6"/>
+  <rect class="chip" x="28" y="270" width="206" height="26" rx="6"/>
+  <rect class="pill" x="90" y="314" width="70" height="16" rx="8"/>
+  <rect class="chip" x="28" y="338" width="98" height="26" rx="6"/>
+  <rect class="chip" x="136" y="338" width="98" height="26" rx="6"/>
+
+  <!-- agent -->
+  <rect class="blk" x="312" y="76" width="196" height="80" rx="10"/>
+  <use href="#v" x="388" y="86" width="44" height="38"/>
+  <rect class="blk" x="312" y="176" width="196" height="54" rx="10"/>
+  <rect class="blk" x="312" y="248" width="196" height="54" rx="10"/>
+  <rect class="sub" x="312" y="320" width="196" height="54" rx="10"/>
+
+  <!-- outcome -->
+  <rect class="opt" x="566" y="64" width="172" height="70" rx="10"/>
+  <rect class="sub" x="566" y="168" width="172" height="60" rx="10"/>
+  <rect x="574" y="284" width="156" height="66" rx="6" fill="#FFFFFF" stroke="#C3CED8"/>
+  <rect x="574" y="284" width="4" height="66" fill="#E51400"/>
+  <rect x="588" y="314" width="128" height="24" rx="4" fill="#007A5A"/>
+  <rect class="blk" x="566" y="380" width="172" height="48" rx="10"/>
+
+  <!-- arrows -->
+  <path class="flow" d="M246 217H290"/>
+  <path class="flow" d="M410 156V170"/>
+  <path class="flow" d="M410 230V242"/>
+  <path class="flow" d="M410 302V314"/>
+  <path class="flow" d="M508 347H540V99H560"/>
+  <path class="flow" d="M652 134V162"/>
+  <path class="flow" d="M652 228V250"/>
+  <path class="flow" d="M652 360V374"/>
+
+  <!-- text -->
+  <text class="zone" x="28" y="68">LOGS</text>
+  <text class="m" x="77" y="97">Loki</text>
+  <text class="m" x="185" y="97">Elasticsearch</text>
+  <text class="m" x="77" y="129">Graylog</text>
+  <text class="m" x="185" y="129">Splunk</text>
+  <text class="m" x="77" y="161">SigNoz</text>
+  <text class="m" x="185" y="161">File</text>
+  <text class="m" x="131" y="193">CloudWatch Logs</text>
+
+  <text class="zone" x="28" y="226">METRICS</text>
+  <text class="tag m" x="131" y="226">Enterprise</text>
+  <text class="m" x="131" y="255">Prometheus</text>
+  <text class="m" x="131" y="287">CloudWatch Metrics</text>
+
+  <text class="zone" x="28" y="326">TRACES</text>
+  <text class="tag m" x="125" y="326">Enterprise</text>
+  <text class="m" x="77" y="355">Tempo</text>
+  <text class="m" x="185" y="355">SigNoz</text>
+
+  <text class="e m" x="268" y="209">reads</text>
+
+  <text class="zone m" x="410" y="64">AI SRE AGENT</text>
+  <text class="logo m" x="410" y="144">INCIDENT</text>
+  <text class="name m" x="410" y="198" style="font-size:15px">Training</text>
+  <text class="d m" x="410" y="218">learns what is normal</text>
+  <text class="name m" x="410" y="270" style="font-size:15px">Shadow</text>
+  <text class="d m" x="410" y="290">checks quietly, no alerts</text>
+  <text class="name m" x="410" y="342" style="font-size:15px">Detect</text>
+  <text class="dk m" x="410" y="362">new patterns and spikes</text>
+
+  <text class="name m" x="652" y="88" style="font-size:15px">AI analysis</text>
+  <text class="d m" x="652" y="108">optional: summary,</text>
+  <text class="d m" x="652" y="124">severity, next steps</text>
+
+  <text class="name m" x="652" y="192" style="font-size:16px">Incident</text>
+  <text class="dk m" x="652" y="212">visible in the web UI</text>
+
+  <text class="e" x="662" y="244">sends</text>
+
+  <text class="zone m" x="652" y="274">YOUR CHANNELS</text>
+  <text x="588" y="302" style="font-weight:700;fill:#E51400">New log pattern</text>
+  <text class="btn m" x="652" y="330">Acknowledge Alert</text>
+
+  <text class="e" x="662" y="374">no ACK</text>
+
+  <text class="name m" x="652" y="400" style="font-size:15px">On call</text>
+  <text class="d m" x="652" y="418">PagerDuty and more</text>
+</svg>

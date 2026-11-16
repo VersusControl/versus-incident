@@ -1,0 +1,13 @@
+# The agent off and the Kubernetes action identity on, with its own token
+# file, so the connector and the actor are rendered without the agent and the
+# actor never inherits the reader credential.
+agent:
+  enable: false
+connectors:
+  kubernetes:
+    actions:
+      enable: true
+      auth:
+        tokenFile: "/run/actor"
+        aks:
+          credentialMode: "managed_identity"

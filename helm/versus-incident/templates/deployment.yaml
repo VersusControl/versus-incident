@@ -3,6 +3,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: {{ include "versus-incident.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 spec:
@@ -24,10 +25,17 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "versus-incident.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "versus-incident.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if and (eq (include "versus-incident.storageType" .) "file") .Values.storage.persistence.enabled }}
+  # The file backend keeps its data on one volume that only one pod may use:
+  # stop the old pod before starting the new one instead of rolling.
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "versus-incident.selectorLabels" . | nindent 6 }}
@@ -39,6 +47,10 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- if include "versus-incident.bundledRedisInUse" . }}
+        # Restart with the bundled Redis whenever its password changes.
+        checksum/redis-password: {{ include "versus-incident.redisPasswordChecksum" . }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "versus-incident.serviceAccountName" . }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 30 }}
@@ -65,6 +77,41 @@ spec:
                 topologyKey: {{ .Values.ha.antiAffinity.topologyKey | default "kubernetes.io/hostname" }}
           {{- end }}
       {{- end }}
+      {{- if include "versus-incident.bundledRedisInUse" . }}
+      # Wait for the bundled Redis before starting: on-call pings Redis at
+      # startup and exits if it does not answer.
+      initContainers:
+        - name: wait-for-redis
+          image: {{ include "versus-incident.redisImage" . | quote }}
+          imagePullPolicy: {{ include "versus-incident.redisImagePullPolicy" . }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              deadline=$(( $(date +%s) + {{ .Values.redis.waitTimeoutSeconds | default 120 | int }} ))
+              until redis-cli -h {{ include "versus-incident.redisFullname" . }} -p 6379 ping 2>/dev/null | grep -q PONG; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "Redis {{ include "versus-incident.redisFullname" . }}:6379 did not answer within {{ .Values.redis.waitTimeoutSeconds | default 120 | int }}s"
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "Redis {{ include "versus-incident.redisFullname" . }}:6379 is ready"
+          {{- if include "versus-incident.redisAuthEnabled" . }}
+          env:
+            {{- include "versus-incident.redisCliAuthEnv" . | nindent 12 }}
+          {{- end }}
+          resources:
+            limits:
+              cpu: 100m
+              memory: 32Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ include "versus-incident.imageTag" . }}"
@@ -84,12 +131,24 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
-            {{- /* Gateway secret — always wired. Empty value leaves admin endpoints unregistered. */}}
+            {{- /* Sign-in secret. A user-supplied Secret is read as optional
+                   so the pod starts and the app logs which Secret is missing,
+                   instead of a bare CreateContainerConfigError. */}}
             - name: GATEWAY_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "versus-incident.fullname" . }}-secrets
-                  key: gateway_secret
+                  name: {{ include "versus-incident.gatewaySecretName" . }}
+                  key: {{ include "versus-incident.gatewaySecretKey" . }}
+                  {{- if .Values.gatewaySecretExistingSecret }}
+                  optional: true
+                  {{- end }}
+            - name: GATEWAY_SECRET_REQUIRED
+              value: "true"
+            {{- if .Values.gatewaySecretExistingSecret }}
+            {{- /* "$$" is how Kubernetes writes a literal "$" in an env value. */}}
+            - name: GATEWAY_SECRET_HINT
+              value: {{ printf "create it with: kubectl -n %s create secret generic %s --from-literal=%s=$$(openssl rand -hex 32), then restart the pod" .Release.Namespace (include "versus-incident.gatewaySecretName" .) (include "versus-incident.gatewaySecretKey" .) | quote }}
+            {{- end }}
 
             {{- /* HA / multi-instance identity. On a StatefulSet the
                    POD_NAME trailing ordinal (Downward API) is the authoritative
@@ -173,6 +232,7 @@ spec:
             {{- end }}
                 {{- end }}
             {{- $kubernetes := (.Values.connectors | default dict).kubernetes | default dict }}
+            {{- if include "versus-incident.kubernetesConnectorEnabled" . }}
             {{- if $kubernetes.multiple }}
             {{- range $cluster := $kubernetes.clusters }}
             {{- $id := $cluster.clusterId | default $cluster.clusterID }}
@@ -218,6 +278,7 @@ spec:
                   key: kubernetes_actor_{{ $key }}
             {{- end }}
                 {{- end }}
+            {{- end }}
 
             {{- if .Values.alert.slack.enable }}
             - name: SLACK_ENABLE
@@ -503,11 +564,22 @@ spec:
                 secretKeyRef:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: redis_port
+            {{- if not .Values.redis.enabled }}
             - name: REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "versus-incident.fullname" . }}-secrets
                   key: redis_password
+            {{- else if include "versus-incident.redisAuthEnabled" . }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "versus-incident.redisSecretName" . }}
+                  key: {{ include "versus-incident.redisSecretKey" . }}
+            {{- else }}
+            - name: REDIS_PASSWORD
+              value: ""
+            {{- end }}
             {{- if not .Values.redis.enabled }}
             - name: REDIS_INSECURE_SKIP_VERIFY
               value: "{{ .Values.externalRedis.insecureSkipVerify }}"

@@ -67,6 +67,20 @@ const headerChips = (header: HTMLElement) => [...header.querySelectorAll<HTMLEle
 const visibleHeaderText = (header: HTMLElement) => [...header.querySelectorAll<HTMLElement>('[aria-hidden="true"]')].map((element) => element.textContent).join(" ");
 
 describe("Kubernetes fleet", () => {
+  it("names why a connector could not be built instead of saying the cluster did not respond", () => {
+    mount([
+      { ...summary("built", "unreachable"), error: { code: "connector_configuration_invalid", message: "Kubeconfig exec credentials are not supported.", action: "Use auth.mode eks, aks or gke." } },
+      { ...summary("refused", "unreachable"), error: { code: "connector_endpoint_refused", message: "Versus refused the Kubernetes API address 10.1.2.3 because it is a private address.", action: "Set connectors.kubernetes.allow_private_networks: true, then restart Versus." } },
+      { ...summary("silent", "unreachable"), error: { code: "connector_unreachable", message: "The cluster did not respond." } },
+    ]);
+    const built = screen.getByRole("article", { name: "Cluster built" });
+    expect(within(built).getByText("Kubeconfig exec credentials are not supported.")).toBeTruthy();
+    expect(within(built).getByText("Use auth.mode eks, aks or gke.")).toBeTruthy();
+    expect(within(built).queryByText("The cluster did not respond.")).toBeNull();
+    expect(within(screen.getByRole("article", { name: "Cluster refused" })).getByText(/allow_private_networks/)).toBeTruthy();
+    expect(within(screen.getByRole("article", { name: "Cluster silent" })).getByText("The cluster did not respond.")).toBeTruthy();
+  });
+
   it("shows only positive broken counts and observed change times", () => {
     mount([summary("unknown", "healthy"), { ...summary("known", "attention"), broken: 3, last_change_at: new Date(Date.now() - 240_000).toISOString() }, { ...summary("quiet", "healthy"), broken: 0 }]);
     expect(screen.queryByText("Broken unknown")).toBeNull();

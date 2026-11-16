@@ -1,151 +1,116 @@
-# SLI/SLO auto-define
+# SLI/SLO
 
 _Enterprise_
 
-Versus watches each of your services and **proposes the SLIs and SLOs you
-should adopt** — automatically, on a schedule you control. It reads the signals
-the agent has already learned (metrics, traces, logs, recent incidents) and
-hands you a short, ranked list of targets per service, each with a plain reason.
+## Concept
 
-It is **advisory only**: the agent suggests, you decide. It never opens an
-incident and never changes anything on its own — adopting an objective is always
-a human action.
+An **SLI** (service level indicator) is one number that says how healthy a
+service is, such as the share of requests that succeed. An **SLO** (service
+level objective) is the target for that number, such as "99.9% of requests
+succeed over 30 days". The room you have below the target is the **error
+budget**.
 
-> **Not familiar with the terms?**
-> - An **SLI** (Service Level Indicator) is a single number that says how
->   healthy a service is right now — e.g. *the share of requests that succeed*,
->   or *how fast they respond*.
-> - An **SLO** (Service Level Objective) is the **target** you promise for that
->   number — e.g. *"99.9% of requests succeed over 30 days"*.
+Versus helps in two ways:
 
-## What this looks like
+- **It proposes SLIs and SLOs.** On a schedule, an AI advisor reviews what
+  Versus has learned about each service (metrics, traces, log patterns and
+  recent incidents) and proposes up to five SLIs per service, each with a
+  target and the reason for it.
+- **It watches the error budget.** With a Prometheus source, Versus derives an
+  objective for each service from what it has observed and raises an incident
+  when the budget is being spent too fast. This runs whether or not you adopt
+  anything.
 
-![The SLI/SLO auto-define page: one card per service listing the recommended indicators, targets, windows, rationale and confidence](../docs/images/versus-incident-slo-dark.png)
+**Adopting** a proposal replaces the derived target with the one you chose;
+burn alerts then use your target. Proposals themselves never page anyone.
 
-Open **SLOs** in the admin UI (`/agent/slo`). Each service gets a card with the
-SLIs/SLOs the advisor recommends, when they were last generated, and — for
-admins — a control to turn the feature on and set how often it re-reviews.
+![Learned signals feed a proposed SLI and SLO for payments, marked Adopt first; before you adopt, Versus watches an auto-derived objective and pages on burn; clicking Adopt replaces the derived target with yours, and Revert to auto-derived goes back; a week later a bad deploy makes 20% of payments fail and Versus raises one critical incident, Error-budget burn on payments (fast window)](../docs/images/slo-concept.svg)
 
-## How it works
+## Example
 
-![From learned signals to an adopted objective: Versus proposes an SLI, the number you measure such as the share of requests that succeed, then sets an SLO, the target for that number such as 99.9% over 30 days, and you decide whether to adopt it. Advisory only, Versus never fires on an SLO](../docs/images/versus-incident-slo-flow.svg)
+The advisor reviews `payments` and proposes:
 
-On its cadence, for every service the agent has seen, it gathers a **redacted,
-derived** bundle of that service's signals — no raw logs, no raw metric series,
-no secrets — and asks the AI for the SLIs and SLOs that fit. The result is
-stored per service (versioned) and shown on the **SLOs** page. Nothing is
-emitted and nothing fires.
+| Indicator | Type | Target | Window | Rationale |
+|---|---|---|---|---|
+| Payments availability | `availability` | 99% | 30 days | About 99.5% of requests succeeded over the last 14 days with no incidents, so 99% leaves headroom. |
 
-> The advisor only ever sees **aggregates** (learned baselines, recurring log
-> templates, an incident summary). Every section is scrubbed by the same
-> redactor used by the analyze tools before it leaves the agent.
+You agree and click **Adopt**. A week later a bad deploy makes 20% of payment
+requests fail. That spends the month's budget many times faster than it
+should, so Versus raises one incident:
 
-## Prerequisites
+```text
+Error-budget burn on payments (fast window)
+```
 
-| Need | Why |
+## What you see in the UI
+
+Open **AI → SLIs/SLOs** (the page is titled **SLI/SLO auto-define**). Each
+service has a card:
+
+| Part | What it shows |
 |---|---|
-| A **Versus Enterprise license** with the **`intelligence`** entitlement, supplied via the `LICENSE_KEY` environment variable | The whole feature is gated on it — on a community/OSS build the **SLOs** page shows a locked upsell and no data. |
-| **AI enabled** with an **API key** (e.g. OpenAI) | The advisor is an AI agent. This is a hard gate: until AI is on *and* a key is set, the feature can't be turned on. |
-| Some **learned signal** for your services | The advisor proposes objectives from observed behavior. A brand-new service with nothing learned yet gets no recommendation until it has enough history. |
+| Header | The service, the recommendation version and when it was generated. The most urgent service is marked **Adopt first**. |
+| Summary | One paragraph on the service's health and what to adopt. |
+| SLI rows | **Indicator**, **Type** (`availability`, `latency`, `error_rate`, `throughput` or `saturation`), **Target**, **Window** in days, **Rationale** citing the signal it was measured from, and **Confidence**. |
+| Now vs target, Error budget | How the service is doing against the objective. **Breaching** when it is below target. |
+| How to measure | The query behind the indicator, with **Copy query**. |
+| **Adopt** | Replace the auto-derived target with this one; burn alerts use it from then on. Once adopted: **Adopted — the platform is tracking this objective**, with **Revert to auto-derived**, which goes back to the derived target. |
 
-> **First time running Enterprise?** Start with
-> [Getting Started — Running the Enterprise Agent](./getting-started.md). It
-> covers signing in as the default admin and turning on AI — the controls this
-> page uses.
+Admins also see **Enable SLI/SLO auto-define** and the review **Cadence** at
+the top of the page.
 
-## 1. Turn on AI
+![AI → SLIs/SLOs with auto-define on and a 24h review cadence: the checkout card, version 1, is marked Adopt first and recommends Checkout availability, 99% over 30 days, with an Adopt button; the _custom_ card is Low priority and shows Manual adoption](../docs/images/slo-ui-dark.png)
 
-The advisor needs AI. Enable it and set an API key from the admin UI — see
-[Getting Started → activate the AI key](./getting-started.md). Until AI is on
-and a key is present, the enable toggle on the **SLOs** page stays disabled and
-shows the reason.
+*Recommended SLOs for two services.*
 
-When changing to OpenAI, DeepSeek, Qwen, Claude, or Gemini, enter a new key for
-the selected provider in the same save. A provider-only change is rejected with
-HTTP 422 and `code: provider_key_required`, leaving the previous provider, key,
-and enabled state active. Switching to Ollama clears the stored runtime key.
-Use **Revert to YAML floor** to remove the override and return to the provider
-and key configured in YAML.
+Only `availability` and `latency` SLIs can be adopted, and only once Versus
+has found a metric to measure them with. Other SLIs show **Manual adoption**
+instead of **Adopt**: copy the query into your own SLO tooling.
 
-## 2. Enable the feature and set the cadence
+## Turn it on
 
-Open **SLOs**. As an admin you'll see an **Enable SLI/SLO auto-define** toggle
-and a **Review cadence** field:
+1. Run the Enterprise image with a license key that includes the
+   `intelligence` entitlement.
+2. Turn AI on with a key in **Admin → AI provider** (see
+   [Getting Started](./getting-started.md#5-add-an-ai-key-optional)). Until
+   then the enable switch stays greyed out.
+3. On the **SLIs/SLOs** page, switch on **Enable SLI/SLO auto-define**. Set the
+   **Cadence** if 24 hours does not suit you.
+4. For burn alerts, add a [Prometheus source](./metrics/prometheus.md). They run on
+   the derived objectives without any adoption.
 
-| Control | What it does | Notes |
+The first proposals appear after the next review, within one cadence. A service
+with too little learned data shows **No recommendations yet**.
+
+## Reference
+
+| Setting | Default | Notes |
 |---|---|---|
-| **Enable** | Turns the scheduled review on or off for your org. | Off by default. Can only be turned **on** once AI is enabled. |
-| **Review cadence** | How often the advisor re-reviews each service. | A Go duration like `24h`. Default **24h**, minimum **1h**. |
+| Enable SLI/SLO auto-define | off | Admin only. Needs AI on with a key. |
+| Cadence | `24h` | How often each service is reviewed. At least `1h`. Takes effect without a restart. |
+| SLIs per service | up to 5 | |
+| Window | 30 days | Between 1 and 90 days. |
 
-> Changing the cadence takes effect **without a restart** — the next due pass
-> picks it up. The cadence floor exists to cap AI cost; a value below it is
-> rejected. Both the enable toggle and the cadence are admin-only
-> (`runtime:manage`) and every change is written to the audit trail.
-
-## 3. Let it run a cycle
-
-The first recommendations appear after the next due pass (by default, within
-24h). Until then — or for a service without enough learned signal — the page
-shows **"No recommendations yet"**. Give it a cycle, then refresh.
-
-## 4. Read the recommendations
-
-Each service card lists up to **five** recommended SLIs. Every row is one
-indicator and its proposed objective:
-
-| Column | Meaning |
-|---|---|
-| **Indicator** | A short human label, e.g. *Checkout availability*. |
-| **Type** | The indicator family: `availability`, `latency`, `error_rate`, `throughput`, or `saturation`. |
-| **Target** | The proposed objective — a percentage for ratio types, a millisecond target for `latency`. |
-| **Window** | The error-budget accounting window, in days (1–90, default 30). |
-| **Rationale** | Why this target, citing the exact observed signal it was measured from. |
-| **Confidence** | The advisor's confidence in this recommendation, 0–100%. |
-
-The card also shows a **version** and when it was **generated**. A new pass
-writes a new version — the recommendation evolves as your service's behavior
-does.
-
-> Every recommendation **cites a real signal** the agent observed. The advisor
-> is asked never to invent an indicator; a row with no backing signal is
-> dropped before it's stored.
-
-## 5. Adopt what fits
-
-Adopting an objective is **your call** — review the rationale and confidence,
-keep what makes sense for the service, and ignore the rest. The advisor mutates
-nothing: it won't create an SLO object, change a setting, or page anyone. Treat
-the page as a well-researched starting point, not a decision.
-
-## Define vs measure — how this differs from SLO burn
-
-These are **two different stages**, not duplicates:
-
-| Stage | This page — **auto-define** | SLO burn evaluation — **measure** |
-|---|---|---|
-| Question | *What* SLIs/SLOs should this service have? | Is the service *meeting* its objective right now? |
-| How | AI reviews all of a service's signals and **recommends** targets. | Deterministic math tracks error-budget burn against an objective. |
-| Output | A stored, advisory list you review and adopt. | Fires a real incident when the budget burns too fast. |
-
-In short: **auto-define proposes the target; burn evaluation watches whether you
-keep it.** Use this page to set good objectives, then let the agent's detect
-pipeline page you when one is at risk. See the
-[Metrics](./metrics.md) and [Traces](./traces.md) guides for where those golden
-signals come from and how anomalies become incidents.
+- The advisor sees only summaries: learned baselines, log pattern templates and
+  an incident summary, with secrets masked. It never sees raw logs or raw
+  metric series.
+- Adopting, reverting and settings changes are admin actions and are recorded
+  in the audit trail.
+- In [High Availability](./ha/overview.md), one replica runs the reviews and
+  the burn check, so you are paged once.
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| Symptom | Likely cause |
 |---|---|
-| The **SLOs** page shows a locked "Enterprise capability" card | The license is missing the **`intelligence`** entitlement, or you're on an OSS build. Mint a key that includes `intelligence`. |
-| An **AI-OFF** banner across the top | AI is disabled or no API key is set. Turn AI on and add a key — see [Getting Started](./getting-started.md). The page tells you the exact reason. |
-| The enable toggle is **greyed out** | Same cause — the toggle stays disabled until the AI hard gate is open (AI on + key set). |
-| **"No recommendations yet"** | Either the first pass hasn't run yet (default cadence is 24h) or the service has too little learned signal. Give it a cycle and refresh. |
-| Saving a cadence is rejected | The value must be a positive Go duration at or above the **1h** floor, e.g. `2h`, `24h`. |
-| You can't see the cadence control | It's admin-only (`runtime:manage`). A read-only role still sees the recommendations, just not the controls. |
+| The page shows the **Enterprise capability** card | No `LICENSE_KEY`, or the key lacks the `intelligence` entitlement. |
+| An AI-off banner, or the enable switch is greyed out | AI is off or has no key. Set it in **Admin → AI provider**. |
+| **No recommendations yet** | The first review has not run yet, or the service has too little learned data. |
+| Cadence is rejected | It must be a duration of at least `1h`, such as `2h` or `24h`. |
+| No burn incidents | There is no Prometheus source, so there is nothing to measure the budget with. |
+| You cannot see the controls | They are admin only. Viewers and responders still see the proposals. |
 
 ## See also
 
-- New here? [Getting Started — Running the Enterprise Agent](./getting-started.md)
-- Where the signals come from: [Metrics (Prometheus)](./metrics.md) · [Traces](./traces.md)
-- How a signal becomes an incident: [AI Detect Mode](../agent/ai-detect-mode.md) · [AI Analyze Mode](../agent/ai-analyze-mode.md)
+- [Metrics](./metrics/overview.md) · [Traces](./traces.md)
+- [AI Detect Mode](../agent/ai-detect-mode.md)

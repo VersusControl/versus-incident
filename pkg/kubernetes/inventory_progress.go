@@ -41,6 +41,11 @@ func (progress *inventoryProgress) advance(step string, now time.Time) {
 	}
 	progress.mu.Lock()
 	defer progress.mu.Unlock()
+	if position < progress.step {
+		// A later cycle repeats earlier phases; the reported step never
+		// moves back.
+		return
+	}
 	if progress.started.IsZero() {
 		progress.started = now
 	}
@@ -112,6 +117,11 @@ func (progress *inventoryProgress) kindObserved(kind string, state kubeindex.Kin
 	} else if state.Error != "" {
 		status = state.Error
 	}
+	if progressKindDone(progress.statuses[kind]) && !progressKindDone(status) {
+		// A kind already done stays done for the first sync: a later cycle's
+		// cluster-wide denial before its namespace read is not lost progress.
+		return
+	}
 	progress.statuses[kind], progress.updated = status, now
 }
 
@@ -167,7 +177,7 @@ func (progress *inventoryProgress) snapshot() *SyncProgress {
 	}
 	for kind, status := range progress.statuses {
 		result.KindStatus[kind] = status
-		if status != "ready" && status != "absent" && status != "forbidden" {
+		if !progressKindDone(status) {
 			result.RemainingKinds = append(result.RemainingKinds, kind)
 		} else {
 			result.KindsDone++
@@ -220,4 +230,10 @@ func (service *Service) withSyncProgress(status SyncStatus) SyncStatus {
 		status.Progress = service.coldSyncProgress()
 	}
 	return status
+}
+
+// progressKindDone reports a first-sync kind state that needs no more work:
+// listed, not served, not readable, or read inside the readable namespaces.
+func progressKindDone(status string) bool {
+	return status == "ready" || status == "absent" || status == "forbidden" || status == "namespace_scope"
 }

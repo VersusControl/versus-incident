@@ -1,0 +1,11 @@
+# The way out of scenario 52 when the Bitnami keys are stored as your own
+# values: setting them to null removes them, and the chart renders.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  architecture: null
+  master: null

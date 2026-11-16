@@ -2,116 +2,30 @@
 
 _Enterprise_
 
-Point Versus at your tracing backend and it does the rest. It finds your services and their
-operations, learns how each one normally behaves — how fast it is and how often it errors
-— and pages you only when one clearly slows down or starts failing and stays that way. You
-don't write a single query or set a single threshold.
+## Concept
 
-Think of it as a teammate who knows how long each endpoint usually takes: they only call
-you when something is clearly off, not at every blip.
+Point Versus at your tracing backend and it finds what to watch on its own:
+every service and the operations inside it, such as `GET /checkout`. For each
+operation it learns two things by time of week: how fast it usually is (p99
+latency) and how often it usually fails (error rate). It raises an incident
+only when an operation gets clearly slower or fails more **and stays that
+way**, not on one slow request. You write no TraceQL and set no thresholds.
 
-Two backends are supported, and they share one brain — the same targets, the same learned
-p99/error-rate baselines, the same **learn → double-check → page** lifecycle:
+Two backends are supported:
 
-| Backend | Source type | Section |
-|---|---|---|
-| **Grafana Tempo** | `traces` | everything below |
-| **SigNoz** | `signoz_traces` | [SigNoz backend](#signoz-backend) |
+| Backend | `type` |
+|---|---|
+| Grafana Tempo | `traces` |
+| SigNoz (v0.87.0+) | `signoz_traces` |
 
-> **Same idea as the logs agent, tuned for traces.** Every data source follows the same
-> three steps: **learn what's normal (`training`) → double-check quietly (`shadow`) →
-> start paging (`detect`)**. Logs learn your common log patterns; metrics learn your
-> normal traffic, errors, and latency; traces learn how each operation usually behaves.
-> If you know the [logs flow](../ai-detect-mode.md), you already know this one.
+Traces move through the same modes as logs: [training](../training-mode.md)
+learns and never alerts, [shadow](../shadow-mode.md) records what it would have
+raised, and [detect](../ai-detect-mode.md) raises incidents.
 
-## How it works
-
-```mermaid
-flowchart LR
-  tempo["Tempo<br/>:3200"]
-
-  subgraph VE["Versus Enterprise"]
-    conn["connect<br/>address + backend: tempo"]
-    disc["find the targets<br/>each service + operation"]
-    train["learn normal<br/>speed + error rate"]
-    shadow["double-check<br/>quietly (no paging)"]
-    detect["page on a real,<br/>lasting problem"]
-  end
-
-  oncall["on-call<br/>Slack / Telegram / page"]
-
-  tempo --> conn --> disc --> train --> shadow --> detect --> oncall
-  detect -. "keeps learning as<br/>traffic changes" .-> train
-```
-
-You give it an address. It finds your services and the operations inside them, and writes
-the trace queries for you. It learns how fast each operation usually is and how often it
-errors, watches quietly for a while, then pages you — but only when something is really
-wrong and stays wrong, not a one-off slow request.
-
-## What you get
-
-A Tempo source that **opens incidents on its own** — like an SLO alert on latency or
-errors, but with no rules to write. All you give it is the connection. From there it:
-
-1. **Finds what to watch.** It lists your services and the operations inside each one
-   (every service + operation pair becomes a watch target) and writes the trace queries
-   itself.
-2. **Learns what's normal.** For each target it learns two things — its usual **speed**
-   (p99 latency, the slowest 1%) and its usual **error rate** — by time of week, so 2pm
-   Tuesday is compared against past 2pm Tuesdays rather than a flat average.
-3. **Pages only on real problems.** It alerts when an operation gets clearly slower or
-   starts failing more *and stays that way* — not on a single slow request, and not
-   against a number you had to guess.
-
-## The three modes
-
-Traces use the same modes as logs. Set the mode with `agent.mode` (or `AGENT_MODE`).
-
-### `training` — learn what's normal
-
-It connects, finds each service + operation, and just watches and learns. **No alerts.** A
-new target stays in training until it has seen enough to know what normal looks like —
-until then it can't page, which keeps it from crying wolf on day one.
-
-**You:** connect the source and let it run.
-**You'll see:** a short report in the logs (how many services and operations it found, and
-whether the data was thin), and its picture of "normal" filling in. Leave it here until
-the operations you care about have been learned.
-
-### `shadow` — double-check quietly
-
-It keeps learning, but now it also starts scoring. When it thinks something's wrong it
-writes a **"would have alerted"** note — but **pages no one**. This is your chance to see
-how often it would fire before trusting it with your phone.
-
-**You:** set `agent.mode: shadow` and watch the **Shadow** page in the admin UI.
-**You'll see:** one row per service + operation it *would* have paged on — just like the
-[logs shadow flow](../shadow-mode.md), for traces.
-
-### `detect` — start paging
-
-Go live. When an operation is clearly slower or failing more *and stays that way* for
-several checks in a row (a brief blip won't page), it opens a real incident, routes it to
-on-call, and the **detect AI** writes the page. The alert says what's wrong in plain
-terms, e.g. *"GET /checkout is far slower than normal for this time of week (about 210ms),
-and has stayed there for several minutes."* (The deeper, tool-using **analyze**
-investigation is a separate, on-demand step you trigger from the incident detail page.)
-
-**You:** set `agent.mode: detect` and turn on a channel.
-**You'll see:** incidents that fire on real, lasting slowdowns or error spikes measured
-against each operation's own normal — no thresholds, no TraceQL.
-
-> **It keeps learning as you go.** The model updates as your traffic changes, so it
-> follows gradual shifts. But it's careful: once it knows a target's normal, it sets aside
-> readings that are way off — so the very outage it's paging you about doesn't get
-> mistaken for the new "normal."
-
-## Quickstart (Tempo)
-
-Add the source to **`agent_sources.yaml`**. Discovery enumerates the targets and the brain learns each one's baseline.
+## Minimal config (Tempo)
 
 ```yaml
+# config/agent_sources.yaml
 sources:
   - name: prod-traces
     type: traces
@@ -119,113 +33,47 @@ sources:
     options:
       address: http://tempo:3200
       backend: tempo
-      allow_private_networks: true   # trusted Docker network for tool reads
 ```
 
-With auth and TLS:
-
-```yaml
-sources:
-  - name: prod-traces
-    type: traces
-    enable: true
-    options:
-      address: https://tempo.internal:3200
-      backend: tempo
-      allow_private_networks: true   # trusted private endpoint for tool reads
-      bearer_token: ${TEMPO_TOKEN}          # Authorization: Bearer <token>
-      # username: ${TEMPO_USERNAME}         # fallback HTTP Basic
-      # password: ${TEMPO_PASSWORD}
-      insecure_skip_verify: false           # default false; dev only — never prod
-```
-
-| Key | Default | Meaning |
+| Key | Default | What it does |
 |---|---|---|
-| `address` | — (required) | Tempo base URL the source reads (GET-only). |
-| `backend` | `tempo` | Trace backend; only `tempo` is supported today. |
-| `bearer_token` / `username` / `password` | unset | Bearer auth, else HTTP Basic. |
-| `insecure_skip_verify` | `false` | Skip TLS verification — **local dev only**, never production. |
+| `address` | required | Tempo base URL. Versus only sends reads. |
+| `backend` | `tempo` | Only `tempo` is supported. |
+| `bearer_token` | none | Token auth. |
+| `username` / `password` | none | Basic auth, used when no `bearer_token` is set. |
+| `insecure_skip_verify` | `false` | Skip TLS verification. Local testing only. |
+| `query` | none | Extra TraceQL of your own, for example `{ status = error }`. Each matching trace raises a signal, alongside the automatic targets. |
+| `page_size` | `100` | Traces searched per target on each poll. |
+| `max_services` | `50` | Most services Versus watches. |
+| `max_operations` | `10` | Most operations per service. |
+| `max_targets` | `200` | Most service and operation pairs in total. |
+| `discovery_interval` | `1h` | How often Versus looks for new services and operations. |
+| `allow_private_networks` | `false` | Lets AI Chat and Analyze read from a private address such as `tempo` on a Docker network. |
+| `allow_loopback` | `false` | Lets AI Chat and Analyze read from `localhost`. |
+| `tool_scope_service` | none | Limits AI Chat and Analyze reads to one service. |
 
-The Tempo source's organization is assigned from the authenticated deployment
-runtime; there is no user-defined Tempo organization option. For the Enterprise
-on-demand `discover_trace_fields` and
-`read_trace_spans` tools, the bounded read client denies private and loopback
-destinations by default. Set
-`allow_private_networks: true` only for a trusted RFC1918/ULA endpoint such as
-`tempo` on a Docker network; use `allow_loopback: true` instead for local
-`localhost` testing. `tool_scope_service` optionally restricts reads to one
-service and hides field discovery. For these bounded Tempo reads, bearer or
-HTTP Basic credentials require HTTPS except on a loopback HTTP origin with
-explicit `allow_loopback: true`; `allow_private_networks` does not allow
-credentialed private-network HTTP. These keys govern the read tools; the
-standing auto-learning source retains its existing behavior. The configured
-Enterprise source contributes these source-bound tools to Chat and Analyze;
-there is no standalone trace tool configuration.
+For AI Chat and Analyze reads, a token or password needs HTTPS, except on a
+`localhost` address with `allow_loopback: true`.
 
 ### What it watches
 
-It finds your services automatically (using the first trace tag it recognizes:
-`resource.service.name`, `service.name`, or `service`), then the operations inside them
-(from the span `name`). Every service + operation pair becomes a watch target, and it
-writes the trace query for it (anything it discovered is safely quoted). For each target
-it learns two signals:
+Versus names each service from the first trace attribute it finds:
+`resource.service.name`, then `service.name`, then `service`. Operations come
+from the span name. Every service and operation pair is one target with two
+signals:
 
-| Signal | Learned from | What it watches |
-|---|---|---|
-| **Speed** (p99 latency) | how long the operation's traces take | the slowest 1% response time |
-| **Error rate** | the share of the operation's traces that errored | how often it fails |
-
-If an operation tag isn't available, it falls back to watching each service as a whole. It
-caps the operations per service and the total targets per tenant so it stays affordable,
-and reports **thin** coverage rather than inventing targets.
-
-## License gate
-
-The source and its learned baselines require a Versus Enterprise license, supplied via the `LICENSE_KEY` environment variable. On an **OSS build**, a source with `type: traces` or `type: signoz_traces` returns **"requires Versus Enterprise"** and refuses to build.
-
-## OSS vs Enterprise
-
-| Capability | OSS | Enterprise |
-|---|---|---|
-| Source-bound `discover_trace_fields` and `read_trace_spans` | ❌ | ✅ |
-| Standing `traces` source that **starts incidents itself** | ❌ | ✅ |
-| **Auto-discovered** `(service, operation)` targets (no TraceQL) | ❌ | ✅ |
-| **Learned** p99/error-rate baseline + sustained-deviation paging | ❌ | ✅ |
-
-The **standing, auto-learned** source on this page is the Enterprise wedge.
-
-## Advanced: custom signal (Tempo)
-
-If you have a specific trace condition to watch that the agent won't find on its own, you
-can add your own TraceQL alongside the auto-discovered targets. **A custom query is
-appended — it doesn't turn off the auto-learning.** The agent still discovers and learns
-all the usual operations; your custom search runs on top.
-
-```yaml
-sources:
-  - name: prod-traces
-    type: traces
-    enable: true
-    options:
-      address: http://tempo:3200
-      backend: tempo
-      allow_private_networks: true
-      query: '{ status = error }'           # added alongside auto-discovered targets
-```
-
-| Key | Meaning |
+| Signal | Watches |
 |---|---|
-| `query` | TraceQL search — each matching trace becomes an additional signal. |
+| Speed | the p99 latency of the operation |
+| Error rate | the share of the operation's traces that fail |
+
+When there is no operation name, Versus watches the service as a whole.
 
 ## SigNoz backend
 
-If your traces live in [SigNoz](https://signoz.io/) — Cloud or self-hosted — use the
-`signoz_traces` source type instead. Everything downstream is identical: the same
-(service, operation) targets, the same learned p99-latency and error-rate baselines, the
-same three modes. Only discovery and the query dialect differ.
-
-Requires **SigNoz v0.87.0 or later**: the source reads `POST /api/v5/query_range`, which
-first appears in `v0.87.0` (verified at source level against the tagged releases).
+For traces in SigNoz, Cloud or self-hosted, use `type: signoz_traces`. It
+watches the same targets and learns the same two signals; only the connection
+differs.
 
 ```yaml
 sources:
@@ -233,81 +81,132 @@ sources:
     type: signoz_traces
     enable: true
     options:
-      address: https://signoz.example.internal # final HTTP(S) Query Service origin
-      # address: https://<region>.signoz.cloud
+      address: https://<region>.signoz.cloud
       api_key: ${SIGNOZ_API_KEY}
-      allow_private_networks: true         # trusted RFC1918/ULA self-hosting only
 ```
 
-That is the whole operator surface for the auto flow. **No `query:`, no TraceQL.**
-
-> **Use a query API key, not an ingestion key.** The source authenticates with the
-> **`SIGNOZ-API-KEY`** header, identical on Cloud and self-hosted. The Cloud-only
-> `signoz-ingestion-key` that shippers use to *write* telemetry will **not** work for
-> queries. Create the query key under **Settings → API Keys** (needs the **Admin** role);
-> it is available on Cloud **and** self-hosted community.
-
-| Key | Default | Meaning |
+| Key | Default | What it does |
 |---|---|---|
-| `address` | — (required) | Final HTTP(S) SigNoz Query Service origin, self-hosted or `https://<region>.signoz.cloud`. Verified HTTPS is recommended for production; HTTP sends the API key in plaintext. |
-| `api_key` | — (required) | Sent as the `SIGNOZ-API-KEY` header. The **query** key, not the ingestion key. |
-| `insecure_skip_verify` | `false` | Disable certificate verification for HTTPS. Ignored for HTTP. |
-| `allow_private_networks` | `false` | Trust RFC1918/ULA destinations for an explicitly trusted self-hosted deployment. |
-| `allow_loopback` | `false` | Trust loopback for local testing, independently of HTTP/TLS. |
-| `query` | unset | A v5 filter expression, **appended** as an extra pinned target (it never turns off auto-learning). |
-| `page_size` | `100` | Spans searched per target per tick. |
-| `max_services` | `50` | Service-enumeration cap. |
-| `max_operations` | `10` | Per-service operation cap. |
-| `max_targets` | `200` | Per-tenant (service, operation) target cap. |
-| `discovery_interval` | `1h` | How often the watch-set is rebuilt (cadence ceiling). |
-| `discovery_lookback` | `1h` | Window discovery samples spans over. Floored at `5m`. |
-| `discovery_samples` | `200` | Span rows per discovery bucket (6 buckets). Capped at `1000`. |
-| `org` | unset | Tenant scope for learned baselines. |
+| `address` | required | SigNoz URL, or `https://<region>.signoz.cloud`. Use HTTPS in production. |
+| `api_key` | required | A SigNoz **query** API key, not an ingestion key. |
+| `allow_private_networks` | `false` | Must be `true` for a self-hosted SigNoz on a private address. |
+| `allow_loopback` | `false` | Must be `true` to reach `localhost`. |
+| `insecure_skip_verify` | `false` | Skip TLS verification. |
+| `query` | none | Extra filter expression of your own, alongside the automatic targets. |
+| `page_size` | `100` | Spans searched per target on each poll. |
+| `max_services` / `max_operations` / `max_targets` | `50` / `10` / `200` | Limits, as for Tempo. |
+| `discovery_interval` | `1h` | How often Versus looks for new services and operations. |
+| `discovery_lookback` | `1h` | Time range Versus samples spans from (at least `5m`). |
+| `discovery_samples` | `200` | Spans sampled per search, up to `1000`. Raise it on a quiet backend. |
 
-### What it watches (SigNoz)
+Create the query key under **Settings → API Keys** in SigNoz (needs the Admin
+role). A service that sent no spans in the last `discovery_lookback` is found on
+a later search.
 
-SigNoz has no Tempo-style tag/tag-values surface, so the watch-set is derived from a
-**bounded sample of raw spans**: the discovery lookback is split into 6 equal buckets and
-one small span query is issued per bucket, so the sample is spread across the window
-instead of pinned to the last few seconds of the busiest service.
+## What you see in the UI
 
-It reads the service from the first attribute it finds of `service.name`,
-`resource.service.name`, `serviceName`, `service`, and the operation from `name`,
-`span_name`, `spanName`, `operation`. Every service + operation pair becomes a watch
-target, and the source writes the v5 filter expression for it. A service with no observed
-operation degrades to a per-service target; if **no** service attribute is observed at all,
-it watches all spans under one global `_all_` target rather than going dark.
+**Agent Learning → Traces** lists every target Versus watches, by service,
+with the operation, the signal and its source. The **Ready** tab shows targets
+whose normal is learned; **Still learning** shows the rest. Incidents appear
+on the **Incidents** page and name the source they came from.
 
-Discovered attribute values carrying a quote, backslash or control character are **refused**
-rather than escaped into a generated filter expression, and reported in the discovery notes.
+![Agent Learning → Traces for the Tempo example: the _custom_ service request target from the example's query with its p99 latency, about 132 ms, and its error rate, both Ready](../../docs/images/ds-traces-ui-dark.png)
 
-### Advanced: custom target (SigNoz)
+## Permissions
 
-As with Tempo, a custom query is **appended** — it does not turn off auto-learning. The
-dialect is a **v5 filter expression**, not TraceQL:
+Versus only reads traces. For Tempo, give it a token or user with read access,
+or none if Tempo has no auth. For SigNoz, a query API key with a viewer role is
+enough. Both sources need the Enterprise image and a license key with the
+`intelligence` entitlement; on the OSS image they stop with
+`requires Versus Enterprise`.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `requires Versus Enterprise` | OSS image, or a license without the `intelligence` entitlement. |
+| Nothing under Traces | Spans carry no service attribute from the list above, or `address` points at the OTLP port (`4317`/`4318`) instead of the query API. |
+| Only whole services, no operations | Spans have no name Versus can read. |
+| SigNoz `401` or `403` | An ingestion key instead of a query API key. |
+| Chat or Analyze cannot read traces | The address is private or loopback. Set `allow_private_networks` or `allow_loopback`. |
+
+## Try it with Docker Compose
+
+You need Git, Docker with Docker Compose v2, and a Versus Enterprise
+license key. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command below runs from this `versus-incident` folder, the repository
+root.
+
+[`examples/metrics-source/`](https://github.com/VersusControl/versus-incident/tree/main/examples/metrics-source)
+runs **Versus Enterprise** (`ghcr.io/versuscontrol/versus-enterprise`) with
+Prometheus. The traces overlay, `docker-compose.traces.yml`, adds Tempo and a
+`traces` source. The demo traffic sends spans for `checkout` to Tempo, about
+half of them errors during a spike. The example starts in detect.
 
 ```yaml
-options:
-  address: https://signoz.example.internal
-  api_key: ${SIGNOZ_API_KEY}
-  allow_private_networks: true
-  query: "service.name = 'checkout'"     # added alongside auto-discovered targets
+# examples/metrics-source/config/agent_sources.traces.yaml (the traces source, trimmed)
+  - name: demo-traces
+    type: traces
+    enable: true
+    options:
+      backend: tempo
+      address: http://tempo:3200
+      allow_private_networks: true
+      query: '{ resource.service.name = "checkout" }'
+      discovery_interval: 1m
 ```
 
-### Limitations
+The example sets an explicit `query`, so its trace targets are listed under the
+service `_custom_`.
 
-- **Reads stay with their source.** A configured `signoz_traces` source
-  contributes `discover_trace_fields` and `read_trace_spans` to Chat and
-  Analyze for that SigNoz source. Use a separate `traces` source in
-  `agent_sources.yaml` for Tempo-backed reads.
-- **Discovery is sample-based.** A service that emitted no spans inside the discovery
-  lookback is not discovered until the next pass. Widen `discovery_lookback` or raise
-  `discovery_samples` on a quiet backend.
+Start the stack and the demo traffic, with your license key from the
+environment. Use both Compose files on every command:
 
-## See also
+```bash
+export LICENSE_KEY=<your license key>
+docker compose -f examples/metrics-source/docker-compose.yml \
+  -f examples/metrics-source/docker-compose.traces.yml \
+  --profile fake-metrics up -d
+```
 
-- Source-bound read tools: [Tool Reference](../tools/overview.md)
-- The metrics twin of this flow: [Prometheus / Metrics (Enterprise)](./prometheus.md)
-- SigNoz metrics (Enterprise): [SigNoz Metrics](../../enterprise/metrics/signoz.md)
-- SigNoz logs (OSS): [SigNoz source](./signoz.md)
-- The logs lifecycle this mirrors: [Shadow Mode](../shadow-mode.md) · [AI Detect Mode](../ai-detect-mode.md) · [AI Analyze Mode](../ai-analyze-mode.md)
+Versus Enterprise prints the admin password once, on the first boot against an
+empty database. Keep it:
+
+```bash
+docker compose -f examples/metrics-source/docker-compose.yml \
+  -f examples/metrics-source/docker-compose.traces.yml \
+  logs versus | grep -A6 "DEFAULT ADMIN CREDENTIALS"
+```
+
+Open `http://localhost:3000` and sign in as `admin` with that password. Within
+a minute **Agent Learning → Traces** lists the `_custom_` targets with their
+error rate and p99 latency. It can also list an `_all_` group: Versus watches
+all traces together until Tempo reports service names, which takes about a
+minute after start. That group then stops updating; ignore it. Wait about 2 minutes, until they are learned, then
+fire a 90-second spike:
+
+```bash
+docker compose -f examples/metrics-source/docker-compose.yml \
+  -f examples/metrics-source/docker-compose.traces.yml \
+  run --rm metrics-spike
+```
+
+An incident appears on the **Incidents** page about a minute into the spike.
+Tempo's search API is on `http://localhost:3200`.
+
+Clean up:
+
+```bash
+docker compose -f examples/metrics-source/docker-compose.yml \
+  -f examples/metrics-source/docker-compose.traces.yml \
+  --profile fake-metrics down -v
+```
+
+To run against SigNoz instead, use the example's `docker-compose.signoz.yml`
+overlay; see the example's README.

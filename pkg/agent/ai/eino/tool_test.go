@@ -93,6 +93,25 @@ func TestNewToolReturnsParentCancellationAsStructuredResult(t *testing.T) {
 	}
 }
 
+func TestNewToolAttributesBackendErrorAfterParentCancellationToCancellation(t *testing.T) {
+	adapter, err := NewTool(adapterTool{invoke: func(ctx context.Context, _ json.RawMessage) (*core.ToolResult, error) {
+		<-ctx.Done()
+		return nil, errors.New("provider cancelled: postgres://admin:hunter2@db.internal/catalog")
+	}}, 0, 8192)
+	if err != nil {
+		t.Fatalf("NewTool: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	output, err := adapter.InvokableRun(ctx, `{}`)
+	if err != nil {
+		t.Fatalf("InvokableRun: %v", err)
+	}
+	if output != `{"error":{"code":"cancelled","message":"tool run was cancelled"}}` {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestNewToolHidesBackendErrorDetails(t *testing.T) {
 	secret := "postgres://admin:hunter2@db.internal/catalog?sslkey=/private/key.pem"
 	adapter, err := NewTool(adapterTool{invoke: func(context.Context, json.RawMessage) (*core.ToolResult, error) {

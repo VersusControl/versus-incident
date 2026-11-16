@@ -19,7 +19,7 @@ proxy:
   password: ${PROXY_PASSWORD} # Optional proxy password
 
 alert:
-  debug_body: true
+  debug_body: false
 
   slack:
     enable: false
@@ -81,7 +81,7 @@ alert:
 
 queue:
   enable: true
-  debug_body: true
+  debug_body: false
 
   # AWS SNS
   sns:

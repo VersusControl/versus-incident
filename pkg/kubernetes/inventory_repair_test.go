@@ -24,7 +24,7 @@ func warmTestInventory(t *testing.T, service *Service, namespaces ...string) {
 	}
 	service.startInventory(t.Context())
 	t.Cleanup(service.StopCapture)
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(scaledTimeout(30 * time.Second))
 	for {
 		service.changes.mu.Lock()
 		cache := service.changes.inventories[service.indexScope()]

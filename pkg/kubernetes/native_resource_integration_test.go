@@ -151,7 +151,7 @@ func nativeResourceService(t *testing.T, backend *nativeResourceBackend) *Servic
 
 func waitNativeCount(t *testing.T, value *atomic.Int32, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(4 * time.Second)
+	deadline := time.Now().Add(scaledTimeout(4 * time.Second))
 	for value.Load() != want {
 		if time.Now().After(deadline) {
 			t.Fatalf("native counter=%d want=%d", value.Load(), want)
@@ -309,7 +309,7 @@ func TestNativeWorkloadWindowBoundsAndTimestampResume(t *testing.T) {
 
 func awaitNativeHistory(t *testing.T, service *Service, samples int) UsageHistory {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(scaledTimeout(3 * time.Second))
 	for {
 		history, err := service.UsageHistory(logStreamTestContext(), "shop", "api-00")
 		if err != nil {

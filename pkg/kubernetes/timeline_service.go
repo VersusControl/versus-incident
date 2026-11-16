@@ -47,7 +47,11 @@ type TimelineItem struct {
 }
 
 type TimelinePage struct {
-	Authority   string            `json:"authority,omitempty"`
+	Authority string `json:"authority,omitempty"`
+	// History is "off_namespace_access" when the connector identity reads only
+	// inside namespaces: no history is kept for it, so the page is empty by
+	// design and retrying cannot fill it.
+	History     string            `json:"history,omitempty"`
 	CountCapped bool              `json:"count_capped,omitempty"`
 	Items       []TimelineItem    `json:"items"`
 	Next        string            `json:"next,omitempty"`
@@ -124,7 +128,11 @@ func (service *Service) Timeline(ctx context.Context, query TimelineQuery) (Time
 		if !query.Since.IsZero() && !query.Until.IsZero() && query.Since.After(query.Until) || query.Until.After(now.Add(time.Minute)) {
 			return TimelinePage{}, ErrInvalidArguments
 		}
-		return service.evidenceTimeline(ctx, query)
+		page, err := service.evidenceTimeline(ctx, query)
+		if err != nil && service.historyOffForNamespaceAccess(ctx, err) {
+			return TimelinePage{Items: []TimelineItem{}, Gaps: []kubechanges.Gap{}, Counts: map[string]int{}, History: HistoryOffNamespaceAccess, Since: query.Since, Until: query.Until, Sync: SyncStatus{State: "partial", Partial: true}}, nil
+		}
+		return page, err
 	}
 	if err := service.validateCredential(ctx); err != nil {
 		return TimelinePage{}, err

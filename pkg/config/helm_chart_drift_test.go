@@ -2,9 +2,7 @@ package config
 
 import (
 	"bytes"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -20,9 +18,9 @@ import (
 // -----------------------------------------------------------------------------
 //
 // TestDefaultConfigMatchesSample keeps the embedded baseline and the documented
-// sample in lockstep. This file is its chart-side analogue: it renders the Helm
-// chart and checks that the config.yaml the chart produces can express every key
-// the binary supports. Without it the chart silently falls behind pkg/config and
+// sample in lockstep. This file is its chart-side analogue: it reads the chart
+// scenarios rendered by helm/versus-incident/tests/run.sh and checks that the
+// config.yaml the chart produces can express every key the binary supports. Without it the chart silently falls behind pkg/config and
 // shipped features become unreachable for Helm users.
 //
 // The comparison is structural (key sets, not values) because the chart is
@@ -30,10 +28,6 @@ import (
 
 // chartDir is the chart under test, relative to this package.
 const chartDir = "../../helm/versus-incident"
-
-// coverageValues is the maximal scenario: every chart-expressible key turned on.
-// It lives with the other chart scenarios so `tests/run.sh` renders it too.
-const coverageValues = chartDir + "/tests/20-config-coverage.yaml"
 
 // appKeysNotExposedByChart lists keys present in default_config.yaml that the
 // chart deliberately does NOT render. Every entry needs a reason: the point of
@@ -79,57 +73,57 @@ var chartKeysNotInAppConfig = map[string]string{
 	"redis.tls_key_file":  "file path delivered via the REDIS_TLS_KEY_FILE env var",
 }
 
-// chartScenario is one `helm template` invocation.
-type chartScenario struct {
-	name string
-	args []string
-}
-
-// chartScenarios covers every mutually exclusive branch in the templates, so
+// chartScenarios are the chart test scenarios (helm/versus-incident/tests)
+// that together cover every mutually exclusive branch in the templates, so
 // their union is the full set of keys the chart can express. The on-call
 // providers and the storage backends are each an either/or in one render.
-var chartScenarios = []chartScenario{
-	{name: "defaults"},
-	{name: "kubernetes-in-cluster", args: kubernetesModeArgs("in_cluster")},
-	{name: "kubernetes-token", args: kubernetesModeArgs("token")},
-	{name: "kubernetes-token-file", args: kubernetesModeArgs("token_file")},
-	{name: "kubernetes-client-certificate", args: kubernetesModeArgs("client_certificate")},
-	{name: "kubernetes-kubeconfig", args: kubernetesModeArgs("kubeconfig")},
-	{name: "kubernetes-eks", args: kubernetesModeArgs("eks")},
-	{name: "kubernetes-aks-workload-identity", args: kubernetesModeArgs("aks", "connectors.kubernetes.auth.aks.credentialMode=workload_identity")},
-	{name: "kubernetes-aks-client-secret", args: kubernetesModeArgs("aks", "connectors.kubernetes.auth.aks.credentialMode=client_secret")},
-	{name: "kubernetes-aks-managed-identity", args: kubernetesModeArgs("aks", "connectors.kubernetes.auth.aks.credentialMode=managed_identity")},
-	{name: "kubernetes-gke", args: kubernetesModeArgs("gke")},
-	{name: "coverage", args: []string{"-f", coverageValues}},
-	{name: "coverage-pagerduty", args: []string{"-f", coverageValues, "--set", "oncall.provider=pagerduty"}},
-	{name: "coverage-servicenow", args: []string{"-f", coverageValues, "--set", "oncall.provider=servicenow"}},
-	{name: "coverage-incident-io", args: []string{"-f", coverageValues, "--set", "oncall.provider=incident_io"}},
-	{name: "postgres", args: []string{
-		"--set", "storage.type=postgres",
-		"--set", "storage.postgres.dsn=postgres://versus:pass@pg:5432/versus?sslmode=require",
-	}},
-	{name: "ha", args: []string{"-f", chartDir + "/tests/05-ha.yaml"}},
-	{name: "tools-secrets", args: []string{"-f", chartDir + "/tests/14-tools-secrets.yaml"}},
+var chartScenarios = append([]string{
+	"01-defaults",
+}, append(kubernetesAuthScenarios,
+	"20-config-coverage",
+	"72-config-coverage-oncall-pagerduty",
+	"73-config-coverage-oncall-servicenow",
+	"74-config-coverage-oncall-incident-io",
+	"75-postgres-storage",
+	"05-ha",
+	"14-tools-secrets",
+)...)
+
+// kubernetesAuthScenarios render the Kubernetes connector in each
+// authentication mode with every other mode's fields also set.
+var kubernetesAuthScenarios = []string{
+	"62-kubernetes-auth-in-cluster",
+	"63-kubernetes-auth-token",
+	"64-kubernetes-auth-token-file",
+	"65-kubernetes-auth-client-certificate",
+	"66-kubernetes-auth-kubeconfig",
+	"67-kubernetes-auth-eks",
+	"68-kubernetes-auth-aks-workload-identity",
+	"69-kubernetes-auth-aks-client-secret",
+	"70-kubernetes-auth-aks-managed-identity",
+	"71-kubernetes-auth-gke",
 }
 
 func TestHelmChartKubernetesIssueTemplateOverrides(t *testing.T) {
-	requireRenderableChart(t)
 	channels := []string{"slack", "telegram", "viber", "email", "msteams", "lark"}
-	for _, override := range []bool{false, true} {
-		name := "defaults"
-		args := []string{}
-		want := map[string]string{}
-		for _, channel := range channels {
-			path := ""
-			if override {
-				name = "overrides"
-				path = "/app/custom/" + channel + ` issue "quoted":template.tmpl`
-				args = append(args, "--set-string", "alert."+channel+".kubernetesIssueTemplatePath="+path)
+	// Both scenarios turn every channel on, since a disabled channel renders
+	// only `enable: false`.
+	for _, test := range []struct {
+		name, scenario string
+		override       bool
+	}{
+		{name: "defaults", scenario: "76-kubernetes-issue-template-default"},
+		{name: "overrides", scenario: "77-kubernetes-issue-template-overrides", override: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := map[string]string{}
+			for _, channel := range channels {
+				want[channel] = ""
+				if test.override {
+					want[channel] = "/app/custom/" + channel + ` issue "quoted":template.tmpl`
+				}
 			}
-			want[channel] = path
-		}
-		t.Run(name, func(t *testing.T) {
-			raw := parseRawYAML(t, []byte(renderChartConfig(t, chartScenario{name: name, args: args})))
+			raw := parseRawYAML(t, []byte(renderChartConfig(t, test.scenario)))
 			var loaded AlertConfig
 			if err := raw.Sub("alert").Unmarshal(&loaded); err != nil {
 				t.Fatal(err)
@@ -152,66 +146,36 @@ func TestHelmChartKubernetesIssueTemplateOverrides(t *testing.T) {
 	}
 }
 
-func kubernetesModeArgs(mode string, overrides ...string) []string {
-	values := []string{
-		"connectors.kubernetes.auth.mode=" + mode,
-		"connectors.kubernetes.endpoint=https://cluster.example",
-		"connectors.kubernetes.caFile=/run/kubernetes/ca.crt",
-		"connectors.kubernetes.serverName=cluster.internal",
-		"connectors.kubernetes.auth.token=fixture-token",
-		"connectors.kubernetes.auth.tokenFile=/run/kubernetes/token",
-		"connectors.kubernetes.auth.clientCertificate.certificateFile=/run/kubernetes/client.crt",
-		"connectors.kubernetes.auth.clientCertificate.keyFile=/run/kubernetes/client.key",
-		"connectors.kubernetes.auth.kubeconfig.path=/run/kubernetes/config",
-		"connectors.kubernetes.auth.kubeconfig.context=production",
-		"connectors.kubernetes.auth.eks.clusterName=production",
-		"connectors.kubernetes.auth.eks.region=us-east-1",
-		"connectors.kubernetes.auth.eks.roleARN=arn:aws:iam::123456789012:role/reader",
-		"connectors.kubernetes.auth.eks.profile=production",
-		"connectors.kubernetes.auth.aks.credentialMode=client_secret",
-		"connectors.kubernetes.auth.aks.serverID=api://aks-server",
-		"connectors.kubernetes.auth.aks.tenantID=tenant",
-		"connectors.kubernetes.auth.aks.clientID=client",
-		"connectors.kubernetes.auth.aks.clientSecret=fixture-secret",
-		"connectors.kubernetes.auth.aks.federatedTokenFile=/run/azure/token",
-		"connectors.kubernetes.auth.aks.environment=government",
-		"connectors.kubernetes.auth.gke.credentialsFile=/run/google/credentials.json",
-	}
-	values = append(values, overrides...)
-	args := make([]string, 0, len(values)*2)
-	for _, value := range values {
-		args = append(args, "--set-string", value)
-	}
-	return args
-}
-
-func TestHelmRejectsToolKubernetesKeysSafely(t *testing.T) {
-	requireRenderableChart(t)
-	for _, value := range []string{"agent.tools.kubernetes.endpoint=sensitive-value", "agent.tools.kubernetes={}", "agent.tools.kubernetes=null"} {
-		command := exec.Command("helm", "template", "connector-check", chartDir, "--set", "agent.enable=false", "--set", value)
-		output, err := command.CombinedOutput()
-		if err == nil || bytes.Contains(output, []byte("sensitive-value")) || !bytes.Contains(output, []byte("must use connectors.kubernetes")) {
-			t.Fatalf("obsolete key rejection: err=%v output=%s", err, output)
+// writeRenderedConfig writes the rendered config files next to each other, as
+// the Deployment mounts them, and returns the config.yaml path.
+func writeRenderedConfig(t *testing.T, files map[string]string) string {
+	t.Helper()
+	directory := t.TempDir()
+	for name, body := range files {
+		if !strings.HasSuffix(name, ".yaml") {
+			continue // message templates, not config
+		}
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write rendered %s: %v", name, err)
 		}
 	}
+	return filepath.Join(directory, "config.yaml")
 }
 
 func TestHelmConnectorsWithoutAgentAndSeparateActor(t *testing.T) {
-	requireRenderableChart(t)
-	for _, mode := range []string{"in_cluster", "token", "token_file", "client_certificate", "kubeconfig", "eks", "aks", "gke"} {
+	for _, test := range []struct{ mode, scenario string }{
+		{"in_cluster", "78-kubernetes-actor-without-agent-in-cluster"},
+		{"token", "79-kubernetes-actor-without-agent-token"},
+		{"token_file", "80-kubernetes-actor-without-agent-token-file"},
+		{"client_certificate", "81-kubernetes-actor-without-agent-client-certificate"},
+		{"kubeconfig", "82-kubernetes-actor-without-agent-kubeconfig"},
+		{"eks", "83-kubernetes-actor-without-agent-eks"},
+		{"aks", "84-kubernetes-actor-without-agent-aks"},
+		{"gke", "85-kubernetes-actor-without-agent-gke"},
+	} {
+		mode := test.mode
 		t.Run(mode, func(t *testing.T) {
-			args := kubernetesModeArgs(mode)
-			args = append(args, "--set", "agent.enable=false", "--set", "connectors.kubernetes.actions.enable=true", "--set-string", "connectors.kubernetes.actions.auth.mode="+mode, "--set-string", "connectors.kubernetes.actions.auth.tokenFile=/run/actor", "--set-string", "connectors.kubernetes.actions.auth.aks.credentialMode=managed_identity")
-			files := renderChartFiles(t, chartScenario{name: "disabled-agent-connector", args: args})
-			directory := t.TempDir()
-			for name, body := range files {
-				if strings.HasSuffix(name, ".yaml") {
-					if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+			loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, test.scenario)))
 			if err != nil || loaded.Agent.Enable || loaded.Connectors.Kubernetes.Auth.Mode != mode || loaded.Connectors.Kubernetes.Actions.Auth.Mode != mode || !loaded.Connectors.Kubernetes.Actions.Enable {
 				t.Fatalf("connector render: %v", err)
 			}
@@ -222,23 +186,14 @@ func TestHelmConnectorsWithoutAgentAndSeparateActor(t *testing.T) {
 	}
 }
 
+// The Secret bindings, the rejected catalogs and the refused top-level
+// settings of multi-cluster mode are chart scenarios 86 to 94.
 func TestHelmMultiClusterConnectorsAndSecrets(t *testing.T) {
-	requireRenderableChart(t)
 	t.Setenv("KUBERNETES_CLUSTER_EAST_TOKEN", "reader-east")
 	t.Setenv("KUBERNETES_CLUSTER_EAST_ACTOR_TOKEN", "actor-east")
 	t.Setenv("KUBERNETES_CLUSTER_WEST_TOKEN", "reader-west")
-	clusters := `[{"clusterId":"east","displayName":"East","endpoint":"https://east.example","auth":{"mode":"token","token":"reader-east"},"actions":{"enable":true,"auth":{"mode":"token","token":"actor-east"}}},{"clusterId":"west","endpoint":"https://west.example","auth":{"mode":"token","token":"reader-west"}}]`
-	args := []string{"--set", "agent.enable=false", "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters=" + clusters}
-	files := renderChartFiles(t, chartScenario{name: "multi-cluster", args: args})
-	directory := t.TempDir()
-	for name, body := range files {
-		if strings.HasSuffix(name, ".yaml") {
-			if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+	files := renderChartFiles(t, "86-kubernetes-multi-cluster")
+	loaded, err := loadConfigFromPath(writeRenderedConfig(t, files))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,46 +204,34 @@ func TestHelmMultiClusterConnectorsAndSecrets(t *testing.T) {
 	if strings.Contains(files["connectors.yaml"], "reader-east") || strings.Contains(files["connectors.yaml"], "actor-east") {
 		t.Fatal("ConfigMap contains credential values")
 	}
-	command := exec.Command("helm", append([]string{"template", "fleet", chartDir}, args...)...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, expected := range []string{"kubernetes_cluster_east_token:", "kubernetes_cluster_west_token:", "kubernetes_cluster_east_actor_token:", "name: KUBERNETES_CLUSTER_EAST_TOKEN", "name: KUBERNETES_CLUSTER_WEST_TOKEN"} {
-		if !bytes.Contains(output, []byte(expected)) {
-			t.Fatalf("missing cluster credential binding %s", expected)
-		}
-	}
-	for _, invalid := range []string{`[]`, `[{"clusterId":"same"},{"clusterId":"same"}]`, `[{"clusterId":"BAD"}]`, `[{"clusterId":"one","endpoint":"https://same.example"},{"clusterId":"two","endpoint":"https://same.example"}]`} {
-		command := exec.Command("helm", "template", "fleet", chartDir, "--set", "connectors.kubernetes.multiple=true", "--set-json", "connectors.kubernetes.clusters="+invalid)
-		if err := command.Run(); err == nil {
-			t.Fatal("invalid Helm cluster catalog accepted")
-		}
-	}
-	for _, setting := range []string{"connectors.kubernetes.auth.token=sensitive-value", "connectors.kubernetes.actions.auth.token=sensitive-value", "connectors.kubernetes.timeout=20s", "connectors.kubernetes.allowPrivateNetworks=true"} {
-		command := exec.Command("helm", append(append([]string{"template", "fleet", chartDir}, args...), "--set", setting)...)
-		output, err := command.CombinedOutput()
-		if err == nil || bytes.Contains(output, []byte("sensitive-value")) || !bytes.Contains(output, []byte("configure each cluster under clusters")) {
-			t.Fatalf("multi-mode top-level setting was ignored: %v", err)
-		}
-	}
 }
 
-// renderChartFiles runs `helm template` for one scenario and returns the config
-// files the chart placed in its ConfigMap, keyed by filename.
-func renderChartFiles(t *testing.T, sc chartScenario) map[string]string {
+// chartRendersEnv names the directory where helm/versus-incident/tests/run.sh
+// keeps each scenario's `helm template` output as <scenario>.yaml. The tests
+// that need a rendered chart read it from there and never run helm themselves;
+// without it they skip, and the chart CI job runs them.
+const chartRendersEnv = "VERSUS_CHART_RENDERS"
+
+// chartRender returns the rendered chart of one scenario in
+// helm/versus-incident/tests.
+func chartRender(t *testing.T, scenario string) []byte {
 	t.Helper()
-
-	args := append([]string{"template", "versus-drift", chartDir}, sc.args...)
-	cmd := exec.Command("helm", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("scenario %q: helm template failed: %v\n%s", sc.name, err, stderr.String())
+	directory := os.Getenv(chartRendersEnv)
+	if directory == "" {
+		t.Skip("needs the chart renders of helm/versus-incident/tests/run.sh, which runs this test")
 	}
+	raw, err := os.ReadFile(filepath.Join(directory, scenario+".yaml"))
+	if err != nil {
+		t.Fatalf("scenario %q has no render; add it to helm/versus-incident/tests: %v", scenario, err)
+	}
+	return raw
+}
 
-	dec := yaml.NewDecoder(bytes.NewReader(stdout.Bytes()))
+// renderChartFiles returns the config files the chart placed in its ConfigMap
+// for one scenario, keyed by filename.
+func renderChartFiles(t *testing.T, scenario string) map[string]string {
+	t.Helper()
+	dec := yaml.NewDecoder(bytes.NewReader(chartRender(t, scenario)))
 	for {
 		var doc struct {
 			Kind string            `yaml:"kind"`
@@ -303,14 +246,14 @@ func renderChartFiles(t *testing.T, sc chartScenario) map[string]string {
 			}
 		}
 	}
-	t.Fatalf("scenario %q: no ConfigMap carrying config.yaml in the rendered output", sc.name)
+	t.Fatalf("scenario %q: no ConfigMap carrying config.yaml in the rendered output", scenario)
 	return nil
 }
 
 // renderChartConfig returns just the rendered config.yaml for a scenario.
-func renderChartConfig(t *testing.T, sc chartScenario) string {
+func renderChartConfig(t *testing.T, scenario string) string {
 	t.Helper()
-	return renderChartFiles(t, sc)["config.yaml"]
+	return renderChartFiles(t, scenario)["config.yaml"]
 }
 
 // TestHelmChartRendersLoadableConfig parses each rendered config file back
@@ -320,46 +263,22 @@ func renderChartConfig(t *testing.T, sc chartScenario) string {
 // to config.yaml exactly as the Deployment mounts them, so the loader picks
 // them up and validates their shapes too.
 func TestHelmChartRendersLoadableConfig(t *testing.T) {
-	requireRenderableChart(t)
-
-	for _, sc := range chartScenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			files := renderChartFiles(t, sc)
-
-			dir := t.TempDir()
-			for name, body := range files {
-				if !strings.HasSuffix(name, ".yaml") {
-					continue // message templates, not config
-				}
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-					t.Fatalf("write rendered %s: %v", name, err)
-				}
-			}
-
-			path := filepath.Join(dir, "config.yaml")
-			if _, err := loadConfigFromPath(path); err != nil {
-				t.Errorf("chart shape drift: the config rendered by scenario %q does not unmarshal into the Go config structs: %v\n--- config.yaml ---\n%s", sc.name, err, files["config.yaml"])
+	for _, scenario := range chartScenarios {
+		t.Run(scenario, func(t *testing.T) {
+			files := renderChartFiles(t, scenario)
+			if _, err := loadConfigFromPath(writeRenderedConfig(t, files)); err != nil {
+				t.Errorf("chart shape drift: the config rendered by scenario %q does not unmarshal into the Go config structs: %v\n--- config.yaml ---\n%s", scenario, err, files["config.yaml"])
 			}
 		})
 	}
 }
 
 func TestHelmChartKubernetesAuthenticationModesAreIsolated(t *testing.T) {
-	requireRenderableChart(t)
 	t.Setenv("KUBERNETES_SERVICE_HOST", "10.20.30.40")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
-	for _, scenario := range chartScenarios[1:11] {
-		t.Run(scenario.name, func(t *testing.T) {
-			files := renderChartFiles(t, scenario)
-			directory := t.TempDir()
-			for name, body := range files {
-				if strings.HasSuffix(name, ".yaml") {
-					if err := os.WriteFile(filepath.Join(directory, name), []byte(body), 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			loaded, err := loadConfigFromPath(filepath.Join(directory, "config.yaml"))
+	for _, scenario := range kubernetesAuthScenarios {
+		t.Run(scenario, func(t *testing.T) {
+			loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, scenario)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -380,17 +299,15 @@ func TestHelmChartKubernetesAuthenticationModesAreIsolated(t *testing.T) {
 // the application supports (a shipped feature unreachable for Helm users), and
 // when the chart renders a key the application does not know about.
 func TestHelmChartCoversDefaultConfig(t *testing.T) {
-	requireRenderableChart(t)
-
 	appKeys := map[string]struct{}{}
 	for _, k := range parseRawYAML(t, defaultConfigYAML).AllKeys() {
 		appKeys[k] = struct{}{}
 	}
 
 	chartKeys := map[string][]string{} // key -> scenarios that produced it
-	for _, sc := range chartScenarios {
-		for _, k := range parseRawYAML(t, []byte(renderChartConfig(t, sc))).AllKeys() {
-			chartKeys[k] = append(chartKeys[k], sc.name)
+	for _, scenario := range chartScenarios {
+		for _, k := range parseRawYAML(t, []byte(renderChartConfig(t, scenario))).AllKeys() {
+			chartKeys[k] = append(chartKeys[k], scenario)
 		}
 	}
 
@@ -414,59 +331,6 @@ func TestHelmChartCoversDefaultConfig(t *testing.T) {
 			t.Errorf("chart drift: the chart renders %q (scenarios: %s) but the application has no such key in pkg/config/default_config.yaml — remove it from the chart or record why it is legitimate in chartKeysNotInAppConfig", k, strings.Join(chartKeys[k], ", "))
 		}
 	}
-}
-
-// chartTestsEnv makes an unrenderable chart a failure instead of a skip.
-// helm/versus-incident/tests/run.sh sets it after `helm dependency build`, so
-// the chart CI job can never silently stop checking for drift.
-const chartTestsEnv = "VERSUS_HELM_CHART_TESTS"
-
-// requireRenderableChart skips unless `helm template` can actually run. The
-// plain `go test ./...` job has Helm on PATH but has not vendored the
-// subcharts, and a missing subchart is a broken environment rather than drift.
-func requireRenderableChart(t *testing.T) {
-	t.Helper()
-
-	var unmet error
-	if _, err := exec.LookPath("helm"); err != nil {
-		unmet = fmt.Errorf("helm is not on PATH; install Helm 3.x")
-	} else {
-		unmet = chartDependenciesVendored()
-	}
-	if unmet == nil {
-		return
-	}
-	if os.Getenv(chartTestsEnv) == "1" {
-		t.Fatalf("%s=1 but the chart cannot be rendered: %v", chartTestsEnv, unmet)
-	}
-	t.Skipf("chart drift tests need a renderable chart: %v — run helm/versus-incident/tests/run.sh", unmet)
-}
-
-// chartDependenciesVendored reports whether every subchart Chart.yaml declares
-// is present in charts/. `helm template` refuses to render without them.
-func chartDependenciesVendored() error {
-	raw, err := os.ReadFile(filepath.Join(chartDir, "Chart.yaml"))
-	if err != nil {
-		return fmt.Errorf("read Chart.yaml: %w", err)
-	}
-	var meta struct {
-		Dependencies []struct {
-			Name string `yaml:"name"`
-		} `yaml:"dependencies"`
-	}
-	if err := yaml.Unmarshal(raw, &meta); err != nil {
-		return fmt.Errorf("parse Chart.yaml: %w", err)
-	}
-	for _, dep := range meta.Dependencies {
-		if tgz, _ := filepath.Glob(filepath.Join(chartDir, "charts", dep.Name+"-*.tgz")); len(tgz) > 0 {
-			continue
-		}
-		if fi, err := os.Stat(filepath.Join(chartDir, "charts", dep.Name)); err == nil && fi.IsDir() {
-			continue
-		}
-		return fmt.Errorf("subchart %q is not vendored in charts/; run `helm dependency build %s`", dep.Name, chartDir)
-	}
-	return nil
 }
 
 // coveredBy reports whether the chart expresses key k. A chart is allowed to

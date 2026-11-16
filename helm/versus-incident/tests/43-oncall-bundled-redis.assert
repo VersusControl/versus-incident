@@ -1,0 +1,22 @@
+# Built-in Redis branch of config.yaml, with TLS off.
+# Configuration for built-in Redis
+^ +tls: false$
+!^ +tls: true$
+!tls_ca_file:
+# The chart's own Redis: Secret, volume, Service and Deployment, official image.
+name: versus-test-versus-incident-redis$
+name: versus-test-versus-incident-redis-data$
+image: "redis:7\.4\.[0-9]+-alpine"
+app.kubernetes.io/component: redis
+redis-server /etc/redis-run/redis.conf --dir /data --appendonly yes
+command: \["/bin/sh", "-c", "redis-cli ping \| grep -q PONG"\]
+runAsUser: 999
+!bitnami
+!redis-master
+# Versus waits for Redis before starting, and reads the password from the
+# Redis Secret, not from its own.
+- name: wait-for-redis
+until redis-cli -h versus-test-versus-incident-redis -p 6379 ping
+- name: REDISCLI_AUTH
+!key: redis_password
+!requirepass .*test-redis-password

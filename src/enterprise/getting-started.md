@@ -1,79 +1,117 @@
-# Running the Enterprise Agent
+# Getting Started with Enterprise
 
 _Enterprise_
 
-This guide walks you from a fresh start to a live Enterprise SRE Agent. You'll start the agent, log in as the built-in default admin, turn on AI, and move the agent through its three modes — **training → shadow → detect**.
+## What Enterprise adds
+
+Versus Enterprise is Versus with a license key. It runs the Enterprise image,
+`ghcr.io/versuscontrol/versus-enterprise`, which does everything the OSS image
+does: log sources, training, shadow and detect, AI Chat and Analyze, webhook
+alerts, channels and on-call. A license key turns on the features below.
+
+![Side-by-side comparison of Versus OSS and Versus Enterprise: the OSS card lists log sources, the three agent modes, AI Chat and Analyze, webhook alerts, channels and on-call, the Kubernetes connector and one instance; the Enterprise card lists everything in OSS plus metrics and traces sources, SLI/SLO, alert fatigue, SSO with roles, high availability and runtime controls in the UI, all unlocked by one license key](../docs/images/enterprise-vs-oss.svg)
+
+| Feature | OSS | Enterprise |
+|---|---|---|
+| Log sources, training, shadow and detect | Yes | Yes |
+| AI Chat and Analyze, webhook alerts, channels, on-call | Yes | Yes |
+| [Metrics](./metrics/overview.md) from Prometheus, CloudWatch and SigNoz | | Yes |
+| [Traces](./traces.md) from Tempo and SigNoz | | Yes |
+| [SLI/SLO auto-define](./slo.md) and error-budget burn alerts | | Yes |
+| [Alert fatigue](./alert-fatigue.md): repeat alerts stop paging | | Yes |
+| [Single sign-on](./sso/overview.md) with roles | | Yes |
+| [High availability](./ha/overview.md): several replicas on one Postgres | | Yes |
+| Runtime mode, AI key and channels changed from the UI, with no restart | | Yes |
+
+### Licensed and unlicensed
+
+The Enterprise image reads `LICENSE_KEY` when it starts.
+
+| | Without a license key | With a license key |
+|---|---|---|
+| OSS features | All work, as on the OSS image. | All work. |
+| Enterprise screens | The sidebar groups **Metrics**, **Traces**, **Alert fatigue** and **SLIs/SLOs** under **Enterprise** with a lock, and each shows an **Enterprise capability** card. | Open, in their usual places. |
+| Metrics and traces sources | Stop with `requires Versus Enterprise`. | Run. |
+| Sign-in | The OSS gateway secret (`GATEWAY_SECRET`). | The built-in `admin` account, then SSO. |
+
+A key that fails to verify is logged as
+`enterprise: license validation failed, falling back to community mode`, and
+Versus runs unlicensed.
+
+### Key renewal
+
+A license key lasts 30 days. Versus renews it online while your subscription
+is active:
+
+| | Behavior |
+|---|---|
+| When | 30 seconds after start, then every 24 hours (`LICENSE_RENEW_INTERVAL`). It calls only when 10 days or less remain (`LICENSE_RENEW_WINDOW`). |
+| Key already expired at start | One extra attempt, of up to 15 seconds, before Versus finishes starting. |
+| Across restarts | The renewed key is kept only when `LICENSE_CACHE_PATH` is set. Otherwise Versus starts again from `LICENSE_KEY`. |
+| No network | Versus keeps the current key until it expires, then runs unlicensed. |
+| Subscription cancelled | Renewal stops; the key runs out within its 30 days. |
+
+Air-gapped deployments cannot renew: the attempts fail and are logged. Contact
+us for a long-lived key.
 
 ## Before you start
 
 | You need | Why |
 |---|---|
-| A **Versus Enterprise license** with the **`intelligence`** entitlement, supplied via the `LICENSE_KEY` environment variable ([generate one below](#get-your-license-key-from-the-management-platform)) | The standing metric/trace sources and the runtime admin controls are gated on it. Without it the agent runs in community mode and these controls stay locked. |
-| **Postgres** (plus the usual infra the agent already uses, e.g. Redis) | The agent persists what it learns — baselines, settings, audit trail — to Postgres so it survives restarts. |
-| The **built-in default admin password** printed once in the boot log | The privileged controls are gated on your RBAC role. The built-in default admin is a root account (owner) you log into directly to configure SSO — no env, no token. See [Single Sign-On](./sso/overview.md). |
+| A Versus account on the Founding plan | Only a paid plan issues a license key. |
+| Postgres | Enterprise keeps users, settings and learned state there. Alert fatigue and HA need it. |
+| An AI provider key (optional) | Only to arm detect from the UI and to get AI-written summaries. |
 
-> **Coming from OSS?** If you're coming from OSS and use PostgreSQL storage and
-> want to keep your existing data, read
-> [Migrating OSS data to Enterprise](../migration/migration-oss-to-enterprise.md)
-> — Enterprise reads under your license org, so your incidents, analyses and
-> learned state stay invisible under `default` until you migrate them.
+## 1. Get a license key
 
-## Get your license key from the management platform
+You generate the key on the Versus management platform,
+[versusincident.com](https://versusincident.com). It is a separate web console
+from the Versus you run.
 
-_Enterprise_
+1. **Sign up or log in** with your email and a password. The sign-up form also
+   asks for an **Organization name**.
 
-Everything below needs a `LICENSE_KEY` first — it is what unlocks the admin
-controls and the AI features used in the later steps. You don't write this key
-by hand; you generate it on the [Versus management platform](https://versusincident.com), the hosted
-control plane that owns your account, plan, and licensing. The platform is a
-separate web console from the agent you run.
+   ![The management platform sign-up and log-in screen](../docs/images/enterprise-platform-login.png)
 
-### 1. Sign up or log in
+2. **Subscribe to the Founding plan.** On the free tier, click **Upgrade to
+   Founding** on the dashboard. Once payment is confirmed, the dashboard shows
+   your plan as **Founding**.
+3. **Generate the key.** Open the **License Key** tab and click **Generate
+   license key**. The full key is shown once. Copy it now. Later the dashboard
+   shows only a masked preview; if you lose the key, click **Regenerate**.
 
-Open the platform in your browser and create an account with your **email and
-a password** (the form also asks for a workspace / organization name). If your
-platform has Google sign-in enabled, you can **Continue with Google** instead.
+   ![Generating the enterprise license key on the dashboard](../docs/images/enterprise-generate-license-key.png)
 
-![The management platform sign-up and log-in screen](../docs/images/enterprise-platform-login.png)
+## 2. Give the key to Versus
 
-### 2. Subscribe to the Founding plan
+Pass the key as the `LICENSE_KEY` environment variable. Keep it out of files
+you commit.
 
-A license key is only issued to a **paid (Founding) plan** with an active
-subscription. If your account is on the free OSS tier, open the dashboard and
-click **Upgrade to Founding** to start checkout; once payment is confirmed the
-dashboard shows your plan as **Founding** and licensing unlocks.
+```bash
+export LICENSE_KEY=<your license key>
 
-### 3. Generate your license key
-
-On the dashboard, open the **License Key** tab and click **Generate license
-key**. The platform mints a fresh, signed key for your org and shows the
-full key exactly once — copy it right away. For your security the
-dashboard only ever shows a masked preview afterward; if you lose it, click
-**Regenerate** to mint a new one.
-
-![Generating the enterprise license key on the dashboard](../docs/images/enterprise-generate-license-key.png)
-
-### 4. Copy the key into the agent
-
-Copy the full key and hand it to the enterprise agent as its **`LICENSE_KEY`**
-environment variable — this is the value the agent boots with in
-[step 1](#1-start-the-enterprise-agent) (the [Metrics](./metrics.md#1-bring-up-the-stack)
-and [Traces](./traces.md#1-bring-up-the-stack) walkthroughs show the exact
-`docker run` line that passes it in). On a successful boot the logs show the
-license unlocked the agent with **no** *requires Versus Enterprise* warning,
-and you can continue with the steps below.
-
-## Start the enterprise agent
-
-Launch the Versus Enterprise image with your license.
-
-### 1. Log in as the built-in default admin
-
-A fresh licensed deployment ships with a built-in **default admin**: a root account you
-log into directly (not through SSO). On first boot the agent generates a
-random password and prints it once to the container log:
-
+docker run -d --name versus-enterprise \
+  -p 127.0.0.1:3000:3000 \
+  -e LICENSE_KEY \
+  -e VERSUS_ENTERPRISE_COOKIE_INSECURE=true \
+  -e STORAGE_TYPE=postgres \
+  -e POSTGRES_DSN="postgres://versus:<password>@<host>:5432/versus?sslmode=disable" \
+  -v versus-data:/app/data \
+  ghcr.io/versuscontrol/versus-enterprise
 ```
+
+`VERSUS_ENTERPRISE_COOKIE_INSECURE=true` lets the sign-in cookie work over
+plain HTTP on `localhost`; leave it out when you serve Versus over HTTPS.
+
+To try it without your own Postgres, use the Compose example
+[below](#try-it-with-docker-compose).
+
+## 3. Sign in as the built-in admin
+
+On its first start against an empty database, Versus prints a generated
+password for the built-in `admin` account, once:
+
+```text
 ================================================================================
   DEFAULT ADMIN CREDENTIALS (shown once — copy them now)
 --------------------------------------------------------------------------------
@@ -84,92 +122,117 @@ random password and prints it once to the container log:
 ================================================================================
 ```
 
-Copy that password and open the console. Log in at the local login with username
-**`admin`** and that password — you land in the console as **owner**, which holds
-every permission.
+```bash
+docker logs versus-enterprise 2>&1 | grep -A6 "DEFAULT ADMIN CREDENTIALS"
+```
 
-From there (optional):
+Open `http://localhost:3000` and sign in as `admin` with that password. You
+are the **owner**, with every permission. The password is not printed again on
+later starts; keep it.
 
-1. **Add your first SSO connection** (Google / Azure / OIDC) — follow
-   [Single Sign-On](./sso/overview.md).
-2. **Sign your team in over SSO.** New SSO users default to the read-only
-   **viewer** role.
-3. **Promote one of them** to **admin** or **owner** from the **Members** panel.
-4. **Disable the built-in default admin** from the **Members** panel. This is
-   allowed only once another owner/admin exists (a no-lockout guard), and it
-   immediately invalidates the built-in admin's session. You can re-enable it
-   later for break-glass recovery.
+Then, when you are ready:
 
-### 2. Open the UI and go to the Agent page
+1. Add an identity provider: see [Single Sign-On](./sso/overview.md).
+2. Your team signs in with SSO. New users start as **viewer** (read-only).
+3. Promote one of them to **admin** or **owner** in **Admin → Members & roles**.
+4. Click **Disable default admin** there. Versus refuses while `admin` is the
+   only owner or admin, so you cannot lock yourself out. You can turn it back
+   on later for break-glass access.
 
-Open dashboard and click into the **Agent** page. You'll see:
+## 4. Unlock the controls
 
-- a **runtime banner** summarising the agent's current mode and AI state,
-- a **Runtime mode** control (Training / Shadow / Detect),
-- an **AI settings** control.
+Open **Admin** (under **Manage** in the sidebar). Its sections are **Runtime
+mode**, **AI provider**, **Channels**, **Alert fatigue**, **Identity
+providers** and **Members & roles**.
 
-### 3. The controls unlock with your owner role
+| Signed in as | What you see |
+|---|---|
+| `owner` or `admin` | Live controls. |
+| `viewer` or `responder` | A **requires the admin role** notice. |
+| Not signed in | A **sign in to manage** notice. |
+| No license key | The locked **Enterprise capability** card. |
 
-After you log in as the built-in default admin (owner) — or as any SSO member
-you've promoted to owner/admin — the Runtime mode and AI settings controls
-become live automatically.
+## 5. Add an AI key (optional)
 
-A signed-out caller, or one whose role is read-only, sees
-the **Sign in to manage** / **Requires the admin role** notice instead. Privileges
-are carried by your role, granted from the **Members** panel by an owner.
-
-### 4. Activate the AI key (Optional)
-
-Find the **AI settings**. This is where you give the agent its AI provider key and turn AI
-on for your org.
+In **Admin → AI provider**:
 
 1. Tick **Enable AI for this org**.
-2. In the **API key** field, paste your AI provider key (e.g. `sk-…`).
-3. Click **Save**.
+2. Pick your provider from the **Provider** list, for example `openai`. A note
+   says that saving switches the model provider to it with the key you enter.
+3. Paste your provider key into **API key** and click **Save**.
 
-![The AI settings card with the enable toggle, API key field, and Save button](../docs/images/enterprise-activate-ai-key.png)
+![Admin → AI provider: Enable AI for this org ticked, the Provider list set to openai with the note that saving will switch the model provider to openai, a masked API key, and the Save button](../docs/images/enterprise-activate-ai-key-dark.png)
 
-What happens on save:
+The key is stored encrypted. The UI shows only its last four characters and
+never returns the full key. When you change provider, enter that provider's
+key in the same save. **Clear runtime override** goes back to the AI settings
+in your config file.
 
-- Your key is stored encrypted using the auto-generated master key —
-  there is nothing for you to configure.
-- The key is write-only: the UI only ever shows it back masked, as
-  the last four characters — the full value is never returned or logged.
-- The key field is transient: it is sent on that one save and immediately
-  cleared. It is never written to your browser storage.
+## 6. Switch the agent mode
 
-### 5. Use the key to run — switch the agent mode
-
-With AI enabled, you can drive the agent through its modes from the
-**Runtime mode** control. The card shows the effective mode and lets an
-admin switch it live:
+In **Admin → Runtime mode**, click a mode. The change applies right away, with
+no restart.
 
 | Mode | What it does |
 |---|---|
-| **Training** | Observes only — learns baselines, never alerts. |
-| **Shadow** | Classifies and logs *would-have-alerted* events, but stays silent. |
-| **Detect** | Calls the AI SRE and opens real incidents / on-call pages. |
+| **Training** | Learns what normal looks like. Never alerts. |
+| **Shadow** | Records what it would have raised. Stays silent. |
+| **Detect** | Raises real incidents and pages on-call. |
 
-Click a mode to switch to it. The change takes effect at runtime — no
-restart needed (use **Revert to YAML** to clear the override).
+Choosing **Detect** asks you to confirm (**Arm detect mode?** → **Arm
+detect**). From the UI, detect also needs AI turned on with a key; without
+one, the control points you to **AI provider**. Starting Versus with
+`AGENT_MODE=detect` has no such check.
 
-**Detect is guarded.** Because detect opens real incidents, choosing it
-asks you to confirm (*"Arm detect mode?"* → **Arm detect**), and it
-requires AI to be enabled — which is exactly why you activated the key
-in [step 5](#5-activate-the-ai-key). If AI is still off, the control points
-you back to the AI settings card.
+![Admin → Runtime mode with shadow active and the Arm detect mode? dialog open, with Cancel and Arm detect buttons](../docs/images/enterprise-arm-detect-dark.png)
 
-![Confirming the switch into detect mode](../docs/images/enterprise-arm-detect.png)
+Start in training, check shadow's results, then arm detect when you trust them.
+The modes are described in [Training Mode](../agent/training-mode.md),
+[Shadow Mode](../agent/shadow-mode.md) and [AI Detect Mode](../agent/ai-detect-mode.md).
 
-The recommended path on a new deployment is to **stay in training** until
-the agent has learned a baseline, move to **shadow** to sanity-check what it
-would have flagged, then **arm detect** when you trust it.
+## Try it with Docker Compose
 
-## Where to go next
+You need Git, Docker with Docker Compose v2, and a Versus Enterprise
+license key. Clone the repository and go into it:
 
-You now have a running, AI-enabled agent and know how to move it between
-modes. Next, drive real data through it and watch the learning flow happen:
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
 
-- [Metrics](./metrics.md) — generate synthetic metrics, watch
-  the agent learn per-service baselines, then flag an anomaly in shadow.
-- [Traces](./traces.md) — the same flow for slow/erroring spans.
+Every command below runs from this `versus-incident` folder, the repository
+root.
+
+[`examples/metrics-source/`](https://github.com/VersusControl/versus-incident/tree/main/examples/metrics-source)
+runs Versus Enterprise with Postgres and a Prometheus that has demo traffic.
+
+```bash
+export LICENSE_KEY=<your license key>
+export AGENT_MODE=training
+docker compose -f examples/metrics-source/docker-compose.yml --profile fake-metrics up -d
+docker compose -f examples/metrics-source/docker-compose.yml logs versus \
+  | grep -A6 "DEFAULT ADMIN CREDENTIALS"
+```
+
+Open `http://localhost:3000`, sign in as `admin`, and open **Admin**. Within
+a few minutes **Agent Learning → Metrics** lists the `checkout` service. The
+walkthrough continues in [Prometheus Metrics](./metrics/prometheus.md).
+
+Run the same commands without `LICENSE_KEY` to see the unlicensed state: the
+Admin sections are locked and the Prometheus source logs
+`requires Versus Enterprise`.
+
+Clean up:
+
+```bash
+docker compose -f examples/metrics-source/docker-compose.yml --profile fake-metrics down -v
+```
+
+## Next steps
+
+| Goal | Page |
+|---|---|
+| Let your team sign in with Google, Entra ID or OIDC | [Single Sign-On](./sso/overview.md) |
+| Watch metrics and traces | [Metrics](./metrics/overview.md), [Traces](./traces.md) |
+| Quiet repeat alerts | [Alert fatigue](./alert-fatigue.md) |
+| Run more than one replica | [High Availability](./ha/overview.md) |

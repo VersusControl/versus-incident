@@ -2,134 +2,124 @@
 
 _Enterprise_
 
-See high availability work on your laptop in about two minutes: **two enterprise
-replicas + one Postgres + an nginx load balancer**. You hit one URL, nginx
-round-robins across both replicas, and a session established on one is served by
-the other — because sessions and secrets converge through the shared Postgres.
+## Concept
+
+See high availability on your laptop: two Versus Enterprise replicas, one
+Postgres, and an nginx load balancer that sends each request to either replica
+in turn. You open one URL, sign in once, and stay signed in whichever replica
+answers. See [High Availability](./overview.md) for how it works.
+
+![A browser or webhook sender calls localhost port 8080, nginx sends each request in turn to the Enterprise replicas versus-0 and versus-1, and both share one Postgres that holds sign-in sessions](../../docs/images/ha-docker-topology.svg)
+
+*nginx sends requests to both replicas in turn; because sessions live in the shared Postgres, restarting one replica keeps you signed in.*
+
+## Try it with Docker Compose
+
+You need Git, Docker with Docker Compose v2, and a Versus Enterprise license
+key. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command below runs from this `versus-incident` folder, the repository
+root.
+
+The example is
+[`examples/high-availability/docker/`](https://github.com/VersusControl/versus-incident/tree/main/examples/high-availability/docker).
+
+**1. Start the stack** with your license key from the environment:
+
+```bash
+export LICENSE_KEY=<your license key>
+docker compose -f examples/high-availability/docker/docker-compose.yml up -d
+docker compose -f examples/high-availability/docker/docker-compose.yml ps
+```
+
+Compose starts Postgres, `versus-0`, `versus-1` and the load balancer. Wait
+until all four are `healthy`.
+
+**2. Open the UI through the load balancer.** Browse to
+`http://localhost:8080`. The sign-in page loads.
+
+![The Versus sign-in page at localhost:8080: the built-in admin username and password form](../../docs/images/ha-docker-sign-in-dark.png)
+
+**3. Check each replica's place in the set:**
+
+```bash
+docker compose -f examples/high-availability/docker/docker-compose.yml \
+  logs versus-0 versus-1 | grep "HA mode"
+```
+
+One line from each replica, `instance 0 of 2` and `instance 1 of 2`:
 
 ```text
-            ┌───────────── http://localhost:8080 ─────────────┐
-            │                  nginx (lb)                      │
-            │            round-robin, no stickiness            │
-            └───────┬─────────────────────────────┬───────────┘
-                    │                              │
-              ┌─────▼─────┐                  ┌─────▼─────┐
-              │ versus-0  │                  │ versus-1  │
-              │ index 0/2 │                  │ index 1/2 │
-              └─────┬─────┘                  └─────┬─────┘
-                    └───────────┬──────────────────┘
-                          ┌─────▼─────┐
-                          │ postgres  │  ONE shared store
-                          └───────────┘  (secrets + sessions converge here)
+enterprise: HA mode — instance 0 of 2; partitioning signal sources and scheduler jobs by hash-ownership
+enterprise: HA mode — instance 1 of 2; partitioning signal sources and scheduler jobs by hash-ownership
 ```
 
-## What you'll need
-
-| Item | Where it comes from |
-|---|---|
-| **Docker** + Docker Compose v2 | runs Postgres, both replicas, and the load balancer |
-| The **enterprise image** | `ghcr.io/versuscontrol/versus-enterprise` (private — `docker login ghcr.io` first, or set `VERSUS_ENTERPRISE_IMAGE` to a local build in `.env`) |
-| A **Versus Enterprise license** (`LICENSE_KEY`) | optional for the topology demo (empty boots community mode); required to prove session/secret convergence |
-
-The example lives at `versus-incident/examples/high-availability/docker/`.
-
-## Step 1 — Provide your license
-
-The compose file reads secrets from a **gitignored `.env`** — never commit a real
-key. Copy the placeholder and fill it in:
+**4. Sign in.** One replica printed the admin password; search both:
 
 ```bash
-cd versus-incident/examples/high-availability/docker
-cp .env.example .env
+docker compose -f examples/high-availability/docker/docker-compose.yml \
+  logs versus-0 versus-1 | grep -A6 "DEFAULT ADMIN CREDENTIALS"
 ```
 
-Edit `.env`:
+Open `http://localhost:8080` and sign in as `admin`. Click around: nginx sends
+your requests to both replicas, and you stay signed in.
+
+**5. Restart one replica.** The other keeps serving:
 
 ```bash
-# Offline JWT — paste your key, or leave empty to boot community mode.
-LICENSE_KEY=
+docker compose -f examples/high-availability/docker/docker-compose.yml restart versus-0
 ```
 
-The Postgres values (`POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`) are
-local dev defaults and already line up with the shared DSN — leave them as is for
-the demo.
+Reload the page in your browser right away. It loads, and you are still
+signed in: `versus-1` answers while `versus-0` restarts.
 
-## Step 2 — Bring up the stack
+**Clean up:**
 
 ```bash
-docker compose up -d
-docker compose ps
+docker compose -f examples/high-availability/docker/docker-compose.yml down -v
 ```
 
-Compose starts one Postgres, the two replicas (`versus-0`, `versus-1`), and the
-nginx load balancer. Each replica is wired for HA out of the box:
+`-v` also deletes the Postgres volume, so the next start prints a new admin
+password.
 
-| Env (set in the compose file) | Value | Why |
+## What the example sets
+
+Each replica gets these settings from `docker-compose.yml`:
+
+| Setting | Value | Why |
 |---|---|---|
-| `STORAGE_TYPE` | `postgres` | the ONE shared store (required for >1 replica) |
-| `POSTGRES_DSN` | same on both replicas | points both at the same Postgres |
-| `POD_NAME` | `versus-0` / `versus-1` | the trailing ordinal is this replica's index |
-| `INSTANCE_COUNT` | `2` | total replicas |
-| `LICENSE_KEY` | from `.env` | enterprise features (empty ⇒ community mode) |
+| `STORAGE_TYPE` | `postgres` | One shared store; required for more than one replica. |
+| `POSTGRES_DSN` | the same on both | Both replicas use the same database. |
+| `POD_NAME` | `versus-0`, `versus-1` | The number at the end is the replica's place in the set. |
+| `INSTANCE_COUNT` | `2` | Total replicas. |
+| `LICENSE_KEY` | from your environment | Empty runs unlicensed. |
+| `VERSUS_ENTERPRISE_COOKIE_INSECURE` | `1` | Lets sign-in work over plain HTTP. Local use only. |
 
-## Step 3 — What success looks like
+Optional variables, from your shell or a `.env` file (see `.env.example`):
 
-**The single endpoint is healthy:**
+| Variable | Default | Purpose |
+|---|---|---|
+| `VERSUS_ENTERPRISE_IMAGE` | `ghcr.io/versuscontrol/versus-enterprise` | Image to run, for example to pin a tag. |
+| `LB_PORT` | `8080` | Load balancer port on `127.0.0.1`. |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `versus` | Local Postgres. |
 
-```bash
-curl -fsS http://localhost:8080/healthz && echo OK
-```
+## Without a license
 
-**Each replica claims a distinct instance index** (from its `POD_NAME` ordinal):
-
-```bash
-docker compose logs versus-0 versus-1 | grep -E "HA mode|instance [0-9]+ of"
-# versus-0 -> "instance 0 of 2"
-# versus-1 -> "instance 1 of 2"
-```
-
-**Secrets converge** (licensed): the break-glass default-admin password is
-generated **once** by the winning replica and printed once — search both:
-
-```bash
-docker compose logs versus-0 versus-1 | grep -A3 "DEFAULT ADMIN CREDENTIALS"
-```
-
-**Sessions work across replicas.** Log in once at <http://localhost:8080> as the
-local admin `admin` with the printed password. nginx round-robins your later
-requests across `versus-0` and `versus-1` and they all succeed — the session
-cookie minted on one replica validates on the other, because the session key
-converges through Postgres. (The compose file sets the dev-only
-`VERSUS_ENTERPRISE_COOKIE_INSECURE=1` so the cookie survives plain HTTP through
-the local load balancer — never set this in production.)
-
-**A rolling restart stays up.** Restart one replica; the load balancer keeps
-serving from the other:
-
-```bash
-docker compose restart versus-0
-curl -fsS http://localhost:8080/healthz && echo "still OK (served by versus-1)"
-```
-
-## Step 4 — Tear down
-
-```bash
-docker compose down      # keep the Postgres volume
-docker compose down -v   # also drop the Postgres volume
-```
+Without `LICENSE_KEY` the stack still starts, and each replica still logs its
+place in the set, so you can see the topology. There is no built-in admin, and
+the Enterprise screens stay locked.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| A replica exits immediately at boot | `STORAGE_TYPE` isn't `postgres` while `INSTANCE_COUNT > 1`. The file backend is single-node and the binary refuses it — both replicas must use the shared Postgres DSN. |
-| `image pull` fails for the enterprise image | The enterprise image is private. Run `docker login ghcr.io`, or set `VERSUS_ENTERPRISE_IMAGE` in `.env` to a locally-built image. |
-| Both replicas report the same index | `POD_NAME` isn't distinct per replica. The compose file sets `versus-0` / `versus-1`; if you copied a service, give it its own `POD_NAME`. |
-| No `DEFAULT ADMIN CREDENTIALS` banner appears | You booted without a `LICENSE_KEY` (community mode). Paste a real key into `.env` and `docker compose up -d` again. |
-| Login on one replica is rejected after a round-robin to the other | Running unlicensed (no converged session key), or you changed `POSTGRES_DSN` so the replicas no longer share one store. Confirm both use the same DSN and a license is set. |
-
-## See also
-
-- [High Availability overview](./overview.md)
-- [HA on Kubernetes](./kubernetes.md) · [HA with Helm](./helm.md)
-- [Getting Started](../getting-started.md) — the default-admin bootstrap flow.
+| A replica exits at start | `STORAGE_TYPE` is not `postgres`. File storage is refused with more than one replica. |
+| Both replicas log the same instance number | They share a `POD_NAME`. Give each service its own. |
+| No `DEFAULT ADMIN CREDENTIALS` in the logs | `LICENSE_KEY` was not exported before `up -d`, or the Postgres volume already holds an admin. Use `down -v` to start over. |
+| Signed out after a request reaches the other replica | The replicas use different databases. Both must share one `POSTGRES_DSN`. |
+| Port 8080 is in use | Set `LB_PORT`, for example `export LB_PORT=8081`, and open that port. |

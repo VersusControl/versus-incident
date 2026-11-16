@@ -97,7 +97,7 @@ describe("Basic workload log viewer", () => {
     current.emit(membership(pods));
     pods.forEach((pod) => current.emit(line(pod)));
     current.emit({ event: "source_status", text: "", pod: secondPod.name, pod_uid: secondPod.uid, source_id: "denied", container: "app", code: "forbidden", message: "forbidden" });
-    await waitFor(() => expect(screen.getByLabelText("Workload log output").textContent).toContain("logs not available: forbidden"));
+    await waitFor(() => expect(screen.getByLabelText("Workload log output").textContent).toContain("logs not available: Permission to read these logs was denied."));
     const output = screen.getByLabelText("Workload log output");
     expect(new Set(pods.map((pod) => within(output).getAllByRole("button", { name: pod.name })[0].className)).size).toBe(4);
     const status = output.querySelector(".log-source-status")!;
@@ -300,13 +300,13 @@ describe("Basic workload log viewer", () => {
     live.emit(line(secondPod, "previous output from denied Pod"));
     if (flushed) await screen.findByText("previous output from denied Pod");
     live.emit(status);
-    if (flushed) await screen.findByText("logs not available: forbidden");
+    if (flushed) await screen.findByText("logs not available: Permission to read these logs was denied.");
     live.emit(status);
     live.emit(line());
     await waitFor(() =>
-      expect(screen.getByText("logs not available: forbidden")).toBeTruthy(),
+      expect(screen.getByText("logs not available: Permission to read these logs was denied.")).toBeTruthy(),
     );
-    expect(screen.getAllByText("logs not available: forbidden")).toHaveLength(
+    expect(screen.getAllByText("logs not available: Permission to read these logs was denied.")).toHaveLength(
       1,
     );
     expect(await screen.findByText("served request")).toBeTruthy();
@@ -314,7 +314,7 @@ describe("Basic workload log viewer", () => {
     expect(live.stream).toHaveBeenCalledTimes(1);
     expect(
       screen
-        .getByText("logs not available: forbidden")
+        .getByText("logs not available: Permission to read these logs was denied.")
         .closest("[data-log-key]")?.className,
     ).toContain("text-ink-400");
     expect(screen.queryByRole("alert")).toBeNull();

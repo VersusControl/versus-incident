@@ -1,0 +1,4 @@
+name: versus-test-versus-incident-redis$
+!initContainers:
+!wait-for-redis
+!- name: REDIS_HOST

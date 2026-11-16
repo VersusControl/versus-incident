@@ -1,0 +1,10 @@
+# A Bitnami revision tag (-r<n>) on the default repository: refused too.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  image:
+    tag: 7.4.2-r0

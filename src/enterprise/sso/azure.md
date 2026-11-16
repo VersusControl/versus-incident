@@ -1,87 +1,85 @@
-# SSO — Microsoft Entra ID (Azure AD)
+# SSO with Microsoft Entra ID
 
 _Enterprise_
 
-Set up single sign-on with **Microsoft Entra ID** (formerly Azure Active
-Directory). The connection type is `azure`; its OIDC issuer is derived from your
-**directory (tenant) ID**:
+## Concept
+
+Your team signs in to Versus with their Microsoft Entra ID (Azure AD)
+accounts. You register an app in Entra and paste its client ID, secret and
+directory (tenant) ID into Versus. Versus builds the issuer from the tenant:
 
 ```text
 https://login.microsoftonline.com/<tenant>/v2.0
 ```
 
-Leave the tenant **blank** to use the multi-tenant `common` authority. For a
-single-organization sign-in, supply your directory (tenant) ID.
+Leave the tenant blank to use the multi-tenant `common` authority. For sign-in
+from your own organization only, enter your tenant ID.
 
-## What you'll need
+## Example
+
+Acme's Entra tenant holds `acme.com`. After this setup, the Versus login screen
+shows **Sign in with Microsoft**. `maria@acme.com` signs in and lands as a
+**viewer**. An account outside `acme.com` is refused.
+
+## What you need
 
 | Item | Where it comes from |
 |---|---|
-| Access to **Microsoft Entra admin center** | [entra.microsoft.com](https://entra.microsoft.com) (or the Azure portal) |
-| The Versus **callback URL** | `https://<your-versus-host>/enterprise/api/sso/<org>/callback` (use `default` for a single-org deployment) |
-| Your **email domain(s)** | e.g. `acme.com` — the allow-list of who may sign in |
+| Access to the Microsoft Entra admin center | [entra.microsoft.com](https://entra.microsoft.com) or the Azure portal |
+| The Versus redirect URL | **Admin → Identity providers → Add identity provider**, field **Redirect URL (callback)** |
+| Your email domain | For example `acme.com` |
 
-## Step 1 — Register the application in Entra ID
+## 1. Register the app in Entra ID
 
-1. In the Entra admin center, open **Identity → Applications → App registrations**
-   and click **New registration**.
-2. Give it a name (e.g. `Versus SRE Agent`) and choose the **supported account
-   types** appropriate for your tenant.
-3. Under **Redirect URI**, choose platform **Web** and enter the Versus callback
-   URL exactly:
+1. Open **Identity → Applications → App registrations** and click **New
+   registration**.
+2. Name it, for example `Versus`, and pick the supported account types for your
+   tenant.
+3. Under **Redirect URI**, choose **Web** and enter the Versus redirect URL
+   exactly:
 
    ```text
    https://<your-versus-host>/enterprise/api/sso/<org>/callback
    ```
 
-4. Click **Register**. On the app **Overview**, copy the **Application (client)
-   ID** and the **Directory (tenant) ID**.
+4. Click **Register**. On **Overview**, copy the **Application (client) ID** and
+   the **Directory (tenant) ID**.
 5. Open **Certificates & secrets → Client secrets → New client secret**. Copy the
-   secret **Value** (not the secret ID) immediately — it is shown only once.
+   secret **Value** (not the secret ID) right away; it is shown once.
 
-## Step 2 — Add the connection in Versus
+## 2. Add the provider in Versus
 
-In the console open the **Agent** page → **Single Sign-On (SSO)** panel → **Add
-identity provider**, then fill in:
+In **Admin → Identity providers**, click **Add identity provider**:
 
 | Field | Value |
 |---|---|
-| **Provider** | `Microsoft Entra (Azure AD)` |
-| **Connection ID** | A slug such as `entra` (lowercase; used in the login URL). |
-| **Display name** | e.g. `Microsoft` — the label on the sign-in button. |
-| **Directory (tenant) ID** | The **Directory (tenant) ID** from Step 1. Blank ⇒ the multi-tenant `common` authority. |
-| **Client ID** | The **Application (client) ID** from Step 1. |
-| **Client secret** | The client secret **Value** from Step 1 (sealed on save). |
-| **Redirect URL (callback)** | The same callback URL you registered in Step 1. |
-| **Scopes** | `email, profile` (`openid` is always implied). |
-| **Allowed email domains** | Your email domain(s), e.g. `acme.com`. **Required.** |
-| **Enabled** | Turn on to show the “Sign in with Microsoft” button. |
+| **Provider** | Microsoft Entra (Azure AD) |
+| **Connection ID** | `entra` |
+| **Display name** | `Microsoft` (the button reads **Sign in with Microsoft**) |
+| **Directory (tenant) ID** | From step 1. Blank uses `common`. |
+| **Client ID** | The **Application (client) ID** from step 1 |
+| **Client secret** | The secret **Value** from step 1 |
+| **Redirect URL (callback)** | Keep the prefilled value; it must match step 1 |
+| **Scopes** | `email, profile` |
+| **Allowed email domains** | `acme.com` (required) |
+| **Enabled** | On |
 
-The issuer is derived from the tenant — there is no issuer field for Entra.
+Click **Add provider**. Versus shows only whether a secret is stored and its
+last four characters.
 
-Click **Save**. Versus seals the secret immediately and confirms with a masked
-summary (whether a secret is stored and its last four characters — never the
-secret itself).
+## 3. Test it
 
-## Step 3 — Test the login
+Sign out. The login screen now shows **Sign in with Microsoft**. Sign in; you
+land in Versus as a **viewer**. Promote someone to **admin** or **owner** in
+**Admin → Members & roles**, then disable the built-in admin (see
+[SSO overview](./overview.md#turn-it-on)).
 
-Once the connection is **enabled**, the console sign-in screen shows a **“Sign in
-with Microsoft”** button. Click it (or visit the login URL directly):
+## Change it later
 
-```text
-https://<your-versus-host>/enterprise/api/sso/<org>/login/<connection-id>
-```
+Open the provider again to change the allowed domains, scopes or display name.
+To rotate the secret, create a new one under **Certificates & secrets** and
+paste its **Value** into **Client secret**. Leave the field blank to keep the
+stored secret.
 
-You'll be redirected to Microsoft, sign in, and land back on Versus with a
-session. A user whose email domain isn't on your allow-list is refused — that's
-expected.
-
-The first SSO user signs in as **viewer**. Promote one to `admin`/`owner` from
-the **Members** panel, then [disable the built-in default admin](./overview.md#the-bootstrap-flow-who-creates-the-first-connection).
-
-## Editing or rotating later
-
-Re-open the connection any time to change the allowed domains, scopes, or display
-name. To **rotate** the client secret, create a new secret under **Certificates &
-secrets** in Entra and paste its **Value** into the **Client secret** field. Leave
-that field **blank** to keep the stored secret unchanged.
+See the [SSO overview](./overview.md#reference) for roles, URLs and login
+enforcement.

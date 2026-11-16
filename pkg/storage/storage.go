@@ -698,8 +698,8 @@ type IncidentRecord struct {
 	// miscounted.
 	Origin   string `json:"origin,omitempty"`
 	Resolved bool   `json:"resolved"`
-	// ChannelsEnabled is the snapshot of channels that were configured
-	// when the alert fired. ChannelsNotified is the subset that
+	// ChannelsEnabled is the set of channels the fan-out tried when the
+	// alert fired. ChannelsNotified is the subset that
 	// actually succeeded. The two diverge whenever a channel fails:
 	// keep both so the UI can show "Slack failed" without losing the
 	// fact that Slack was supposed to be tried.
@@ -712,6 +712,7 @@ type IncidentRecord struct {
 	// "sent"    — every enabled channel returned success
 	// "partial" — at least one channel succeeded, at least one failed
 	// "failed"  — no channel succeeded
+	// "none"    — no channel was enabled, so nothing was sent
 	// "diverted" — an external interceptor completed delivery
 	NotifyStatus            string                 `json:"notify_status,omitempty"`
 	NotifyError             string                 `json:"notify_error,omitempty"`

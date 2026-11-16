@@ -1,0 +1,11 @@
+# A Bitnami Secure Images Redis with a registry: refused like the other
+# Bitnami images.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  image:
+    repository: registry.example.com/bitnamisecure/redis

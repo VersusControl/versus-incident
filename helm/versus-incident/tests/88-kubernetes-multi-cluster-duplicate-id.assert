@@ -1,0 +1,2 @@
+# EXPECT_FAIL: an invalid cluster catalog is rejected.
+clusters\[1\]: invalid or duplicate cluster id

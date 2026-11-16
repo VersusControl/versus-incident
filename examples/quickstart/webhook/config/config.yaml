@@ -1,0 +1,55 @@
+# Versus config for the webhook quickstart.
+# Every ${VAR} is filled from the environment set in docker-compose.yml, so the
+# stack runs with no edits. Export a variable in your shell to change it.
+
+name: versus
+host: 0.0.0.0
+port: 3000
+
+gateway_secret: ${GATEWAY_SECRET}
+
+# The address you open Versus on. Used for the Acknowledge link in alerts.
+public_host: ${PUBLIC_HOST}
+
+alert:
+  # Print every incoming alert body to the Versus log (docker compose logs versus).
+  debug_body: true
+
+  slack:
+    enable: false # turned on by SLACK_ENABLE=true
+    token: ${SLACK_TOKEN}
+    channel_id: ${SLACK_CHANNEL_ID}
+    # The custom template from ./templates, mounted at /app/templates.
+    template_path: "templates/slack_message.tmpl"
+    message_properties:
+      button_text: "Acknowledge Alert"
+      button_style: "primary"
+      disable_button: false
+
+queue:
+  enable: false
+
+# On-call is optional. ONCALL_ENABLE=true plus PAGERDUTY_ROUTING_KEY pages
+# PagerDuty when nobody presses Acknowledge within wait_minutes.
+oncall:
+  enable: false # turned on by ONCALL_ENABLE=true
+  initialized_only: false
+  wait_minutes: 3
+  provider: pagerduty
+  pagerduty:
+    routing_key: ${PAGERDUTY_ROUTING_KEY}
+
+redis:
+  insecure_skip_verify: true
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  db: 0
+
+storage:
+  type: file
+  file:
+    max_incidents: 1000
+
+agent:
+  enable: false

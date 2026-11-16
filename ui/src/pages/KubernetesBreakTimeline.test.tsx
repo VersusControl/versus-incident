@@ -1216,7 +1216,7 @@ describe("Break timeline", () => {
     fireEvent.click(marker);
     expect(screen.queryByText(/Related-resource graph unavailable/)).toBeNull();
     expect(api.kubernetesRelated).not.toHaveBeenCalled();
-    expect(screen.getByText("ConfigMap: permission denied")).toBeTruthy();
+    expect(screen.getByText("ConfigMap is not readable with this connector's permissions.")).toBeTruthy();
     expect(screen.getByText("Change capture does not cover the whole range")).toBeTruthy();
   });
 
@@ -1502,7 +1502,7 @@ describe("Break timeline", () => {
     fireEvent.click(screen.getByRole("button", { name: "Resource coverage" }));
     expect(screen.queryByText(/Image history rebuilt from ReplicaSets/)).toBeNull();
     expect(screen.getByText("Secret history is not tracked")).toBeTruthy();
-    expect(screen.getByText("ConfigMap: permission denied")).toBeTruthy();
+    expect(screen.getByText("ConfigMap is not readable with this connector's permissions.")).toBeTruthy();
     expect(screen.getAllByText("Change capture does not cover the whole range")).toHaveLength(1);
     const toggle = screen.getByRole("button", { name: "Resource coverage" });
     toggle.focus();
@@ -1881,7 +1881,7 @@ describe("Break timeline", () => {
     expect(screen.getByText("CrashLoopBackOff")).toBeTruthy();
     expect(screen.getByText("OOMKilled on 6 pods")).toBeTruthy();
     fireEvent.click(toggle);
-    expect(screen.getAllByText("ConfigMap: permission denied")).toHaveLength(1);
+    expect(screen.getAllByText("ConfigMap is not readable with this connector's permissions.")).toHaveLength(1);
     expect(screen.getByText("Change activity is stale.")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Changes in 60 min/ }).textContent).toContain("0+");
     expect(screen.queryByText("Break evidence is partial.")).toBeNull();

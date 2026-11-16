@@ -250,10 +250,9 @@ It reads the same `data/runbooks` directory.
 ## Managing runbooks from the admin UI
 
 Beyond the corpus directory, you can upload, view, and delete runbooks
-from the **Runbooks** page in the [admin UI](../../configuration/admin-ui.md)
-(`/runbooks`). Uploads atomically rebuild the search index, so newly
+from the **Runbooks** page in the. Uploads atomically rebuild the search index, so newly
 uploaded runbooks become searchable without a restart.
 
 ---
 
-Back to the [Tool Reference](./tools.md).
+Back to the [Tool Reference](./overview.md).

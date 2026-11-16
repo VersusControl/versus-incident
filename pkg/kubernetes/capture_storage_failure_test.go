@@ -255,8 +255,14 @@ func TestHistorySaveOutageIsReportedAlikeByEveryReplica(t *testing.T) {
 
 			// The first failure is the capture's own save; the next is the owner's
 			// retry of that pending save. Neither may count as a credential failure.
+			// A newer capture reads as delayed until its own save is tried, so the
+			// wait holds until every replica reports this case's code.
+			reports := func(service *Service) bool {
+				save := historySaveOf(t, service)
+				return save != nil && save.Code == test.code
+			}
 			waitUntil(t, 45*time.Second, "a failed history save seen by every replica", func() bool {
-				return observed.failures.Load() > 1 && historySaveOf(t, replicas[0]) != nil && historySaveOf(t, replicas[1]) != nil
+				return observed.failures.Load() > 1 && reports(replicas[0]) && reports(replicas[1])
 			})
 			scope := storage.EvidenceScope{OrgID: "default", ClusterID: "save-delay", ClusterUID: "save-delay-physical"}
 			checkpoint, err := observed.EvidenceCheckpoint(t.Context(), scope)

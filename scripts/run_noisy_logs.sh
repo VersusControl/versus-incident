@@ -26,6 +26,11 @@
 #   TARGET         file|loki|elasticsearch|cloudwatch|graylog|splunk|signoz  (default file)
 #   OUTPUT         log file (file target only)         (default local/resource/noisy-app.log)
 #   ITER           max iterations, 0 = infinite        (default 0)
+#   MIX            steady|noisy                        (default steady)
+#                  steady: every batch has one line of each ordinary error
+#                  and filler the agent ignores, so the patterns become known
+#                  and ordinary traffic never raises an incident; noisy: the
+#                  weighted random mix with rare errors sprinkled in
 #
 # Loki target:
 #   LOKI_URL       (default http://localhost:3100)
@@ -51,7 +56,8 @@
 #   SPLUNK_URL          (default https://localhost:8088)
 #   SPLUNK_HEC_TOKEN    (required)
 #   SPLUNK_INDEX        (default main)
-#   SPLUNK_SOURCETYPE   (default _json)
+#   SPLUNK_SOURCETYPE   (default noisy; not _json, which parses each event as
+#                       JSON at index time and drops the plain-text lines)
 #
 # SigNoz target (OTLP/HTTP JSON straight at the collector — the real ingest path):
 #   SIGNOZ_OTLP_URL      (default http://localhost:4318)
@@ -78,6 +84,7 @@ BATCH="${BATCH:-20}"
 TARGET="${TARGET:-file}"
 OUTPUT="${OUTPUT:-local/resource/noisy-app.log}"
 ITER="${ITER:-0}"
+MIX="${MIX:-steady}"
 SPIKE="${SPIKE:-}"
 SPIKE_BURST="${SPIKE_BURST:-80}"
 SPIKE_CONTEXT="${SPIKE_CONTEXT:-0}"
@@ -94,6 +101,7 @@ while [[ $# -gt 0 ]]; do
     --target)   TARGET="$2";   shift 2 ;;
     --output|-o) OUTPUT="$2";  shift 2 ;;
     --iter)     ITER="$2";     shift 2 ;;
+    --mix)      MIX="$2";      shift 2 ;;
     --spike)         SPIKE="$2";         shift 2 ;;
     --spike-burst)   SPIKE_BURST="$2";   shift 2 ;;
     --spike-context) SPIKE_CONTEXT="$2"; shift 2 ;;
@@ -102,7 +110,7 @@ while [[ $# -gt 0 ]]; do
     --list-templates) LIST_TEMPLATES=1;  shift ;;
     --list-scenarios) LIST_SCENARIOS=1;  shift ;;
     -h|--help)
-      sed -n '2,73p' "$0"; exit 0 ;;
+      sed -n '2,79p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -126,7 +134,9 @@ fi
 # Python generator. The generator also reads the same env vars directly, but
 # being explicit avoids surprises (e.g. ES_INDEX silently inheriting from a
 # parent shell).
-target_args=( --target "$TARGET" )
+# The data-source examples match the level inside the message text, so
+# backends that keep the level in a separate field get it prefixed there too.
+target_args=( --target "$TARGET" --level-in-message )
 case "$TARGET" in
   file)
     mkdir -p "$(dirname "$OUTPUT")"
@@ -171,7 +181,7 @@ case "$TARGET" in
     target_args+=( --splunk-url "${SPLUNK_URL:-https://localhost:8088}" \
                    --splunk-token "$SPLUNK_HEC_TOKEN" \
                    --splunk-index "${SPLUNK_INDEX:-main}" \
-                   --splunk-sourcetype "${SPLUNK_SOURCETYPE:-_json}" )
+                   --splunk-sourcetype "${SPLUNK_SOURCETYPE:-noisy}" )
     summary_target="splunk:${SPLUNK_URL:-https://localhost:8088} index=${SPLUNK_INDEX:-main}"
     ;;
   signoz)
@@ -216,12 +226,13 @@ fi
 
 trap 'echo; echo "stopped after $count batch(es)"; exit 0' INT TERM
 
-echo "appending $BATCH line(s) every ${INTERVAL}s -> $summary_target (Ctrl+C to stop)"
+echo "appending $BATCH line(s) every ${INTERVAL}s ($MIX mix) -> $summary_target (Ctrl+C to stop)"
 count=0
 while :; do
   python3 "$GEN" \
     --append \
     --lines "$BATCH" \
+    --mix "$MIX" \
     --start-time now \
     --interval-min 0.1 \
     --interval-max 1.0 \

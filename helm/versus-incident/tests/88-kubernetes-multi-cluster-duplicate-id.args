@@ -1,0 +1,7 @@
+# An invalid cluster catalog: duplicate-id.
+--set
+connectors.kubernetes.enabled=true
+--set
+connectors.kubernetes.multiple=true
+--set-json
+connectors.kubernetes.clusters=[{"clusterId":"same"},{"clusterId":"same"}]

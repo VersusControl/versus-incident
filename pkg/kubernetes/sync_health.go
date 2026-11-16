@@ -67,16 +67,33 @@ type SyncHealth struct {
 	Truncated       bool `json:"truncated"`
 	// OmittedKinds names the kinds the bound dropped, bounded itself.
 	OmittedKinds []string `json:"omitted_kinds,omitempty"`
+	// ClusterWide is false when the connector identity reads namespaced kinds
+	// only inside some namespaces, and ReadableNamespaces then lists them,
+	// sorted. Both are set whenever a generation was read; a report that could
+	// not read one leaves them out.
+	ClusterWide        *bool    `json:"cluster_wide,omitempty"`
+	ReadableNamespaces []string `json:"readable_namespaces,omitempty"`
+	// NotCollected names, sorted, the kinds the connector is configured never
+	// to list. They are a choice, not a fault: never failing, never unreadable.
+	NotCollected []string `json:"not_collected,omitempty"`
+	// NamespaceScoped lists the kinds this identity may not list cluster-wide
+	// but reads inside the namespaces it may read. Like Unreadable it is a
+	// capability limit: these kinds count as ready and never as failing.
+	NamespaceScoped      []SyncKindProblem `json:"namespace_scoped"`
+	NamespaceScopedKinds int               `json:"namespace_scoped_kinds"`
 }
 
 // SyncKindProblem is one failing kind in plain terms. Since is when the failing
 // attempt started, so a surface can say how long the kind has been failing.
 type SyncKindProblem struct {
-	Kind    string `json:"kind"`
-	State   string `json:"state"`
-	Class   string `json:"class,omitempty"`
-	Skipped int    `json:"skipped,omitempty"`
-	Records int    `json:"records"`
+	Kind  string `json:"kind"`
+	State string `json:"state"`
+	Class string `json:"class,omitempty"`
+	// Namespace names the namespace a kind read only inside namespaces failed
+	// in, when that is where the failure is.
+	Namespace string `json:"namespace,omitempty"`
+	Skipped   int    `json:"skipped,omitempty"`
+	Records   int    `json:"records"`
 	// Since is when this failure began, kept until the kind recovers. A zero time
 	// is omitted rather than rendered as a date.
 	Since time.Time `json:"since,omitzero"`
@@ -108,6 +125,11 @@ func (service *Service) SyncHealth(ctx context.Context) (SyncHealth, error) {
 	report := buildSyncHealth(syncHealthKinds(generation), generation.FirstReadyAt)
 	if generation.FirstReadyAt.IsZero() {
 		report.Progress = service.coldSyncProgress()
+	}
+	clusterWide, readable := readableNamespaceScope(generation)
+	report.ClusterWide, report.ReadableNamespaces = &clusterWide, readable
+	if kinds := service.notCollectedKinds(); len(kinds) > 0 {
+		report.NotCollected = kinds
 	}
 	return report, nil
 }
@@ -245,6 +267,7 @@ func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt time.Time
 	}
 	sort.Strings(names)
 	result := SyncHealth{FirstReadyAt: firstReadyAt, TotalKinds: len(all), Failing: []SyncKindProblem{}, Unreadable: []SyncKindProblem{}}
+	result.NamespaceScoped, result.NamespaceScopedKinds = syncNamespaceScopedKinds(names, all)
 	result.Failing, result.FailingKinds = syncKindProblems(names, all)
 	result.Unreadable, result.UnreadableKinds = syncUnreadableKinds(names, all)
 	kept, omitted := boundedSyncKinds(names, all)
@@ -263,8 +286,13 @@ func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt time.Time
 // serve cannot hold the aggregate back, and any failing kind keeps it out of
 // ready — that is the whole point of a cluster-wide answer. Ready also requires
 // at least one kind to be ready, so an empty published set is loading.
+//
+// A failure is scoped to what failed. One kind that failed on its own, while
+// others are ready, makes the cluster partial, not failed. The whole cluster
+// is an error only when the failure is the cluster's own: a cycle that failed
+// as a whole, a credential the cluster rejects, or nothing readable at all.
 func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, float64, int, int) {
-	failed, degraded, stale, loading := false, false, false, false
+	failed, clusterFailed, degraded, stale, loading := false, false, false, false, false
 	ready, pending, unreadable := 0, 0, 0
 	oldest := time.Time{}
 	for kind, state := range kinds {
@@ -285,11 +313,22 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 			unreadable++
 			continue
 		}
+		if isNamespaceScopedSyncKind(state) {
+			// Read in full inside every namespace the identity may read: a
+			// capability limit too, and its data is as current as any ready
+			// kind's.
+			ready++
+			if syncKindStale(kind, state) {
+				stale = true
+			}
+			continue
+		}
 		// One rule decides what failing means, for the aggregate and for the
 		// problem list alike, so the two can never disagree.
 		if isFailingSyncKind(state) {
 			if state.State == "error" {
 				failed = true
+				clusterFailed = clusterFailed || state.CycleFailure || state.Error == "unauthorized"
 			} else {
 				degraded = true
 			}
@@ -311,9 +350,9 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 		}
 	}
 	switch {
-	case failed:
+	case clusterFailed || failed && ready == 0:
 		return "error", true, ageSeconds, ready, pending
-	case degraded:
+	case failed || degraded:
 		return "partial", true, ageSeconds, ready, pending
 	case stale:
 		return "stale", true, ageSeconds, ready, pending
@@ -379,7 +418,11 @@ func syncProblemRow(kind string, state kubeindex.KindStatus) SyncKindProblem {
 	if observed.IsZero() {
 		observed = time.Time{}
 	}
-	return SyncKindProblem{Kind: kind, State: state.State, Class: state.Error, Skipped: state.Skipped, Records: state.Records, Since: since, ObservedAt: observed}
+	class := state.Error
+	if state.ScopeError != "" {
+		class = state.ScopeError
+	}
+	return SyncKindProblem{Kind: kind, State: state.State, Class: class, Namespace: state.ScopeNamespace, Skipped: state.Skipped, Records: state.Records, Since: since, ObservedAt: observed}
 }
 
 // syncUnreadableKinds lists the kinds this identity may not read: a capability
@@ -410,6 +453,35 @@ func isUnreadableSyncKind(state kubeindex.KindStatus) bool {
 		return false
 	}
 	return state.State == "error" && state.Error == "forbidden"
+}
+
+// isNamespaceScopedSyncKind reports a kind the identity may not list
+// cluster-wide but read inside the namespaces it may read. It is a capability
+// limit of the role, never a sync fault, so it neither degrades the report nor
+// holds back the cluster's first ready moment.
+func isNamespaceScopedSyncKind(state kubeindex.KindStatus) bool {
+	if state.Absent || state.CycleFailure || state.ObservedAt.IsZero() {
+		return false
+	}
+	return state.Error == "namespace_scope" && state.State != "error" && state.ScopeError == ""
+}
+
+// syncNamespaceScopedKinds lists the kinds read only inside namespaces.
+func syncNamespaceScopedKinds(names []string, all map[string]kubeindex.KindStatus) ([]SyncKindProblem, int) {
+	rows := []SyncKindProblem{}
+	total := 0
+	for _, kind := range names {
+		state := all[kind]
+		if !isNamespaceScopedSyncKind(state) {
+			continue
+		}
+		total++
+		if len(rows) >= maxSyncHealthProblems {
+			continue
+		}
+		rows = append(rows, syncProblemRow(kind, state))
+	}
+	return rows, total
 }
 
 // boundedSyncKinds keeps every failing kind first and then fills up to the
@@ -456,7 +528,7 @@ func boundedSyncKinds(names []string, all map[string]kubeindex.KindStatus) (map[
 // cleanly. Loading, and a kind the cluster does not serve, are not failures. A
 // loading kind also never reports partial, so the wire shape cannot be misread.
 func isFailingSyncKind(state kubeindex.KindStatus) bool {
-	if state.Absent || isUnreadableSyncKind(state) {
+	if state.Absent || isUnreadableSyncKind(state) || isNamespaceScopedSyncKind(state) {
 		return false
 	}
 	switch state.State {

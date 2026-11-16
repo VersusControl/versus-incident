@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="390" viewBox="0 0 760 390" style="max-width:100%;height:auto" role="img" aria-label="On the left, your logs: a stream of thousands of repeating lines, declined cards and cart reads, with one new checkout error hidden among them, payment processor acme-pay did not answer within 30s; on the right, what Versus tells you: the repeating lines grouped into two known patterns that stay quiet, and one incident, Anomaly: checkout-api, with a WARN severity, open status and the alert sent">
+  <title>The SRE Agent finds the one new line</title>
+  <desc>Left: a noisy log stream of repeating declined card and cart read lines with one new acme-pay timeout hidden in it; right: the repeats grouped as known patterns that stay quiet, and one open incident for checkout-api</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f10{font-size:10px}.f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f14{font-size:14px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}.amb{fill:#B54708}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}.end{text-anchor:end}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+    <symbol id="i-bell" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></g></symbol>
+  </defs>
+
+  <rect width="760" height="390" fill="#FFFFFF"/>
+
+  <text x="24" y="40" class="pt">The SRE Agent finds the one new line</text>
+  <text x="24" y="64" class="f13 sec">It learns what normal looks like and tells you only what is new</text>
+
+  <!-- panels -->
+  <rect x="20" y="84" width="340" height="286" rx="12" fill="#F2F5F8"/>
+  <rect x="400" y="84" width="340" height="286" rx="12" fill="#FFFFFF" stroke="#BACFE3" stroke-width="2"/>
+
+  <!-- LEFT: your logs -->
+  <text x="36" y="108" class="zone">YOUR LOGS</text>
+  <rect x="36" y="120" width="308" height="176" rx="8" fill="#F7F9FB" stroke="#D8E0E8"/>
+  <rect x="39" y="195" width="3" height="29" rx="1.5" fill="#12222F"/>
+  <text x="46" y="140" class="c f10 sec">payment declined for order 81723 (card_expired)</text>
+  <text x="46" y="156" class="c f10 sec">cart read for user 4410 took 12ms</text>
+  <text x="46" y="172" class="c f10 sec">payment declined for order 81731 (card_expired)</text>
+  <text x="46" y="188" class="c f10 sec">cart read for user 9022 took 9ms</text>
+  <text x="46" y="204" class="c f10">checkout error: payment processor acme-pay</text>
+  <text x="58" y="220" class="c f10">did not answer within 30s</text>
+  <text x="46" y="236" class="c f10 sec">payment declined for order 81802 (card_expired)</text>
+  <text x="46" y="252" class="c f10 sec">cart read for user 1187 took 14ms</text>
+  <text x="46" y="268" class="c f10 sec">payment declined for order 81815 (card_expired)</text>
+  <text x="46" y="284" class="c f10 sec">cart read for user 3301 took 11ms</text>
+  <text x="36" y="322" class="f13">Thousands of repeating lines an hour</text>
+  <text x="36" y="342" class="f12 sec">One new line hides among them</text>
+
+  <!-- RIGHT: what Versus tells you -->
+  <text x="416" y="108" class="zone">WHAT VERSUS TELLS YOU</text>
+  <text x="416" y="132" class="f12 sec">Known patterns stay quiet</text>
+
+  <rect x="416" y="142" width="308" height="48" rx="10" fill="#FFFFFF" stroke="#C3CED8"/>
+  <text x="428" y="160" class="c f10">payment declined for order &lt;*&gt; (card_expired)</text>
+  <rect x="428" y="168" width="48" height="16" rx="8" fill="#F2F5F8" stroke="#9AA9B6"/>
+  <text x="452" y="180" class="f11 nm mid">known</text>
+  <text x="486" y="180" class="f11 sec">seen 8,412 times today</text>
+
+  <rect x="416" y="198" width="308" height="48" rx="10" fill="#FFFFFF" stroke="#C3CED8"/>
+  <text x="428" y="216" class="c f10">cart read for user &lt;*&gt; took &lt;*&gt;</text>
+  <rect x="428" y="224" width="48" height="16" rx="8" fill="#F2F5F8" stroke="#9AA9B6"/>
+  <text x="452" y="236" class="f11 nm mid">known</text>
+  <text x="486" y="236" class="f11 sec">seen 5,930 times today</text>
+
+  <text x="416" y="266" class="f12 sec">Something new raises one incident</text>
+  <rect x="416" y="276" width="308" height="76" rx="12" fill="#BACFE3" stroke="#12222F" stroke-width="2"/>
+  <rect x="430" y="286" width="48" height="18" rx="9" fill="#FEF3E2" stroke="#B54708"/>
+  <text x="454" y="299" class="f11 b amb mid">WARN</text>
+  <rect x="486" y="286" width="44" height="18" rx="9" fill="#FFFFFF" stroke="#12222F"/>
+  <text x="508" y="299" class="f11 nm mid">open</text>
+  <use href="#i-bell" x="624" y="287" width="16" height="16" color="#12222F"/>
+  <text x="710" y="299" class="f11 b nm end">alert sent</text>
+  <text x="430" y="322" class="f14 b nm">Anomaly: checkout-api</text>
+  <text x="430" y="340" class="c f11">acme-pay did not answer within 30s</text>
+
+  <!-- flow -->
+  <path class="flow" d="M366 227H393" marker-end="url(#a)"/>
+</svg>

@@ -525,11 +525,14 @@ export interface ShadowEvent {
   last_seen: string;
 }
 
+// ShadowStats mirrors the flat map the shadow log returns: per-verdict counts
+// are top-level `verdict_<name>` keys, not a nested object.
 export interface ShadowStats {
   events: number;
   total_signals: number;
-  verdicts: Record<string, number>;
-  occurrences: number;
+  total_occurrences: number;
+  verdict_spike: number;
+  verdict_unknown: number;
 }
 
 export interface ServiceInfo {
@@ -667,7 +670,7 @@ export interface DetectEvent {
   occurrence_delta?: number;
   occurrence_count?: number;
   episode_action?: "opened" | "coalesced" | "escalated" | "reopened" | "episode_error" | string;
-  notification_outcome?: "sent" | "partial" | "failed" | "suppressed" | "grouped" | "diverted" | "not_applicable" | string;
+  notification_outcome?: "sent" | "partial" | "failed" | "none" | "suppressed" | "grouped" | "diverted" | "not_applicable" | string;
   episode_error?: string;
   outcome: string; // emitted | cached | dry | quota | ai_error | send_error
   error?: string;
@@ -691,10 +694,32 @@ export interface IncidentSummary {
   origin?: string;
   service?: string;
   resolved: boolean;
+  // channels_enabled lists every channel the fan-out tried; channels_notified
+  // lists the ones that succeeded, so failed = enabled minus notified. Older
+  // servers omit channels_enabled.
+  channels_enabled?: string[];
   channels_notified?: string[];
   oncall_triggered?: boolean;
-  notify_status?: "pending" | "sent" | "failed" | string;
+  // oncall_error is the reason an attempted on-call escalation failed; empty
+  // when escalation was not attempted or succeeded.
+  oncall_error?: string;
+  // notify_status "none" means no channel was enabled, so nothing was sent.
+  notify_status?:
+    | "pending"
+    | "sent"
+    | "partial"
+    | "failed"
+    | "none"
+    | "suppressed"
+    | "grouped"
+    | "diverted"
+    | string;
+  // notify_error joins one "<channel>: <reason>" line per failed channel.
   notify_error?: string;
+  // severity is the raw alert severity the server read from the alert body
+  // (top level, then label maps, then the first alert's labels); "" when the
+  // body carries none. List rows carry it because they omit the content.
+  severity?: string;
   created_at: string;
   acked_at?: string | null;
   resolved_at?: string | null;
@@ -1455,7 +1480,37 @@ export interface SSODeployment {
 // Plain GET, no gateway secret — the endpoint exposes only the
 // non-secret org id. THROWS ApiError on a non-2xx response (notably 403 in
 // community mode), so the caller can fall back to the non-SSO path.
-export async function getSSODeployment(): Promise<SSODeployment> {
+//
+// The answer cannot change without a restart, so one request per page load is
+// enough: a licensed org and an authoritative community answer (403/404) are
+// kept; a transient failure is not, so the next caller asks again.
+let deploymentProbe: Promise<SSODeployment> | null = null;
+let communityDeploymentStatus: number | null = null;
+
+export function getSSODeployment(): Promise<SSODeployment> {
+  if (!deploymentProbe) {
+    const probe = fetchSSODeployment().catch((error: unknown) => {
+      if (isCommunityDeploymentError(error)) {
+        communityDeploymentStatus = (error as ApiError).status;
+      } else if (deploymentProbe === probe) {
+        deploymentProbe = null;
+      }
+      throw error;
+    });
+    deploymentProbe = probe;
+  }
+  return deploymentProbe;
+}
+
+// knownCommunityDeploymentStatus is the 403/404 the deployment probe already
+// answered on this page load, or null when the deployment is licensed or not
+// yet known. Callers use it to skip Enterprise-only routes the server would
+// refuse, without issuing a request of its own.
+export function knownCommunityDeploymentStatus(): number | null {
+  return communityDeploymentStatus;
+}
+
+async function fetchSSODeployment(): Promise<SSODeployment> {
   const res = await fetch(`${API_BASE}/enterprise/api/sso/deployment`);
   if (!res.ok) {
     throw new ApiError(res.status, `HTTP ${res.status}`, null);
@@ -1649,7 +1704,7 @@ export interface KubernetesClusterSummary {
   /** Same freshness envelope as every other Kubernetes view, including first-sync progress. */
   sync: KubernetesSync;
   observed_at: string;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; action?: string };
 }
 
 export interface KubernetesClusters {
@@ -2174,7 +2229,12 @@ export interface KubernetesOverview {
   metrics_fresh: boolean;
   truncated: boolean;
   omitted_categories?: string[] | null;
-  partial_failures?: { resource_id?: string; scope?: string; group_version?: string; class: string }[] | null;
+  /** Each entry names its subject (`kind`) and says what happened in a plain sentence (`message`), in a stable server order. */
+  partial_failures?: { resource_id?: string; scope?: string; group_version?: string; class: string; kind?: string; message?: string }[] | null;
+  /** False when the connector identity reads namespaced kinds only inside some namespaces. */
+  cluster_wide?: boolean;
+  /** The namespaces a namespace-only identity reads, sorted. */
+  readable_namespaces?: string[] | null;
 }
 
 export interface KubernetesResource {
@@ -2220,6 +2280,8 @@ export interface KubernetesMetricsSourceStatus {
 
 export interface KubernetesUsage {
   observed_at: string;
+  /** The Metrics API: "not_installed" (no metrics-server), "forbidden", "unavailable", "syncing" or "available". */
+  metrics?: "not_installed" | "forbidden" | "unavailable" | "syncing" | "available";
   availability: "available" | "stale" | "unavailable";
   fresh: boolean;
   pod_metrics: KubernetesMetricsSourceStatus;
@@ -2443,6 +2505,8 @@ export interface KubernetesCaptureStatus {
 
 export interface KubernetesCrashPage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
+  /** "off_namespace_access": no history is kept for a namespace-only identity, so the page is empty by design. */
+  history?: "off_namespace_access" | (string & {});
   crash_count?: number;
   items: KubernetesCrashEvent[];
   next?: string;
@@ -2461,6 +2525,8 @@ export interface KubernetesCrashPage extends KubernetesHistoryCounts {
 
 export interface KubernetesChangesPage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
+  /** "off_namespace_access": no history is kept for a namespace-only identity, so the page is empty by design. */
+  history?: "off_namespace_access" | (string & {});
   items: KubernetesChange[];
   next?: string;
   truncated?: boolean;
@@ -2478,6 +2544,8 @@ export type KubernetesTimelineEntry =
 
 export interface KubernetesTimelinePage extends KubernetesHistoryCounts {
   authority?: "current" | "stale" | "denied" | "unknown";
+  /** "off_namespace_access": no history is kept for a namespace-only identity, so the page is empty by design. */
+  history?: "off_namespace_access" | (string & {});
   items: KubernetesTimelineEntry[];
   next?: string;
   sync: KubernetesSync;
@@ -2607,6 +2675,8 @@ export interface KubernetesFailingKind {
   /** When the failure began; the same time until the kind's state changes. */
   since?: string;
   observed_at?: string;
+  /** Set when the kind fails in this one namespace while others read fine. */
+  namespace?: string;
 }
 
 /**
@@ -2643,6 +2713,24 @@ export interface KubernetesSyncHealthReport {
    * the UI can tell a first boot from a background resync.
    */
   first_ready_at?: string;
+  /**
+   * False when the connector identity reads namespaced kinds only inside some
+   * namespaces; missing or true means cluster-wide.
+   */
+  cluster_wide?: boolean;
+  /** The namespaces a namespace-only identity reads, sorted. */
+  readable_namespaces?: string[] | null;
+  /**
+   * Kinds excluded by configuration (`connectors.kubernetes.exclude_resources`),
+   * sorted. Never part of `unreadable` or `failing`: nothing went wrong.
+   */
+  not_collected?: string[] | null;
+  /**
+   * Kinds the connector identity reads only inside some namespaces, same row
+   * shape as `unreadable`. A permission gap, never a failure.
+   */
+  namespace_scoped?: KubernetesUnreadableKind[] | null;
+  namespace_scoped_kinds?: number;
 }
 
 /**
@@ -2674,6 +2762,8 @@ export interface KubernetesTopPage {
   items_available?: boolean;
   total: number;
   truncated: boolean;
+  /** The Metrics API: "not_installed" (no metrics-server), "forbidden", "unavailable", "syncing" or "available". */
+  metrics?: "not_installed" | "forbidden" | "unavailable" | "syncing" | "available";
   availability: "available" | "stale" | "unavailable";
   fresh: boolean;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
@@ -2738,6 +2828,18 @@ export interface KubernetesHelmRelease {
   health: string;
 }
 
+export interface KubernetesHelmReleasePage extends KubernetesPageTotals {
+  items: KubernetesHelmRelease[];
+  next?: string;
+  truncated: boolean;
+  partial_failures?: Array<{ resource_id?: string; class: string }>;
+  /** "needs_secret_list" when releases could not be read at all, so an empty list is never "no releases". */
+  access?: "needs_secret_list" | (string & {});
+  /** One sentence saying why releases could not be read. */
+  access_message?: string;
+  docs_url?: string;
+}
+
 export interface KubernetesGitOpsApp {
   tool: string;
   kind: string;
@@ -2756,6 +2858,9 @@ export interface KubernetesGitOpsPage extends KubernetesPageTotals {
   items: KubernetesGitOpsApp[];
   available: boolean;
   reason?: string;
+  /** "not_readable" when the kinds are installed but this identity may not list them. */
+  access?: "not_readable" | (string & {});
+  access_message?: string;
   next?: string;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   truncated: boolean;
@@ -2765,6 +2870,9 @@ export interface KubernetesRolloutPage {
   items: KubernetesRollout[];
   available: boolean;
   reason?: string;
+  /** "not_readable" when Rollouts are installed but this identity may not list them. */
+  access?: "not_readable" | (string & {});
+  access_message?: string;
   next?: string;
   truncated: boolean;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
@@ -3259,7 +3367,7 @@ export function createKubernetesApi(cluster?: string) {
     for (const [key, value] of Object.entries(options)) {
       if (value !== undefined && value !== "") query.set(key, String(value));
     }
-    return request<{ items: KubernetesHelmRelease[]; next?: string; truncated: boolean; partial_failures?: Array<{ resource_id?: string; class: string }> } & KubernetesPageTotals>(`/api/admin/kubernetes/releases?${query}`);
+    return request<KubernetesHelmReleasePage>(`/api/admin/kubernetes/releases?${query}`);
   },
   kubernetesRelease: (namespace: string, name: string) =>
     request<KubernetesHelmRelease>(`/api/admin/kubernetes/releases/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
@@ -4622,6 +4730,12 @@ export const api = {
     if (params?.type) qs.set("type", params.type);
     if (params?.confident) qs.set("confident", "true");
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    // A community binary has no baselines route; once the deployment probe
+    // has said so, answer with the same status instead of a request that 404s.
+    const community = knownCommunityDeploymentStatus();
+    if (community !== null) {
+      return Promise.reject(new ApiError(community, "Enterprise feature not available", null));
+    }
     return request<BaselinesResponse>(`/api/agent/baselines${suffix}`);
   },
 

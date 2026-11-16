@@ -1,13 +1,14 @@
 # Tool Reference
 
 The AI SRE Agent uses read-only tools to gather evidence before it answers.
-The operator catalog is organized as Connectors, Data Source Tools, and Common.
+Open **AI → Connectors & Tools** to set them up. The page is organized as
+Connectors, Data Source Tools, and Common.
 Connector and data-source cards control their hidden model tools atomically;
 Common tools remain individual cards. Chat and Analyze have independent
 policies. Versus self-knowledge is internal and appears only as one recovery
 card when a legacy child policy disabled it.
 
-![Versus Tool Catalog](../../docs/images/agent-tool-catalog.png)
+![The Connectors & Tools page, selected under AI in the sidebar, with Chat and Analyze tabs: Kubernetes shows Connection needed and Source control shows Setup needed; Loki shows Configured and Logs tools Ready; Metrics tools, Prometheus and CloudWatch Metrics show Data source needed](../../docs/images/agent-tool-catalog-dark.png)
 
 During the one-release grouped-policy compatibility window, deployments must
 retain legacy child-deny fields until every old replica has been retired. A
@@ -24,7 +25,7 @@ runs remediation, triggers on-call, or sends a notification.
 
 The `versus` group reads state already held by Versus. These internal tools need
 no external integration and are always available to an agent whose policy allows
-them. The Tool catalog UI can hide this group because there is nothing for an
+them. The **Connectors & Tools** page can hide this group because there is nothing for an
 operator to connect.
 
 | Tool | What it returns |

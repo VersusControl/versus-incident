@@ -4,8 +4,6 @@ package storage
 
 import "time"
 
-// Race instrumentation slows the embedded SQLite engine about 40x, and the read
-// deadline is a production latency bound rather than a correctness property.
-func init() {
-	localEvidenceReadTimeout = 30 * time.Second
-}
+// scaledTimeout stretches a test wait budget for race instrumentation. Waits
+// stay condition-based; only the point at which they give up moves.
+func scaledTimeout(d time.Duration) time.Duration { return 5 * d }

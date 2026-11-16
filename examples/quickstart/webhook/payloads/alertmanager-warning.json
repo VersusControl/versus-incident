@@ -1,0 +1,38 @@
+{
+  "receiver": "versus",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "DiskSpaceLow",
+        "severity": "warning",
+        "instance": "worker-03:9100",
+        "job": "node"
+      },
+      "annotations": {
+        "summary": "Disk /var is 91% full",
+        "description": "worker-03 has less than 10% free space on /var."
+      },
+      "startsAt": "2026-11-15T09:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://localhost:9090/graph?g0.expr=node_filesystem_avail_bytes",
+      "fingerprint": "f0e1d2c3b4a59687"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "DiskSpaceLow"
+  },
+  "commonLabels": {
+    "alertname": "DiskSpaceLow",
+    "severity": "warning",
+    "instance": "worker-03:9100",
+    "job": "node"
+  },
+  "commonAnnotations": {
+    "summary": "Disk /var is 91% full"
+  },
+  "externalURL": "http://localhost:9093",
+  "version": "4",
+  "groupKey": "{}:{alertname=\"DiskSpaceLow\"}"
+}

@@ -20,6 +20,10 @@ const (
 	// FieldSignal is the Signal.Fields key holding the logical signal name
 	// (string) — e.g. a metric golden-signal or trace operation label.
 	FieldSignal = "signal"
+	// FieldUnit is the Signal.Fields key holding the unit the source stated
+	// for a metric value (string, e.g. "Percent", "Bytes/Second"). Empty when
+	// the source did not state one.
+	FieldUnit = "unit"
 )
 
 // Signal is one normalized observation pulled from a SignalSource.

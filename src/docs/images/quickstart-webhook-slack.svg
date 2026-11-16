@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="214" viewBox="0 0 760 214" style="max-width:100%;height:auto" role="img" aria-label="Slack message from the Versus app in the alerts channel with a red side bar, rendered by the quickstart template from the sample Alertmanager alert: first line, a fire emoji, FIRING in bold, then HighErrorRate (1 alert); second line, a bullet, CRITICAL in bold, on, checkout-api:8080 in inline code, then 5xx error rate above 5% for 5 minutes; third line, indented and in italics, checkout-api is returning 503 on POST /api/orders">
+  <title>Slack message from the webhook quickstart template</title>
+  <desc>The sample Alertmanager alert rendered by templates/slack_message.tmpl: FIRING HighErrorRate with one alert, CRITICAL on checkout-api:8080, and the alert description in italics</desc>
+  <defs>
+    <symbol id="v" viewBox="24 18 64 55.1">
+      <path fill="#223947" fill-rule="evenodd" d="M53.55 23.74L56 27.98L58.45 23.74H77.96L74.71 29.38L65.76 44.89L62.51 50.52L59.25 56.16L56 61.79L52.75 56.16L49.5 50.52L37.29 29.38L34.04 23.74L30.78 18.11H24.28L27.53 23.74L30.78 29.38L46.24 56.16L52.75 67.42L56 73.06L59.25 67.42L62.51 61.79L65.76 56.16L69.01 50.52L81.21 29.38L84.47 23.74L87.72 18.11H50.3ZM47.04 23.74L43.79 18.11H37.29L40.54 23.74L43.79 29.38L52.75 44.89L56 50.52L59.25 44.89L62.51 39.25L68.2 29.38H61.7L59.25 33.62L56 39.25L50.3 29.38Z"/>
+    </symbol>
+  </defs>
+  <style>
+    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;fill:#000000}
+    .b{font-weight:700}
+    .i{font-style:italic}
+    .s{font-size:12px;fill:#5B6B78}
+    .tag{font-size:10px;font-weight:700;fill:#5B6B78}
+    .ch{font-size:15px;font-weight:700}
+    .ic{font-family:SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;fill:#E01E5A}
+    .code{fill:#F7F9FB;stroke:#D8E0E8}
+  </style>
+
+  <rect width="760" height="214" fill="#FFFFFF"/>
+
+  <!-- channel header -->
+  <text class="ch" x="24" y="34"># alerts</text>
+  <path d="M24 52.5H736" stroke="#C3CED8"/>
+
+  <!-- sender -->
+  <rect x="24" y="68" width="36" height="36" rx="6" fill="#BACFE3"/>
+  <use href="#v" x="30" y="76" width="24" height="21"/>
+  <text class="ch" x="72" y="82">Versus</text>
+  <rect x="130" y="70" width="30" height="16" rx="3" fill="#F2F5F8" stroke="#C3CED8"/>
+  <text class="tag" x="145" y="82" text-anchor="middle">APP</text>
+  <text class="s" x="168" y="82">9:00 AM</text>
+
+  <!-- attachment bar: Versus posts unresolved incidents with this colour -->
+  <rect x="72" y="96" width="4" height="72" rx="2" fill="#C70039"/>
+
+  <!-- inline code background -->
+  <rect class="code" x="185.5" y="125" width="129" height="18" rx="3"/>
+
+  <!-- message -->
+  <text x="88" y="114">🔥</text>
+  <text x="110" y="114"><tspan class="b">FIRING</tspan> · HighErrorRate (1 alert)</text>
+  <text x="88" y="138">• <tspan class="b">CRITICAL</tspan> on <tspan class="ic" dx="4">checkout-api:8080</tspan><tspan dx="4">: 5xx error rate above 5% for 5 minutes</tspan></text>
+  <text class="i" x="96" y="160">checkout-api is returning 503 on POST /api/orders.</text>
+
+  <text class="s" x="24" y="196">Rendered from payloads/alertmanager.json by templates/slack_message.tmpl</text>
+</svg>

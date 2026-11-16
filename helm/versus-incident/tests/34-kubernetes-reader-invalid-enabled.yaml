@@ -1,0 +1,6 @@
+# A value that is neither a boolean nor empty is rejected.
+kubernetesReaderRBAC:
+  enabled: "no"
+connectors:
+  kubernetes:
+    enabled: true

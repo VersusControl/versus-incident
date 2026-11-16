@@ -19,6 +19,12 @@ var (
 	// recorded as known and empty; its first real listing later is a baseline,
 	// not a wave of created changes.
 	ErrKindNotServed = errors.New("kubernetes index: kind not served by the cluster")
+	// ErrNotAttempted reports that the loader did not read the cluster for
+	// this kind this time, for example because the API version the kind is
+	// listed from could not be discovered. A kind with a recorded status keeps
+	// it: one missed read neither replaces a known permission gap nor fails a
+	// kind that was read before. A kind with no status yet records the failure.
+	ErrNotAttempted = errors.New("kubernetes index: kind not read this time")
 )
 
 const (
@@ -158,7 +164,12 @@ type KindStatus struct {
 	// says the connector could not read anything at all, so it stays a fault even
 	// when its class is a permission class: a per-kind capability gap and a dead
 	// credential are different problems with different remedies.
-	CycleFailure    bool `json:"cycle_failure,omitempty"`
+	CycleFailure bool `json:"cycle_failure,omitempty"`
+	// ScopeError and ScopeNamespace describe a kind read only inside
+	// namespaces whose read failed in one of them for a reason other than a
+	// denial: the class of that failure and the namespace it happened in.
+	ScopeError      string `json:"scope_error,omitempty"`
+	ScopeNamespace  string `json:"scope_namespace,omitempty"`
 	hasCompleteSync bool
 }
 
@@ -581,7 +592,8 @@ func (index *Index) RefreshGuarded(ctx context.Context, kind string, interval ti
 		}
 	}
 	index.mu.Lock()
-	if err != nil && !errors.Is(err, context.Canceled) {
+	_, known := index.kinds[kind]
+	if err != nil && !errors.Is(err, context.Canceled) && !(known && errors.Is(err, ErrNotAttempted)) {
 		status = index.kinds[kind]
 		status.State = "error"
 		status.LastAttemptAt = now.UTC()

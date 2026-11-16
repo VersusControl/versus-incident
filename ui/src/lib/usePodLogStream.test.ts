@@ -6,7 +6,7 @@ import { ApiError, api, type KubernetesPodLogEvent, type KubernetesWorkloadLogEv
 import { SSELimitError } from "@/lib/sse";
 import {
   appendPodLogLines, earlierOverlap, POD_LOG_CLOCK_SKEW_MS, POD_LOG_MAX_BYTES, POD_LOG_MAX_STALLED_ROTATIONS,
-  POD_LOG_WORKLOAD_EARLIER_TAIL, prependEarlierLines, usePodLogStream,
+  POD_LOG_WORKLOAD_EARLIER_TAIL, prependEarlierLines, usePodLogStream, logFailureSentence,
 } from "./usePodLogStream";
 import { KubernetesClusterContext, kubernetesKey } from "./useKubernetesCluster";
 
@@ -62,7 +62,8 @@ describe("Pod log stream lifecycle", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(result.current.status).toBe("error");
-    expect(result.current.message).toContain("credential_unavailable");
+    expect(result.current.message).toBe("Cluster credentials unavailable");
+    expect(result.current.code).toBe("credential_unavailable");
   });
 
   it("recovers transient credential renewal from its resume position within a bounded retry budget", async () => {
@@ -91,7 +92,7 @@ describe("Pod log stream lifecycle", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(stream).toHaveBeenCalledTimes(4);
     expect(result.current.status).toBe("error");
-    expect(result.current.message).toMatch(/credential_unavailable.*exhausted/);
+    expect(result.current.message).toMatch(/^renewal unavailable .*exhausted/);
     expect(result.current.buffer.lines).toEqual([]);
   });
   it("replenishes admission retries after an admitted read later rotates within the same selection", async () => {
@@ -139,7 +140,8 @@ describe("Pod log stream lifecycle", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(stream).toHaveBeenCalledTimes(1);
     expect(result.current.status).toBe("error");
-    expect(result.current.message).toContain("invalid_arguments");
+    expect(result.current.message).toBe("Invalid log arguments.");
+    expect(result.current.code).toBe("invalid_arguments");
   });
 
   it.each([
@@ -322,7 +324,8 @@ describe("Pod log stream lifecycle", () => {
     const { result, rerender } = renderHook((props) => usePodLogStream(props), { initialProps: options });
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(stream).toHaveBeenCalledTimes(4);
-    expect(result.current.message).toContain("upstream_unavailable Kubelet unreachable Check node connectivity");
+    expect(result.current.message).toContain("Kubelet unreachable Check node connectivity");
+    expect(result.current.message).not.toContain("upstream_unavailable");
     expect(result.current.message).toContain("exhausted");
     rerender({ ...options, paused: true });
     rerender(options);
@@ -647,7 +650,7 @@ describe("Pod log stream lifecycle", () => {
     const { result, rerender } = renderHook((props) => usePodLogStream(props), { initialProps: previousOptions });
     await act(async () => { await vi.advanceTimersByTimeAsync(50); });
     expect(result.current.status).toBe("error");
-    expect(result.current.message).toContain("previous_unavailable Previous container logs are unavailable. Select current container logs.");
+    expect(result.current.message).toBe("Previous container logs are unavailable. Select current container logs.");
     expect(result.current.buffer.lines).toHaveLength(0);
     expect(result.current.replayUncertain).toBe(false);
     rerender({ ...previousOptions, paused: true });
@@ -667,7 +670,7 @@ describe("Pod log stream lifecycle", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(stream).toHaveBeenCalledTimes(1);
     expect(result.current.status).toBe("error");
-    expect(result.current.message).toContain(`${code} Logs are unavailable.`);
+    expect(result.current.message).toBe("Logs are unavailable.");
     expect(result.current.replayUncertain).toBe(false);
     expect(result.current.buffer.lines).toHaveLength(0);
   });
@@ -1253,5 +1256,29 @@ describe("Earlier log window merge", () => {
     const buffer = appendPodLogLines({ lines: [], bytes: 0, dropped: 0, nextKey: 0 }, [line("served", { timestamp: "2026-10-26T12:00:01Z" })]);
     const merged = prependEarlierLines(buffer, [line("served", { timestamp: "2026-10-26T11:59:59Z" }), line("served", { timestamp: "2026-10-26T12:00:01Z" })]);
     expect(merged.lines.map((entry) => entry.timestamp)).toEqual(["2026-10-26T11:59:59Z", "2026-10-26T12:00:01Z"]);
+  });
+});
+
+describe("log failure wording", () => {
+  it.each([
+    ["invalid_arguments", undefined, "The log request did not name a container this Pod accepts. Pick a container and retry."],
+    ["forbidden", "", "Permission to read these logs was denied."],
+    ["credential_unavailable", "credential_unavailable", "Cluster credentials are unavailable or were rejected."],
+    ["upstream_unavailable", "Kubelet unreachable", "Kubelet unreachable"],
+    ["something_new", undefined, "Logs are unavailable right now."],
+    [undefined, "log_stream_busy", "Logs are unavailable right now."],
+  ])("words %s with message %s as a sentence, never the class", (code, message, expected) => {
+    expect(logFailureSentence(code, message)).toBe(expected);
+  });
+
+  it("never prints the failure class for a refused read that sent no message", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "kubernetesPodLogStream").mockRejectedValue(new ApiError(400, "", { error: { code: "invalid_arguments" } }));
+    const { result } = renderHook(() => usePodLogStream(options));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(result.current.status).toBe("error");
+    expect(result.current.code).toBe("invalid_arguments");
+    expect(result.current.message).toBe("The log request did not name a container this Pod accepts. Pick a container and retry.");
+    expect(result.current.message).not.toContain("invalid_arguments");
   });
 });

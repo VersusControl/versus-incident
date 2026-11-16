@@ -438,7 +438,7 @@ func TestSyncHealthKeepsTheFailureClassAndAge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"state":"error"`, `"failing_kinds":1`, `"class":"budget_exhausted"`, `"since":"`, `"kinds":{`} {
+	for _, want := range []string{`"state":"partial"`, `"failing_kinds":1`, `"class":"budget_exhausted"`, `"since":"`, `"kinds":{`} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("payload %s lacks %s", encoded, want)
 		}
@@ -719,7 +719,7 @@ func TestSyncHealthFirstReadySurvivesDegradedReports(t *testing.T) {
 				kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: now.Add(-2 * time.Hour), CompletedAt: now.Add(-2 * time.Hour)}
 			}
 		}},
-		{name: "error", want: "error", with: func(kinds map[string]kubeindex.KindStatus) {
+		{name: "one failing kind", want: "partial", with: func(kinds map[string]kubeindex.KindStatus) {
 			kinds["StatefulSet"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "timeout", LastAttemptAt: now, FailingSince: now}
 		}},
 		{name: "unreadable credential", want: "error", with: func(kinds map[string]kubeindex.KindStatus) {
@@ -782,8 +782,8 @@ func TestSyncHealthFirstReadySurvivesRestart(t *testing.T) {
 		t.Fatalf("the stored generation carries first ready %s, want %s", persisted.FirstReadyAt, stamped)
 	}
 	health := cluster.report(t)
-	if health.State != "error" || !health.FirstReadyAt.Equal(stamped) {
-		t.Fatalf("after restart state = %q first ready = %s, want error at %s", health.State, health.FirstReadyAt, stamped)
+	if health.State != "partial" || !health.FirstReadyAt.Equal(stamped) {
+		t.Fatalf("after restart state = %q first ready = %s, want partial at %s", health.State, health.FirstReadyAt, stamped)
 	}
 }
 
@@ -1394,5 +1394,49 @@ func TestFirstPublicationConcurrentWritersAgree(t *testing.T) {
 		if !at.Equal(winner) {
 			t.Fatalf("writer returned %s, persisted winner %s", at, winner)
 		}
+	}
+}
+
+// A failure is scoped to what failed: one kind that failed on its own, among
+// ready kinds, makes the cluster partial. Only a failure of the cluster's own
+// (nothing readable, a rejected credential, a failed cycle) is an error.
+func TestSyncHealthOneFailingKindIsPartialNotAClusterError(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		name string
+		want string
+		with func(map[string]kubeindex.KindStatus)
+	}{
+		{name: "optional kind timed out", want: "partial", with: func(kinds map[string]kubeindex.KindStatus) {
+			kinds["Gateway"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "timeout", LastAttemptAt: now, FailingSince: now}
+			kinds["HTTPRoute"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "unsupported", LastAttemptAt: now, FailingSince: now}
+		}},
+		{name: "denied kind beside a timed out kind", want: "partial", with: func(kinds map[string]kubeindex.KindStatus) {
+			kinds["Secret"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "forbidden", LastAttemptAt: now, FailingSince: now}
+			kinds["Event"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "timeout", LastAttemptAt: now, FailingSince: now}
+		}},
+		{name: "rejected credential", want: "error", with: func(kinds map[string]kubeindex.KindStatus) {
+			kinds["Pod"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "unauthorized", LastAttemptAt: now, FailingSince: now}
+		}},
+		{name: "failed cycle", want: "error", with: func(kinds map[string]kubeindex.KindStatus) {
+			kinds["Pod"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "timeout", CycleFailure: true, LastAttemptAt: now, FailingSince: now}
+		}},
+		{name: "nothing ready", want: "error", with: func(kinds map[string]kubeindex.KindStatus) {
+			for kind := range kinds {
+				kinds[kind] = kubeindex.KindStatus{State: "error", Partial: true, Error: "timeout", LastAttemptAt: now, FailingSince: now}
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kinds := fullySyncedKinds(now)
+			test.with(kinds)
+			health := buildSyncHealth(kinds, time.Time{})
+			if health.State != test.want || !health.Partial {
+				t.Fatalf("state = %q partial=%t, want %q: failing=%+v", health.State, health.Partial, test.want, health.Failing)
+			}
+			if secret := health.Kinds["Secret"]; secret.Error == "forbidden" && health.UnreadableKinds != 1 {
+				t.Fatalf("the denied kind is not reported as not readable: %+v", health.Unreadable)
+			}
+		})
 	}
 }

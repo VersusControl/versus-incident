@@ -23,27 +23,101 @@ export function normalizeSeverity(raw?: string | null): Severity | null {
   return null;
 }
 
-// severityFromContent digs through the free-form alert payload the same way
-// the detail page historically did: common keys first, then nested labels.
+const SEVERITY_KEYS = ["Severity", "severity", "level", "priority"];
+const LABEL_PARENTS = ["labels", "commonLabels"];
+
+type Accept = (v: unknown) => boolean;
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+const anyValue: Accept = () => true;
+
+// pickKey resolves name against the object's real spellings the way the server
+// does: the exact spelling wins, else the lexicographically smallest
+// case-insensitive match whose value accept() approves.
+function pickKey(obj: Record<string, unknown>, name: string, accept: Accept): string | null {
+  if (Object.prototype.hasOwnProperty.call(obj, name) && accept(obj[name])) return name;
+  const lowered = name.toLowerCase();
+  let best: string | null = null;
+  for (const k of Object.keys(obj)) {
+    if (k.toLowerCase() !== lowered || !accept(obj[k])) continue;
+    if (best === null || k < best) best = k;
+  }
+  return best;
+}
+
+function pick(obj: Record<string, unknown>, name: string, accept: Accept = anyValue): unknown {
+  const k = pickKey(obj, name, accept);
+  return k === null ? undefined : obj[k];
+}
+
+const isKnownSeverity: Accept = (v) => typeof v === "string" && normalizeSeverity(v) !== null;
+
+// keySeverity reads the first recognised severity at any of keys: exact
+// spellings across all keys first, then case-insensitive matches, matching the
+// server's lookup order.
+function keySeverity(obj: unknown, keys: string[]): Severity | null {
+  if (!isObject(obj)) return null;
+  for (const k of keys) {
+    const v = obj[k];
+    if (isKnownSeverity(v)) return normalizeSeverity(v as string);
+  }
+  for (const k of keys) {
+    const v = pick(obj, k, isKnownSeverity);
+    if (v !== undefined) return normalizeSeverity(v as string);
+  }
+  return null;
+}
+
+// severityFromContent digs through the free-form alert payload in the same
+// order the server resolves an incident's severity: top-level keys, then the
+// nested label maps, then the first alert's labels, then CloudWatch alarm
+// trigger dimensions. Key matching is case-insensitive.
 export function severityFromContent(
   content?: Record<string, unknown> | null,
 ): Severity | null {
   if (!content) return null;
-  const tryKeys = ["Severity", "severity", "level", "priority"];
-  for (const k of tryKeys) {
-    const v = content[k];
-    if (typeof v === "string") {
-      const n = normalizeSeverity(v);
-      if (n) return n;
-    }
+  const top = keySeverity(content, SEVERITY_KEYS);
+  if (top) return top;
+  for (const parent of LABEL_PARENTS) {
+    const fromLabels = keySeverity(pick(content, parent, isObject), SEVERITY_KEYS);
+    if (fromLabels) return fromLabels;
   }
-  const labels = content["labels"] ?? content["commonLabels"];
-  if (labels && typeof labels === "object") {
-    const v = (labels as Record<string, unknown>)["severity"];
-    if (typeof v === "string") {
-      const n = normalizeSeverity(v);
-      if (n) return n;
-    }
+  // A minimal Alertmanager body may carry its labels only on each alert. A
+  // grouped body (commonLabels with several alerts) is not read from its first
+  // alert: the alerts disagree on any label missing from commonLabels.
+  const alerts = pick(content, "alerts");
+  const grouped = isObject(pick(content, "commonLabels", isObject));
+  if (Array.isArray(alerts) && isObject(alerts[0]) && (!grouped || alerts.length === 1)) {
+    const fromAlert = keySeverity(pick(alerts[0], "labels", isObject), SEVERITY_KEYS);
+    if (fromAlert) return fromAlert;
+  }
+  return dimensionSeverity(content);
+}
+
+// dimensionSeverity reads a severity from a CloudWatch alarm's
+// Trigger.Dimensions list ({name, value} entries, any key casing). The first
+// entry for a dimension name wins; names are tried in key priority order.
+function dimensionSeverity(content: Record<string, unknown>): Severity | null {
+  const trigger = pick(content, "Trigger", isObject);
+  if (!isObject(trigger)) return null;
+  const dims = pick(trigger, "Dimensions");
+  if (!Array.isArray(dims)) return null;
+  const byName = new Map<string, string>();
+  const isNonEmpty: Accept = (v) => typeof v === "string" && v.trim() !== "";
+  for (const entry of dims) {
+    if (!isObject(entry)) continue;
+    const name = pick(entry, "name", isNonEmpty);
+    const value = pick(entry, "value", isNonEmpty);
+    if (typeof name !== "string" || typeof value !== "string") continue;
+    const key = name.trim().toLowerCase();
+    if (!byName.has(key)) byName.set(key, value.trim());
+  }
+  for (const k of SEVERITY_KEYS) {
+    const n = normalizeSeverity(byName.get(k.toLowerCase()));
+    if (n) return n;
   }
   return null;
 }
@@ -53,15 +127,20 @@ export function severityRank(sev: Severity | null): number {
   return sev === null ? 99 : ORDER[sev];
 }
 
+// incidentSeverity picks the highest of the typed episode severities, the
+// content blob (detail pages) and the server-reported raw severity (list rows,
+// which carry no content).
 export function incidentSeverity(
   content?: Record<string, unknown> | null,
   highestObserved?: string | null,
   highestNotified?: string | null,
+  reported?: string | null,
 ): Severity | null {
   return [
     normalizeSeverity(highestObserved),
     normalizeSeverity(highestNotified),
     severityFromContent(content),
+    normalizeSeverity(reported),
   ].reduce<Severity | null>((highest, candidate) =>
     severityRank(candidate) < severityRank(highest) ? candidate : highest,
     null);

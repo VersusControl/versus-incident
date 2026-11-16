@@ -1282,7 +1282,17 @@ const (
 )
 
 func (service *Service) authorizeRestore(ctx context.Context, generation inventoryGeneration, caller restoreCaller) error {
-	if len(generation.View.Kinds) == 0 || service.evidenceStore() == nil {
+	if len(generation.View.Kinds) == 0 {
+		return nil
+	}
+	if service.evidenceStore() == nil {
+		if generationHoldsRecords(generation) && service.provesOnceCaptureStarts() {
+			// The store can prove this generation, but capture has not
+			// started, so nothing has proved it yet: its records are not
+			// served until it is. A generation without records serves only
+			// kind states, which hold nothing to withhold.
+			return restoreProofUnanswered{ErrInventoryNotReady}
+		}
 		return nil
 	}
 	authority := service.inventoryRestore
@@ -1375,6 +1385,13 @@ func (service *Service) authorizeRestore(ctx context.Context, generation invento
 	return err
 }
 
+// errStoredGenerationUnbound reports a stored generation that carries no
+// cluster identity, as one collected by an identity that may read only inside
+// namespaces does. It can never be proved, so it is never restored: the
+// cluster is collected again, and readers wait for that instead of being told
+// the cluster is unreachable.
+var errStoredGenerationUnbound = errors.Join(errors.New("kubernetes: stored inventory carries no cluster identity"), ErrInventoryNotReady)
+
 // proveStoredGeneration proves that this credential may read everything one
 // stored generation holds: the physical cluster identity, every kind it stored
 // cluster-wide, and every kind it stored only for a namespace, in that
@@ -1406,7 +1423,10 @@ func (service *Service) proveStoredGeneration(ctx context.Context, generation in
 			}
 		}
 	}
-	if expected == "" || expected != scope.ClusterUID {
+	if expected == "" {
+		return inventoryPayloadError{errStoredGenerationUnbound}
+	}
+	if expected != scope.ClusterUID {
 		return inventoryPayloadError{ErrClusterUnavailable}
 	}
 	held := map[string]bool{}
@@ -1464,4 +1484,39 @@ func (service *Service) proveStoredGeneration(ctx context.Context, generation in
 		}
 	}
 	return nil
+}
+
+// provesOnceCaptureStarts reports a registry-served cluster whose store proves
+// stored generations but whose proof is not enabled yet, because the registry
+// has not started capture and no worker runs for the scope. The process starts
+// capture before it registers any route or tool, so no request reaches this
+// window today; the check keeps it closed if that order ever changes. A scope
+// with a running worker is answered by that worker's own proof or publication.
+func (service *Service) provesOnceCaptureStarts() bool {
+	if service == nil || service.changes == nil || !service.registered {
+		return false
+	}
+	service.changes.mu.Lock()
+	enabled := service.changes.evidenceEnabled
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	if enabled || cache != nil && cache.started {
+		return false
+	}
+	store, ok := service.usageProvider().(storage.EvidenceStore)
+	return ok && store.EvidencePolicy().Mode != "unsupported"
+}
+
+// generationHoldsRecords reports whether a generation holds any object records,
+// cluster-wide or read inside a namespace.
+func generationHoldsRecords(generation inventoryGeneration) bool {
+	if len(generation.View.Records) > 0 || len(generation.Resources) > 0 {
+		return true
+	}
+	for _, snapshot := range generation.Namespaces {
+		if len(snapshot.Records) > 0 {
+			return true
+		}
+	}
+	return false
 }

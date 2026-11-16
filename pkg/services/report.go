@@ -567,7 +567,7 @@ func sendReport(ctx context.Context, cfg *config.Config, st storage.Provider, re
 	for _, p := range targets {
 		if as, ok := p.(core.AttachmentSender); ok {
 			if err := as.SendAttachment(carrier, att); err != nil {
-				out.Failed[p.Name()] = err.Error()
+				out.Failed[p.Name()] = utils.SafeErrorText(err)
 			} else {
 				out.Sent = append(out.Sent, p.Name())
 			}
@@ -578,7 +578,7 @@ func sendReport(ctx context.Context, cfg *config.Config, st storage.Provider, re
 			// they still get the redacted fallback text even when charts are on
 			// — otherwise they'd receive nothing.
 			if err := ts.SendText(carrier, fallbackText); err != nil {
-				out.Failed[p.Name()] = err.Error()
+				out.Failed[p.Name()] = utils.SafeErrorText(err)
 			} else {
 				out.Fallback = append(out.Fallback, p.Name())
 			}

@@ -49,10 +49,10 @@ export default {
         // Severity ramp. DEFAULT = text/icon tone (AA on the theme's
         // card surface at 11px); solid = saturated fill for rails.
         sev: {
-          critical: { DEFAULT: v("sev-critical"), solid: v("sev-critical-solid") },
+          critical: { DEFAULT: v("sev-critical"), solid: v("sev-critical-solid"), text: v("sev-critical-text") },
           high: { DEFAULT: v("sev-high"), solid: v("sev-high-solid") },
           warn: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid") },
-          warning: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid") },
+          warning: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid"), text: v("sev-warn-text") },
           info: { DEFAULT: v("sev-info"), solid: v("sev-info-solid") },
           ok: { DEFAULT: v("sev-ok"), solid: v("sev-ok-solid") },
         },

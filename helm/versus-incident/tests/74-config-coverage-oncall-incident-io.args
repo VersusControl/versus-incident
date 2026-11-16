@@ -1,0 +1,5 @@
+# The maximal coverage scenario with the incident_io on-call provider.
+-f
+20-config-coverage.yaml
+--set
+oncall.provider=incident_io

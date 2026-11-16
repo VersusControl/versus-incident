@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="410" viewBox="0 0 760 410" style="max-width:100%;height:auto" role="img" aria-label="The SRE agent quickstart in six steps: in training mode you start the stack with docker compose up, which runs Versus, Redis, Loki and Grafana, then start the optional fake logs that push 100 lines into Loki every 5 seconds, and training learns about 20 patterns that are all known after a few minutes; a few minutes later you switch to detect mode by restarting Versus with AGENT_MODE=detect, keeping the learned patterns, then inject an error burst, a new checkout error: payment processor line from checkout-api, and Versus raises an incident that shows in the Versus UI and arrives as a Slack message">
+  <title>SRE agent quickstart flow</title>
+  <desc>Training mode: start the stack, send fake logs into Loki, the agent learns about 20 patterns; then detect mode: restart with AGENT_MODE=detect, inject a new checkout error from checkout-api, and an incident appears in the Versus UI and in Slack</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+  <style>
+    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:12px;fill:#000000}
+    .m{text-anchor:middle}
+    .name{font-size:15px;font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .d{fill:#5B6B78}
+    .dk{fill:#12222F}
+    .e{fill:#E51400}
+    .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;fill:#12222F}
+    .num{font-size:12px;font-weight:700;fill:#12222F}
+    .grp{fill:none;stroke:#000000;stroke-width:1.5;stroke-dasharray:6 5}
+    .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
+    .badge{fill:#FFFFFF;stroke:#000000;stroke-width:1.5}
+    .flow{fill:none;stroke:#000000;stroke-width:2;marker-end:url(#a)}
+  </style>
+
+  <rect width="760" height="410" fill="#FFFFFF"/>
+
+  <!-- zones -->
+  <rect class="grp" x="16" y="36" width="728" height="150"/>
+  <rect class="grp" x="16" y="232" width="728" height="158"/>
+
+  <!-- training row -->
+  <rect class="blk" x="32" y="80" width="214" height="92" rx="10"/>
+  <rect class="blk" x="273" y="80" width="214" height="92" rx="10"/>
+  <rect class="sub" x="514" y="80" width="214" height="92" rx="10"/>
+
+  <!-- detect row -->
+  <rect class="blk" x="32" y="275" width="214" height="92" rx="10"/>
+  <rect class="blk" x="273" y="275" width="214" height="92" rx="10"/>
+  <rect class="sub" x="514" y="275" width="214" height="92" rx="10"/>
+
+  <!-- step badges -->
+  <circle class="badge" cx="56" cy="80" r="11"/>
+  <circle class="badge" cx="297" cy="80" r="11"/>
+  <circle class="badge" cx="538" cy="80" r="11"/>
+  <circle class="badge" cx="56" cy="275" r="11"/>
+  <circle class="badge" cx="297" cy="275" r="11"/>
+  <circle class="badge" cx="538" cy="275" r="11"/>
+
+  <!-- arrows -->
+  <path class="flow" d="M246 126H268"/>
+  <path class="flow" d="M487 126H509"/>
+  <path class="flow" d="M621 172V209H139V270"/>
+  <path class="flow" d="M246 321H268"/>
+  <path class="flow" d="M487 321H509"/>
+
+  <!-- text -->
+  <text class="zone" x="28" y="58">TRAINING MODE</text>
+  <text class="zone" x="28" y="254">DETECT MODE</text>
+
+  <text class="num m" x="56" y="84">1</text>
+  <text class="num m" x="297" y="84">2</text>
+  <text class="num m" x="538" y="84">3</text>
+  <text class="num m" x="56" y="279">4</text>
+  <text class="num m" x="297" y="279">5</text>
+  <text class="num m" x="538" y="279">6</text>
+
+  <text class="name m" x="139" y="112">Start the stack</text>
+  <text class="c m" x="139" y="134">docker compose up -d</text>
+  <text class="d m" x="139" y="154">Versus, Redis, Loki, Grafana</text>
+
+  <text class="name m" x="380" y="112">Fake logs into Loki</text>
+  <text class="c m" x="380" y="134">--profile fake-logs</text>
+  <text class="d m" x="380" y="154">100 lines every 5 seconds</text>
+
+  <text class="name m" x="621" y="112">Training learns</text>
+  <text class="dk m" x="621" y="134">about 20 patterns</text>
+  <text class="dk m" x="621" y="154">all known after a few minutes</text>
+
+  <text class="e m" x="380" y="203">a few minutes later</text>
+
+  <text class="name m" x="139" y="307">Switch to detect</text>
+  <text class="c m" x="139" y="329">AGENT_MODE=detect</text>
+  <text class="d m" x="139" y="349">restart Versus, patterns kept</text>
+
+  <text class="name m" x="380" y="307">Inject an error burst</text>
+  <text class="d m" x="380" y="329">a new line from checkout-api</text>
+  <text class="dk m" x="380" y="349">checkout error: payment processor</text>
+
+  <text class="name m" x="621" y="307">Incident raised</text>
+  <text class="dk m" x="621" y="329">in the Versus UI</text>
+  <text class="dk m" x="621" y="349">and as a Slack message</text>
+</svg>

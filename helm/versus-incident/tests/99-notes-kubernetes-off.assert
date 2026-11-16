@@ -1,0 +1,5 @@
+# NOTES
+# One line on how to turn the connector on, plus the quickstart.
+The Kubernetes connector is off\. Turn it on with --set connectors\.kubernetes\.enabled=true
+https://docs\.versusincident\.com/#/agent/kubernetes/quickstart
+!ClusterRole

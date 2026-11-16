@@ -1,0 +1,5 @@
+# An explicit list wins over the default.
+connectors:
+  kubernetes:
+    enabled: true
+    excludeResources: [secrets, configmaps]

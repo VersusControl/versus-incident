@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"time"
@@ -451,6 +452,7 @@ func (store *SessionStore) updateSession(id string, change func(*Session, time.T
 	}
 	name := store.sessionBlobName(id)
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		casBackoff(attempt)
 		if len(store.archives) > 0 {
 			deleted, err := store.isDeleted(id)
 			if err != nil {
@@ -507,6 +509,18 @@ func (store *SessionStore) updateSession(id string, change func(*Session, time.T
 	return ErrStoreConflict
 }
 
+// casBackoff pauses before retrying a lost compare-and-swap. Writers that share
+// one blob, such as the session index every append touches, otherwise retry in
+// lockstep and a single writer can lose every attempt and report a conflict. A
+// short randomized pause that grows with each loss lets the winning write land
+// and spreads the retries.
+func casBackoff(attempt int) {
+	if attempt == 0 {
+		return
+	}
+	time.Sleep(rand.N(time.Millisecond << min(attempt, 5)))
+}
+
 func (store *SessionStore) readIndex() (*sessionIndex, []byte, error) {
 	data, err := store.provider.ReadBlob(store.indexBlobName())
 	if err != nil {
@@ -542,6 +556,7 @@ func (store *SessionStore) updateIndex(change func(*sessionIndex) error) error {
 		return storage.ErrUnsupported
 	}
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		casBackoff(attempt)
 		index, current, err := store.readIndex()
 		if err != nil {
 			return err
@@ -825,6 +840,7 @@ func (store *SessionStore) replaceBlob(name string, replacement []byte, requireM
 		return storage.ErrUnsupported
 	}
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		casBackoff(attempt)
 		current, err := store.provider.ReadBlob(name)
 		if err != nil {
 			return fmt.Errorf("chat: read blob: %w", err)
@@ -905,6 +921,7 @@ func (store *SessionStore) AcquireLease(id, owner string, ttl time.Duration) (ui
 	}
 	name := store.leaseBlobName(id)
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		casBackoff(attempt)
 		current, err := store.provider.ReadBlob(name)
 		if err != nil {
 			return 0, false, fmt.Errorf("chat: read lease: %w", err)
@@ -955,6 +972,7 @@ func (store *SessionStore) RequestCancel(id string) (bool, error) {
 	}
 	name := store.leaseBlobName(id)
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		casBackoff(attempt)
 		current, err := store.provider.ReadBlob(name)
 		if err != nil || len(current) == 0 {
 			return false, err
@@ -986,6 +1004,7 @@ func (store *SessionStore) mutateLease(id, owner string, epoch uint64, stopOnCan
 	}
 	name := store.leaseBlobName(id)
 	for attempt := 0; attempt < maxCASAttempts; attempt++ {
+		casBackoff(attempt)
 		current, err := store.provider.ReadBlob(name)
 		if err != nil {
 			return false, false, err

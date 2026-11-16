@@ -9,6 +9,8 @@ import { clock } from "@/lib/kubernetesResourcePresentation";
 import { counted } from "@/lib/kubernetesEvidence";
 import { useKubernetesCluster, useKubernetesFirstReady, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { failureWarnings } from "../kubernetesWarningItems";
+import { KubernetesHistoryOffNotice } from "@/components/KubernetesAccessNotices";
+import { historyOffFor, useKubernetesNamespaceAccess } from "@/lib/kubernetesNamespaceAccess";
 
 export function ResourceTimeline({
   resource,
@@ -50,13 +52,15 @@ export function ResourceTimeline({
     retry: false,
     refetchInterval: (query) => query.state.data?.sync.state === "syncing" ? 1000 : false,
   });
+  const access = useKubernetesNamespaceAccess();
+  const historyIsOff = historyOffFor(access, timeline.data, timeline.error);
   const data = timeline.data;
   const history = (data?.items ?? []).map<{ id: string; at: string; type: string; fields?: KubernetesChange["fields"]; crash?: KubernetesCrashEvent }>((entry) =>
     entry.type === "change" ? { id: entry.id, at: entry.at, type: entry.change.type, fields: entry.change.fields }
       : entry.type === "crash" ? { id: entry.id, at: entry.at, type: "crash", crash: entry.crash }
         : { id: entry.id, at: entry.at, type: "break" },
   );
-  const coverageReasons = [
+  const coverageReasons = historyIsOff ? [] : [
     ...failureWarnings(data?.partial_failures).map((warning) => warning.content),
     ...(data?.gaps?.length ? ["History capture does not cover the whole range"] : []),
     ...(["stale", "error", "partial"].includes(data?.sync.state ?? "") ? ["Some history could not be read"] : []),
@@ -85,6 +89,7 @@ export function ResourceTimeline({
           {resource.name}
         </span>
       </div>
+      {historyIsOff ? <KubernetesHistoryOffNotice className="py-2 !text-xs" /> : <>
       <KubernetesHistorySaveNotice pages={[data]} />
       {history.length > 0 && <><div className="flex flex-wrap justify-end gap-3 text-2xs text-ink-400" aria-label="History legend"><span><span className="text-link">●</span> change</span><span><span className="text-sev-critical">│</span> break</span><span><span className="text-sev-critical">×</span> crash</span></div>
       <div
@@ -167,6 +172,7 @@ export function ResourceTimeline({
       {!data && !timeline.isPending && !syncing && <p className="py-4 text-xs text-ink-400">History unavailable.</p>}
       {timeline.isError && <button type="button" className="btn text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor ? "Restart history" : "Retry history"}</button>}
       <CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} total={data?.total} limit={data?.limit} capped={data?.count_capped} count={data?.items.length} />
+      </>}
     </section>
   );
 }

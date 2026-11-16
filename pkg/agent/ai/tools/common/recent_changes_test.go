@@ -3,11 +3,15 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
@@ -243,32 +247,23 @@ func TestGitAuth(t *testing.T) {
 // initGitRepo builds a throwaway git repo with the given commits (oldest
 // first) under a subdirectory named `name` (so the auto-detected service
 // is predictable) and returns its path. Each commit stamps the same
-// author and committer date so windowing is deterministic. The test is
-// skipped when the git binary is unavailable.
+// author and committer date so windowing is deterministic. The repo is
+// written in-process with go-git, so no git binary is needed.
 func initGitRepo(t *testing.T, name string, commits []struct {
 	when    time.Time
 	file    string
 	message string
 }) string {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git binary not available")
-	}
 	dir := filepath.Join(t.TempDir(), name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir repo: %v", err)
+	repo, err := git.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("init repo: %v", err)
 	}
-	run := func(env []string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		cmd.Env = append(os.Environ(), env...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
+	worktree, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("worktree: %v", err)
 	}
-	run(nil, "init")
-	run(nil, "config", "user.email", "test@example.com")
-	run(nil, "config", "user.name", "Test")
 	for _, c := range commits {
 		path := filepath.Join(dir, c.file)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -277,10 +272,13 @@ func initGitRepo(t *testing.T, name string, commits []struct {
 		if err := os.WriteFile(path, []byte(c.message), 0o600); err != nil {
 			t.Fatalf("write file: %v", err)
 		}
-		run(nil, "add", ".")
-		stamp := c.when.UTC().Format(time.RFC3339)
-		run([]string{"GIT_AUTHOR_DATE=" + stamp, "GIT_COMMITTER_DATE=" + stamp},
-			"commit", "-m", c.message)
+		if _, err := worktree.Add(c.file); err != nil {
+			t.Fatalf("add %s: %v", c.file, err)
+		}
+		signature := &object.Signature{Name: "Test", Email: "test@example.com", When: c.when.UTC()}
+		if _, err := worktree.Commit(c.message, &git.CommitOptions{Author: signature, Committer: signature}); err != nil {
+			t.Fatalf("commit %q: %v", c.message, err)
+		}
 	}
 	return dir
 }
@@ -371,9 +369,6 @@ func TestGitChangeFeed_ThroughTool(t *testing.T) {
 }
 
 func TestGitChangeFeed_BadRepoErrors(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git binary not available")
-	}
 	feed := newGitChangeFeed([]GitRepo{{URL: filepath.Join(t.TempDir(), "not-a-repo")}}, t.TempDir())
 	if _, err := feed.Changes(context.Background(), time.Now().Add(-time.Hour)); err == nil {
 		t.Fatal("expected error when the only repo fails to clone")
@@ -399,5 +394,175 @@ func TestGitChangeFeed_PartialFailureDegrades(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].Service != "good" {
 		t.Fatalf("records = %+v, want one record for service good", recs)
+	}
+}
+
+func TestGitChangeFeed_ReadsLocalBareRepository(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	source := initGitRepo(t, "source", []commitSpec{
+		{now.Add(-6 * time.Minute), "main.go", "ledger deploy"},
+	})
+	bare := filepath.Join(t.TempDir(), "ledger.git")
+	if _, err := git.PlainClone(bare, true, &git.CloneOptions{URL: source}); err != nil {
+		t.Fatalf("bare clone: %v", err)
+	}
+
+	feed := newGitChangeFeed([]GitRepo{{URL: bare}}, t.TempDir())
+	recs, err := feed.Changes(context.Background(), now.Add(-60*time.Minute))
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Service != "ledger" || recs[0].Summary != "ledger deploy" {
+		t.Fatalf("records = %+v, want one ledger deploy record", recs)
+	}
+}
+
+func TestGitChangeFeed_WorkingTreeWithConfigFolder(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := initGitRepo(t, "settings", []commitSpec{
+		{now.Add(-7 * time.Minute), "config/app.yaml", "tune pool size"},
+	})
+
+	feed := newGitChangeFeed([]GitRepo{{URL: repo}}, t.TempDir())
+	recs, err := feed.Changes(context.Background(), now.Add(-60*time.Minute))
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Summary != "tune pool size" {
+		t.Fatalf("records = %+v, want the config change", recs)
+	}
+}
+
+func TestGitChangeFeed_WorkingTreeWithGitdirFile(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	source := initGitRepo(t, "source", []commitSpec{
+		{now.Add(-9 * time.Minute), "main.go", "checkout deploy"},
+	})
+	// A linked checkout points at its repository through a ".git" file.
+	checkout := filepath.Join(t.TempDir(), "checkout")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	gitdir := "gitdir: " + filepath.Join(source, ".git") + "\n"
+	if err := os.WriteFile(filepath.Join(checkout, ".git"), []byte(gitdir), 0o600); err != nil {
+		t.Fatalf("write .git file: %v", err)
+	}
+
+	feed := newGitChangeFeed([]GitRepo{{URL: checkout}}, t.TempDir())
+	recs, err := feed.Changes(context.Background(), now.Add(-60*time.Minute))
+	if err != nil {
+		t.Fatalf("Changes: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Service != "checkout" || recs[0].Summary != "checkout deploy" {
+		t.Fatalf("records = %+v, want one checkout deploy record", recs)
+	}
+}
+
+func TestGitChangeFeed_ConcurrentFirstUseSharesOneMirror(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := initGitRepo(t, "orders", []commitSpec{
+		{now.Add(-4 * time.Minute), "main.go", "orders deploy"},
+	})
+	cacheDir := t.TempDir()
+	feed := newGitChangeFeed([]GitRepo{{URL: repo}}, cacheDir)
+	// A second feed over the same cache directory, as after a reload.
+	other := newGitChangeFeed([]GitRepo{{URL: repo}}, cacheDir)
+
+	const callers = 8
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			use := feed
+			if i%2 == 1 {
+				use = other
+			}
+			recs, err := use.Changes(context.Background(), now.Add(-60*time.Minute))
+			if err == nil && len(recs) != 1 {
+				err = fmt.Errorf("got %d records, want 1", len(recs))
+			}
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Changes: %v", err)
+		}
+	}
+
+	recs, err := feed.Changes(context.Background(), now.Add(-60*time.Minute))
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("later Changes = %+v, %v; want one record", recs, err)
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("read cache dir: %v", err)
+	}
+	if len(entries) != 1 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("cache dir holds %v, want only the one mirror", names)
+	}
+}
+
+func TestGitChangeFeed_ReplacesUnusableMirror(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := initGitRepo(t, "invoices", []commitSpec{
+		{now.Add(-3 * time.Minute), "main.go", "invoices deploy"},
+	})
+	cacheDir := t.TempDir()
+	feed := newGitChangeFeed([]GitRepo{{URL: repo}}, cacheDir).(*gitChangeFeed)
+
+	// Leave behind a mirror directory that is not a repository.
+	broken := feed.cachePathFor(repo)
+	if err := os.MkdirAll(broken, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, "leftover"), []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write leftover: %v", err)
+	}
+
+	recs, err := feed.Changes(context.Background(), now.Add(-60*time.Minute))
+	if err != nil {
+		t.Fatalf("Changes over an unusable mirror: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Summary != "invoices deploy" {
+		t.Fatalf("records = %+v, want one invoices deploy record", recs)
+	}
+	if _, err := os.Stat(filepath.Join(broken, "leftover")); !os.IsNotExist(err) {
+		t.Fatalf("unusable mirror was not replaced: stat leftover err = %v", err)
+	}
+}
+
+func TestGitChangeFeed_CancelledContextLeavesNoMirror(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	repo := initGitRepo(t, "refunds", []commitSpec{
+		{now.Add(-3 * time.Minute), "main.go", "refunds deploy"},
+	})
+	cacheDir := t.TempDir()
+	feed := newGitChangeFeed([]GitRepo{{URL: repo}}, cacheDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := feed.Changes(ctx, now.Add(-60*time.Minute)); err == nil {
+		t.Fatal("expected an error for a cancelled context")
+	}
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read cache dir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("cancelled clone left %d cache entries", len(entries))
+	}
+
+	recs, err := feed.Changes(context.Background(), now.Add(-60*time.Minute))
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("Changes after cancellation = %+v, %v; want one record", recs, err)
 	}
 }

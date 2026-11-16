@@ -1,0 +1,10 @@
+# NOTES
+# How to reach the UI, read the sign-in secret, and what the connector reads with.
+kubectl -n versus port-forward svc/versus-test-versus-incident 3000:3000
+http://localhost:3000
+kubectl -n versus get secret versus-test-versus-incident-secrets -o jsonpath='\{\.data\.gateway_secret\}' \| base64 -d
+ServiceAccount versus/versus-test-versus-incident \(auth\.mode=in_cluster\)
+ClusterRole versus-test-versus-incident-kubernetes-reader
+https://docs\.versusincident\.com/#/agent/kubernetes/quickstart
+!NOT registered
+!404

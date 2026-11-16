@@ -2,148 +2,127 @@
 
 _Enterprise_
 
-Run the Enterprise SRE Agent as **3 replicas sharing one Postgres** with plain
-Kubernetes manifests you can read top to bottom. This is the same topology the
-[Helm chart](./helm.md) produces, applied with `kubectl apply -k .` (kustomize).
+## Concept
 
-## What you'll need
+Run three Versus Enterprise replicas on Kubernetes with plain manifests you can
+read top to bottom. A StatefulSet names the pods `versus-0`, `versus-1` and
+`versus-2` and passes each its name, so every replica knows its place in the
+set. All three share one Postgres. The [Helm chart](./helm.md) builds the same
+setup. See [High Availability](./overview.md) for how it works.
 
-| Item | Where it comes from |
+## Example
+
+The example is
+[`examples/high-availability/k8s/`](https://github.com/VersusControl/versus-incident/tree/main/examples/high-availability/k8s).
+It creates everything in the `versus-ha` namespace:
+
+| File | Creates |
 |---|---|
-| A **cluster** + `kubectl` | kind, minikube, or any cluster. Kustomize is built into `kubectl` ≥ 1.14 (`kubectl apply -k`). |
-| The **enterprise image** pullable by the cluster | `ghcr.io/versuscontrol/versus-enterprise` (private — use `imagePullSecrets`, or on kind: `kind load docker-image ghcr.io/versuscontrol/versus-enterprise`) |
-| A **Versus Enterprise license** (`LICENSE_KEY`) | required to prove session/secret convergence; the topology boots without it |
+| `00-namespace.yaml` | The `versus-ha` namespace |
+| `10-postgres.yaml` | A Postgres StatefulSet and Service: the shared store |
+| `20-versus-config.yaml` | The Versus `config.yaml` (Postgres storage) |
+| `30-versus-statefulset.yaml` | The Versus StatefulSet: 3 replicas, `INSTANCE_COUNT=3`, `POD_NAME` from the pod name |
+| `40-versus-service.yaml` | The `versus` Service and a headless Service |
+| `50-poddisruptionbudget.yaml` | A PodDisruptionBudget |
+| `60-networkpolicy.yaml` | Network policies: deny other ingress, allow Postgres from Versus |
+| `kustomization.yaml` | Builds the `versus-secrets` Secret from a local `.env` file |
 
-The example lives at `versus-incident/examples/high-availability/k8s/` and
-creates everything in the `versus-ha` namespace:
+## Run it
 
-| File | Resource |
-|---|---|
-| `00-namespace.yaml` | Namespace |
-| `10-postgres.yaml` | Postgres StatefulSet + headless Service (the ONE shared store) |
-| `20-versus-config.yaml` | ConfigMap (`config.yaml`, storage = postgres) |
-| `30-versus-statefulset.yaml` | **Versus StatefulSet (3 replicas)** — `POD_NAME` via Downward API, `INSTANCE_COUNT=3`, hardened securityContext, anti-affinity, probes |
-| `40-versus-service.yaml` | ClusterIP + headless Service |
-| `50-poddisruptionbudget.yaml` | PodDisruptionBudget |
-| `60-networkpolicy.yaml` | NetworkPolicy ×2 (default-deny ingress; Postgres reachable) |
-| `kustomization.yaml` | `secretGenerator` that builds `versus-secrets` from a gitignored `.env` |
-
-## Step 1 — Provide the license and secrets
-
-Kustomize's `secretGenerator` builds the `versus-secrets` Secret from a
-**gitignored `.env`** — never commit a real key. Copy the placeholder and fill
-it in:
+You need a cluster (kind, minikube or any other), `kubectl` and Git. The cluster
+must be able to pull `ghcr.io/versuscontrol/versus-enterprise`. Clone the repository and go into it:
 
 ```bash
-cd versus-incident/examples/high-availability/k8s
-cp .env.example .env
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
 ```
 
-Edit `.env`:
+Every command below runs from this `versus-incident` folder, the repository
+root.
+
+**1. Create the secrets file.** Kustomize builds the Secret from `.env`, which
+git ignores:
 
 ```bash
-license_key=PASTE_YOUR_ENTERPRISE_LICENSE_JWT_HERE
-# Local dev Postgres — postgres_password must match the password in postgres_dsn.
+cp examples/high-availability/k8s/.env.example examples/high-availability/k8s/.env
+```
+
+In `examples/high-availability/k8s/.env`, replace `PASTE_YOUR_ENTERPRISE_LICENSE_JWT_HERE` with your license
+key. The Postgres values already match each other; leave them for the demo.
+
+```bash
+license_key=<your license key>
 postgres_password=versus
 postgres_dsn=postgres://versus:versus@versus-postgres:5432/versus?sslmode=disable
 ```
 
-These keys become `versus-secrets`; the StatefulSet reads `license_key` and
-`postgres_dsn` from it. The dev Postgres password and DSN
-already line up out of the box.
-
-## Step 2 — Apply everything
+**2. Apply everything:**
 
 ```bash
-kubectl apply -k .
-```
-
-This creates the Namespace, Postgres, the `versus-secrets` Secret, the Versus
-StatefulSet, both Services, the PodDisruptionBudget, and the NetworkPolicies.
-
-## Step 3 — Wait for the replicas
-
-```bash
+kubectl apply -k examples/high-availability/k8s
 kubectl -n versus-ha rollout status statefulset/versus
 kubectl -n versus-ha get pods -l app.kubernetes.io/name=versus
-# versus-0, versus-1, versus-2 all Running / Ready
 ```
 
-## Step 4 — What success looks like
+`versus-0`, `versus-1` and `versus-2` are `Running` and ready.
 
-**Each replica claims a distinct instance index** (from its `POD_NAME` ordinal,
-supplied by the StatefulSet via the Downward API):
+**3. Check each replica's place in the set:**
 
 ```bash
-for i in 0 1 2; do
-  echo "== versus-$i =="
-  kubectl -n versus-ha logs versus-$i | grep -E "HA mode|instance [0-9]+ of"
-done
-# versus-0 -> "instance 0 of 3"
-# versus-1 -> "instance 1 of 3"
-# versus-2 -> "instance 2 of 3"
+for i in 0 1 2; do kubectl -n versus-ha logs versus-$i | grep "HA mode"; done
 ```
 
-**Secrets converge** (licensed): the break-glass default-admin password is
-generated **once** by the winning replica and printed once — search all three:
+You see `instance 0 of 3`, `instance 1 of 3` and `instance 2 of 3`.
+
+**4. Sign in.** One replica printed the admin password:
 
 ```bash
 kubectl -n versus-ha logs -l app.kubernetes.io/name=versus --tail=-1 \
-  | grep -A3 "DEFAULT ADMIN CREDENTIALS"
-```
-
-**Hit the load-balanced endpoint** (round-robins across replicas):
-
-```bash
+  | grep -A6 "DEFAULT ADMIN CREDENTIALS"
 kubectl -n versus-ha port-forward svc/versus 3000:3000
-# in another shell:
-curl -fsS http://localhost:3000/healthz && echo OK
 ```
 
-Log in at <http://localhost:3000> as the built-in admin `admin` with the
-password from the log above. A session cookie obtained from one replica is
-accepted by any other, because the session key, AI master key, and admin-token
-hash converge through Postgres. (The StatefulSet sets the dev-only
-`VERSUS_ENTERPRISE_COOKIE_INSECURE=1` so the cookie survives the plain-HTTP
-port-forward — never set this in production.)
+The port-forward keeps running: leave it open while you use the UI, and run
+the next steps in a second terminal in the `versus-incident` folder.
 
-## Graceful rollout
+Open `http://localhost:3000` and sign in as `admin`. The StatefulSet sets
+`VERSUS_ENTERPRISE_COOKIE_INSECURE=1` so sign-in works over the plain-HTTP
+port-forward; remove it in production.
 
-Replace pods one ordinal at a time without dropping the Service:
+**5. Roll the replicas** one at a time:
 
 ```bash
 kubectl -n versus-ha rollout restart statefulset/versus
 kubectl -n versus-ha rollout status statefulset/versus
 ```
 
-## Tear down
+**Clean up:**
 
 ```bash
-kubectl delete -k .
-# the Postgres PVC is retained by default; remove it explicitly if desired:
-kubectl -n versus-ha delete pvc -l app.kubernetes.io/name=versus-postgres
+kubectl delete -k examples/high-availability/k8s
+kubectl delete namespace versus-ha --ignore-not-found
 ```
 
 ## For production
 
-- Use a **managed Postgres** (e.g. RDS) with `sslmode=require` instead of the
-  in-cluster dev Postgres.
-- Add `imagePullSecrets` for the private enterprise image.
-- Tighten the NetworkPolicy egress to your environment.
+- Use a managed Postgres with `sslmode=require` instead of the in-cluster one.
+- Add `imagePullSecrets` if your cluster needs credentials for the registry.
+- Tighten the network policies to your environment, but keep outbound HTTPS to
+  `versusincident.com` from every replica so the license key can renew.
+- Remove `VERSUS_ENTERPRISE_COOKIE_INSECURE` and serve Versus over HTTPS.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| A pod `CrashLoopBackOff`s at boot | `STORAGE_TYPE` isn't `postgres` while `INSTANCE_COUNT > 1`, or `postgres_dsn` is wrong. All replicas must share one Postgres — the file backend is single-node and the binary refuses it. |
-| Pods stuck `ImagePullBackOff` | The enterprise image is private. Add `imagePullSecrets`, or on kind `kind load docker-image …` the image into the cluster. |
-| Pods stuck `Pending` on a single-node cluster | Soft anti-affinity won't block scheduling, but verify the node has capacity. The example uses `preferredDuringScheduling…` so a one-node kind/minikube cluster still schedules all three. |
-| `secret "versus-secrets" not found` | You skipped `cp .env.example .env` (the `secretGenerator` reads `.env`). Create it, then re-run `kubectl apply -k .`. |
-| Login on one replica rejected after hitting another | Running unlicensed (no converged session key), or the replicas don't share one `postgres_dsn`. Confirm a license is set and the DSN is identical. |
+| A pod restarts at start | `postgres_dsn` is wrong, or storage is not `postgres`. File storage is refused with more than one replica. |
+| `ImagePullBackOff` | The cluster cannot pull the image. Add `imagePullSecrets`, or on kind run `kind load docker-image ghcr.io/versuscontrol/versus-enterprise`. |
+| `secret "versus-secrets" not found` | `examples/high-availability/k8s/.env` is missing. Run `cp examples/high-availability/k8s/.env.example examples/high-availability/k8s/.env` and apply again. |
+| No `DEFAULT ADMIN CREDENTIALS` in the logs | The license key is still the placeholder, or Postgres already holds an admin. |
+| Pods `Pending` on a one-node cluster | Check node capacity. The example's anti-affinity is a preference, so one node can run all three. |
 
 ## See also
 
-- [High Availability overview](./overview.md)
+- [High Availability](./overview.md)
 - [HA on Docker Compose](./docker.md) · [HA with Helm](./helm.md)
-- [Deploy on Kubernetes](../../configuration/kubernetes.md) — the single-instance
-  manifests this builds on.
+- [Deploy on Kubernetes](../../configuration/kubernetes.md): the single-instance setup.

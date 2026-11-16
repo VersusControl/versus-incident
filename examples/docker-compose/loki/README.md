@@ -1,5 +1,16 @@
 # Loki-source example
 
+You need Git and Docker with Docker Compose v2; the traffic generator below
+also needs Python 3. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
+
+Every command in this README runs from that `versus-incident` folder, the
+repository root.
+
 Versus + Redis + Grafana Loki + Grafana. The agent ingests log
 entries via Loki's `query_range` API; Grafana is provisioned with
 Loki as the default datasource so you can browse the same logs.
@@ -16,7 +27,7 @@ Loki as the default datasource so you can browse the same logs.
 ## Run
 
 ```bash
-docker compose up -d
+docker compose -f examples/docker-compose/loki/docker-compose.yml up -d
 ```
 
 Wait for Loki to become healthy (~10s). All settings have safe
@@ -25,23 +36,20 @@ defaults; export the variables in your shell to override — see
 
 ## Generate test traffic
 
-Push synthetic logs into the local Loki using the bundled generator
-(run from the repo root):
+Push synthetic logs into the local Loki using the bundled generator:
 
 ```bash
-# 500 mixed lines once:
-python3 scripts/generate_noisy_logs.py --target loki --lines 500
-
-# Continuous — 20 lines every 5s, Ctrl+C to stop:
+# Training traffic — 20 lines every 5s, stamped with the current time.
+# Leave it running while the agent learns its baseline; Ctrl+C to stop:
 scripts/run_noisy_logs.sh --target loki
 
-# Continuous — 500 lines every 5s, Ctrl+C to stop:
+# Heavier training traffic — 500 lines every 5s, Ctrl+C to stop:
 scripts/run_noisy_logs.sh --target loki --batch 500
 
-# Spike (test the spike detector):
+# Spike (test the spike detector) — one burst, then exits:
 scripts/run_noisy_logs.sh --target loki --spike db-conn-refused --spike-burst 80
 
-# Curated incident cluster (test detect mode):
+# Curated incident cluster (test detect mode) — one 60-line burst, then exits:
 scripts/run_noisy_logs.sh --target loki --scenario db-outage
 ```
 
@@ -86,7 +94,7 @@ loki/
 ## Cleanup
 
 ```bash
-docker compose down -v
+docker compose -f examples/docker-compose/loki/docker-compose.yml down -v
 ```
 
 ## Reference

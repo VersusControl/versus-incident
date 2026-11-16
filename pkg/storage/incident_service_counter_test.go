@@ -53,6 +53,40 @@ func testIncidentServiceCounter(t *testing.T, provider storage.Provider) {
 	}
 }
 
+// testIncidentServiceCounterAlertmanagerSeverity counts severities for
+// Alertmanager bodies whose labels sit only on the alerts, plus malformed
+// shapes that must count as "no severity" instead of failing the query.
+func testIncidentServiceCounterAlertmanagerSeverity(t *testing.T, provider storage.Provider) {
+	t.Helper()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	labels := func(severity string) map[string]any {
+		return map[string]any{"labels": map[string]any{"severity": severity}}
+	}
+	for i, content := range []map[string]any{
+		{"status": "firing", "alerts": []any{labels("critical"), labels("info")}},
+		{"commonLabels": map[string]any{"env": "prod"}, "alerts": []any{labels("high")}},
+		{"commonLabels": map[string]any{"env": "prod"}, "alerts": []any{labels("warning"), labels("info")}},
+		{"alerts": []any{"x"}},
+		{"alerts": "text"},
+		{"alerts": []any{map[string]any{"labels": "x"}}},
+		{"alerts": map[string]any{"labels": map[string]any{"severity": "critical"}}},
+		{"labels": "x"},
+		{"Trigger": "x"},
+	} {
+		rec := &storage.IncidentRecord{ID: "am-" + string(rune('a'+i)), OrgID: "org-a", Service: "alerts", CreatedAt: now.Add(-time.Duration(i+1) * time.Minute), Content: content}
+		if err := provider.SaveIncident(rec); err != nil {
+			t.Fatalf("SaveIncident(%s): %v", rec.ID, err)
+		}
+	}
+	count, severities, err := provider.(storage.IncidentServiceCounter).CountIncidentsByServiceSince("org-a", "alerts", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CountIncidentsByServiceSince: %v", err)
+	}
+	if count != 9 || severities["critical"] != 1 || severities["high"] != 1 || severities[""] != 7 || len(severities) != 3 {
+		t.Fatalf("count/severities = %d/%v, want 9 with critical=1 high=1 and 7 without severity", count, severities)
+	}
+}
+
 func TestIncidentServiceCounterParity(t *testing.T) {
 	backends := map[string]func(*testing.T) storage.Provider{
 		"memory": func(*testing.T) storage.Provider { return storage.NewMemory() },
@@ -68,6 +102,7 @@ func TestIncidentServiceCounterParity(t *testing.T) {
 	for name, makeProvider := range backends {
 		t.Run(name, func(t *testing.T) {
 			testIncidentServiceCounter(t, makeProvider(t))
+			testIncidentServiceCounterAlertmanagerSeverity(t, makeProvider(t))
 		})
 	}
 }

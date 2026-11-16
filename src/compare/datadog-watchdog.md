@@ -1,64 +1,67 @@
 # Versus vs Datadog Watchdog
 
-**Versus Incident is the self-hosted AI SRE agent.** Datadog Watchdog is the
-AIOps layer inside Datadog's cloud platform. Both use machine intelligence to
-surface anomalies — the difference that matters is **where your data lives** and
-**what you pay to keep it watched.**
+Datadog Watchdog is the AI layer inside Datadog's cloud platform: it flags
+anomalies in the logs, traces and infrastructure data you send to Datadog, and
+Bits AI and Datadog On-Call build investigation and paging around it. Versus
+does the same core job, finding new problems without rules, from a deployment
+you run yourself, so your logs never leave your network for analysis.
 
-This is an honest comparison. Watchdog is a strong product inside a mature
-platform. If you are already all-in on Datadog and your compliance team is
-comfortable shipping logs to a US SaaS, Watchdog is convenient. The reasons to
-choose Versus are below.
+## Feature comparison
 
-## The wedge: your data never leaves your infrastructure
+✓ built in · partial: limited or through another tool · ✗ not built in
 
-Datadog Watchdog runs in Datadog's cloud. To get anomaly detection, your logs and
-metrics are ingested into Datadog's platform first. For teams in EU fintech,
-health, and government — or anyone with data-residency, sovereignty, or air-gap
-requirements — that is the blocker.
-
-Versus is **self-hosted by default.** You run the same Go binary in your own
-infrastructure (or fully air-gapped). The AI agent reads your logs in place and only ever emits
-an *incident notification* outward — never the raw data. Nothing is shipped to a
-vendor for analysis.
-
-## Side-by-side
-
-| | **Versus Incident** | **Datadog Watchdog** |
+| Capability | Versus | Datadog (Watchdog, Bits AI, On-Call) |
 |---|---|---|
-| Deployment | Self-hosted (your infrastructure) or air-gapped | Datadog cloud (SaaS) |
-| Where your logs live | In your infrastructure | Ingested into Datadog |
-| Data residency / sovereignty | You control it entirely | Datadog regions only |
-| Licensing | MIT core, free forever + commercial Enterprise | Proprietary, per-host + ingest |
-| Pricing model | Monitored services, not per-seat | Per-host + per-GB ingest + indexing |
-| AI detection | Drain miner + EWMA + LLM detect, **auditable** (`detect.json`) | Proprietary, opaque |
-| Explainability | Deterministic patterns + recorded AI decisions | Black-box scoring |
-| Bring your own LLM | Yes (per-org model gateway, BYO key) | No |
-| On-call relationship | Feeds PagerDuty / Opsgenie / incident.io | Datadog On-Call (its own stack) |
-| Lock-in | None — open core, your data, your infra | Platform + billing lock-in |
+| Detect new errors without writing rules | ✓ The AI SRE Agent opens an incident when a new or unusual error appears, or when a known error spikes. | ✓ Watchdog needs no setup and flags new log patterns and spikes in existing ones. |
+| Learns what normal looks like from logs | ✓ Reads File, Loki, Elasticsearch, Graylog, Splunk, SigNoz and CloudWatch Logs where they already live. Metrics and traces are _Enterprise_. | ✓ Learns from the logs you send to Datadog Log Management. |
+| Kubernetes issue detection | ✓ Reads your cluster read-only, lists broken workloads and links each one to the changes and logs around it. | ✓ Watchdog shows Kubernetes anomalies in the Kubernetes Explorer. |
+| Webhook intake from existing tools | ✓ Alertmanager, Grafana, Sentry, CloudWatch SNS, FluentBit or your own scripts. | ✓ Event Management takes in events and alerts from any source. |
+| Notification channels | ✓ Slack, Microsoft Teams, Telegram, Viber, Email and Lark. | ✓ Slack, Microsoft Teams, email, webhooks, Jira, PagerDuty, ServiceNow and more. |
+| On-call escalation | ✓ If nobody acknowledges, Versus pages AWS Incident Manager, PagerDuty, ServiceNow or incident.io. Rotations stay in that tool. | ✓ Datadog On-Call has its own schedules, escalation policies and paging. |
+| Alert noise reduction | ✓ Known log patterns stay quiet. [Alert Fatigue](../enterprise/alert-fatigue.md) stops repeat alerts from paging (_Enterprise_). | ✓ Event Management correlation groups related alerts. |
+| SLOs | ✓ Proposes SLIs and SLOs per service and alerts on error-budget burn (_Enterprise_). | ✓ SLOs with burn-rate tracking. |
+| AI investigation and chat | ✓ [AI Analyze](../agent/ai-analyze-mode.md) suggests root causes; [DevOps Agent Chat](../agent/devops-agent.md) answers questions with evidence. Uses the AI provider key you supply. | ✓ Bits AI chat and Bits investigations. Billed in AI credits. |
+| Self-hosted, data stays in your network | ✓ Runs in your infrastructure. AI features call only the AI provider you configure. | ✗ SaaS. Your data is sent to Datadog. |
+| Single sign-on | ✓ Google Workspace, Microsoft Entra ID or any OpenID Connect provider (_Enterprise_). | ✓ SAML. |
+| High availability | ✓ Several replicas on one Postgres (_Enterprise_). | — Run by Datadog as a managed service. |
+| Open source | ✓ MIT core, plus a commercial Enterprise edition. | ✗ Proprietary. |
 
-## Where Datadog Watchdog is the better fit
+## When to choose Versus
 
-- You already run the full Datadog platform and want correlation across metrics,
-  traces, and logs in one pane.
-- You have no data-residency constraint and prefer a fully managed SaaS.
-- You want APM-grade trace anomaly detection today (Versus is log-first; metrics
-  and traces are on the [roadmap](https://github.com/VersusControl/versus-incident/blob/main/ROADMAP.md)).
+- Your logs cannot leave your network, for data residency, sovereignty or
+  compliance reasons.
+- Your logs already live in Loki, Elasticsearch, Graylog, Splunk, SigNoz or
+  CloudWatch, and you do not want to send them to another platform to watch
+  them.
+- You already have an on-call tool and want something that feeds it fewer,
+  better incidents.
+- You want an open-source core you can run and inspect yourself.
 
-## Where Versus wins
+## When Datadog Watchdog is the better fit
 
-- **Data residency is non-negotiable.** Regulated buyers can run Versus where the
-  data already is. Nothing leaves your infrastructure.
-- **Auditability.** Every AI decision is explainable and recorded — you can buy
-  what you can audit.
-- **Cost shape.** You pay on monitored services, not on ingest volume and
-  per-host agents. No surprise overage on a noisy day.
-- **No lock-in.** The core is MIT. If you stop paying for Enterprise, the binary
-  keeps running in full community mode.
+- You already run Datadog across metrics, traces and logs and want anomalies
+  linked across all of them in one place.
+- You want APM-grade trace anomalies, real user monitoring and profiling from
+  one vendor.
+- You prefer a fully managed service and have no data-residency limits.
+- You want schedules, escalation and paging in the same product as detection.
 
-## Try it
+## Use them together
 
-Run the MIT core in under 30 minutes:
-[AI Agent — Getting Started](../agent/getting-started.md). Need data-residency
-guarantees or a self-hosted enterprise quote? Email
-<a href="mailto:admin@versusincident.com?subject=Versus%20vs%20Datadog%20Watchdog">admin@versusincident.com</a>.
+Versus can run next to Datadog. Point the AI SRE Agent at the logs you keep in
+your own network, and keep Datadog for the data you already send there. Both
+can page the same on-call tool, such as PagerDuty.
+
+To bring Datadog monitor alerts into Versus as well, add a Datadog webhook
+that points at your Versus webhook URL. Datadog must be able to reach that
+URL. The [Webhook Quickstart](../webhook/quickstart.md) shows how Versus
+receives, formats and routes an incoming alert.
+
+## Get started
+
+- [AIOps SRE Quickstart](../agent/quickstart.md): let the agent learn your logs
+  and catch new errors.
+- [AIOps Kubernetes Quickstart](../agent/kubernetes/quickstart.md): find broken
+  workloads in your cluster.
+- For Enterprise, see [pricing](https://versusincident.com/pricing) or email
+  <a href="mailto:admin@versusincident.com?subject=Versus%20vs%20Datadog%20Watchdog">admin@versusincident.com</a>.

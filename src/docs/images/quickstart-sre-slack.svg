@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="790" viewBox="0 0 760 790" style="max-width:100%;height:auto" role="img" aria-label="Slack message from the Versus app in the alerts channel with a red side bar: the bold title reads Versus Agent, Anomaly: checkout-api, followed by the learned pattern service = checkout-api message = checkout error: payment processor acme-pay did not answer within a placeholder, charge aborted, times N; then Severity: MEDIUM, Service: checkout-api, Source: loki:quickstart-loki, Category: anomaly, Verdict: unknown and Confidence: 0.50; a Summary that reads Unknown anomaly on checkout-api, frequency N, then Heuristic detection, AI enrichment not configured or unavailable, then three sample signals with the checkout error line; Frequency: N with baseline 0.00; the pattern ID and the pattern template in inline code; two suggestions, to review the sampled signals against recent deploys or config changes and to configure an AI key; and the sample log line in a code block">
+  <title>Slack message for a detected incident without an AI key</title>
+  <desc>The message the SRE agent sends to Slack through the default agent Slack template when detect mode finds the new checkout error and no AI key is set: severity medium, the heuristic detection note, sample signals, pattern, suggestions and a sample log</desc>
+  <defs>
+    <symbol id="v" viewBox="24 18 64 55.1">
+      <path fill="#223947" fill-rule="evenodd" d="M53.55 23.74L56 27.98L58.45 23.74H77.96L74.71 29.38L65.76 44.89L62.51 50.52L59.25 56.16L56 61.79L52.75 56.16L49.5 50.52L37.29 29.38L34.04 23.74L30.78 18.11H24.28L27.53 23.74L30.78 29.38L46.24 56.16L52.75 67.42L56 73.06L59.25 67.42L62.51 61.79L65.76 56.16L69.01 50.52L81.21 29.38L84.47 23.74L87.72 18.11H50.3ZM47.04 23.74L43.79 18.11H37.29L40.54 23.74L43.79 29.38L52.75 44.89L56 50.52L59.25 44.89L62.51 39.25L68.2 29.38H61.7L59.25 33.62L56 39.25L50.3 29.38Z"/>
+    </symbol>
+  </defs>
+  <style>
+    text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:14px;fill:#000000}
+    .b{font-weight:700}
+    .s{font-size:12px;fill:#5B6B78}
+    .tag{font-size:10px;font-weight:700;fill:#5B6B78}
+    .ch{font-size:15px;font-weight:700}
+    .ic{font-family:SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;fill:#E01E5A}
+    .pre{font-family:SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;fill:#12222F}
+    .code{fill:#F7F9FB;stroke:#D8E0E8}
+  </style>
+
+  <rect width="760" height="790" fill="#FFFFFF"/>
+
+  <!-- channel header -->
+  <text class="ch" x="24" y="34"># alerts</text>
+  <path d="M24 52.5H736" stroke="#C3CED8"/>
+
+  <!-- sender -->
+  <rect x="24" y="68" width="36" height="36" rx="6" fill="#BACFE3"/>
+  <use href="#v" x="30" y="76" width="24" height="21"/>
+  <text class="ch" x="72" y="82">Versus</text>
+  <rect x="130" y="70" width="30" height="16" rx="3" fill="#F2F5F8" stroke="#C3CED8"/>
+  <text class="tag" x="145" y="82" text-anchor="middle">APP</text>
+  <text class="s" x="168" y="82">10:42 AM</text>
+
+  <!-- attachment bar: Versus posts unresolved incidents with this colour -->
+  <rect x="72" y="94" width="4" height="645" rx="2" fill="#C70039"/>
+
+  <!-- inline code and code block backgrounds -->
+  <rect class="code" x="144.5" y="516" width="109" height="18" rx="3"/>
+  <rect class="code" x="158" y="537" width="563" height="18" rx="3"/>
+  <rect class="code" x="88" y="558" width="433" height="18" rx="3"/>
+  <rect class="code" x="88" y="689" width="640" height="50" rx="4"/>
+
+  <!-- title -->
+  <text x="88" y="112">🤖</text>
+  <text class="b" x="108" y="112">Versus Agent — Anomaly: checkout-api — service = checkout-api message = " checkout</text>
+  <text class="b" x="88" y="133">error: payment processor acme-pay did not answer within &lt;*&gt; , charge aborted… ×N</text>
+
+  <!-- fields -->
+  <text x="88" y="160">🟡</text>
+  <text x="108" y="160"><tspan class="b">Severity:</tspan> MEDIUM</text>
+  <text x="88" y="181"><tspan class="b">Service:</tspan> checkout-api</text>
+  <text x="88" y="202"><tspan class="b">Source:</tspan> loki:quickstart-loki</text>
+  <text x="88" y="223"><tspan class="b">Category:</tspan> anomaly</text>
+  <text x="88" y="244"><tspan class="b">Verdict:</tspan> unknown</text>
+  <text x="88" y="265"><tspan class="b">Confidence:</tspan> 0.50</text>
+
+  <!-- summary -->
+  <text class="b" x="88" y="298">Summary:</text>
+  <text x="88" y="319">Unknown anomaly on checkout-api (frequency N).</text>
+  <text x="88" y="340">Heuristic detection — AI enrichment not configured or unavailable.</text>
+  <text x="88" y="361">Sample signals:</text>
+  <text x="88" y="382">- service=checkout-api message="checkout error: payment processor acme-pay did not answer within</text>
+  <text x="88" y="403">30s, charge aborted" order_id=ORD-48213</text>
+  <text x="88" y="424">- service=checkout-api message="checkout error: payment processor acme-pay did not answer within</text>
+  <text x="88" y="445">30s, charge aborted" order_id=ORD-73905</text>
+  <text x="88" y="466">- service=checkout-api message="checkout error: payment processor acme-pay did not answer within</text>
+  <text x="88" y="487">30s, charge aborted" order_id=ORD-15562</text>
+
+  <!-- pattern -->
+  <text x="88" y="508"><tspan class="b">Frequency:</tspan> N (baseline 0.00)</text>
+  <text class="b" x="88" y="529">Pattern:</text>
+  <text class="ic" x="149" y="529">p-7c41e9a0d2b3</text>
+  <text class="b" x="88" y="550">Template:</text>
+  <text class="ic" x="162" y="550">service = checkout-api message = " checkout error: payment processor acme-pay</text>
+  <text class="ic" x="92" y="571">did not answer within &lt;*&gt; , charge aborted " order_id = &lt;*&gt;</text>
+
+  <!-- suggestions -->
+  <text class="b" x="88" y="604">Suggestions:</text>
+  <text x="88" y="625">• Review the sampled signals above and correlate with recent deploys or config changes.</text>
+  <text x="88" y="646">• Configure an AI key to enrich future detections with automated triage.</text>
+
+  <!-- sample log -->
+  <text class="b" x="88" y="679">Sample log:</text>
+  <text class="pre" x="98" y="709">service=checkout-api message="checkout error: payment processor acme-pay did not</text>
+  <text class="pre" x="98" y="727">answer within 30s, charge aborted" order_id=ORD-48213</text>
+
+  <text class="s" x="24" y="770">Detect mode with no AI key, rendered by the default agent Slack template; N is how many burst lines the agent counted</text>
+</svg>

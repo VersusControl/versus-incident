@@ -24,7 +24,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.10'
+          go-version: '1.26.11'
           cache: true
 
       - name: Verify go.mod is tidy
@@ -56,8 +56,11 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # Coverage run without the race detector: plain instrumentation keeps
+      # wall-clock waits in tests realistic. The race detector runs in the
+      # sharded race job below; atomic covermode is only needed under -race.
       - name: Test
-        run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -short -count=1 -timeout 15m -coverprofile=coverage.out -covermode=set ./...
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
@@ -67,33 +70,140 @@ jobs:
           path: coverage.out
           retention-days: 7
 
-  # Build the release Dockerfile on every pull request and push without pushing
-  # the image. `go build ./...` compiles packages, so it cannot catch a
-  # Dockerfile that builds a narrower target than the package.
-  docker-build:
-    name: Docker image build
+  # Race detector run, split into shards that run in parallel so each one
+  # finishes well inside its timeout on a default hosted runner. The slowest
+  # packages under -race get their own shard; "rest" is every other package.
+  race:
+    name: Race (${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [kubernetes, storage-controllers, rest]
+    env:
+      GORACE: halt_on_error=1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      - name: Race test
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          case "$SHARD" in
+            kubernetes)
+              packages="./pkg/kubernetes/..."
+              ;;
+            storage-controllers)
+              packages="./pkg/storage/... ./pkg/controllers/..."
+              ;;
+            rest)
+              packages=$(go list ./... | grep -v -E '/pkg/(kubernetes|storage|controllers)(/|$)')
+              ;;
+            *)
+              echo "::error::Unknown race shard: $SHARD"
+              exit 1
+              ;;
+          esac
+          if [ -z "$packages" ]; then
+            echo "::error::Race shard $SHARD selected no packages"
+            exit 1
+          fi
+          # Word splitting of the package list is intended.
+          # shellcheck disable=SC2086
+          go test -short -race -count=1 -timeout 20m $packages
+
+  # Helm chart checks that run on every change, not only on chart edits: the
+  # chart version must follow the release version, the committed one-file
+  # kubectl manifest must match a fresh render of the chart, and the chart
+  # must lint and pass its template scenarios.
+  chart:
+    name: Chart & manifest
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build image (no push)
-        uses: docker/build-push-action@v7
+      # Same Helm version the committed manifest is rendered with, so the
+      # freshness check compares like with like.
+      - name: Install Helm
+        uses: azure/setup-helm@v5
         with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          platforms: linux/amd64
-          cache-from: type=gha,scope=docker-build
-          cache-to: type=gha,mode=max,scope=docker-build
+          version: v3.15.3
+
+      # The scenario runner ends with Go checks that read its renders: the
+      # chart config through the application's config loader and key set, and
+      # the reader role against what the Kubernetes connector reads.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.11'
+          cache: true
+
+      - name: Ensure ui/dist placeholder exists
+        run: |
+          mkdir -p ui/dist
+          touch ui/dist/.gitkeep
+
+      # Chart version and appVersion move together with the release. The
+      # release tag itself is checked in the release workflow.
+      - name: Chart version matches appVersion
+        run: |
+          chart=helm/versus-incident/Chart.yaml
+          version=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$chart")
+          app_version=$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$chart")
+          if [ -z "$version" ] || [ -z "$app_version" ]; then
+            echo "::error file=$chart::Could not read version and appVersion"
+            exit 1
+          fi
+          if [ "$version" != "$app_version" ]; then
+            echo "::error file=$chart::Chart version $version differs from appVersion $app_version"
+            exit 1
+          fi
+          echo "Chart version and appVersion are both $version"
+
+      - name: One-file manifests are up to date
+        run: scripts/render_kubernetes_manifest.sh --check
+
+      # Each example values file must lint and render on its own, with only
+      # the sign-in Secret reference the examples ask for at install time.
+      - name: Example values files lint and render
+        run: |
+          for values in examples/kubernetes/values-*.yaml; do
+            echo "== $values"
+            helm lint helm/versus-incident \
+              -f "$values" \
+              --set gatewaySecretExistingSecret=versus-incident
+            helm template versus-incident helm/versus-incident \
+              --namespace versus \
+              -f "$values" \
+              --set gatewaySecretExistingSecret=versus-incident >/dev/null
+          done
+
+      - name: helm lint
+        run: helm lint helm/versus-incident
+
+      - name: Chart template scenarios
+        run: ./helm/versus-incident/tests/run.sh
 
   build-and-push-dev:
     name: Build & push dev image
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, race, chart]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

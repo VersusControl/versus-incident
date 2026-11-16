@@ -1,28 +1,21 @@
-# Detect-path sources for the OPTIONAL traces overlay: the same enterprise
-# `prometheus` source as agent_sources.yaml PLUS an enterprise `traces`
-# source that searches Tempo for error traces. Mounted over
-# agent_sources.yaml only when you run with `-f docker-compose.traces.yml`.
+# Sources for the traces overlay (docker-compose.traces.yml): the same
+# Prometheus source as agent_sources.yaml plus a Tempo traces source. This file
+# is mounted over agent_sources.yaml only when the overlay is used.
 #
-# Both are ENTERPRISE DATA SOURCES, license-gated on the `intelligence`
-# entitlement, and both use the generic `options:` schema. The licensed
-# sources contribute `discover_metrics`, `read_metric_series`,
-# `discover_trace_fields`, and `read_trace_spans` to Chat and Analyze without
-# separate tools.yaml entries.
+# Both are Enterprise sources and need a license with the `intelligence`
+# entitlement. The traces source finds each service and operation in Tempo,
+# learns its error rate and latency, and raises an incident when one stays
+# well outside its baseline. It also gives Chat and Analyze the
+# `discover_trace_fields` and `read_trace_spans` tools.
 sources:
   - name: demo-prom
     type: prometheus
     enable: true
     options:
       address: http://prometheus:9090
-      step: 30s
-      page_size: 500
-      queries:
-        - query: 'sum by (service) (rate(demo_http_requests_total{code=~"5.."}[1m])) > 0.5'
-          severity: critical
-          service_label: service
-        - query: 'histogram_quantile(0.95, sum by (service, le) (rate(demo_http_request_duration_seconds_bucket[1m]))) > 0.5'
-          severity: high
-          service_label: service
+      step: 15s
+      filter: '{service!=""}'
+      discovery_interval: 1m
 
   - name: demo-traces
     type: traces
@@ -30,6 +23,10 @@ sources:
     options:
       backend: tempo
       address: http://tempo:3200
-      allow_private_networks: true # deliberate opt-in for tool reads on this Docker network
-      query: '{ status = error }'
+      # Tempo is on the private Docker network; tool reads must opt in to that.
+      allow_private_networks: true
+      # A TraceQL query you choose; the source learns its error rate and
+      # latency as one extra target.
+      query: '{ resource.service.name = "checkout" }'
       page_size: 100
+      discovery_interval: 1m

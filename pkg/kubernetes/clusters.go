@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"sync"
 	"time"
@@ -101,6 +102,13 @@ func (registry *ServiceRegistry) Summaries(ctx context.Context, orgID string, al
 			defer cancel()
 			service, err := registry.ResolveCluster(orgID, info.ID)
 			if err != nil {
+				var build *connectorBuildError
+				if errors.As(err, &build) {
+					// A connector that could not be built says why, not that
+					// the cluster did not answer.
+					detail := DiagnoseError(err)
+					unreachable.Error = &detail
+				}
 				result[index] = unreachable
 				return
 			}

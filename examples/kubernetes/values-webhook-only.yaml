@@ -1,0 +1,49 @@
+# Versus as an alert router only.
+#
+# Monitoring tools (Alertmanager, Grafana, Sentry, CloudWatch, Fluent Bit)
+# POST alerts to http://versus-incident.versus:3000/api/incidents; Versus
+# renders them with a template and sends them to Slack and Microsoft Teams.
+# The agent and the Kubernetes connector stay off.
+#
+# Install. Channel credentials are passed at install time and kept in the
+# chart's Secret; never write them in this file:
+#   kubectl create namespace versus --save-config
+#   kubectl -n versus create secret generic versus-incident \
+#     --from-literal=gateway_secret=$(openssl rand -hex 32)
+#   helm install versus-incident oci://ghcr.io/versuscontrol/charts/versus-incident \
+#     --namespace versus \
+#     -f values-webhook-only.yaml \
+#     --set gatewaySecretExistingSecret=versus-incident \
+#     --set-string alert.slack.token=$SLACK_BOT_TOKEN \
+#     --set-string alert.slack.channelId=$SLACK_CHANNEL_ID \
+#     --set-string alert.msteams.powerAutomateUrl=$TEAMS_POWER_AUTOMATE_URL
+#
+# The same install as one file for kubectl: webhook-only.yaml.
+
+alert:
+  slack:
+    enable: true
+  msteams:
+    enable: true
+
+# A custom Slack message for Alertmanager and Grafana alerts. Teams keeps the
+# shipped template. Fields come from the incoming JSON body. Slack adds the
+# Acknowledge button itself (alert.slack.messageProperties).
+templates:
+  slack: |
+    {{- range .alerts }}
+    *{{ .status | upper }}: {{ .labels.alertname }}* ({{ or .labels.severity "none" }})
+    {{ or .annotations.summary .annotations.description "No description." }}
+    {{- end }}
+
+# On-call escalation is off. To page PagerDuty when an alert is not
+# acknowledged within waitMinutes, uncomment this block and pass the routing
+# key at install time (--set-string oncall.pagerduty.routingKey=$PAGERDUTY_ROUTING_KEY).
+# On-call keeps its timers in Redis: the bundled Redis below, or externalRedis.
+# oncall:
+#   enable: true
+#   waitMinutes: 3
+#   provider: pagerduty
+# redis:
+#   enabled: true
+#   # --set-string redis.auth.password=$REDIS_PASSWORD

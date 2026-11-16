@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
 
 const inventoryAuthorityProbeInterval = time.Second
@@ -28,13 +33,18 @@ func unverifiedInventoryAuthority(cause error) error {
 }
 
 type inventoryCollectionAuthorityKey struct{}
+
+// inventoryCollectionAuthority records what one collection cycle read
+// successfully. Each kind or resource keeps the credential generation of its
+// successful read, so the record is a set: the order in which concurrent LISTs
+// finish never changes what it proves.
 type inventoryCollectionAuthority struct {
-	mu                sync.Mutex
-	denied, witnessed time.Time
-	invalid           error
+	mu      sync.Mutex
+	read    map[string]uint64
+	invalid error
 }
 
-func recordInventoryMaterialResult(ctx context.Context, err error) {
+func recordInventoryMaterialResult(ctx context.Context, kind string, credential uint64, err error) {
 	current, _ := ctx.Value(inventoryCollectionAuthorityKey{}).(*inventoryCollectionAuthority)
 	if current == nil {
 		return
@@ -46,12 +56,15 @@ func recordInventoryMaterialResult(ctx context.Context, err error) {
 		current.invalid = err
 	}
 	if err == nil {
-		current.witnessed = time.Now()
-	} else if errors.Is(err, ErrForbidden) || errorClass(err) == "forbidden" {
-		current.denied = time.Now()
+		if current.read == nil {
+			current.read = map[string]uint64{}
+		}
+		current.read[kind] = credential
 	}
 }
 
+// hasCurrentInventoryMaterialWitness reports whether this cycle completed at
+// least one valid LIST and no LIST answered with an invalid envelope.
 func hasCurrentInventoryMaterialWitness(ctx context.Context) bool {
 	current, _ := ctx.Value(inventoryCollectionAuthorityKey{}).(*inventoryCollectionAuthority)
 	if current == nil {
@@ -59,7 +72,44 @@ func hasCurrentInventoryMaterialWitness(ctx context.Context) bool {
 	}
 	current.mu.Lock()
 	defer current.mu.Unlock()
-	return current.invalid == nil && !current.witnessed.IsZero() && !current.witnessed.Before(current.denied)
+	return current.invalid == nil && len(current.read) > 0
+}
+
+// hasCurrentInventoryRead reports whether this cycle read any kind
+// successfully, whatever else it found.
+func hasCurrentInventoryRead(ctx context.Context) bool {
+	current, _ := ctx.Value(inventoryCollectionAuthorityKey{}).(*inventoryCollectionAuthority)
+	if current == nil {
+		return false
+	}
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	return len(current.read) > 0
+}
+
+// currentInventoryIdentityWitness reports whether this cycle proved its read
+// authority by itself: the Namespace LIST matched the bound cluster identity
+// and at least one other kind was read, both with the credential generation
+// that is current now. It holds whatever order the LISTs finished in.
+func currentInventoryIdentityWitness(ctx context.Context, generation inventoryGeneration, attempt time.Time, credential uint64) bool {
+	current, _ := ctx.Value(inventoryCollectionAuthorityKey{}).(*inventoryCollectionAuthority)
+	if current == nil || !currentCollectionIdentityVerified(generation, attempt) || generation.EvidenceScope.ClusterUID == "" {
+		return false
+	}
+	current.mu.Lock()
+	defer current.mu.Unlock()
+	if current.invalid != nil {
+		return false
+	}
+	if at, ok := current.read["Namespace"]; !ok || at != credential {
+		return false
+	}
+	for kind, at := range current.read {
+		if kind != "Namespace" && at == credential {
+			return true
+		}
+	}
+	return false
 }
 
 func inventoryCollectionValidationError(ctx context.Context) error {
@@ -100,6 +150,9 @@ type inventoryAuthorityProofState struct {
 	result           error
 	next             time.Time
 	clock            func() time.Time
+	// holdProbe, when set, runs as a live proof begins. Tests use it to hold a
+	// proof open and observe what readers see meanwhile.
+	holdProbe atomic.Pointer[func()]
 }
 
 func (state *inventoryAuthorityProofState) now() time.Time {
@@ -212,25 +265,214 @@ type inventoryAuthorityTarget struct {
 	scopedWitness bool
 }
 
-func currentMaterialDenied(generation inventoryGeneration, attempt time.Time) bool {
-	for _, state := range generation.View.Kinds {
-		if state.LastAttemptAt.Equal(attempt) && state.Error == "forbidden" {
-			return true
+// inventoryAuthorityBaseline is what the last committed generation read under
+// one binding: the connector identity, credential generation, cluster UID and
+// namespace scope. A denial is new only against a baseline of the same binding.
+type inventoryAuthorityBaseline struct {
+	binding   string
+	kinds     map[string]kubeindex.KindStatus
+	resources map[string]kubeindex.KindStatus
+	scoped    map[string]map[string]kubeindex.KindStatus
+}
+
+// inventoryAuthorityBinding names the identity a generation is collected
+// under. A new credential generation (a rejected or replaced credential), a
+// different cluster UID or namespace scope is a different binding.
+func (service *Service) inventoryAuthorityBinding(clusterUID string) string {
+	if service == nil || service.client == nil {
+		return ""
+	}
+	return logIdentity(service.cacheKey() + "\x00" + strconv.FormatUint(service.credentialGeneration(), 10) + "\x00" + clusterUID + "\x00" + service.client.namespace)
+}
+
+// newInventoryAuthorityBaseline copies the kind states of a committed
+// generation, so collection may rebuild its candidate maps freely. The
+// baseline is empty unless the generation was committed under binding.
+func newInventoryAuthorityBaseline(committedBinding, binding string, generation inventoryGeneration) inventoryAuthorityBaseline {
+	if binding == "" || committedBinding != binding {
+		return inventoryAuthorityBaseline{}
+	}
+	baseline := inventoryAuthorityBaseline{binding: binding, kinds: maps.Clone(generation.View.Kinds), resources: maps.Clone(generation.ResourceStatus)}
+	if len(generation.Namespaces) > 0 {
+		baseline.scoped = make(map[string]map[string]kubeindex.KindStatus, len(generation.Namespaces))
+		for namespace, scope := range generation.Namespaces {
+			baseline.scoped[namespace] = maps.Clone(scope.Kinds)
 		}
 	}
-	for _, state := range generation.ResourceStatus {
-		if state.LastAttemptAt.Equal(attempt) && state.Error == "forbidden" {
-			return true
+	return baseline
+}
+
+// readUnderBaseline reports whether the baseline holds a successful read of
+// the kind in that scope: it was observed and was not denied when committed. A
+// kind denied since its first sync, or still denied, is a capability gap. A
+// cluster-wide kind read only inside namespaces carries namespace_scope: its
+// cluster-wide LIST was denied, so that denial is a gap too.
+func readUnderBaseline(states map[string]kubeindex.KindStatus, kind string) bool {
+	state, ok := states[kind]
+	return ok && !state.Absent && !state.ObservedAt.IsZero() && state.Error != "forbidden" && state.Error != "namespace_scope"
+}
+
+// inventoryQuestionedKinds are the kinds this cycle found newly denied. Until
+// the authority proof settles, readers see them as unreadable rather than the
+// whole cluster as unavailable.
+type inventoryQuestionedKinds struct {
+	kinds     map[string]bool
+	resources map[string]bool
+	scoped    map[string]map[string]bool
+}
+
+func (questioned inventoryQuestionedKinds) empty() bool {
+	return len(questioned.kinds) == 0 && len(questioned.resources) == 0 && len(questioned.scoped) == 0
+}
+
+func (questioned inventoryQuestionedKinds) merge(other inventoryQuestionedKinds) inventoryQuestionedKinds {
+	result := inventoryQuestionedKinds{kinds: maps.Clone(questioned.kinds), resources: maps.Clone(questioned.resources)}
+	if result.kinds == nil {
+		result.kinds = map[string]bool{}
+	}
+	if result.resources == nil {
+		result.resources = map[string]bool{}
+	}
+	maps.Copy(result.kinds, other.kinds)
+	maps.Copy(result.resources, other.resources)
+	result.scoped = map[string]map[string]bool{}
+	for _, source := range []map[string]map[string]bool{questioned.scoped, other.scoped} {
+		for namespace, kinds := range source {
+			if result.scoped[namespace] == nil {
+				result.scoped[namespace] = map[string]bool{}
+			}
+			maps.Copy(result.scoped[namespace], kinds)
 		}
 	}
-	for _, scope := range generation.Namespaces {
-		for _, state := range scope.Kinds {
-			if state.LastAttemptAt.Equal(attempt) && state.Error == "forbidden" {
-				return true
+	return result
+}
+
+// newlyDeniedInventory lists the kinds that are forbidden in this attempt but
+// were read successfully by the baseline. Without a baseline (first sync, or a
+// binding that changed since the last commit) nothing is new: a new identity
+// proves itself through the Namespace identity read instead.
+func newlyDeniedInventory(baseline inventoryAuthorityBaseline, generation inventoryGeneration, attempt time.Time) inventoryQuestionedKinds {
+	if baseline.binding == "" {
+		return inventoryQuestionedKinds{}
+	}
+	return deniedInventory(generation, attempt, func(namespace string, resource bool, kind string) bool {
+		switch {
+		case resource:
+			return readUnderBaseline(baseline.resources, kind)
+		case namespace != "":
+			return readUnderBaseline(baseline.scoped[namespace], kind)
+		default:
+			return readUnderBaseline(baseline.kinds, kind)
+		}
+	})
+}
+
+// unreadInventory lists every kind denied in this attempt. It applies when a
+// cycle without a baseline read nothing at all: that is not a capability gap
+// but possibly a connector without any permission, so its denials need proof.
+func unreadInventory(generation inventoryGeneration, attempt time.Time) inventoryQuestionedKinds {
+	return deniedInventory(generation, attempt, func(string, bool, string) bool { return true })
+}
+
+// deniedInventory lists the kinds forbidden in this attempt that include
+// selects, by namespace scope ("" for cluster-wide), API resource or kind.
+func deniedInventory(generation inventoryGeneration, attempt time.Time, include func(namespace string, resource bool, kind string) bool) inventoryQuestionedKinds {
+	questioned := inventoryQuestionedKinds{}
+	// Namespace LISTs stamp their own start time, which follows the cycle
+	// start, so any attempt from the cycle start on belongs to this cycle.
+	deniedNow := func(state kubeindex.KindStatus) bool {
+		return !state.LastAttemptAt.Before(attempt) && state.Error == "forbidden"
+	}
+	for kind, state := range generation.View.Kinds {
+		if deniedNow(state) && include("", false, kind) {
+			if questioned.kinds == nil {
+				questioned.kinds = map[string]bool{}
+			}
+			questioned.kinds[kind] = true
+		}
+	}
+	for id, state := range generation.ResourceStatus {
+		if deniedNow(state) && include("", true, id) {
+			if questioned.resources == nil {
+				questioned.resources = map[string]bool{}
+			}
+			questioned.resources[id] = true
+		}
+	}
+	for namespace, scope := range generation.Namespaces {
+		for kind, state := range scope.Kinds {
+			if deniedNow(state) && include(namespace, false, kind) {
+				if questioned.scoped == nil {
+					questioned.scoped = map[string]map[string]bool{}
+				}
+				if questioned.scoped[namespace] == nil {
+					questioned.scoped[namespace] = map[string]bool{}
+				}
+				questioned.scoped[namespace][kind] = true
 			}
 		}
 	}
-	return false
+	return questioned
+}
+
+// currentMaterialDenied reports a denial that may mean lost read authority: a
+// kind the same binding read before is forbidden now.
+func currentMaterialDenied(baseline inventoryAuthorityBaseline, generation inventoryGeneration, attempt time.Time) bool {
+	return !newlyDeniedInventory(baseline, generation, attempt).empty()
+}
+
+// questionInventoryKinds marks newly denied kinds unreadable in a reader's
+// copy of the committed generation. Their records are withheld by the usual
+// per-kind denial handling; every other kind stays as committed.
+func questionInventoryKinds(generation inventoryGeneration, questioned inventoryQuestionedKinds) inventoryGeneration {
+	if questioned.empty() {
+		return generation
+	}
+	deny := func(state kubeindex.KindStatus) kubeindex.KindStatus {
+		state.State, state.Partial, state.Error = "error", true, "forbidden"
+		return state
+	}
+	if len(questioned.kinds) > 0 {
+		kinds := maps.Clone(generation.View.Kinds)
+		for kind := range questioned.kinds {
+			if state, ok := kinds[kind]; ok {
+				kinds[kind] = deny(state)
+			}
+		}
+		generation.View.Kinds = kinds
+	}
+	if len(questioned.resources) > 0 {
+		resources := maps.Clone(generation.ResourceStatus)
+		for id := range questioned.resources {
+			if state, ok := resources[id]; ok {
+				resources[id] = deny(state)
+			}
+		}
+		generation.ResourceStatus = resources
+	}
+	// A questioned cluster-wide kind is withheld in every namespace too:
+	// readers fall back to a retained namespace read when the cluster-wide
+	// kind is denied, and that read predates the denial in question.
+	if len(questioned.scoped) > 0 || len(questioned.kinds) > 0 && len(generation.Namespaces) > 0 {
+		scopes := make(map[string]kubeindex.Snapshot, len(generation.Namespaces))
+		for namespace, scope := range generation.Namespaces {
+			var states map[string]kubeindex.KindStatus
+			for kind, state := range scope.Kinds {
+				if questioned.kinds[kind] || questioned.scoped[namespace][kind] {
+					if states == nil {
+						states = maps.Clone(scope.Kinds)
+					}
+					states[kind] = deny(state)
+				}
+			}
+			if states != nil {
+				scope.Kinds = states
+			}
+			scopes[namespace] = scope
+		}
+		generation.Namespaces = scopes
+	}
+	return generation
 }
 
 func currentCollectionIdentityVerified(generation inventoryGeneration, attempt time.Time) bool {
@@ -429,7 +671,8 @@ func (service *Service) inventoryAuthorityTargets(generation inventoryGeneration
 }
 
 func (service *Service) verifyCurrentInventoryAuthority(ctx context.Context, cache *inventoryCache, generation inventoryGeneration, attempt time.Time) error {
-	if hasCurrentInventoryMaterialWitness(ctx) {
+	cache.authorityChecks.Add(1)
+	if currentInventoryIdentityWitness(ctx, generation, attempt, service.credentialGeneration()) {
 		return service.validateCredential(ctx)
 	}
 	expected := generation.EvidenceScope.ClusterUID
@@ -455,10 +698,11 @@ func (service *Service) verifyCurrentInventoryAuthority(ctx context.Context, cac
 	binding := logIdentity(service.cacheKey() + "\x00" + expected + "\x00" + service.client.namespace)
 	episode := attempt.UTC().Format(time.RFC3339Nano)
 	err = cache.authorityProof.verify(ctx, binding, episode, func() error {
-		pending := unverifiedInventoryAuthority(ErrInventoryNotReady)
-		cache.mu.Lock()
-		cache.authorityFailure = pending
-		cache.mu.Unlock()
+		// Readers keep the last committed generation while the proof runs;
+		// only the kinds whose new denial is in question are withheld.
+		if hold := cache.authorityProof.holdProbe.Load(); hold != nil {
+			(*hold)()
+		}
 		if err := service.validateCredential(ctx); err != nil {
 			return err
 		}
@@ -500,4 +744,13 @@ func (service *Service) verifyCurrentInventoryAuthority(ctx context.Context, cac
 		cache.mu.Unlock()
 	}
 	return err
+}
+
+// credentialGeneration is the client's credential generation: it changes when a
+// credential is rejected or replaced, which fences reads made before that.
+func (service *Service) credentialGeneration() uint64 {
+	if service == nil || service.client == nil {
+		return 0
+	}
+	return service.client.authGeneration.Load()
 }

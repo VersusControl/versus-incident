@@ -69,7 +69,7 @@ func TestPostgresKubernetesIssueConcurrentEmissionClaims(t *testing.T) {
 						t.Fatal("concurrent emitters created distinct incidents")
 					}
 				}
-				if result.outcome.NotificationOutcome == "sent" {
+				if result.outcome.NotificationOutcome == "none" {
 					claims++
 				}
 			}

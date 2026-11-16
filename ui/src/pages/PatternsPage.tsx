@@ -91,6 +91,16 @@ function matchesVerdict(p: Pattern, v: string): boolean {
 
 type VerdictVars = { id: string; verdict: string };
 
+// noPatternsHint explains an empty log catalog without claiming logs are being
+// catalogued: the agent learns only the lines that match its learning pattern
+// and skips the rest, so a healthy service can read logs and learn nothing.
+function noPatternsHint(pattern: string): string {
+  const which = pattern
+    ? `the learning pattern ${pattern} (agent.regex.default_pattern)`
+    : "the learning pattern (agent.regex.default_pattern)";
+  return `The agent learns only log lines that match ${which}; other lines are read and skipped. If logs are flowing but nothing appears, they may not match it.`;
+}
+
 export function PatternsPage() {
   const qc = useQueryClient();
   const toast = useToast();
@@ -104,6 +114,16 @@ export function PatternsPage() {
   // list. useInfiniteQuery accumulates loaded pages; the client-side
   // filter/sort/search below operates over what is loaded, and "Load more"
   // pulls the next page on demand.
+  // The configured learning pattern explains an empty catalog: only matching
+  // lines are learned. Shares the ["agent-config"] cache with the shell.
+  const agentConfigQ = useQuery({
+    queryKey: ["agent-config"],
+    queryFn: api.getAgentConfig,
+    staleTime: 60_000,
+    retry: 1,
+  });
+  const learningPattern = agentConfigQ.data?.regex?.default_pattern?.trim() || "";
+
   const patternsQ = useInfiniteQuery({
     queryKey: ["patterns-all"],
     queryFn: ({ pageParam }) => api.listPatternsIndex({ offset: pageParam }),
@@ -566,7 +586,7 @@ export function PatternsPage() {
                         {data && data.length === 0 ? (
                           <EmptyState
                             title="No patterns learned yet"
-                            hint="The agent builds the catalog as logs flow in."
+                            hint={noPatternsHint(learningPattern)}
                             action={
                               <Link className="btn" to="/agent/metrics">
                                 Learning metrics or traces? See Metrics

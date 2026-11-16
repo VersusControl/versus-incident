@@ -1,0 +1,3 @@
+exclude_resources: \[\]
+namespaces: \["shop","payments"\]
+!kind: ClusterRole

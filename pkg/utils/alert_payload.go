@@ -33,6 +33,14 @@ var patternKeys = []string{"patternid", "pattern_id", "key"}
 // their labels in.
 var labelParents = []string{"labels", "commonLabels"}
 
+// alertLabelParents are the maps read on the first entry of an Alertmanager
+// alerts array for service and severity: only its labels.
+var alertLabelParents = []string{"labels"}
+
+// alertTitleParents are the maps read on the first entry of an Alertmanager
+// alerts array for a title: labels.alertname first, then annotations.summary.
+var alertTitleParents = []string{"labels", "annotations"}
+
 // cloudWatchServiceDimensions lists CloudWatch alarm dimension names in the
 // order we trust them to name a service: an explicit service name first, then
 // the resource that identifies the workload (Lambda function, RDS instance,
@@ -97,12 +105,16 @@ func NewFoldedPayload(content map[string]interface{}) *FoldedPayload {
 }
 
 // Service resolves the service this payload is about: top-level keys, then
-// nested Alertmanager labels, then CloudWatch alarm trigger dimensions.
+// nested Alertmanager labels, then the first alert's labels, then CloudWatch
+// alarm trigger dimensions.
 func (p *FoldedPayload) Service() string {
 	if s := p.String(serviceKeys...); s != "" {
 		return s
 	}
 	if s := p.nestedString(labelParents, serviceKeys); s != "" {
+		return s
+	}
+	if s := p.firstAlert().nestedString(alertLabelParents, serviceKeys); s != "" {
 		return s
 	}
 	return p.dimension(cloudWatchServiceDimensions)
@@ -117,16 +129,28 @@ func (p *FoldedPayload) Severity() string {
 	if s := p.nestedString(labelParents, severityKeys); s != "" {
 		return s
 	}
+	if s := p.firstAlert().nestedString(alertLabelParents, severityKeys); s != "" {
+		return s
+	}
 	return p.dimension(cloudWatchSeverityDimensions)
 }
 
 // Title resolves the payload's human-facing title: top-level keys first, then
-// the nested Alertmanager label maps.
+// the nested Alertmanager label maps, then the first alert's labels and
+// annotations.
 func (p *FoldedPayload) Title() string {
 	if s := p.foldedString(titleKeys...); s != "" {
 		return s
 	}
-	for _, parent := range labelParents {
+	if s := p.nestedTitle(labelParents); s != "" {
+		return s
+	}
+	return p.firstAlert().nestedTitle(alertTitleParents)
+}
+
+// nestedTitle returns the first title found in any of the parent maps.
+func (p *FoldedPayload) nestedTitle(parents []string) string {
+	for _, parent := range parents {
 		nested, ok := p.child(parent)
 		if !ok {
 			continue
@@ -136,6 +160,45 @@ func (p *FoldedPayload) Title() string {
 		}
 	}
 	return ""
+}
+
+// firstAlert returns the folded view of the first entry of an Alertmanager
+// webhook's alerts array, or nil when it must not be used. A minimal webhook
+// body may omit commonLabels and carry its labels only on each alert, so the
+// first alert is the fallback once the top-level and common label maps are
+// empty. When the body does carry commonLabels and groups several alerts, a
+// label missing there differs between the alerts, so reading it from whichever
+// alert happens to be first would change the title and the dedup fingerprint
+// each time the group's membership changes; the fallback is skipped then.
+func (p *FoldedPayload) firstAlert() *FoldedPayload {
+	if p == nil || p.content == nil {
+		return nil
+	}
+	ck, ok := p.key("alerts", isAnyValue)
+	if !ok {
+		return nil
+	}
+	var first map[string]interface{}
+	count := 0
+	switch list := p.content[ck].(type) {
+	case []interface{}:
+		count = len(list)
+		if count > 0 {
+			first, _ = list[0].(map[string]interface{})
+		}
+	case []map[string]interface{}:
+		count = len(list)
+		if count > 0 {
+			first = list[0]
+		}
+	}
+	if first == nil {
+		return nil
+	}
+	if _, grouped := p.child("commonLabels"); grouped && count != 1 {
+		return nil
+	}
+	return NewFoldedPayload(first)
 }
 
 // Source resolves the ingress/source label the payload names itself with.
@@ -168,7 +231,8 @@ func (p *FoldedPayload) String(keys ...string) string {
 // IncidentRecord.Service column, the incidents list, the service detail
 // aggregation, the report and the emit fingerprint) routes through, so they
 // can never disagree. Lookup order: top-level keys, then nested
-// Alertmanager labels, then CloudWatch alarm trigger dimensions. Matching is
+// Alertmanager labels, then the first alert's labels, then CloudWatch alarm
+// trigger dimensions. Matching is
 // case-insensitive and fail-soft: an unrecognised payload yields "".
 func ExtractService(content map[string]interface{}) string {
 	return NewFoldedPayload(content).Service()
@@ -176,7 +240,8 @@ func ExtractService(content map[string]interface{}) string {
 
 // ExtractSeverity resolves the best-effort severity of a free-form alert
 // payload, using the same lookup order as ExtractService: top-level severity
-// keys, then the nested Alertmanager label maps, then the CloudWatch alarm's
+// keys, then the nested Alertmanager label maps, then the first alert's
+// labels, then the CloudWatch alarm's
 // Trigger.Dimensions[]. Raw — callers band or normalize it. Returns "" when
 // the payload carries no severity.
 //
@@ -191,7 +256,8 @@ func ExtractSeverity(content map[string]interface{}) string {
 
 // ExtractTitle resolves the human-facing title of a free-form alert payload:
 // top-level keys first, then the nested Alertmanager label maps
-// (labels.alertname / commonLabels.alertname). It is the ONE implementation
+// (labels.alertname / commonLabels.alertname), then the first alert's
+// labels.alertname or annotations.summary. It is the ONE implementation
 // behind the durable IncidentRecord.Title, the report's title fallback and the
 // emit fingerprint's title fallback, so an alert can never be titled one way
 // and fingerprinted another. Matching is case-insensitive and fail-soft: a

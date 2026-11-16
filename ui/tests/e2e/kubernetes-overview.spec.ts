@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as https from "node:https";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { openApp } from "./helpers";
+import { openApp, signInWithGatewaySecret } from "./helpers";
 import { captureDir, capturePath, harnessRuntimeStateDir } from "./support/capture";
 import type { KubernetesAgentSettings, KubernetesBreakLogPage, KubernetesClusters, KubernetesCrashEvent, KubernetesCrashPage, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
 
@@ -954,6 +954,25 @@ test.describe("Kubernetes documentation consumer", () => {
         const published = fs.readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../src/docs/images", filename));
         expect(createHash("sha256").update(image).digest("hex")).toBe(createHash("sha256").update(published).digest("hex"));
       }
+    });
+
+    test(`loads Kubernetes quickstart images ${viewport.name}`, async ({ page }) => {
+      const target = new URL(docsURL!);
+      expect(["localhost", "127.0.0.1", "[::1]"]).toContain(target.hostname);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await page.goto(`${target.origin}/#/agent/kubernetes/quickstart`);
+      await expect(page.getByRole("heading", { name: "Kubernetes Quickstart", exact: true })).toBeVisible();
+      for (const name of ["preparing", "overview"]) {
+        const image = page.locator(`.markdown-section img[src$="kubernetes-quickstart-${name}.png"]`);
+        expect((await page.request.get(new URL(await image.getAttribute("src") as string, page.url()).href)).status()).toBe(200);
+        await image.scrollIntoViewIfNeeded();
+        await expect.poll(() => image.evaluate((element) => (element as HTMLImageElement).complete && (element as HTMLImageElement).naturalWidth === 1440)).toBe(true);
+        const box = await image.evaluate((element) => { const bounds = element.getBoundingClientRect(); return { left: bounds.left, right: bounds.right, viewport: innerWidth }; });
+        expect(box.left).toBeGreaterThanOrEqual(0);
+        expect(box.right).toBeLessThanOrEqual(box.viewport);
+        await page.screenshot({ path: capturePath("kubernetes-quickstart-docs", viewport.name, "light", name), animations: "disabled" });
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
     });
 
     test(`loads published Kubernetes images ${viewport.name}`, async ({ page }) => {
@@ -9089,3 +9108,110 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
     await testInfo.attach("sanitized-response-bodies", { body: JSON.stringify(replies), contentType: "application/json" });
   });
 }
+
+// Quickstart documentation captures against a real in-cluster install (Helm,
+// no values, gateway-secret sign-in). Opt-in: E2E_KUBERNETES_QUICKSTART_DOCS=
+// "preparing" right after the pod is ready (first sync), or "overview" once the
+// first sync is done. Workloads: plans/harness-run/config/k8s/workloads/docs-showcase.
+const quickstartDocs = process.env.E2E_KUBERNETES_QUICKSTART_DOCS ?? "";
+test.describe("Kubernetes quickstart documentation", () => {
+  test.skip(!["preparing", "overview"].includes(quickstartDocs), "opt-in real in-cluster quickstart capture");
+  test.describe.configure({ timeout: 180_000 });
+  const themes = ["light", "dark"] as const;
+
+  async function themedPage(browser: import("@playwright/test").Browser, theme: (typeof themes)[number], height: number) {
+    const context = await browser.newContext({ viewport: { width: 1440, height }, deviceScaleFactor: 2, colorScheme: theme });
+    await context.addInitScript((value) => localStorage.setItem("versus.theme", value), theme);
+    return context.newPage();
+  }
+
+  test("captures Preparing your cluster during the first sync", async ({ browser }) => {
+    test.skip(quickstartDocs !== "preparing");
+    // The first sync of a small cluster lasts a few seconds, so both themes sign
+    // in first, then the spec restarts the Versus pod (an in-memory install
+    // re-runs its first sync on start) and reloads until the panel appears.
+    const context = process.env.E2E_KUBERNETES_QUICKSTART_CONTEXT ?? "kind-versus-docs";
+    const pages = await Promise.all(themes.map(async (theme) => {
+      const page = await themedPage(browser, theme, 900);
+      await openApp(page, "/agent/kubernetes");
+      await expect(page.locator("#kubernetes-view-panel")).toBeVisible({ timeout: 30_000 });
+      return { theme, page };
+    }));
+    const log = (message: string) => console.log(`${new Date().toISOString()} quickstart: ${message}`);
+    const kubectl = (...args: string[]) => execFileSync("kubectl", ["--context", context, "-n", "versus", ...args], { encoding: "utf8" });
+    const before = new Set(kubectl("get", "pods", "-o", "name").split("\n").filter(Boolean));
+    kubectl("rollout", "restart", "deploy/versus-versus-incident");
+    log("restart requested");
+    let pod = "";
+    for (let i = 0; i < 300 && !pod; i++) {
+      const items = JSON.parse(kubectl("get", "pods", "-o", "json")).items as { metadata: { name: string }; status: { containerStatuses?: { started?: boolean }[] } }[];
+      pod = items.find((item) => !before.has(`pod/${item.metadata.name}`) && item.status.containerStatuses?.some((status) => status.started))?.metadata.name ?? "";
+      if (!pod) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(pod, "restarted Versus pod started").not.toBe("");
+    log(`new pod started ${pod}`);
+    // A second loopback port reaches the new pod directly; cookies are shared
+    // per host, and the theme comes from the init script.
+    const forward = spawn("kubectl", ["--context", context, "-n", "versus", "port-forward", `pod/${pod}`, "3001:3000"], { stdio: "ignore" });
+    try {
+      const frames = await Promise.all(pages.map(async ({ theme, page }) => {
+        const panel = page.locator("[data-preparing-panel]").first();
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline && !(await panel.isVisible().catch(() => false))) {
+          const ok = await page.goto("http://127.0.0.1:3001/agent/kubernetes", { timeout: 3_000 }).then(() => true).catch(() => false);
+          if (!ok) { await page.waitForTimeout(100); continue; }
+          const secret = page.getByLabel("Gateway secret");
+          const state = await Promise.race([
+            panel.waitFor({ state: "visible", timeout: 4_000 }).then(() => "panel"),
+            secret.waitFor({ state: "visible", timeout: 4_000 }).then(() => "secret"),
+            page.getByText(/^Last synced \d+s ago$/).first().waitFor({ state: "visible", timeout: 4_000 }).then(() => "ready"),
+          ]).catch(() => "none");
+          log(`${theme} page state ${state}`);
+          if (state === "secret") await signInWithGatewaySecret(page).catch(() => undefined);
+          if (state === "ready") break;
+        }
+        let taken = 0;
+        for (let i = 0; i < 150 && await panel.isVisible().catch(() => false); i++) {
+          const done = await panel.locator("li[data-state=done]").count().catch(() => 0);
+          const active = await panel.locator("li[data-state=active]").count().catch(() => 0);
+          if (done >= 1 && active >= 1) {
+            await page.screenshot({ path: capturePath("kubernetes-quickstart", 1440, theme, `preparing-${String(i).padStart(3, "0")}-d${done}`), animations: "disabled", scale: "device", timeout: 5_000 }).then(() => taken++).catch(() => undefined);
+          }
+          await page.waitForTimeout(150);
+        }
+        log(`${theme} frames ${taken}`);
+        await page.context().close();
+        return taken;
+      }));
+      expect(frames.every((count) => count > 0), `frames per theme ${frames.join(",")}`).toBe(true);
+    } finally {
+      forward.kill();
+    }
+  });
+
+  test("captures the populated Overview after the first sync", async ({ browser }) => {
+    test.skip(quickstartDocs !== "overview");
+    for (const theme of themes) {
+      const page = await themedPage(browser, theme, 1000);
+      await openApp(page, "/agent/kubernetes?view=overview");
+      const panel = page.locator("#kubernetes-view-panel");
+      await expect(panel).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator("[data-preparing-panel]")).toHaveCount(0, { timeout: 60_000 });
+      await expect(page.getByText(/^Last synced \d+s ago$/).first()).toBeVisible({ timeout: 30_000 });
+      await expect(panel.getByText(/^Loading/i)).toHaveCount(0, { timeout: 30_000 });
+      await expect(panel.locator(".sk")).toHaveCount(0, { timeout: 30_000 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+      await page.waitForTimeout(1_500);
+      await page.screenshot({ path: capturePath("kubernetes-quickstart", 1440, theme, "overview-viewport"), animations: "disabled", scale: "device" });
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const extra = await panel.evaluate((element) => Math.max(0, Math.ceil(element.getBoundingClientRect().bottom + 24 - window.innerHeight)));
+        if (extra === 0) break;
+        await page.setViewportSize({ width: 1440, height: Math.min(2400, page.viewportSize()!.height + extra) });
+        await page.locator("main").evaluate((main) => main.scrollTo({ top: 0 }));
+      }
+      await page.waitForTimeout(1_000);
+      await page.screenshot({ path: capturePath("kubernetes-quickstart", 1440, theme, "overview-full"), animations: "disabled", scale: "device" });
+      await page.context().close();
+    }
+  });
+});

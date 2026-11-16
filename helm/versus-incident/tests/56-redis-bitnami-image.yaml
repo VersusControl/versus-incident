@@ -1,0 +1,15 @@
+# The Bitnami image override an older release set after the Bitnami images
+# moved, as --reset-then-reuse-values keeps it: the install stops and names
+# the key to clear instead of running an image that cannot be pulled.
+oncall:
+  enable: true
+  provider: pagerduty
+  pagerduty:
+    routingKey: "test-routing-key"
+redis:
+  enabled: true
+  image:
+    repository: bitnamilegacy/redis
+global:
+  security:
+    allowInsecureImages: true

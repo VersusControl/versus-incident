@@ -160,6 +160,12 @@ describe("Sidebar — deployment-aware navigation groups", () => {
     ]);
   });
 
+  it("does not probe the Enterprise baselines route on a community binary", async () => {
+    apiMocks.getSSODeployment.mockRejectedValue(new ApiError(404, "not found"));
+    await renderSettled();
+    expect(apiMocks.listBaselines).not.toHaveBeenCalled();
+  });
+
   it("partitions every navigation route exactly once without empty entries", async () => {
     await renderSettled();
 

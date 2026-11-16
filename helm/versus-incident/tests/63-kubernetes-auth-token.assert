@@ -1,0 +1,3 @@
+# Rendered for the Go config checks; the mode must reach the config.
+kind: ConfigMap
+mode: "token"

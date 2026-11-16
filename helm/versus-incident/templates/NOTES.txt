@@ -51,11 +51,14 @@ HIGH AVAILABILITY (enterprise) is ENABLED:
 
 {{- if .Values.redis.enabled }}
 8. Redis configuration:
-   - Using bundled Redis deployment
-   - Host: {{ .Release.Name }}-redis-master
+   - Using the bundled Redis ({{ include "versus-incident.redisImage" . }})
+   - Host: {{ include "versus-incident.redisFullname" . }}
    - Port: 6379
-   {{- if .Values.redis.auth.enabled }}
-   - Authentication is enabled
+   {{- if include "versus-incident.redisAuthEnabled" . }}
+   - Password: Secret {{ include "versus-incident.redisSecretName" . }}, key {{ include "versus-incident.redisSecretKey" . }}
+   {{- end }}
+   {{- if include "versus-incident.redisPersistenceEnabled" . }}
+   - Data: PersistentVolumeClaim {{ ((.Values.redis | default dict).persistence | default dict).existingClaim | default (printf "%s-data" (include "versus-incident.redisFullname" .)) }}
    {{- end }}
 {{- else if and (not .Values.redis.enabled) (or .Values.oncall.enable .Values.oncall.initializedOnly) }}
 8. Redis configuration:
@@ -68,13 +71,43 @@ HIGH AVAILABILITY (enterprise) is ENABLED:
 For more information on using Versus Incident, refer to the documentation at:
 https://github.com/versuscontrol/versus-incident
 
-{{- if not .Values.gatewaySecret }}
+{{- $fullname := include "versus-incident.fullname" . }}
 
-WARNING: gatewaySecret is empty. The admin endpoints (/api/admin/*,
-/api/agent/*) and the management UI are NOT registered. Set a strong
-value (e.g. `--set gatewaySecret=$(openssl rand -hex 32)`) before
-exposing the UI.
+Open the UI:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullname }} 3000:{{ .Values.service.port }}
+  Then browse to http://localhost:3000
+
+Sign in with the sign-in secret. Print it with:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "versus-incident.gatewaySecretName" . }} -o jsonpath='{.data.{{ include "versus-incident.gatewaySecretKey" . }}}' | base64 -d; echo
+{{- if .Values.gatewaySecretExistingSecret }}
+  The pod does not start until that Secret exists. Create it with:
+  kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.gatewaySecretExistingSecret }} --from-literal={{ include "versus-incident.gatewaySecretKey" . }}=$(openssl rand -hex 32)
+{{- else if not .Values.gatewaySecret }}
+  The chart generated this secret on the first install and keeps it on upgrades.
 {{- end }}
+
+Kubernetes:
+{{- if not (include "versus-incident.kubernetesConnectorEnabled" .) }}
+  The Kubernetes connector is off. Turn it on with --set connectors.kubernetes.enabled=true
+{{- else }}
+  {{- $kubernetes := .Values.connectors.kubernetes | default dict }}
+  {{- if include "versus-incident.kubernetesInCluster" . }}
+  Identity : ServiceAccount {{ .Release.Namespace }}/{{ include "versus-incident.serviceAccountName" . }} (auth.mode=in_cluster)
+  {{- else if $kubernetes.multiple }}
+  Identity : one per cluster entry under connectors.kubernetes.clusters
+  {{- else }}
+  Identity : auth.mode={{ (($kubernetes.auth | default dict).mode | default "") }}
+  {{- end }}
+  {{- if include "versus-incident.kubernetesReaderRBACEnabled" . }}
+  Role     : ClusterRole {{ $fullname }}-kubernetes-reader (read-only{{ if .Values.kubernetesReaderRBAC.optionalKinds }}; includes Gateway API, Argo CD, Argo Rollouts and Flux kinds{{ end }}{{ if .Values.kubernetesReaderRBAC.secrets }}; lists Secrets for Helm releases{{ else }}; no Secrets{{ end }})
+  {{- else if .Values.kubernetesReaderRBAC.external }}
+  Role     : managed outside this chart (kubernetesReaderRBAC.external=true)
+  {{- else }}
+  Role     : none created by this chart; grant the connector identity read access yourself
+  {{- end }}
+  Open the Kubernetes page in the UI. The first sync shows "Preparing your cluster".
+{{- end }}
+  Quickstart: https://docs.versusincident.com/#/agent/kubernetes/quickstart
 
 {{- if .Values.agent.enable }}
 

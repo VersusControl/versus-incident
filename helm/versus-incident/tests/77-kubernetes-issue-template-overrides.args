@@ -1,0 +1,26 @@
+# Every alert channel on with its own Kubernetes issue template path, which
+# carries spaces, quotes and a colon.
+--set
+alert.slack.enable=true
+--set
+alert.telegram.enable=true
+--set
+alert.viber.enable=true
+--set
+alert.email.enable=true
+--set
+alert.msteams.enable=true
+--set
+alert.lark.enable=true
+--set-string
+alert.slack.kubernetesIssueTemplatePath=/app/custom/slack issue "quoted":template.tmpl
+--set-string
+alert.telegram.kubernetesIssueTemplatePath=/app/custom/telegram issue "quoted":template.tmpl
+--set-string
+alert.viber.kubernetesIssueTemplatePath=/app/custom/viber issue "quoted":template.tmpl
+--set-string
+alert.email.kubernetesIssueTemplatePath=/app/custom/email issue "quoted":template.tmpl
+--set-string
+alert.msteams.kubernetesIssueTemplatePath=/app/custom/msteams issue "quoted":template.tmpl
+--set-string
+alert.lark.kubernetesIssueTemplatePath=/app/custom/lark issue "quoted":template.tmpl

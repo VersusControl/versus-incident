@@ -301,39 +301,53 @@ kind: ClusterRole
 metadata:
   name: versus-kubernetes-reader
 rules:
+  - nonResourceURLs: ["/.well-known/openid-configuration", "/openid/v1/jwks"]
+    verbs: ["get"]
   - apiGroups: [""]
-    resources: [nodes, namespaces, pods, services, events, configmaps, serviceaccounts, secrets, persistentvolumeclaims, persistentvolumes]
-    verbs: [get, list]
+    resources: ["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["get", "list"]
   - apiGroups: [""]
-    resources: [pods/log]
-    verbs: [get]
-  - apiGroups: [apps]
-    resources: [deployments, statefulsets, daemonsets, replicasets]
-    verbs: [get, list]
-  - apiGroups: [batch]
-    resources: [jobs, cronjobs]
-    verbs: [get, list]
-  - apiGroups: [discovery.k8s.io]
-    resources: [endpointslices]
-    verbs: [get, list]
-  - apiGroups: [networking.k8s.io]
-    resources: [ingresses, networkpolicies]
-    verbs: [get, list]
-  - apiGroups: [autoscaling]
-    resources: [horizontalpodautoscalers]
-    verbs: [get, list]
-  - apiGroups: [policy]
-    resources: [poddisruptionbudgets]
-    verbs: [get, list]
-  - apiGroups: [storage.k8s.io]
-    resources: [storageclasses]
-    verbs: [get, list]
-  - apiGroups: [apiextensions.k8s.io]
-    resources: [customresourcedefinitions]
-    verbs: [get, list]
-  - apiGroups: [metrics.k8s.io]
-    resources: [nodes, pods]
-    verbs: [get, list]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "rollouts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -355,39 +369,41 @@ Save that manifest as `versus-kubernetes-rbac.yaml`, then apply it:
 kubectl apply -f versus-kubernetes-rbac.yaml
 ```
 
-The role grants only `get` and `list`, plus `get` on `pods/log`. It grants no
-create, update, patch, delete, exec, proxy, rollout, or Helm permission.
+The role grants only `get` and `list`, plus `get` on `pods/log` and on the two
+ServiceAccount token discovery URLs. It grants no create, update, patch, delete,
+exec, proxy, rollout, or Helm permission. It is the same role the Helm chart
+creates by default.
 
-Secrets are included in the role above and read as metadata only: Versus
-projects names, labels, and referenced key names, never values. Remove the
-`secrets` grant from your own role or binding if you want Secrets invisible.
-Add Gateway API `gateways` and `httproutes` only when those CRDs are installed.
+The role has no `secrets`, so the Helm tab cannot list Helm releases and says
+it needs Secret access. To show them, add `list` on `secrets`. Versus requests
+only labels and metadata, but RBAC cannot limit a LIST to metadata, so that
+grant lets the IAM role read Secret values; see
+[Helm releases need Secret access](/agent/kubernetes/configuration#helm-releases-need-secret-access).
+
+The last four rules, for Gateway API, Argo CD, Argo Rollouts and Flux, are
+optional and harmless when those CRDs are not installed. Remove them if you
+don't want them; everything else is still shown.
 
 For namespace-only access, replace the ClusterRoleBinding with RoleBindings in
-approved namespaces and remove cluster-scoped resources. Versus reports denied
-cluster-wide reads as partial evidence instead of treating them as an empty
-healthy result.
+approved namespaces and remove cluster-scoped resources. You get a live,
+partial view of those namespaces only, and **no Kubernetes history is saved**:
+history needs a cluster-wide read of Namespaces. When you need history, keep the
+cluster-wide role. See
+[Least privilege](/agent/kubernetes/configuration#least-privilege) for what
+each reader role shows.
 
 Verify the custom binding by refreshing `/agent/kubernetes`. Normal resources
-should remain visible; anything intentionally excluded should appear as partial
-or forbidden evidence.
+should remain visible. To see anything you left out, open the info marker next
+to **Last synced** in the top bar: it lists those kinds as not readable, with
+the reason, instead of showing them as empty.
 
 ## Same-cluster alternative
 
-When Versus reads only the cluster where it runs, prefer:
-
-```yaml
-connectors:
-  kubernetes:
-    auth:
-      mode: in_cluster
-
-kubernetesReaderRBAC:
-  enabled: true
-```
-
-In this simpler mode, the chart binds Kubernetes read permissions directly to
-the Versus ServiceAccount. IRSA and an EKS access entry are unnecessary.
+When Versus reads only the cluster where it runs, install the chart with
+`--set connectors.kubernetes.enabled=true`. That uses `auth.mode: in_cluster`,
+and the chart creates the reader role and binds it to the Versus
+ServiceAccount. IRSA and an EKS access entry are unnecessary. See
+the [Kubernetes quickstart](/agent/kubernetes/quickstart).
 
 ## Next
 

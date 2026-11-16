@@ -1,5 +1,9 @@
 # Default values for Versus Incident Helm chart
-replicaCount: 2
+#
+# One replica by default: the file storage backend keeps state on the pod, so
+# more than one replica needs storage.type=postgres (the install fails
+# otherwise).
+replicaCount: 1
 
 image:
   repository: ghcr.io/versuscontrol/versus-incident
@@ -17,14 +21,28 @@ serviceAccount:
   create: true
   name: ""
 
-# Optionally grant the chart ServiceAccount the cluster-wide read permissions
-# used by all eight Kubernetes tools. Leave disabled when bindings are managed
-# separately or when namespace-scoped Roles are preferred.
+# Cluster-wide, read-only role for the Kubernetes connector, bound to the
+# chart ServiceAccount.
 kubernetesReaderRBAC:
-  enabled: false
-  # Gateway API CRDs are optional and may not be installed. Enable only when
-  # generic Gateway and HTTPRoute reads are needed.
-  gatewayAPI: false
+  # Leave empty to create the role when the Kubernetes connector is on
+  # (connectors.kubernetes.enabled=true) with auth.mode=in_cluster; with the
+  # connector off, no role is created. Set true to create it anyway, for any
+  # mode or for a connector configured outside this chart; set false to skip
+  # it. With the connector on and in_cluster, false fails the install unless
+  # `external: true` says you manage the connector's RBAC yourself.
+  enabled:
+  # You bind the connector identity to your own role or RoleBindings (for
+  # example namespace-only access). The chart creates no reader role.
+  external: false
+  # Read-only access to optional kinds: Gateway API Gateways and HTTPRoutes,
+  # Argo CD Applications, Argo Rollouts, and Flux Kustomizations and
+  # HelmReleases. Granting them is harmless when the CRDs are not installed.
+  optionalKinds: true
+  # List Secrets so the Helm tab can show Helm releases (Helm stores releases
+  # in Secrets). Off by default. The grant is `list` only, never `get`, but a
+  # Kubernetes list can still return Secret values to the connector identity:
+  # RBAC cannot limit it to metadata. Versus requests metadata only.
+  secrets: false
 
 # Optional, separate service-account grants for supported Kubernetes actor
 # operations. Mount its token as the actor auth token_file; never reuse the
@@ -173,15 +191,20 @@ config:
   # CSRF checks behind rewriting or TLS-terminating proxies.
   publicHost: ""
 
-# Shared secret required by all admin endpoints (`/api/admin/*` and
-# `/api/agent/*`). Clients send the same value in the `X-Gateway-Secret`
-# header.
+# Sign-in secret for the web UI and the admin API (`/api/admin/*`,
+# `/api/agent/*`). Clients send it in the `X-Gateway-Secret` header.
 #
-# When `gatewaySecret` is empty the admin routes are NOT registered at
-# all — the agent UI, detect log endpoints, and incident admin endpoints
-# return 404. This is the safest default; set a strong value (32+ random
-# bytes) before exposing the UI or admin endpoints.
+# Empty (the default): the chart generates a random 32-byte secret on the
+# first install and keeps it on every upgrade. Read it with the command that
+# the install notes print. Set a value to use your own.
 gatewaySecret: ""
+# Read the sign-in secret from a Secret you create instead. The chart then
+# stores no sign-in secret, and the app refuses to start until the Secret
+# exists, for example:
+#   kubectl -n <namespace> create secret generic versus-incident \
+#     --from-literal=gateway_secret=$(openssl rand -hex 32)
+gatewaySecretExistingSecret: ""
+gatewaySecretExistingSecretKey: "gateway_secret"
 
 # Storage backend used by BOTH the agent (catalog, shadow log, detect log,
 # services, AI cache) and the incident service (history shown in the UI).
@@ -418,6 +441,11 @@ agent:
 
 connectors:
   kubernetes:
+    # Off by default. Set true to read the cluster Versus runs in with the pod
+    # ServiceAccount (auth.mode=in_cluster below); the chart then creates the
+    # read-only reader role above. While off, the chart renders no connector
+    # settings and no reader role.
+    enabled: false
     multiple: false
     clusters: []
     endpoint: ""
@@ -431,8 +459,17 @@ connectors:
     changeCapture: "continuous"
     allowPrivateNetworks: false
     endpointCIDRs: []
+    # Resources, by plural API name, Versus never lists. Leave empty (null) and
+    # the chart sets ["secrets"] whenever it creates the reader role without
+    # kubernetesReaderRBAC.secrets, so the deliberate omission is reported as
+    # "not collected" instead of "permission denied". Set a list to choose.
+    excludeResources:
+    # Namespaces to read when the connector identity may read only inside some
+    # namespaces (a Role and RoleBinding per namespace). Versus reads them from
+    # the first sync on and after every restart. Example: [shop, payments]
+    namespaces: []
     auth:
-      mode: ""
+      mode: in_cluster
       token: ""
       tokenFile: ""
       clientCertificate: {certificateFile: "", keyFile: "", certificateData: "", keyData: ""}
@@ -534,7 +571,9 @@ proxy:
   password: ""
 
 alert:
-  debugBody: true
+  # Log the body of every incoming alert. Off by default because bodies can
+  # carry sensitive data.
+  debugBody: false
   
   slack:
     enable: false
@@ -607,8 +646,9 @@ alert:
 # the chart maps them into `queue` when it renders config.yaml.
 queue:
   # Log the raw body of every message pulled off the queue. Useful while
-  # wiring up a new producer; noisy in production.
-  debugBody: true
+  # wiring up a new producer; off by default because bodies can carry
+  # sensitive data.
+  debugBody: false
 
 oncall:
   initializedOnly: false
@@ -638,45 +678,86 @@ oncall:
 
 # Redis configuration
 #
-# Redis is REQUIRED only when on-call is enabled (oncall.enable=true or
-# oncall.initializedOnly=true). When on-call is disabled, the values in this
-# section are ignored and no Redis connection is attempted.
+# Versus uses Redis only for on-call (oncall.enable=true or
+# oncall.initializedOnly=true). The bundled Redis is deployed whenever
+# redis.enabled=true, even with on-call off, where it sits unused; with
+# on-call off and redis.enabled=false, no Redis is deployed or contacted.
 #
 # There are exactly TWO supported modes. Pick ONE:
 #
 #   1) Bundled Redis (recommended for getting started):
 #        redis.enabled: true
-#        redis.auth.password: "<your-password>"
-#      The chart deploys the Bitnami Redis subchart and the application
-#      automatically connects to "<release-name>-redis-master:6379".
-#      The externalRedis.* block is IGNORED in this mode.
+#      The chart runs one Redis pod (official redis image) with a Service
+#      named "<fullname>-redis". Its password is generated on the first
+#      install and kept on every upgrade, or read from redis.auth.password /
+#      redis.auth.existingSecret. The externalRedis.* block is IGNORED.
 #
 #   2) External Redis (production / shared Redis):
 #        redis.enabled: false
 #        externalRedis.host: "redis.my-namespace.svc.cluster.local"
 #        externalRedis.password: "<your-password>"
-#      The bundled Redis is NOT deployed; the application connects to the
-#      host/port you provide.
+#      No Redis is deployed; the application connects to the host/port you
+#      provide.
 #
 # Common pitfall: setting externalRedis.host while leaving redis.enabled=true
-# silently ignores externalRedis.* — the app talks to the bundled Redis.
+# fails the install, because externalRedis.* would be ignored.
 redis:
-  # Enable the bundled Redis subchart. Set to false to use externalRedis.
+  # Run the bundled Redis. Set to false to use externalRedis.
   enabled: false
 
-  # Authentication parameters for the built-in Redis (used only when enabled=true)
+  image:
+    repository: redis
+    tag: "7.4.12-alpine"
+    pullPolicy: IfNotPresent
+
   auth:
+    # Require a password. The Versus pod and the Redis probes read it from
+    # the Secret; it never appears in a command line.
     enabled: true
+    # Empty: generated on the first install and kept on upgrades. Set a value
+    # with --set-string at install time; do not commit it.
     password: ""
+    # Read the password from a Secret you create instead. The chart then
+    # creates no Redis Secret.
+    existingSecret: ""
+    existingSecretPasswordKey: "redis-password"
 
-  # Redis architecture choice
-  architecture: standalone
+  # On-call keeps its pending escalations in Redis. Without a volume they are
+  # lost when the Redis pod restarts.
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""   # "" → cluster default
+    # Bind to an existing PVC instead of creating one.
+    existingClaim: ""
 
-  # Redis master configuration
-  master:
-    persistence:
-      enabled: true
-      size: 8Gi
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+
+  # The official image runs as the redis user (uid 999, gid 1000).
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+
+  # How long the Versus pod waits for the bundled Redis to answer before its
+  # init container gives up and the pod restarts.
+  waitTimeoutSeconds: 120
 
 # External Redis configuration (used only when redis.enabled=false)
 externalRedis:

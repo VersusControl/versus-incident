@@ -179,7 +179,7 @@ async function installApi(page: Page, health: Snapshot) {
     if (requestPath === "/api/incidents") return json(route, []);
     if (requestPath === "/api/incidents/counts") return json(route, { ai_detect: 0, webhook: 0, total: 0 });
     if (requestPath === "/api/agent/status") return json(route, state.status);
-    if (requestPath === "/api/agent/shadow/stats") return json(route, { events: 28, total_signals: 540, verdicts: { spike: 8 }, occurrences: 28 });
+    if (requestPath === "/api/agent/shadow/stats") return json(route, { events: 28, total_signals: 540, total_occurrences: 28, verdict_spike: 8, verdict_unknown: 0 });
     if (requestPath === "/api/agent/detect/stats") return json(route, { outcome_emitted: 12, outcome_cached: 29, outcome_ai_error: 1, verdict_spike: 18, verdict_unknown: 7, verdict_normal: 17, severity_high: 9, severity_medium: 14, severity_low: 19 });
     if (requestPath === "/api/agent/patterns") return json(route, { patterns: [
       { id: "checkout-timeout", template: "checkout request timed out after <*> ms", count: 1240, baseline_frequency: 2.4, verdict: "known" },

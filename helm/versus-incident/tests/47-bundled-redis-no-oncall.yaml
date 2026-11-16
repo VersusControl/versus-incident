@@ -1,0 +1,4 @@
+# Bundled Redis turned on while on-call is off: Redis runs, but Versus does
+# not use it, so its pod does not wait for it.
+redis:
+  enabled: true

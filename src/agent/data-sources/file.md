@@ -1,13 +1,16 @@
-# File source
+# File
 
-Tail a single log file from disk. The cheapest way to test the agent
-end-to-end and the source you should use for fixtures or to onboard a
-new format before plumbing in a real backend.
+## Concept
+
+The file source reads one log file from disk, line by line, as it grows.
+Use it for a container's log file on a mounted volume, for a host log, or to
+try the agent before you connect a real log backend. Lines can be plain text
+or one JSON object per line.
 
 ## Minimal config
 
 ```yaml
-# agent_sources.yaml
+# config/agent_sources.yaml
 sources:
   - name: my-app
     type: file
@@ -16,72 +19,119 @@ sources:
       path: /var/log/my-app/app.log
 ```
 
-That's it. The agent tails new lines, parses an optional leading
-timestamp, and feeds each line through the regex pre-filter and miner.
+By default Versus starts at the end of the file and reads only new lines. Set
+`from_beginning: true` to read the whole file the first time. When the file is
+rotated or truncated, Versus starts again from the top of the new file.
 
-## Agent evidence and tools
+| Key | Default | What it does |
+|---|---|---|
+| `path` | required | The file to read. One file per source; globs are not supported. |
+| `format` | `text` | `text` or `json` (one JSON object per line). |
+| `from_beginning` | `false` | Read the existing content on first start. |
+| `cursor_path` | `.versus-cursor-<name>` next to the log | Where Versus records how far it has read. |
+| `max_line_bytes` | `65536` | Longer lines are cut to this length. |
+| `max_lines_per_pull` | `1000` | Lines read per poll. A large backlog is read over several polls. |
+| `timestamp_layout` | auto-detect | `text` only. A Go time layout for the leading timestamp. |
+| `message_field` | `message` | `json` only. Field that holds the log line. |
+| `timestamp_field` | `@timestamp` | `json` only. Field that holds the time. |
+| `severity_field` | `level` | `json` only. Field that holds the level. |
 
-Ingested lines can contribute to learned log patterns, incidents, and
-ordinary shared log investigation evidence. File is ingestion-only: it
-does not supply `discover_log_fields`, `read_log_records`, or a
-File-specific toolset for Chat or Analyze. It does not give the model
-direct filesystem access, and there is no planned File Development card.
+For Docker's JSON log files, use `format: json` with `message_field: log` and
+`timestamp_field: time`.
 
-## Full reference
+## What you see in the UI
 
-```yaml
-file:
-  path: /var/log/my-app/app.log    # REQUIRED. Globs are NOT supported.
-  format: text                     # "text" (default) or "json"
-  from_beginning: false            # true = replay whole file on first start
-  cursor_path: ""                  # default: a ".versus-cursor-<name>" file next to the watched log file
-  max_line_bytes: 65536            # truncate longer lines
-  max_lines_per_pull: 1000         # cap signals per tick (paginates backlog)
+New patterns from the file appear in **Agent Learning → Logs**, grouped by
+service, within one poll of the lines being written.
 
-  # text-mode only
-  timestamp_layout: ""             # Go time layout; empty = auto-detect
+![Agent Learning → Logs for the file example: 34 templates learned from the log file, grouped by service such as notifier, jobrunner, db-pool and storage, each with its count and all still learning](../../docs/images/ds-file-ui-dark.png)
 
-  # json-mode only
-  message_field: message
-  timestamp_field: "@timestamp"
-  severity_field: level
+## Permissions
+
+Versus needs to **read** the log file and **write** to the folder that holds
+its read position: the log's own folder by default, or the folder of
+`cursor_path`. If the log folder is mounted read-only, set `cursor_path` to a
+writable path such as `/app/data/my-app.cursor`.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| Nothing is learned | The file does not exist yet, or the lines do not match the agent's [match pattern](../regex.md) (by default, lines containing `error`). |
+| Old lines are never read | `from_beginning` is `false`, so Versus starts at the end. Set it to `true` before the first start. |
+| `read cursor` error at startup | Versus cannot read or write its position file. Check the folder permissions or set `cursor_path`. |
+| JSON lines show as raw text | `format` is still `text`, or `message_field` names a field the lines do not have. |
+
+## Try it with Docker Compose
+
+You need Git, Docker with Docker Compose v2, and Python 3 for the demo
+traffic script. Clone the repository and go into it:
+
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
 ```
 
-## Behavior
+Every command below runs from this `versus-incident` folder, the repository
+root.
 
-- **Cursor** — A `.versus-cursor-<name>` file next to the log (or `cursor_path`)
-  records the byte offset. Survives restarts and handles log rotation:
-  if the file shrinks, the source reopens from offset 0.
-- **Backlog pagination** — When `from_beginning: true` on a large
-  file, the source returns at most `max_lines_per_pull` lines per tick
-  and resumes on the next tick. Nothing is dropped.
-- **Format detection** — `format: json` parses each line as a JSON
-  object and pulls `message_field` / `timestamp_field` /
-  `severity_field`. Anything else is treated as plain text.
+[`examples/docker-compose/file/`](https://github.com/VersusControl/versus-incident/tree/main/examples/docker-compose/file)
+runs Versus (OSS image) and Redis. The agent reads `./local/logs/app.log`,
+mounted into the container at `/var/log/sample/app.log`. The first start
+creates the file empty; `local/` is ignored by git, so the demo leaves your
+checkout clean:
 
-## Tips
+```yaml
+# examples/docker-compose/file/config/agent_sources.yaml
+sources:
+  - name: sample-app
+    type: file
+    enable: true
+    file:
+      path: /var/log/sample/app.log
+      format: text
+      from_beginning: true
+      max_lines_per_pull: 1000
+```
 
-- Keep `max_lines_per_pull ≤ agent.batch_max`, otherwise the worker's
-  hard truncation drops the overflow on every tick (see
-  [Configuration](../configuration.md#signal-sources)
-  for the worked example).
-- For Docker / Kubernetes, mount the container's log directory or
-  `/var/lib/docker/containers/<id>/<id>-json.log` (with `format:
-  json`).
-- Use it in CI to run agent tests against committed fixtures.
+Start it:
 
-## Worked example
+```bash
+docker compose -f examples/docker-compose/file/docker-compose.yml up -d
+```
 
-Suppose you have `from_beginning: true` on a 50,000-line file with
-`poll_interval: 30s`, `max_lines_per_pull: 1000`,
-`agent.batch_max: 1000`:
+Start the training traffic: 20 lines every 5 seconds, stamped with the
+current time, with one line of each ordinary error in every batch. The script
+needs Python 3 on your machine. Leave it running while the agent learns; press
+`Ctrl+C` to stop it.
 
-| Tick | Lines read | Cursor advances | Remaining |
-|---|---|---|---|
-| 1 | 1,000 | 1,000 | 49,000 |
-| … | … | … | … |
-| 50 | 1,000 | 1,000 | 0 |
+```bash
+OUTPUT=examples/docker-compose/file/local/logs/app.log \
+  scripts/run_noisy_logs.sh
+```
 
-Total drain: 50 × 30s ≈ **25 min**, no losses. To go faster, raise
-**both** `max_lines_per_pull` and `agent.batch_max` together (e.g. to
-5000 → ~5 min). Raising only one drops signals.
+Open `http://localhost:3000`, enter the gateway secret `change-me`, and go to
+**Agent Learning → Logs**. The example polls every 15 seconds.
+
+Within about a minute all 6 patterns show **Known**.
+
+To see an incident, keep the training traffic running for 3 minutes. Then open
+a second terminal in the `versus-incident` folder, switch the agent to
+detect, and send one incident burst:
+
+```bash
+AGENT_MODE=detect docker compose -f examples/docker-compose/file/docker-compose.yml \
+  up -d --force-recreate versus
+OUTPUT=examples/docker-compose/file/local/logs/app.log \
+  scripts/run_noisy_logs.sh --scenario db-outage
+```
+
+The burst sends 60 lines and exits. Within about 30 seconds of the burst, often sooner, two
+`db-pool` incidents appear on the **Incidents** page, and the normal traffic
+raises none.
+
+Clean up:
+
+```bash
+docker compose -f examples/docker-compose/file/docker-compose.yml down -v
+```

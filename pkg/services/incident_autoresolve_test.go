@@ -84,9 +84,9 @@ func TestCreateIncident_WebhookAutoResolve(t *testing.T) {
 			t.Fatalf("origin = %q, want webhook", rec.Origin)
 		}
 		// The alert still fanned out: the fan-out stage ran and stamped the
-		// terminal status (no channels enabled → "sent").
-		if rec.NotifyStatus != "sent" {
-			t.Fatalf("notify_status = %q, want sent (alert must still fan out)", rec.NotifyStatus)
+		// terminal status (no channels enabled → "none").
+		if rec.NotifyStatus != "none" {
+			t.Fatalf("notify_status = %q, want none (fan-out must still complete)", rec.NotifyStatus)
 		}
 	})
 

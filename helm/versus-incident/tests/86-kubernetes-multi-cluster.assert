@@ -1,0 +1,6 @@
+# Each cluster credential is a Secret key bound to its own env variable.
+kubernetes_cluster_east_token:
+kubernetes_cluster_west_token:
+kubernetes_cluster_east_actor_token:
+name: KUBERNETES_CLUSTER_EAST_TOKEN
+name: KUBERNETES_CLUSTER_WEST_TOKEN

@@ -6,9 +6,7 @@ fleet navigation, see [Multi-Cluster](/agent/kubernetes/multi-cluster).
 
 ## Configuration
 
-Configure `connectors.kubernetes` at the root of `config.yaml`, or in an optional
-`connectors.yaml` file beside it. The examples below use the same root
-`connectors:` wrapper in either file.
+Configure in a `connectors.yaml` file beside `config.yaml`. To easily run Versus within the existing cluster, start with the [Quickstart](/agent/kubernetes/quickstart). This page is the full reference.
 
 ## Authentication
 
@@ -277,7 +275,7 @@ uncaptured or file-pruned evidence.
 | Symptom | What to check |
 | --- | --- |
 | Configured continuous capture reports effective Demand | Check the reported reason. Projected ServiceAccount tokens must be verifiable against the cluster API server. Unverified rotating or cloud identities, and unsupported storage, fall back to demand; selecting continuous alone does not guarantee coverage. |
-| History has gaps or is unavailable | Check capture mode, runtime uptime, current reader permissions, and the backend's history policy above. Revoked credentials stop capture; missing permissions leave incomplete history. Expand the history warnings rather than assuming nothing changed. |
+| History has gaps or is unavailable | Check capture mode, runtime uptime, current reader permissions, and the backend's history policy above. Revoked credentials stop capture. A namespace-only reader role saves no history; see [Least privilege](/agent/kubernetes/configuration#least-privilege). Expand the history warnings rather than assuming nothing changed. |
 | Multiple replicas need continuous history | Use shared PostgreSQL storage and the same connector configuration on current versions. Duplicate-free capture is verified for static readers and verified projected ServiceAccount readers, not every cloud identity. Confirm effective continuous capture on each replica. v1.4.34 and v1.4.35 replicas can run together during a rolling update; see [What happens on first start](/migration/migration-v1.4.35.md#what-happens-on-first-start). When upgrading from a version before v1.4.34, stop all old capture instances first. |
 | A large cluster responds slowly | Large inventories, including around 50,000 resources, can still be slow. Retry the read. Temporarily switching to demand may help reduce background work, but is not a guaranteed fix and can leave idle history gaps. |
 
@@ -287,8 +285,15 @@ Versus Enterprise `infrastructure:view` controls access to the Versus UI/API.
 It does not grant Kubernetes permissions. Bind the connector identity inside
 Kubernetes separately. For `in_cluster`, that identity is the pod
 ServiceAccount. For `eks`, it is normally the Kubernetes group assigned by the
-EKS access entry. This cluster-wide example covers discovery, resources, logs,
-and metrics with read verbs only:
+EKS access entry.
+
+The one-file manifest creates this role for you. So does the Helm chart once the
+connector is turned on (`connectors.kubernetes.enabled: true`) with
+`auth.mode: in_cluster`. Write it yourself only when you manage
+RBAC outside the chart (`kubernetesReaderRBAC.external: true`) or use another
+auth mode. It is the same role the chart creates by default: discovery,
+resources, logs, metrics, and the optional Gateway API, Argo CD, Argo Rollouts
+and Flux kinds, with read verbs only and no `secrets`.
 
 When `auth.mode: eks` is used with an IAM role, the binding subject is normally
 the Kubernetes group configured on the EKS access entry, not the pod
@@ -298,41 +303,56 @@ shows that mapping. The ServiceAccount binding below is for `in_cluster` mode.
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
-metadata: {name: versus-kubernetes-reader}
+metadata:
+  name: versus-kubernetes-reader
 rules:
-- apiGroups: [""]
-  resources: [nodes, namespaces, pods, services, events, configmaps, serviceaccounts, secrets, persistentvolumeclaims, persistentvolumes]
-  verbs: [get, list]
-- apiGroups: [""]
-  resources: [pods/log]
-  verbs: [get]
-- apiGroups: [apps]
-  resources: [deployments, statefulsets, daemonsets, replicasets, controllerrevisions]
-  verbs: [get, list]
-- apiGroups: [batch]
-  resources: [jobs, cronjobs]
-  verbs: [get, list]
-- apiGroups: [discovery.k8s.io]
-  resources: [endpointslices]
-  verbs: [get, list]
-- apiGroups: [networking.k8s.io]
-  resources: [ingresses, networkpolicies]
-  verbs: [get, list]
-- apiGroups: [autoscaling]
-  resources: [horizontalpodautoscalers]
-  verbs: [get, list]
-- apiGroups: [policy]
-  resources: [poddisruptionbudgets]
-  verbs: [get, list]
-- apiGroups: [storage.k8s.io]
-  resources: [storageclasses]
-  verbs: [get, list]
-- apiGroups: [apiextensions.k8s.io]
-  resources: [customresourcedefinitions]
-  verbs: [get, list]
-- apiGroups: [metrics.k8s.io]
-  resources: [nodes, pods]
-  verbs: [get, list]
+  - nonResourceURLs: ["/.well-known/openid-configuration", "/openid/v1/jwks"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "pods", "services", "events", "configmaps", "serviceaccounts", "persistentvolumeclaims", "persistentvolumes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "rollouts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list"]
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -348,18 +368,123 @@ roleRef:
   name: versus-kubernetes-reader
 ```
 
-The shipped role reads Secret metadata only. Resource reports project Secret
-names, labels, and referenced key names; Secret values are never projected. The
-grant is part of the role above, so remove `secrets` from your own role or
-binding if you want Secrets invisible to Versus. Gateway API reads are also
-optional: add `get,list` for `gateway.networking.k8s.io` `gateways` and
-`httproutes`, or set `kubernetesReaderRBAC.gatewayAPI=true` in the chart, only on
-clusters where those CRDs are installed.
+### Least privilege
 
-For least privilege, replace `ClusterRole`/`ClusterRoleBinding` with a `Role`
-and `RoleBinding` in each observed namespace, remove nodes/namespaces and node
-metrics, and accept a partial cluster overview. API discovery itself may
-still be visible, while forbidden resource reads are reported as partial.
+The default reader role grants read verbs only and **no `secrets`**. It never
+changes anything in the cluster. Each grant below is a trade-off you can change.
+
+Because the default role has no `secrets`, the chart also sets
+`exclude_resources: ["secrets"]`, so Versus never tries to list Secrets. Secret
+is then reported as not collected, not as a warning or a permission error.
+
+#### Where to see what is not read
+
+On the Kubernetes page, a grey info marker sits next to **Last synced** in the
+top bar, for example **1 not collected**. Hover, focus or press it to open the
+sync details. They list:
+
+- **Not readable with this connector identity:** each kind the identity may not
+  read, with its reason, then **Everything else is shown.**
+- **Not collected by configuration:** the kinds excluded by `exclude_resources`,
+  for example `Not collected by configuration: Secret`.
+- A **Reader permissions and exclusions** link to this section.
+
+When the sync has failed or is degraded, or with namespace-only access, the same
+lines appear at the end of that status's details. The marker is not shown when
+every kind is read.
+
+If you write your own role without `secrets`, set the same exclusion so Secret
+is not reported as permission denied:
+
+```yaml
+connectors:
+  kubernetes:
+    exclude_resources: ["secrets"]
+```
+
+| Reader role | What you see | History |
+| --- | --- | --- |
+| Default role (one-file manifest, or the chart with `connectors.kubernetes.enabled: true`) | Everything except Secrets and Helm releases. The sync details next to **Last synced** list Secret as not collected by configuration; the Helm tab says it needs Secret access. | Saved every cycle |
+| Default role plus `secrets` (`kubernetesReaderRBAC.secrets: true`) | Everything, including Helm releases | Saved every cycle |
+| Without the optional kinds (`kubernetesReaderRBAC.optionalKinds: false`) | Everything except Gateway, HTTPRoute, and the Argo CD, Argo Rollouts and Flux kinds | Saved every cycle |
+| Namespace-only `Role`/`RoleBinding` | Live, partial view of the granted namespaces only | Not saved |
+
+#### Helm releases need Secret access
+
+Helm stores each release in a Secret in the release namespace. To list Helm
+releases, the connector identity needs `list` on `secrets`. Without it, the Helm
+tab shows:
+
+> Helm releases need list access to Secrets. Versus reads only their labels, never their contents.
+
+The trade-off: Versus requests only the labels and metadata of those Secrets,
+but Kubernetes RBAC cannot limit a `list` to metadata. A `list` grant lets the
+connector identity read Secret **values** in every namespace it can list. That
+is why the default role leaves it off. Grant it only if you accept that.
+
+With the Helm chart, turn it on and upgrade. `kubernetesReaderRBAC.secrets: true`
+does two things: it adds `list` on `secrets` to the reader role, and it removes
+`secrets` from `exclude_resources`, so Secret is no longer listed as not collected
+in the sync details next to **Last synced**.
+
+```bash
+helm upgrade versus oci://ghcr.io/versuscontrol/charts/versus-incident -n versus --reuse-values --set kubernetesReaderRBAC.secrets=true
+```
+
+If you manage the role yourself, add this rule to it, and remove `secrets` from
+`exclude_resources` if you set it:
+
+```yaml
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
+```
+
+#### Optional kinds
+
+The default role reads Gateway API Gateways and HTTPRoutes, Argo CD
+Applications, Argo Rollouts, and Flux Kustomizations and HelmReleases. The
+grants are harmless when those CRDs are not installed. To leave them out, set
+`kubernetesReaderRBAC.optionalKinds: false` in the chart, or remove the last four
+rules from your own role. Everything else is still shown.
+
+#### Namespace-only access
+
+A namespace-only role, a `Role` and `RoleBinding` in each observed namespace
+with no cluster-wide grant, gives a live, partial view of those namespaces
+only. It saves **no Kubernetes history**: history needs a cluster-wide read of
+Namespaces so Versus can identify the cluster. The top bar shows the namespaces
+it reads; open that status for details, including any kinds not read (see
+[Where to see what is not read](/agent/kubernetes/configuration#where-to-see-what-is-not-read)).
+Cluster-scoped data such as
+Nodes is not shown, and Workloads and Issues may need a namespace selected.
+When you need history, use the cluster-wide reader role.
+
+Set it up in three steps:
+
+1. Turn off the chart's reader role, so it creates no cluster-wide grant.
+2. Bind the connector identity with a `Role` and `RoleBinding` in each namespace.
+3. Name those namespaces in `namespaces`. Versus reads them from the first sync
+   on, and again after every restart.
+
+With the Helm chart, steps 1 and 3 are one command (here for `shop` and
+`payments`):
+
+```bash
+helm upgrade versus oci://ghcr.io/versuscontrol/charts/versus-incident -n versus --reuse-values --set connectors.kubernetes.enabled=true --set kubernetesReaderRBAC.external=true --set 'connectors.kubernetes.namespaces={shop,payments}'
+```
+
+In `config.yaml` or `connectors.yaml`:
+
+```yaml
+connectors:
+  kubernetes:
+    namespaces: ["shop", "payments"]
+```
+
+With `kubernetesReaderRBAC.external: true` the chart sets no
+`exclude_resources`. If your Roles leave out `secrets`, set
+`exclude_resources: ["secrets"]` too (`--set 'connectors.kubernetes.excludeResources={secrets}'`).
 
 ## Connection options
 
@@ -376,6 +501,8 @@ These keys apply to the single connector or to each multi-cluster entry.
 | `discovery_ttl` | Discovery cache duration, such as `5m`. |
 | `allow_private_networks` | Permit private API-server addresses. |
 | `endpoint_cidrs` | Explicit allowed endpoint network ranges. |
+| `exclude_resources` | Resources, by plural API name such as `secrets`, that Versus never lists. They show as not collected by configuration, not as permission denied. |
+| `namespaces` | Namespaces to read when the identity may read only inside some namespaces. See [Namespace-only access](/agent/kubernetes/configuration#namespace-only-access). |
 | `allow_loopback` | Test-only loopback access; not for production. |
 | `actions.enable` | Enable separately authenticated action clients; disabled by default. |
 | `actions.max_replicas` | Replica ceiling for supported scale operations. |
@@ -389,25 +516,40 @@ Helm values use camelCase where the runtime YAML uses snake_case. For example,
 above. Native auth fields also use camelCase, such as `eks.clusterName`,
 `eks.roleARN`, `aks.credentialMode`, and `gke.credentialsFile`.
 
+The Kubernetes connector is off by default in the chart. Turn it on with
+`--set connectors.kubernetes.enabled=true`: the connector then reads the cluster
+Versus runs in, and the chart creates the read-only reader role. These are the
+values that produces:
+
 ```yaml
 connectors:
   kubernetes:
+    enabled: true       # chart default: false
     multiple: false
     auth:
       mode: in_cluster
 kubernetesReaderRBAC:
-  enabled: true
+  enabled:              # empty: created automatically for in_cluster
+  external: false
+  optionalKinds: true
+  secrets: false
 ```
 
-The chart defaults include `clusterID: default`, `timeout: 10s`,
+| Value | Default | What it does |
+| --- | --- | --- |
+| `connectors.kubernetes.enabled` | `false` | Set `true` to turn on the Kubernetes connector (`in_cluster`) and its read-only reader role. |
+| `kubernetesReaderRBAC.enabled` | empty | Empty creates the reader role whenever `auth.mode` is `in_cluster`. `true` creates it for any mode. `false` skips it. `external: true` always skips it; with `in_cluster`, the install then fails unless `external: true`. |
+| `kubernetesReaderRBAC.external` | `false` | `true` means you bind the connector identity to your own role or RoleBindings. The chart creates no reader role. |
+| `kubernetesReaderRBAC.optionalKinds` | `true` | Reads Gateway, HTTPRoute, Argo CD Applications, Argo Rollouts, and Flux Kustomizations and HelmReleases. |
+| `connectors.kubernetes.excludeResources` | empty | Empty renders `["secrets"]` when the chart creates the reader role without `secrets`, and `[]` with `external: true` or `secrets: true`. Set a list to choose. |
+| `connectors.kubernetes.namespaces` | `[]` | Namespaces to read with a namespace-only role. |
+| `kubernetesReaderRBAC.secrets` | `false` | Lists Secrets so the Helm tab can show Helm releases, and drops `secrets` from the default exclusion. See [Helm releases need Secret access](/agent/kubernetes/configuration#helm-releases-need-secret-access). |
+
+The chart defaults also include `clusterID: default`, `timeout: 10s`,
 `discoveryTTL: 5m`, `actions.enable: false`, `actions.maxReplicas: 20`, and
-`actions.timeout: 15s`. Secret reads are metadata-only and already part of the
-shipped reader role; remove the `secrets` grant to exclude them. Gateway API
-grants use `kubernetesReaderRBAC.gatewayAPI: true` and must be enabled
-deliberately. Keep credential values in Secrets or mounted files, not committed
-values files. See
-[Installing with Helm](/configuration/helm) and the complete
-[EKS with IRSA example](/examples/eks-irsa-kubernetes-reader).
+`actions.timeout: 15s`. Keep credential values in Secrets or mounted files, not
+committed values files. See [Installing with Helm](/configuration/helm) and the
+complete [EKS with IRSA example](/examples/eks-irsa-kubernetes-reader).
 
 ## Network and TLS policy
 

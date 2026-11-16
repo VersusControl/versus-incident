@@ -1,0 +1,6 @@
+# File storage on a persistent ReadWriteOnce volume: only one pod may use the
+# volume, so updates stop the old pod before starting the new one.
+storage:
+  type: file
+  persistence:
+    enabled: true

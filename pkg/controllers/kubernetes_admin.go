@@ -209,6 +209,7 @@ func (controller *KubernetesAdminController) commitStream(ctx *fiber.Ctx) error 
 			return writer.Flush() == nil
 		}
 		last := initial
+		pacer := &kubernetes.StreamSyncPacer{}
 		if !write("committed", initial, initial.Revision) {
 			return
 		}
@@ -229,12 +230,13 @@ func (controller *KubernetesAdminController) commitStream(ctx *fiber.Ctx) error 
 				}
 				last = current
 			}
-			age := max(0, time.Since(current.At).Seconds())
-			state, reason := "ready", ""
-			if age > 120 {
-				state, reason = "refreshing", "collection_stale"
+			syncCtx, cancelSync := context.WithTimeout(streamContext, 2*time.Second)
+			event, send := service.NextStreamSync(syncCtx, current, pacer)
+			cancelSync()
+			if !send {
+				return true
 			}
-			return write("sync", fiber.Map{"state": state, "age": age, "reason": reason, "cluster_id": current.ClusterID}, current.Revision)
+			return write("sync", event, current.Revision)
 		}
 		for {
 			select {

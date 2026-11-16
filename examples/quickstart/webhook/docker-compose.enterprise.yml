@@ -1,0 +1,41 @@
+# Enterprise overlay: runs the Enterprise image on Postgres so Alert Fatigue
+# can be turned on. Use it together with the base file:
+#
+#   export LICENSE_KEY=<your license key>     # never commit it
+#   docker compose -f docker-compose.yml -f docker-compose.enterprise.yml up -d
+#
+# Without LICENSE_KEY the Enterprise image runs in community mode and the
+# Enterprise screens stay locked.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: versus
+      POSTGRES_USER: versus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-versus-dev}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "versus", "-d", "versus"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  versus:
+    image: ${VERSUS_ENTERPRISE_IMAGE:-ghcr.io/versuscontrol/versus-enterprise:latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LICENSE_KEY: ${LICENSE_KEY:-}
+      # The Alert fatigue screen sits in the agent area of the UI, which is
+      # shown only when the agent is on. No log source is configured, so the
+      # agent has nothing to read; it only unlocks the screen.
+      AGENT_ENABLE: "true"
+      STORAGE_TYPE: postgres
+      POSTGRES_DSN: postgres://versus:${POSTGRES_PASSWORD:-versus-dev}@postgres:5432/versus?sslmode=disable
+
+volumes:
+  postgres-data:
