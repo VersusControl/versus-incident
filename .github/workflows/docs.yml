@@ -1,64 +1,263 @@
 name: Deploy docs site to Pages
 
-# Docsify documentation site — static, no build step.
+# Docsify documentation site: plain Markdown rendered in the browser by the
+# shell in src/index.html, so there is nothing to compile.
 #
-# The docs are plain HTML/CSS/JS rendered at runtime by docsify (CDN). The
-# rendering shell (`src/index.html`), the navigation (`src/_sidebar.md`) and all
-# documentation prose + images live together in this public OSS repo under
-# `src/`. There is nothing to compile, so this workflow simply uploads `src/`
-# as the Pages artifact and deploys it at the site root (custom domain via the
-# committed `src/CNAME`; `src/.nojekyll` disables Jekyll processing).
-#
-# Replaces the former React + Vite docs-app pipeline: no cross-repo checkout, no
-# PLATFORM_UI_DEPLOY_KEY secret, no repository_dispatch trigger, no Node/npm
-# build. See plans/productization/global/f4-docs-migration-plan.md.
+# The site is main's src/ plus the pages that exist only on dev, listed in
+# .github/dev-docs.json. Every run builds from both branches' current heads:
+# tools/devdocs copies the listed dev pages and the files they link to over
+# main's pages, marks each one "In development", points its Versus image at
+# the newest dev-<sha> image in the registry, and adds missing sidebar
+# entries. tools/docscheck then checks every internal link before deploying.
+# The repository files are never changed.
 
 on:
   push:
-    branches: ["main"]
+    branches: [main, dev]
     paths:
-      - "src/**"
-      - ".github/workflows/docs.yml"
+      - 'src/**'
+      - '.github/dev-docs.json'
+      - '.github/workflows/docs.yml'
+      - 'tools/devdocs/**'
+      - 'tools/docscheck/**'
+  # A finished dev image build can change which dev-<sha> tag the pages show.
+  workflow_run:
+    workflows: ['DEV - Code CI']
+    types: [completed]
+    branches: [dev]
   workflow_dispatch:
 
-# Allow GITHUB_TOKEN to deploy to GitHub Pages.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+permissions: {}
 
-# Allow only one concurrent deployment, skipping runs queued between the run
-# in-progress and latest queued. Do NOT cancel in-progress production deploys.
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
+# No workflow-level concurrency: a run the gate skips must never take a place
+# in a queue. Builds and deploys each queue in their own group without
+# cancelling a running job (see the build and deploy jobs).
 
 jobs:
-  # Build job — assemble the static docs directory (no compilation).
-  build:
+  # A push to dev rebuilds the site only when it touched a listed page, a docs
+  # image, the list or the build. A push to main is already narrowed by the
+  # path filter.
+  gate:
+    name: Does this change the site
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
     steps:
-      - name: Check out docs (this repo)
-        uses: actions/checkout@v7
+      - name: Checkout the pushed dev commit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        timeout-minutes: 5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.11'
+          cache: false
+
+      - name: Decide
+        id: decide
+        timeout-minutes: 5
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          FORCED: ${{ github.event.forced }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          build=true
+          if [ "$EVENT" = workflow_run ] && { [ "$RUN_EVENT" != push ] || [ "$RUN_REPO" != "$THIS_REPO" ]; }; then
+            # Only a push to this repository's dev builds a dev image. Pull
+            # request runs, from forks or not, never start a deploy.
+            echo "::notice::Docs build skipped: the finished CI run was a $RUN_EVENT from $RUN_REPO, not a push to dev"
+            build=false
+          elif [ "$EVENT" = workflow_run ] && [ "$RUN_CONCLUSION" != success ]; then
+            echo "::notice::Docs build skipped: the dev image build did not succeed, so no new image tag"
+            build=false
+          elif [ "$EVENT" = push ] && [ "$GITHUB_REF" = refs/heads/dev ]; then
+            if [ "${BEFORE//0/}" = "" ] || [ "$FORCED" = true ]; then
+              echo "No usable range for this push; building"
+            elif [ ! -f .github/dev-docs.json ] || [ ! -d tools/devdocs ]; then
+              echo "dev has no dev docs list or build tool yet; building"
+            elif ! git diff --name-only "$BEFORE...$GITHUB_SHA" > "$RUNNER_TEMP/changed.txt"; then
+              echo "::warning::Could not list the changed files; building"
+            else
+              build=$(go run ./tools/devdocs affected --config .github/dev-docs.json --files "$RUNNER_TEMP/changed.txt")
+              if [ "$build" != true ]; then
+                echo "::notice::Docs build skipped: this push to dev changed no listed page, docs image or the dev docs list"
+              fi
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  # One build at a time. A newer build waiting in this group replaces an
+  # older one that is still waiting, never one that is running; the newer one
+  # checks out both branch heads when it starts, so it holds every change the
+  # replaced one would have.
+  build:
+    name: Build the site
+    needs: gate
+    if: needs.gate.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: pages-build
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+      pages: read
+    steps:
+      - name: Checkout main
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: main
+          persist-credentials: false
+
+      - name: Is there a dev branch
+        id: dev
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # Only "not found" means there is no dev branch. Any other error
+          # stops the build rather than deploy a site without the dev pages.
+          if gh api "repos/$GH_REPO/branches/dev" --silent 2> "$RUNNER_TEMP/dev-branch.err"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -q "HTTP 404" "$RUNNER_TEMP/dev-branch.err"; then
+            echo "::notice::No dev branch yet: the site is built from main alone"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not check for the dev branch: $(tr '\n' ' ' < "$RUNNER_TEMP/dev-branch.err")"
+            exit 1
+          fi
+
+      # Full history, so the image lookup can tell which dev-<sha> tags are
+      # on dev.
+      - name: Checkout dev
+        if: steps.dev.outputs.exists == 'true'
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: dev
+          path: dev
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record the branch heads
+        timeout-minutes: 1
+        run: |
+          {
+            echo "### Docs built from"
+            echo "- main: \`$(git -C main rev-parse HEAD)\`"
+            if [ -d dev ]; then echo "- dev: \`$(git -C dev rev-parse HEAD)\`"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Go
+        timeout-minutes: 5
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.11'
+          cache: false
+
+      # dev's list is the one that names dev's pages; main's copy is used until
+      # dev has its own.
+      - name: Find the dev image tag
+        id: tag
+        if: steps.dev.outputs.exists == 'true'
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          config="$GITHUB_WORKSPACE/dev/.github/dev-docs.json"
+          if [ ! -f "$config" ]; then config="$GITHUB_WORKSPACE/main/.github/dev-docs.json"; fi
+          echo "config=$config" >> "$GITHUB_OUTPUT"
+          image=$(jq -r '.image' "$config")
+          rest=${image#*/}
+          owner=${rest%%/*}
+          package=${rest#*/}
+          versions="$RUNNER_TEMP/package-versions.json"
+          lookup_err="$RUNNER_TEMP/package-versions.err"
+          # A failed lookup must not stop the docs deploy: dev pages then use
+          # the moving dev tag, which points at the image of the last
+          # successful dev image build.
+          if gh api --paginate "/orgs/$owner/packages/container/$package/versions?per_page=100" > "$versions" 2> "$lookup_err" \
+            || gh api --paginate "/users/$owner/packages/container/$package/versions?per_page=100" > "$versions" 2>> "$lookup_err"; then
+            git -C dev rev-list --max-count=5000 HEAD > "$RUNNER_TEMP/dev-commits.txt"
+            tag=$(cd main && go run ./tools/devdocs pick-tag --versions "$versions" --commits "$RUNNER_TEMP/dev-commits.txt")
+          else
+            reason=$(tr '\n' ' ' < "$lookup_err" | cut -c1-300)
+            echo "::warning::Could not list the tags of $image ($reason); dev pages use :dev. Give this repository read access to the package."
+            tag=dev
+          fi
+          echo "Dev pages use $image:$tag"
+          echo "- dev image: \`$image:$tag\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build the site
+        timeout-minutes: 5
+        working-directory: main
+        env:
+          HAS_DEV: ${{ steps.dev.outputs.exists }}
+          CONFIG: ${{ steps.tag.outputs.config }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          site="$RUNNER_TEMP/site"
+          if [ "$HAS_DEV" = true ]; then
+            go run ./tools/devdocs build --config "$CONFIG" --main src --dev ../dev/src --tag "$TAG" --out "$site"
+          else
+            go run ./tools/devdocs build --main src --out "$site"
+          fi
+
+      - name: Check internal links
+        timeout-minutes: 5
+        working-directory: main
+        run: go run ./tools/docscheck --root "$RUNNER_TEMP/site"
 
       - name: Setup Pages
-        uses: actions/configure-pages@v6
+        timeout-minutes: 5
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
+        timeout-minutes: 10
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          # `src/` already contains the docsify index.html, _sidebar.md,
-          # markdown content, images, CNAME and .nojekyll — it IS the site.
-          path: src
+          path: ${{ runner.temp }}/site
 
-  # Deployment job.
+  # One deploy at a time, in a group of its own so a waiting deploy never
+  # replaces a waiting build. A newer waiting deploy replaces an older waiting
+  # one; it carries a site built later, from newer branch heads.
   deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        timeout-minutes: 10
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
