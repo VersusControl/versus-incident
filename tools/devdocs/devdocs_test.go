@@ -235,7 +235,8 @@ func TestAddSidebarEntries(t *testing.T) {
 		{Group: "In Development", Title: "AWS FinOps Agent", Route: "/in-development/aws-finops"},
 		{Group: "AWS", Title: "Quickstart", Route: "/agent/aws/quickstart"},
 	}
-	got, added := AddSidebarEntries(mainSidebar, entries)
+	// No dev sidebar: a new group goes at the end.
+	got, added := AddSidebarEntries(mainSidebar, "", entries)
 	want := `- [Introduction](/introduction)
 
 - Kubernetes Connectors
@@ -254,9 +255,189 @@ func TestAddSidebarEntries(t *testing.T) {
 	if !reflect.DeepEqual(added, []string{"/in-development/aws-finops", "/agent/aws/quickstart"}) {
 		t.Errorf("added = %v", added)
 	}
-	again, added2 := AddSidebarEntries(got, entries)
+	again, added2 := AddSidebarEntries(got, "", entries)
 	if again != got || len(added2) != 0 {
 		t.Errorf("second run changed the sidebar (added %v)", added2)
+	}
+}
+
+// devSidebar is dev's sidebar: main's groups plus "AWS" right after
+// "Kubernetes Connectors", and a dev-only "SRE Agent" group whose lines must
+// never reach the built sidebar.
+const devSidebar = `- [Introduction](/introduction)
+- [Dev Only Link](/dev-only)
+
+- Kubernetes Connectors
+  - [Kubernetes](/agent/connectors/kubernetes)
+  - [Dev Only Item](/agent/connectors/dev-only)
+
+- AWS
+  - [Quickstart](/agent/aws/quickstart)
+  - [Costs](/agent/aws/costs)
+
+- SRE Agent
+  - [Introduction](/agent/agent-introduction)
+
+- In Development
+  - [AWS Harness](/in-development/aws-harness)
+`
+
+// awsEntries lists the AWS pages in the opposite order to dev's sidebar.
+var awsEntries = []SidebarEntry{
+	{Group: "AWS", Title: "Costs", Route: "/agent/aws/costs"},
+	{Group: "AWS", Title: "Quickstart", Route: "/agent/aws/quickstart"},
+}
+
+func TestAddSidebarEntriesPlacesNewGroupAfterDevAnchor(t *testing.T) {
+	// Main has a group dev lacks between the anchor and dev's next shared
+	// group, so only the anchor (not the group after AWS) gives this place.
+	main := strings.Replace(mainSidebar, "- In Development", "- Webhooks\n  - [Send](/webhook/send)\n\n- In Development", 1)
+	got, added := AddSidebarEntries(main, devSidebar, awsEntries)
+	want := `- [Introduction](/introduction)
+
+- Kubernetes Connectors
+  - [Kubernetes](/agent/connectors/kubernetes)
+
+- AWS
+  - [Quickstart](/agent/aws/quickstart)
+  - [Costs](/agent/aws/costs)
+
+- Webhooks
+  - [Send](/webhook/send)
+
+- In Development
+  - [AWS Harness](/in-development/aws-harness)
+`
+	if got != want {
+		t.Errorf("sidebar:\n%s\nwant:\n%s", got, want)
+	}
+	if !reflect.DeepEqual(added, []string{"/agent/aws/quickstart", "/agent/aws/costs"}) {
+		t.Errorf("added = %v, want dev's item order", added)
+	}
+	// Main's released lines are all still there, unchanged and in order.
+	block := "- AWS\n  - [Quickstart](/agent/aws/quickstart)\n  - [Costs](/agent/aws/costs)\n\n"
+	if strings.Replace(got, block, "", 1) != main {
+		t.Errorf("main's entries changed:\n%s", got)
+	}
+	for _, devOnly := range []string{"dev-only", "SRE Agent", "agent-introduction"} {
+		if strings.Contains(got, devOnly) {
+			t.Errorf("%q was taken from dev's sidebar", devOnly)
+		}
+	}
+	again, added2 := AddSidebarEntries(got, devSidebar, awsEntries)
+	if again != got || len(added2) != 0 {
+		t.Errorf("second run changed the sidebar (added %v)", added2)
+	}
+}
+
+func TestAddSidebarEntriesNewGroupFirstOnDev(t *testing.T) {
+	dev := "- [Introduction](/introduction)\n\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n\n" +
+		"- Kubernetes Connectors\n  - [Kubernetes](/agent/connectors/kubernetes)\n"
+	// Main's first group is not dev's second, so only the first-group rule
+	// puts AWS at the top.
+	main := "- [Introduction](/introduction)\n\n- Webhooks\n  - [Send](/webhook/send)\n\n" + strings.TrimPrefix(mainSidebar, "- [Introduction](/introduction)\n\n")
+	got, _ := AddSidebarEntries(main, dev, awsEntries[1:])
+	want := "- [Introduction](/introduction)\n\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n\n- Webhooks\n  - [Send](/webhook/send)\n\n" +
+		strings.TrimPrefix(mainSidebar, "- [Introduction](/introduction)\n\n")
+	if got != want {
+		t.Errorf("sidebar:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAddSidebarEntriesNewGroupBeforeDevSuccessor(t *testing.T) {
+	// dev renamed the group before AWS, so the group after it places AWS.
+	dev := strings.Replace(devSidebar, "- Kubernetes Connectors", "- Kubernetes", 1)
+	dev = strings.Replace(dev, "- SRE Agent\n  - [Introduction](/agent/agent-introduction)\n\n", "", 1)
+	got, _ := AddSidebarEntries(mainSidebar, dev, awsEntries[1:])
+	want := strings.Replace(mainSidebar, "- In Development", "- AWS\n  - [Quickstart](/agent/aws/quickstart)\n\n- In Development", 1)
+	if got != want {
+		t.Errorf("sidebar:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAddSidebarEntriesNewGroupFallsBackToEnd(t *testing.T) {
+	atEnd := mainSidebar + "\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n"
+	for name, dev := range map[string]string{
+		"no dev sidebar":        "",
+		"group not on dev":      strings.Replace(devSidebar, "- AWS\n", "- Amazon\n", 1),
+		"no anchor in main":     "- Other\n  - [O](/o)\n\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n\n- Another\n  - [A](/a)\n",
+		"dev has links only":    "- [Quickstart](/agent/aws/quickstart)\n",
+		"main has no group yet": "",
+	} {
+		main := mainSidebar
+		want := atEnd
+		if name == "main has no group yet" {
+			main = "- [Introduction](/introduction)\n"
+			dev = devSidebar
+			want = main + "\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n"
+		}
+		if got, _ := AddSidebarEntries(main, dev, awsEntries[1:]); got != want {
+			t.Errorf("%s: sidebar:\n%s\nwant:\n%s", name, got, want)
+		}
+	}
+}
+
+func TestAddSidebarEntriesNeighbourTiePrefersAnchor(t *testing.T) {
+	// Both dev neighbours of AWS are in main at distance 1; the group before
+	// it on dev wins, so AWS goes after K, not before D (which would put it
+	// after W).
+	main := "- K\n  - [K](/k)\n\n- W\n  - [W](/w)\n\n- D\n  - [D](/d)\n"
+	dev := "- K\n  - [K](/k)\n\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n\n- D\n  - [D](/d)\n"
+	got, _ := AddSidebarEntries(main, dev, awsEntries[1:])
+	want := "- K\n  - [K](/k)\n\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n\n- W\n  - [W](/w)\n\n- D\n  - [D](/d)\n"
+	if got != want {
+		t.Errorf("sidebar:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestListedOnDevFilesEntryUnderDevGroup(t *testing.T) {
+	// The config says "AWS"; dev lists the page under "Amazon".
+	dev := strings.Replace(devSidebar, "- AWS\n", "- Amazon\n", 1)
+	kept, unlisted := ListedOnDev(awsEntries, dev)
+	if len(unlisted) != 0 || len(kept) != 2 || kept[0].Group != "Amazon" || kept[1].Group != "Amazon" {
+		t.Fatalf("kept %+v unlisted %v", kept, unlisted)
+	}
+	got, _ := AddSidebarEntries(mainSidebar, dev, kept)
+	want := strings.Replace(mainSidebar, "- In Development", "- Amazon\n  - [Quickstart](/agent/aws/quickstart)\n  - [Costs](/agent/aws/costs)\n\n- In Development", 1)
+	if got != want {
+		t.Errorf("sidebar:\n%s\nwant:\n%s", got, want)
+	}
+	// A link outside any group keeps the configured group.
+	kept, _ = ListedOnDev(awsEntries[1:], "- [Intro](/introduction)\n- [Start here](/agent/aws/quickstart)\n")
+	if len(kept) != 1 || kept[0].Group != "AWS" || kept[0].Title != "Start here" {
+		t.Errorf("top-level link: %+v", kept)
+	}
+}
+
+func TestListedOnDevRejectsUnsafeText(t *testing.T) {
+	entry := []SidebarEntry{{Group: "AWS", Title: "Quickstart", Route: "/agent/aws/quickstart"}}
+	block := "- AWS\n  - [Quickstart](/agent/aws/quickstart)\n"
+	// "AWS" is dev's first group in most cases, so it goes before main's
+	// first group; where dev has no plain "AWS" group it goes at the end.
+	first := strings.Replace(mainSidebar, "- Kubernetes Connectors", block+"\n- Kubernetes Connectors", 1)
+	atEnd := mainSidebar + "\n" + block
+	noAWSGroup := map[string]bool{"stray bracket": true, "html group": true}
+	for name, dev := range map[string]string{
+		"multi-line text": "- AWS\n  - [Quick\n<!--\n<img src=x onerror=alert(1)>\n- Fake Group](/agent/aws/quickstart)\n",
+		"html text":       "- AWS\n  - [<img src=x onerror=alert(1)>](/agent/aws/quickstart)\n",
+		"stray bracket":   "- AWS [beta\n  - [Quickstart](/agent/aws/quickstart)\n",
+		"nested bracket":  "- AWS\n  - [a [b](/agent/aws/quickstart)\n",
+		"code text":       "- AWS\n  - [`x`](/agent/aws/quickstart)\n",
+		"html group":      "- <img src=x onerror=alert(1)>\n  - [Quickstart](/agent/aws/quickstart)\n",
+	} {
+		kept, unlisted := ListedOnDev(entry, dev)
+		if len(unlisted) != 0 || len(kept) != 1 || kept[0].Title != "Quickstart" || kept[0].Group != "AWS" {
+			t.Errorf("%s: kept %+v unlisted %v; want the configured title and group", name, kept, unlisted)
+			continue
+		}
+		got, _ := AddSidebarEntries(mainSidebar, dev, kept)
+		want := first
+		if noAWSGroup[name] {
+			want = atEnd
+		}
+		if got != want {
+			t.Errorf("%s: sidebar:\n%s\nwant:\n%s", name, got, want)
+		}
 	}
 }
 
@@ -339,6 +520,75 @@ func TestOverlay(t *testing.T) {
 	}
 }
 
+func TestOverlayPlacesNewGroupFromDevSidebar(t *testing.T) {
+	dev := devTree()
+	// dev's sidebar gives the quickstart its own link text and does not
+	// list in-development/aws-finops.md, which the config's glob matches.
+	devSb := strings.Replace(devSidebar, "[Quickstart](/agent/aws/quickstart)", "[Quick start on AWS](/agent/aws/quickstart)", 1)
+	dev["_sidebar.md"] = &fstest.MapFile{Data: []byte(devSb)}
+	site := Files{"_sidebar.md": []byte(mainSidebar)}
+	r, err := Overlay(mustConfig(t), site, dev, "dev-1a2b3c4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `- [Introduction](/introduction)
+
+- Kubernetes Connectors
+  - [Kubernetes](/agent/connectors/kubernetes)
+
+- AWS
+  - [Quick start on AWS](/agent/aws/quickstart)
+
+- In Development
+  - [AWS Harness](/in-development/aws-harness)
+`
+	if got := string(site["_sidebar.md"]); got != want {
+		t.Errorf("sidebar:\n%s\nwant:\n%s", got, want)
+	}
+	if !reflect.DeepEqual(r.SidebarAdded, []string{"/agent/aws/quickstart"}) {
+		t.Errorf("SidebarAdded = %v", r.SidebarAdded)
+	}
+}
+
+func TestOverlayPublishesPageDevSidebarDoesNotList(t *testing.T) {
+	dev := devTree()
+	dev["_sidebar.md"] = &fstest.MapFile{Data: []byte(devSidebar)}
+	site := Files{"_sidebar.md": []byte(mainSidebar)}
+	r, err := Overlay(mustConfig(t), site, dev, "dev-1a2b3c4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(site["in-development/aws-finops.md"]), "# AWS FinOps Agent\n\n"+BadgeLine) {
+		t.Error("a dev page the sidebar does not list was not published")
+	}
+	if SidebarHas(string(site["_sidebar.md"]), "/in-development/aws-finops") {
+		t.Errorf("a page dev's sidebar does not list got a sidebar entry:\n%s", site["_sidebar.md"])
+	}
+	if !reflect.DeepEqual(r.NotInSidebar, []string{"/in-development/aws-finops"}) {
+		t.Errorf("NotInSidebar = %v", r.NotInSidebar)
+	}
+}
+
+func TestOverlaySymlinkedDevSidebarCountsAsNone(t *testing.T) {
+	dev := devTree()
+	dev["notes/sidebar.md"] = &fstest.MapFile{Data: []byte(devSidebar)}
+	dev["_sidebar.md"] = &fstest.MapFile{Data: []byte("notes/sidebar.md"), Mode: fs.ModeSymlink}
+	site := Files{"_sidebar.md": []byte(mainSidebar)}
+	r, err := Overlay(mustConfig(t), site, dev, "dev-1a2b3c4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As with no dev sidebar: every listed page gets an entry and the new
+	// group goes at the end.
+	want := mainSidebar[:len(mainSidebar)-1] + "\n  - [AWS FinOps Agent](/in-development/aws-finops)\n\n- AWS\n  - [Quickstart](/agent/aws/quickstart)\n"
+	if got := string(site["_sidebar.md"]); got != want {
+		t.Errorf("sidebar:\n%s\nwant:\n%s", got, want)
+	}
+	if len(r.NotInSidebar) != 0 {
+		t.Errorf("NotInSidebar = %v", r.NotInSidebar)
+	}
+}
+
 func TestOverlayReportsPageWithoutTitle(t *testing.T) {
 	dev := devTree()
 	dev["in-development/notes.md"] = &fstest.MapFile{Data: []byte("Some notes, no title.\n")}
@@ -397,6 +647,7 @@ func TestAffected(t *testing.T) {
 		"src/agent/aws/quickstart.md":        true,
 		"src/docs/images/new.png":            true,
 		".github/dev-docs.json":              true,
+		"src/_sidebar.md":                    true,
 		"tools/devdocs/main.go":              false,
 		".github/workflows/docs.yml":         false,
 		"src/agent/connectors/kubernetes.md": false,
