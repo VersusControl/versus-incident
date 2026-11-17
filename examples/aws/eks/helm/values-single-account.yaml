@@ -1,0 +1,19 @@
+# One account, IRSA or Pod Identity. Versus reads the account it runs in with
+# the role it gets from EKS (versus-app). The file is the same for both paths:
+# only the ServiceAccount differs, and you create it before the install.
+
+serviceAccount:
+  create: false
+  name: ${SERVICE_ACCOUNT}
+
+connectors:
+  aws:
+    enable: true
+    accounts:
+      - accountId: "${VERSUS_ACCOUNT_ID}"
+        displayName: Platform
+        regions: [${AWS_REGION}]
+        auth:
+          mode: default_chain
+    credentials:
+      existingSecret: ""   # empty: the identity comes from IRSA or Pod Identity

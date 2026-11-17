@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssumeVersusReaderRoles",
+      "Effect": "Allow",
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ],
+      "Resource": [
+        "arn:aws:iam::${PROD_ACCOUNT_ID}:role/versus-reader",
+        "arn:aws:iam::${STAGING_ACCOUNT_ID}:role/versus-reader"
+      ]
+    }
+  ]
+}

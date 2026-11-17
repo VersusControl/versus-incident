@@ -2,6 +2,8 @@
   "image": "ghcr.io/versuscontrol/versus-incident",
   "pages": [
     { "path": "in-development/**", "sidebar": { "group": "In Development" } },
-    { "path": "agent/aws/quickstart.md", "sidebar": { "group": "AWS", "title": "Quickstart" } }
+    { "path": "agent/aws/quickstart.md", "sidebar": { "group": "AWS", "title": "Quickstart" } },
+    { "path": "agent/aws/configuration.md", "sidebar": { "group": "AWS", "title": "Configuration" } },
+    { "path": "examples/aws-eks-irsa-pod-identity.md", "sidebar": { "group": "Examples", "title": "AWS on EKS" } }
   ]
 }

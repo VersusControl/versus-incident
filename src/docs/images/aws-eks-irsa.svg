@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="412" viewBox="0 0 760 412" style="max-width:100%;height:auto" role="img" aria-label="IRSA in five steps: first, the ServiceAccount versus/versus-incident carries the annotation eks.amazonaws.com/role-arn with the value arn:aws:iam::999988887777:role/versus-app; second, EKS injects a projected web identity token into the Versus pod, with AWS_ROLE_ARN and AWS_WEB_IDENTITY_TOKEN_FILE; third, Versus calls AWS STS AssumeRoleWithWebIdentity, and STS checks the trust of the IAM role versus-app, which trusts the cluster IAM OIDC provider on the condition sub = system:serviceaccount:versus:versus-incident; fourth, STS returns temporary credentials for versus-app; fifth, Versus reads AWS APIs read only">
+  <title>IRSA: how the Versus pod gets the IAM role versus-app</title>
+  <desc>Top: the EKS cluster with the annotated ServiceAccount, step 1, and the Versus pod that receives a projected web identity token, step 2; bottom: the IAM role versus-app with its OIDC trust condition, AWS STS, which takes the AssumeRoleWithWebIdentity call, step 3, and returns temporary credentials, step 4, and the AWS APIs that Versus reads, step 5</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+  <style>
+    text{font-family:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;font-size:13px;fill:#000000}
+    .m{text-anchor:middle}
+    .end{text-anchor:end}
+    .name{font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .d{font-size:12px;fill:#5B6B78}
+    .dk{font-size:12px;fill:#12222F}
+    .lbl{font-size:12px;font-weight:600;fill:#5B6B78}
+    .c{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;fill:#12222F}
+    .num{font-size:12px;font-weight:700;fill:#FFFFFF}
+    .out{fill:none;stroke:#9AA9B6;stroke-width:1}
+    .blk{fill:#FFFFFF;stroke:#12222F;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#12222F;stroke-width:2}
+    .code{fill:#F7F9FB;stroke:#D8E0E8;stroke-width:1}
+    .flow{fill:none;stroke:#000000;stroke-width:2}
+    .badge{fill:#12222F}
+  </style>
+
+  <rect width="760" height="412" fill="#FFFFFF"/>
+
+  <!-- cluster outline -->
+  <rect class="out" x="16" y="44" width="728" height="170" rx="6"/>
+
+  <!-- blocks -->
+  <rect class="blk" x="32" y="76" width="306" height="122" rx="6"/>
+  <rect class="code" x="42" y="142" width="290" height="46" rx="4"/>
+  <rect class="sub" x="430" y="76" width="298" height="122" rx="6"/>
+
+  <rect class="sub" x="32" y="262" width="336" height="130" rx="6"/>
+  <rect class="code" x="44" y="324" width="312" height="54" rx="4"/>
+  <rect class="blk" x="430" y="290" width="160" height="84" rx="6"/>
+  <rect class="blk" x="620" y="290" width="108" height="84" rx="6"/>
+
+  <!-- arrows -->
+  <path class="flow" d="M338 150H424" marker-end="url(#a)"/>
+  <path class="flow" d="M470 198V284" marker-end="url(#a)"/>
+  <path class="flow" d="M550 290V204" marker-end="url(#a)"/>
+  <path class="flow" d="M690 198V284" marker-end="url(#a)"/>
+  <path class="flow" d="M430 332H374" marker-end="url(#a)"/>
+
+  <!-- step badges -->
+  <circle class="badge" cx="54" cy="101" r="11"/>
+  <circle class="badge" cx="384" cy="150" r="11"/>
+  <circle class="badge" cx="470" cy="241" r="11"/>
+  <circle class="badge" cx="550" cy="241" r="11"/>
+  <circle class="badge" cx="690" cy="241" r="11"/>
+  <text class="num m" x="54" y="105">1</text>
+  <text class="num m" x="384" y="154">2</text>
+  <text class="num m" x="470" y="245">3</text>
+  <text class="num m" x="550" y="245">4</text>
+  <text class="num m" x="690" y="245">5</text>
+
+  <!-- text: cluster -->
+  <text class="zone" x="32" y="64">EKS CLUSTER</text>
+
+  <text class="name" x="74" y="107" style="font-size:17px">ServiceAccount</text>
+  <text class="c" x="48" y="130" style="font-size:12px">versus/versus-incident</text>
+  <text class="c" x="50" y="160" style="font-size:11px">eks.amazonaws.com/role-arn:</text>
+  <text class="c" x="50" y="178" style="font-size:11px">arn:aws:iam::999988887777:role/versus-app</text>
+
+  <text class="lbl m" x="384" y="118">EKS injects</text>
+  <text class="lbl m" x="384" y="132">a token</text>
+
+  <text class="name" x="446" y="104" style="font-size:17px">Versus pod</text>
+  <text class="d" x="446" y="126">projected web identity token</text>
+  <text class="c" x="446" y="152" style="font-size:11px">AWS_ROLE_ARN</text>
+  <text class="c" x="446" y="170" style="font-size:11px">AWS_WEB_IDENTITY_TOKEN_FILE</text>
+
+  <!-- text: step labels -->
+  <text class="c end" x="452" y="245" style="font-size:11px">AssumeRoleWithWebIdentity</text>
+  <text class="lbl" x="566" y="230">temporary</text>
+  <text class="lbl" x="566" y="244">credentials for</text>
+  <text class="c" x="566" y="258" style="font-size:11px">versus-app</text>
+  <text class="lbl" x="707" y="245">read</text>
+
+  <!-- text: AWS side -->
+  <text class="name" x="48" y="290" style="font-size:17px">IAM role</text>
+  <text class="c" x="126" y="290">versus-app</text>
+  <text class="dk" x="48" y="312">trusts the cluster IAM OIDC provider</text>
+  <text class="c" x="52" y="344" style="font-size:11px">sub =</text>
+  <text class="c" x="52" y="364" style="font-size:11px">system:serviceaccount:versus:versus-incident</text>
+
+  <text class="lbl m" x="399" y="310">checks</text>
+  <text class="lbl m" x="399" y="324">trust</text>
+
+  <text class="name m" x="510" y="324" style="font-size:17px">AWS STS</text>
+  <text class="d m" x="510" y="346">checks the token</text>
+
+  <text class="name m" x="674" y="324" style="font-size:17px">AWS APIs</text>
+  <text class="d m" x="674" y="346">read only</text>
+</svg>

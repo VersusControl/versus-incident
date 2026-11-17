@@ -11,6 +11,7 @@
 
 - AWS
   - [Quickstart](/agent/aws/quickstart)
+  - [Configuration](/agent/aws/configuration)
 
 - SRE Agent
   - [Introduction](/agent/agent-introduction)
@@ -101,6 +102,7 @@
 
 - Examples
   - [EKS with IRSA](/examples/eks-irsa-kubernetes-reader)
+  - [AWS on EKS](/examples/aws-eks-irsa-pod-identity)
   - [SigNoz Logs](/examples/signoz-logs)
   - [Alertmanager](/examples/alertmanager)
   - [FluentBit](/examples/fluent-bit)

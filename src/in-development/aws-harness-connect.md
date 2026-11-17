@@ -1,7 +1,5 @@
 # Connect your AWS account
 
-_In development — not released yet_
-
 Connecting an account lets AWS Harness read its resource metadata. It takes a
 few minutes, writes nothing to your account, and shows you exactly what Versus
 can read before you save. New to AWS Harness? [See the
@@ -139,10 +137,10 @@ account and region.
 
 Both artifacts create the same role, and either is fine:
 
-- [versus-reader.yaml](https://github.com/VersusControl/versus-incident/blob/main/scripts/aws/versus-reader.yaml)
+- [versus-reader.yaml](https://github.com/VersusControl/versus-incident/blob/dev/scripts/aws/versus-reader.yaml)
   — CloudFormation.
-- [Terraform module](https://github.com/VersusControl/versus-incident/tree/main/scripts/aws/terraform/versus-reader)
-  — the [README](https://github.com/VersusControl/versus-incident/blob/main/scripts/aws/README.md)
+- [Terraform module](https://github.com/VersusControl/versus-incident/tree/dev/scripts/aws/terraform/versus-reader)
+  — the [README](https://github.com/VersusControl/versus-incident/blob/dev/scripts/aws/README.md)
   covers both.
 
 | Parameter | Terraform | Value |
@@ -183,7 +181,7 @@ account in Versus stops the reads but leaves the role in place.
 
 ## Create the role with the AWS CLI
 
-The script in [scripts/aws/cli/](https://github.com/VersusControl/versus-incident/blob/main/scripts/aws/cli/README.md) creates the same
+The script in [scripts/aws/cli/](https://github.com/VersusControl/versus-incident/blob/dev/scripts/aws/cli/README.md) creates the same
 `versus-reader` role as the template, prints its ARN, and can be re-run to
 update the trust in place.
 

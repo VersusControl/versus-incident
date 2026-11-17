@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="488" viewBox="0 0 760 488" style="max-width:100%;height:auto" role="img" aria-label="Versus runs as a pod in an EKS cluster in the platform account 999988887777, with the ServiceAccount versus/versus-incident; the pod gets the IAM role versus-app through either IRSA or EKS Pod Identity; versus-app reads the AWS APIs of its own account with default_chain; versus-app also calls sts:AssumeRole and sts:TagSession with an external ID into the role versus-reader in the Production account 111122223333 and in the Staging account 444455556666, and into the role versus-cost-reader in the management account 123456789012; each versus-reader reads inventory, AWS Health and CloudTrail changes in its account, and versus-cost-reader reads Cost Explorer for the whole Organization; every read is read only, with no write actions">
+  <title>Versus on Amazon EKS reads its platform account and your other AWS accounts through IAM roles</title>
+  <desc>Left: the platform account 999988887777 with the EKS cluster, the Versus pod and its ServiceAccount, which gets the IAM role versus-app through IRSA or Pod Identity, and a read arrow from versus-app to the AWS APIs of the platform account through default_chain; right: Production 111122223333, Staging 444455556666 and the management account 123456789012, each with a role that versus-app assumes through sts:AssumeRole and sts:TagSession with an external ID, and read only arrows from each role to inventory, AWS Health and CloudTrail changes, or to Cost Explorer for the cost role</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+  <style>
+    text{font-family:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;font-size:13px;fill:#000000}
+    .m{text-anchor:middle}
+    .name{font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .id{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;font-size:12px;fill:#5B6B78}
+    .d{font-size:12px;fill:#5B6B78}
+    .dk{font-size:12px;fill:#12222F}
+    .lbl{font-size:12px;font-weight:600;fill:#5B6B78}
+    .c{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;fill:#12222F}
+    .cs{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;font-size:11px;font-weight:400;fill:#12222F}
+    .acct{fill:none;stroke:#5B6B78;stroke-width:1.5}
+    .out{fill:none;stroke:#9AA9B6;stroke-width:1}
+    .blk{fill:#FFFFFF;stroke:#12222F;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#12222F;stroke-width:2}
+    .chip{fill:#FFFFFF;stroke:#12222F;stroke-width:1.5}
+    .flow{fill:none;stroke:#000000;stroke-width:2}
+  </style>
+
+  <rect width="760" height="488" fill="#FFFFFF"/>
+
+  <!-- account frames and cluster outline -->
+  <rect class="acct" x="16" y="44" width="234" height="428" rx="8"/>
+  <rect class="out" x="28" y="92" width="210" height="130" rx="6"/>
+  <rect class="acct" x="386" y="44" width="358" height="120" rx="8"/>
+  <rect class="acct" x="386" y="176" width="358" height="120" rx="8"/>
+  <rect class="acct" x="386" y="308" width="358" height="120" rx="8"/>
+
+  <!-- blocks -->
+  <rect class="sub" x="40" y="122" width="186" height="86" rx="6"/>
+  <rect class="sub" x="40" y="296" width="186" height="72" rx="6"/>
+  <rect class="chip" x="40" y="416" width="110" height="40" rx="4"/>
+
+  <rect class="blk" x="400" y="90" width="156" height="62" rx="6"/>
+  <rect class="chip" x="590" y="90" width="140" height="62" rx="4"/>
+  <rect class="blk" x="400" y="222" width="156" height="62" rx="6"/>
+  <rect class="chip" x="590" y="222" width="140" height="62" rx="4"/>
+  <rect class="blk" x="400" y="354" width="156" height="62" rx="6"/>
+  <rect class="chip" x="590" y="354" width="140" height="62" rx="4"/>
+
+  <!-- arrows: identity -->
+  <path class="flow" d="M83 208V290" marker-end="url(#a)"/>
+  <path class="flow" d="M183 208V290" marker-end="url(#a)"/>
+
+  <!-- arrow: read in the platform account -->
+  <path class="flow" d="M95 368V410" marker-end="url(#a)"/>
+
+  <!-- arrows: assume role fan out -->
+  <path class="flow" d="M226 332H318V121H394" marker-end="url(#a)"/>
+  <path class="flow" d="M226 332H318V253H394" marker-end="url(#a)"/>
+  <path class="flow" d="M226 332H318V385H394" marker-end="url(#a)"/>
+
+  <!-- arrows: reads in the target accounts -->
+  <path class="flow" d="M556 121H584" marker-end="url(#a)"/>
+  <path class="flow" d="M556 253H584" marker-end="url(#a)"/>
+  <path class="flow" d="M556 385H584" marker-end="url(#a)"/>
+
+  <!-- legend arrow -->
+  <path class="flow" d="M400 452H428" marker-end="url(#a)"/>
+
+  <!-- edge label backgrounds -->
+  <rect x="65" y="245" width="36" height="20" fill="#FFFFFF"/>
+  <rect x="144" y="245" width="78" height="20" fill="#FFFFFF"/>
+  <rect x="258" y="265" width="120" height="56" fill="#FFFFFF"/>
+
+  <!-- text: platform account -->
+  <text class="zone" x="28" y="64">PLATFORM ACCOUNT</text>
+  <text class="id" x="28" y="80">999988887777</text>
+  <text class="zone" x="40" y="112">EKS CLUSTER</text>
+
+  <text class="name m" x="133" y="150" style="font-size:17px">Versus pod</text>
+  <text class="d m" x="133" y="172">ServiceAccount</text>
+  <text class="c m" x="133" y="190" style="font-size:12px">versus/versus-incident</text>
+
+  <text class="lbl m" x="83" y="259">IRSA</text>
+  <text class="d m" x="122" y="259">or</text>
+  <text class="lbl m" x="183" y="259">Pod Identity</text>
+
+  <text class="name m" x="133" y="324" style="font-size:17px">IAM role</text>
+  <text class="c m" x="133" y="348" style="font-size:14px">versus-app</text>
+
+  <text class="lbl" x="107" y="394">read <tspan class="cs">(default_chain)</tspan></text>
+  <text class="name m" x="95" y="441">AWS APIs</text>
+
+  <text class="lbl m" x="318" y="281"><tspan class="cs">sts:AssumeRole</tspan> +</text>
+  <text class="lbl m" x="318" y="296"><tspan class="cs">sts:TagSession</tspan>,</text>
+  <text class="lbl m" x="318" y="312">external ID</text>
+
+  <!-- text: production -->
+  <text class="zone" x="400" y="64">PRODUCTION</text>
+  <text class="id" x="400" y="80">111122223333</text>
+  <text class="c m" x="478" y="116">versus-reader</text>
+  <text class="d m" x="478" y="135">IAM role</text>
+  <text class="dk m" x="660" y="108">Inventory</text>
+  <text class="dk m" x="660" y="124">AWS Health</text>
+  <text class="dk m" x="660" y="140">CloudTrail changes</text>
+
+  <!-- text: staging -->
+  <text class="zone" x="400" y="196">STAGING</text>
+  <text class="id" x="400" y="212">444455556666</text>
+  <text class="c m" x="478" y="248">versus-reader</text>
+  <text class="d m" x="478" y="267">IAM role</text>
+  <text class="dk m" x="660" y="240">Inventory</text>
+  <text class="dk m" x="660" y="256">AWS Health</text>
+  <text class="dk m" x="660" y="272">CloudTrail changes</text>
+
+  <!-- text: management -->
+  <text class="zone" x="400" y="328">MANAGEMENT ACCOUNT (COST)</text>
+  <text class="id" x="400" y="344">123456789012</text>
+  <text class="c m" x="478" y="380">versus-cost-reader</text>
+  <text class="d m" x="478" y="399">IAM role</text>
+  <text class="dk m" x="660" y="378">Cost Explorer</text>
+  <text class="d m" x="660" y="396">whole Organization</text>
+
+  <!-- legend -->
+  <text class="lbl" x="438" y="456">read only, no write actions</text>
+</svg>

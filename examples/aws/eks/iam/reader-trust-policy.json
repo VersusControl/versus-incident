@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VersusAppWithExternalId",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::${VERSUS_ACCOUNT_ID}:role/versus-app"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "${VERSUS_AWS_EXTERNAL_ID}"
+        }
+      }
+    }
+  ]
+}

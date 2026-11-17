@@ -1,7 +1,5 @@
 # Read your FinOps report
 
-_In development — not released yet_
-
 **The FinOps report fits a month of AWS cost on two pages: what you spent, what
 moved it, and what you can save.** This guide walks through it block by block,
 so you can read it, or send it to someone who has never opened Versus.

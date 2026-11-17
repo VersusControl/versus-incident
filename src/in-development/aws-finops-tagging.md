@@ -1,7 +1,5 @@
 # Tag your AWS cost for ownership
 
-_In development — not released yet_
-
 **Give every dollar an owner with one tag.** The FinOps agent names the team
 behind each cost from a single tag. This guide shows how to set it up and what
 the page shows until you do.
