@@ -1,0 +1,20 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CostReads",
+      "Effect": "Allow",
+      "Resource": "*",
+      "Action": [
+        "ce:GetCostAndUsage",
+        "ce:GetCostAndUsageWithResources",
+        "ce:GetCostForecast",
+        "ce:GetSavingsPlansCoverage",
+        "ce:ListCostAllocationTags",
+        "budgets:ViewBudget",
+        "cost-optimization-hub:ListRecommendations",
+        "compute-optimizer:GetEC2InstanceRecommendations"
+      ]
+    }
+  ]
+}

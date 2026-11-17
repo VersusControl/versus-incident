@@ -1,0 +1,34 @@
+# Several accounts. Layer on top of values-single-account.yaml:
+#   -f values-single-account.yaml -f values-multi-account.yaml
+# Helm replaces lists, so this file lists every account, the first one again.
+
+connectors:
+  aws:
+    accounts:
+      - accountId: "${VERSUS_ACCOUNT_ID}"
+        displayName: Platform
+        regions: [${AWS_REGION}]
+        auth:
+          mode: default_chain
+      - accountId: "${PROD_ACCOUNT_ID}"
+        displayName: Production
+        regions: [${AWS_REGION}]
+        auth:
+          mode: assume_role
+          roleArn: arn:aws:iam::${PROD_ACCOUNT_ID}:role/versus-reader
+          externalIdEnv: VERSUS_AWS_EXTERNAL_ID   # name of the env var, not the value
+      - accountId: "${STAGING_ACCOUNT_ID}"
+        displayName: Staging
+        regions: [${AWS_REGION}]
+        auth:
+          mode: assume_role
+          roleArn: arn:aws:iam::${STAGING_ACCOUNT_ID}:role/versus-reader
+          externalIdEnv: VERSUS_AWS_EXTERNAL_ID
+
+# The external ID reaches the pod from a Secret you create, as an env var.
+extraEnv:
+  - name: VERSUS_AWS_EXTERNAL_ID
+    valueFrom:
+      secretKeyRef:
+        name: versus-aws-external-id
+        key: external_id

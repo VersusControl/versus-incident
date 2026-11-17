@@ -56,7 +56,7 @@ What Versus can read:
 | Changes | None. Versus never creates, edits or deletes anything in your account. |
 
 The full policy is in
-[`scripts/aws/versus-quickstart-policy.json`](https://github.com/VersusControl/versus-incident/blob/main/scripts/aws/versus-quickstart-policy.json).
+[`scripts/aws/versus-quickstart-policy.json`](https://github.com/VersusControl/versus-incident/blob/dev/scripts/aws/versus-quickstart-policy.json).
 
 ## Step 1: Create the IAM user
 
@@ -154,6 +154,9 @@ export GATEWAY_SECRET=$(openssl rand -hex 32)
 Go to [What you'll see](#step-4-what-youll-see).
 
 ## Step 3, Option B: Kubernetes
+
+For a detailed EKS setup with IRSA or Pod Identity, several accounts and
+FinOps, see [AWS on EKS](/examples/aws-eks-irsa-pod-identity).
 
 **1. Store the key in a Secret.** The key reaches the pod as environment
 variables only, never in a ConfigMap.

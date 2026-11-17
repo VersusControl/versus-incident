@@ -1,0 +1,41 @@
+# FinOps for an AWS Organization. Layer last:
+#   -f values-single-account.yaml -f values-multi-account.yaml \
+#   -f values-finops.yaml -f values-finops-organization.yaml
+# The management account reads the cost of every account through
+# versus-cost-reader. Helm replaces lists, so this file lists every account
+# again, plus the management account.
+
+connectors:
+  aws:
+    accounts:
+      - accountId: "${VERSUS_ACCOUNT_ID}"
+        displayName: Platform
+        regions: [${AWS_REGION}]
+        auth:
+          mode: default_chain
+      - accountId: "${PROD_ACCOUNT_ID}"
+        displayName: Production
+        regions: [${AWS_REGION}]
+        auth:
+          mode: assume_role
+          roleArn: arn:aws:iam::${PROD_ACCOUNT_ID}:role/versus-reader
+          externalIdEnv: VERSUS_AWS_EXTERNAL_ID
+      - accountId: "${STAGING_ACCOUNT_ID}"
+        displayName: Staging
+        regions: [${AWS_REGION}]
+        auth:
+          mode: assume_role
+          roleArn: arn:aws:iam::${STAGING_ACCOUNT_ID}:role/versus-reader
+          externalIdEnv: VERSUS_AWS_EXTERNAL_ID
+      - accountId: "${MGMT_ACCOUNT_ID}"
+        displayName: Management
+        regions: [us-east-1]       # Cost Explorer is global
+        auth:
+          mode: assume_role
+          roleArn: arn:aws:iam::${MGMT_ACCOUNT_ID}:role/versus-cost-reader
+          externalIdEnv: VERSUS_AWS_EXTERNAL_ID
+    finops:
+      costSourceAccount: "${MGMT_ACCOUNT_ID}"
+      accountGroups:
+        - {name: Production, accounts: ["${PROD_ACCOUNT_ID}"]}
+        - {name: Non-production, accounts: ["${VERSUS_ACCOUNT_ID}", "${STAGING_ACCOUNT_ID}"]}

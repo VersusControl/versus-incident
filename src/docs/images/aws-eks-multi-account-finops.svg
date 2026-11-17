@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="564" viewBox="0 0 760 564" style="max-width:100%;height:auto" role="img" aria-label="In the platform account 999988887777, the external ID lives in the Kubernetes Secret versus-aws-external-id, which reaches the Versus pod through secretKeyRef as the environment variable VERSUS_AWS_EXTERNAL_ID; the pod runs as the IAM role versus-app through IRSA or Pod Identity; versus-app calls sts:AssumeRole and sts:TagSession with the external ID into versus-reader in the Production account 111122223333 and in the Staging account 444455556666, and into versus-cost-reader in the management account 123456789012; each of these roles trusts versus-app with the sts:ExternalId condition; versus-cost-reader reads Cost Explorer for the cost of every account in the Organization, and the config sets finops.cost_source_account = 123456789012">
+  <title>Multi account access and FinOps with one external ID</title>
+  <desc>Left: the platform account 999988887777, where a Kubernetes Secret supplies VERSUS_AWS_EXTERNAL_ID to the Versus pod, which runs as versus-app; right: versus-app calls sts:AssumeRole and sts:TagSession with the external ID into versus-reader in Production 111122223333 and Staging 444455556666 and into versus-cost-reader in the management account 123456789012, each role trusts versus-app plus sts:ExternalId, and versus-cost-reader reads Cost Explorer for the whole Organization, set in config by finops.cost_source_account = 123456789012</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+  <style>
+    text{font-family:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;font-size:13px;fill:#000000}
+    .m{text-anchor:middle}
+    .name{font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .id{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;font-size:12px;fill:#5B6B78}
+    .d{font-size:12px;fill:#5B6B78}
+    .dk{font-size:12px;fill:#12222F}
+    .lbl{font-size:12px;font-weight:600;fill:#5B6B78}
+    .c{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;fill:#12222F}
+    .cs{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;font-size:11px;font-weight:400;fill:#12222F}
+    .acct{fill:none;stroke:#5B6B78;stroke-width:1.5}
+    .out{fill:none;stroke:#9AA9B6;stroke-width:1}
+    .blk{fill:#FFFFFF;stroke:#12222F;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#12222F;stroke-width:2}
+    .flow{fill:none;stroke:#000000;stroke-width:2}
+  </style>
+
+  <rect width="760" height="564" fill="#FFFFFF"/>
+
+  <!-- account frames and cluster outline -->
+  <rect class="acct" x="16" y="44" width="234" height="504" rx="8"/>
+  <rect class="out" x="28" y="92" width="210" height="285" rx="6"/>
+  <rect class="acct" x="386" y="44" width="358" height="108" rx="8"/>
+  <rect class="acct" x="386" y="164" width="358" height="108" rx="8"/>
+  <rect class="acct" x="386" y="284" width="358" height="264" rx="8"/>
+
+  <!-- blocks -->
+  <rect class="blk" x="40" y="128" width="186" height="62" rx="6"/>
+  <rect class="sub" x="40" y="281" width="186" height="80" rx="6"/>
+  <rect class="sub" x="40" y="452" width="186" height="72" rx="6"/>
+
+  <rect class="blk" x="400" y="90" width="176" height="50" rx="6"/>
+  <rect class="blk" x="400" y="210" width="176" height="50" rx="6"/>
+  <rect class="blk" x="400" y="330" width="176" height="50" rx="6"/>
+  <rect class="blk" x="400" y="418" width="176" height="72" rx="6"/>
+
+  <!-- arrows: inside the platform account -->
+  <path class="flow" d="M133 190V275" marker-end="url(#a)"/>
+  <path class="flow" d="M133 361V446" marker-end="url(#a)"/>
+
+  <!-- arrows: assume role fan out -->
+  <path class="flow" d="M226 488H318V115H394" marker-end="url(#a)"/>
+  <path class="flow" d="M226 488H318V235H394" marker-end="url(#a)"/>
+  <path class="flow" d="M226 488H318V355H394" marker-end="url(#a)"/>
+
+  <!-- arrow: cost read -->
+  <path class="flow" d="M488 380V412" marker-end="url(#a)"/>
+
+  <!-- edge label background -->
+  <rect x="258" y="267" width="120" height="56" fill="#FFFFFF"/>
+
+  <!-- text: platform account -->
+  <text class="zone" x="28" y="64">PLATFORM ACCOUNT</text>
+  <text class="id" x="28" y="80">999988887777</text>
+  <text class="zone" x="40" y="112">EKS CLUSTER</text>
+
+  <text class="name m" x="133" y="154" style="font-size:17px">Secret</text>
+  <text class="c m" x="133" y="176" style="font-size:12px">versus-aws-external-id</text>
+
+  <text class="cs" x="144" y="239">secretKeyRef</text>
+
+  <text class="name m" x="133" y="307" style="font-size:17px">Versus pod</text>
+  <text class="d m" x="133" y="327">env</text>
+  <text class="cs m" x="133" y="345">VERSUS_AWS_EXTERNAL_ID</text>
+
+  <text class="lbl" x="144" y="401">IRSA or</text>
+  <text class="lbl" x="144" y="415">Pod Identity</text>
+
+  <text class="name m" x="133" y="480" style="font-size:17px">IAM role</text>
+  <text class="c m" x="133" y="504" style="font-size:14px">versus-app</text>
+
+  <text class="lbl m" x="318" y="283"><tspan class="cs">sts:AssumeRole</tspan> +</text>
+  <text class="lbl m" x="318" y="298"><tspan class="cs">sts:TagSession</tspan>,</text>
+  <text class="lbl m" x="318" y="314">external ID</text>
+
+  <!-- text: production -->
+  <text class="zone" x="400" y="64">PRODUCTION</text>
+  <text class="id" x="400" y="80">111122223333</text>
+  <text class="c m" x="488" y="112">versus-reader</text>
+  <text class="d m" x="488" y="130">IAM role</text>
+  <text class="dk" x="592" y="111">trusts <tspan class="cs">versus-app</tspan></text>
+  <text class="dk" x="592" y="129">+ <tspan class="cs">sts:ExternalId</tspan></text>
+
+  <!-- text: staging -->
+  <text class="zone" x="400" y="184">STAGING</text>
+  <text class="id" x="400" y="200">444455556666</text>
+  <text class="c m" x="488" y="232">versus-reader</text>
+  <text class="d m" x="488" y="250">IAM role</text>
+  <text class="dk" x="592" y="231">trusts <tspan class="cs">versus-app</tspan></text>
+  <text class="dk" x="592" y="249">+ <tspan class="cs">sts:ExternalId</tspan></text>
+
+  <!-- text: management -->
+  <text class="zone" x="400" y="304">MANAGEMENT ACCOUNT (COST)</text>
+  <text class="id" x="400" y="320">123456789012</text>
+  <text class="c m" x="488" y="352">versus-cost-reader</text>
+  <text class="d m" x="488" y="370">IAM role</text>
+  <text class="dk" x="592" y="351">trusts <tspan class="cs">versus-app</tspan></text>
+  <text class="dk" x="592" y="369">+ <tspan class="cs">sts:ExternalId</tspan></text>
+
+  <text class="lbl" x="498" y="400">reads</text>
+
+  <text class="name m" x="488" y="446" style="font-size:17px">Cost Explorer</text>
+  <text class="d m" x="488" y="466">cost of every account</text>
+  <text class="d m" x="488" y="482">in the Organization</text>
+
+  <text class="dk" x="400" y="514">set in config:</text>
+  <text class="cs" x="400" y="532">finops.cost_source_account = 123456789012</text>
+</svg>

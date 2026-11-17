@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="504" viewBox="0 0 760 504" style="max-width:100%;height:auto" role="img" aria-label="EKS Pod Identity in four steps: first, a pod identity association links the namespace versus and the ServiceAccount versus-incident to the IAM role versus-app, and versus-app trusts the service principal pods.eks.amazonaws.com for sts:AssumeRole and sts:TagSession; second, the EKS Pod Identity Agent, a DaemonSet on every node, gets credentials for versus-app through the EKS Auth API and serves them at 169.254.170.23; third, the Versus pod gets temporary credentials for versus-app from the agent; fourth, Versus reads AWS APIs read only; no ServiceAccount annotation is needed">
+  <title>EKS Pod Identity: how the Versus pod gets the IAM role versus-app</title>
+  <desc>Top: the pod identity association, step 1, linked to the IAM role versus-app, which trusts pods.eks.amazonaws.com; inside the EKS cluster: the EKS Pod Identity Agent, step 2, receives credentials through the EKS Auth API and passes temporary credentials for versus-app to the Versus pod, step 3, whose ServiceAccount needs no annotation; the pod then reads AWS APIs, step 4</desc>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+  <style>
+    text{font-family:"Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;font-size:13px;fill:#000000}
+    .m{text-anchor:middle}
+    .name{font-weight:700;fill:#12222F}
+    .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+    .d{font-size:12px;fill:#5B6B78}
+    .dk{font-size:12px;fill:#12222F}
+    .lbl{font-size:12px;font-weight:600;fill:#5B6B78}
+    .note{font-size:12px;font-weight:700;fill:#12222F}
+    .c{font-family:SFMono-Regular,Menlo,Consolas,ui-monospace,monospace;fill:#12222F}
+    .num{font-size:12px;font-weight:700;fill:#FFFFFF}
+    .out{fill:none;stroke:#9AA9B6;stroke-width:1}
+    .blk{fill:#FFFFFF;stroke:#12222F;stroke-width:2}
+    .sub{fill:#BACFE3;stroke:#12222F;stroke-width:2}
+    .chip{fill:#FFFFFF;stroke:#12222F;stroke-width:1.5}
+    .flow{fill:none;stroke:#000000;stroke-width:2}
+    .badge{fill:#12222F}
+  </style>
+
+  <rect width="760" height="504" fill="#FFFFFF"/>
+
+  <!-- cluster outline -->
+  <rect class="out" x="16" y="214" width="728" height="158" rx="6"/>
+
+  <!-- blocks -->
+  <rect class="blk" x="32" y="56" width="300" height="110" rx="6"/>
+  <rect class="sub" x="412" y="56" width="316" height="110" rx="6"/>
+
+  <rect class="sub" x="32" y="246" width="300" height="110" rx="6"/>
+  <rect class="chip" x="44" y="326" width="276" height="22" rx="11"/>
+  <rect class="blk" x="412" y="246" width="316" height="110" rx="6"/>
+
+  <rect class="blk" x="102" y="416" width="160" height="72" rx="6"/>
+
+  <!-- arrows -->
+  <path class="flow" d="M332 111H406" marker-end="url(#a)"/>
+  <path class="flow" d="M570 166V240" marker-end="url(#a)"/>
+  <path class="flow" d="M412 310H338" marker-end="url(#a)"/>
+  <path class="flow" d="M182 356V410" marker-end="url(#a)"/>
+
+  <!-- step badges -->
+  <circle class="badge" cx="54" cy="81" r="11"/>
+  <circle class="badge" cx="434" cy="271" r="11"/>
+  <circle class="badge" cx="372" cy="310" r="11"/>
+  <circle class="badge" cx="182" cy="392" r="11"/>
+  <text class="num m" x="54" y="85">1</text>
+  <text class="num m" x="434" y="275">2</text>
+  <text class="num m" x="372" y="314">3</text>
+  <text class="num m" x="182" y="396">4</text>
+
+  <!-- text: association -->
+  <text class="name" x="74" y="87" style="font-size:17px">Pod identity association</text>
+  <text class="d" x="48" y="114">namespace</text>
+  <text class="c" x="160" y="114" style="font-size:12px">versus</text>
+  <text class="d" x="48" y="134">ServiceAccount</text>
+  <text class="c" x="160" y="134" style="font-size:12px">versus-incident</text>
+  <text class="d" x="48" y="154">IAM role</text>
+  <text class="c" x="160" y="154" style="font-size:12px">versus-app</text>
+
+  <text class="lbl m" x="372" y="102">links to</text>
+
+  <!-- text: role -->
+  <text class="name" x="428" y="87" style="font-size:17px">IAM role</text>
+  <text class="c" x="506" y="87">versus-app</text>
+  <text class="dk" x="428" y="118">trusts <tspan class="c" style="font-size:12px">pods.eks.amazonaws.com</tspan></text>
+  <text class="dk" x="428" y="142">for <tspan class="c" style="font-size:11px">sts:AssumeRole</tspan> and <tspan class="c" style="font-size:11px">sts:TagSession</tspan></text>
+
+  <text class="lbl" x="584" y="186">credentials via</text>
+  <text class="lbl" x="584" y="200">EKS Auth API</text>
+
+  <!-- text: cluster -->
+  <text class="zone" x="32" y="234">EKS CLUSTER</text>
+
+  <text class="name" x="48" y="274" style="font-size:17px">Versus pod</text>
+  <text class="d" x="48" y="296">ServiceAccount</text>
+  <text class="c" x="48" y="314" style="font-size:12px">versus/versus-incident</text>
+  <text class="note m" x="182" y="341">No ServiceAccount annotation needed</text>
+
+  <text class="lbl m" x="372" y="262">temporary</text>
+  <text class="lbl m" x="372" y="276">credentials</text>
+  <text class="c m" x="372" y="290" style="font-size:11px">versus-app</text>
+
+  <text class="name" x="454" y="277" style="font-size:17px">EKS Pod Identity Agent</text>
+  <text class="d" x="428" y="300">DaemonSet on every node</text>
+  <text class="dk" x="428" y="326">serves credentials at <tspan class="c" style="font-size:12px">169.254.170.23</tspan></text>
+
+  <!-- text: reads -->
+  <text class="lbl" x="200" y="396">read</text>
+  <text class="name m" x="182" y="448" style="font-size:17px">AWS APIs</text>
+  <text class="d m" x="182" y="468">read only</text>
+</svg>

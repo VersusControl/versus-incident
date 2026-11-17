@@ -1,0 +1,23 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VersusPodIdentityOnly",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "pods.eks.amazonaws.com"
+      },
+      "Action": [
+        "sts:AssumeRole",
+        "sts:TagSession"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/eks-cluster-arn": "arn:aws:eks:${AWS_REGION}:${VERSUS_ACCOUNT_ID}:cluster/${CLUSTER_NAME}",
+          "aws:RequestTag/kubernetes-namespace": "${NAMESPACE}",
+          "aws:RequestTag/kubernetes-service-account": "${SERVICE_ACCOUNT}"
+        }
+      }
+    }
+  ]
+}

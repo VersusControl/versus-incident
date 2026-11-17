@@ -1,0 +1,21 @@
+# FinOps. Layer on top of the account files:
+#   -f values-single-account.yaml [-f values-multi-account.yaml] -f values-finops.yaml
+# Each connected account reads its own cost. For one bill across an AWS
+# Organization, add values-finops-organization.yaml after this file.
+
+connectors:
+  aws:
+    optionalData:
+      costExplorer: true          # paid Cost Explorer reads, $0.01 each
+    tags:
+      # Tag keys whose values Versus keeps. Must include finops.teamTagKey.
+      valueAllowlist: [Name, app, service, team, env]
+    finops:
+      teamTagKey: team
+      maxPaidRequestsPerDay: 20   # at most $0.20 a day
+      refreshTime: "09:00"
+      report:
+        timezone: UTC
+      budgets:
+        - {name: AWS total, scope: deployment, monthlyUsd: 10000}
+        - {name: Checkout team, scope: team, value: checkout, monthlyUsd: 2000}
