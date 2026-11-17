@@ -169,3 +169,33 @@ Refuse excluding the kinds every Kubernetes view is built from.
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Validate the AWS connector.
+
+Caught here:
+  - connectors.aws.credentials.existingSecret set while the connector is off,
+    so the keys would be mounted for nothing
+  - the same Secret wiring alongside the aws.accessKeyId/aws.secretAccessKey
+    keys the SNS or SQS listener uses, which would set AWS_ACCESS_KEY_ID twice
+  - an account ID that is not 12 digits, which the binary refuses at start
+*/}}
+{{- define "versus-incident.validateAWS" -}}
+{{- $aws := (.Values.connectors | default dict).aws | default dict -}}
+{{- $credentials := $aws.credentials | default dict -}}
+{{- if $credentials.existingSecret -}}
+  {{- if not $aws.enable -}}
+    {{- fail (printf "versus-incident: connectors.aws.credentials.existingSecret=%q is set but connectors.aws.enable is false. Set connectors.aws.enable=true to read AWS with these keys, or remove connectors.aws.credentials.existingSecret." (toString $credentials.existingSecret)) -}}
+  {{- end -}}
+  {{- $listenerAWS := .Values.aws | default dict -}}
+  {{- if and (or .Values.alert.sns.enable .Values.alert.sqs.enable) $listenerAWS.accessKeyId $listenerAWS.secretAccessKey -}}
+    {{- fail "versus-incident: connectors.aws.credentials.existingSecret and aws.accessKeyId/aws.secretAccessKey both set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for the same container. Keep one: remove aws.accessKeyId and aws.secretAccessKey to let the SNS/SQS listener use the keys from the Secret too." -}}
+  {{- end -}}
+{{- end -}}
+{{- range $index, $account := ($aws.accounts | default list) -}}
+  {{- $id := include "versus-incident.awsAccountId" ($account | default dict).accountId -}}
+  {{- if not (regexMatch "^[0-9]{12}$" $id) -}}
+    {{- fail (printf "versus-incident: connectors.aws.accounts[%d].accountId=%q is not a 12-digit AWS account ID. Use the Account value from `aws sts get-caller-identity`, quoted in a values file (accountId: \"111122223333\") so a leading zero is kept." $index $id) -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}

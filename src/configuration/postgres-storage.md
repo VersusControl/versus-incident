@@ -42,6 +42,18 @@ Substitute your own database name, username, and a strong password.
   startup (detected from the Postgres SQLSTATE), but **this page is the
   canonical reference** — follow the SQL here.
 
+## Connection pooling and AWS cost refresh
+
+With several replicas, only one runs the AWS cost refresh. Versus holds a
+Postgres session-level advisory lock on one database session for the whole
+refresh.
+
+| Requirement | Why |
+|---|---|
+| Connect directly, or through a pooler in **session mode** (for example PgBouncer `pool_mode = session`). Transaction and statement pooling are not supported. | These modes hand Versus a different server session per transaction, and a server session can be reused across replicas. An advisory lock can be taken again on the session that already holds it. So either every refresh stops with `the replica lock was lost`, or two replicas refresh at the same time and duplicate the work. |
+| Leave `idle_session_timeout` at `0` for the Versus role and database. | The lock session is idle while the refresh calls AWS. If the server ends it, the refresh stops before writing and retries on a later tick. |
+| Limit who can connect to the Versus database. | Any database role that takes the same advisory lock blocks cost refreshes. |
+
 ## Kubernetes history
 
 Versus saves what it sees in your Kubernetes clusters (changes, crashes and

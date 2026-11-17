@@ -26,6 +26,10 @@ It is written for two readers at once:
 
 The **Summary | Details** switch changes labels and columns, never the numbers.
 
+Two short guides go with this page:
+[Read your FinOps report](./aws-finops-report.md) and
+[Tag your AWS cost for ownership](./aws-finops-tagging.md).
+
 ## The questions it answers
 
 - **How much did we spend, and is that OK?** Total, forecast and, if you set
@@ -35,7 +39,8 @@ The **Summary | Details** switch changes labels and columns, never the numbers.
 - **Why did it go up?** Each increase is linked to the change that most likely
   started it, with who made it and when.
 - **Who owns it?** The team from your cost tag, or the account owner. Cost with
-  no owner is shown as **Unallocated**, never hidden.
+  no owner is shown as **Unallocated**, never hidden. See
+  [Tag your AWS cost for ownership](./aws-finops-tagging.md).
 - **Is it expected?** An admin can mark an increase expected, with a reason and
   an end date.
 - **What can we save, and how?** A savings list with the monthly amount, effort,
@@ -65,6 +70,12 @@ total, adds or subtracts one row per cause, and ends with this month's total.
 Each row shows the AWS service, the owner, a short reason and its status
 (**Open** or **Expected**). Click a row to see the full explanation.
 
+**Exact and estimated.** Totals per account, service, team and region are
+always exact. Cost Explorer can only split cost two ways in one request, so a
+figure that combines more than that — for example a team's share of one service
+across several accounts — is shared out in proportion. Only those figures carry
+a **≈** sign and an ⓘ (*Estimated split*), and their sentences say *likely*.
+
 Below it:
 
 - **Spend by service** — the top services with amount and share.
@@ -73,9 +84,25 @@ Below it:
 - **Savings found** — the only place the savings total appears, each item with
   its monthly amount, effort, risk and a **Guide**.
 
-An increase that stays up for three days and adds at least $100 a month also
-becomes an alert through your existing Versus channels (Slack, Teams or email),
-once per increase.
+How the savings total is counted:
+
+- **One action per resource.** If a resource has several possible savings (for
+  example, remove it or make it smaller), the largest one counts. The others
+  are listed under it as alternatives and are not added.
+- **Commitments stand apart.** A Savings Plan is priced on today's usage,
+  before your other savings shrink it. It is shown on its own as *up to $X a
+  month, before other savings* and is never added to the total.
+- **Checks that could not run are named.** For example, *Not checked: private
+  endpoints — needs usage detail (Organization)*. They are never shown as $0.
+
+Alerts go through your existing Versus channels (Slack, Teams or email):
+
+- **Increases.** A cost line that stays up for three complete days and adds at
+  least $100 a month raises one alert. It alerts again only if the impact
+  doubles.
+- **Budgets.** If you set a budget, you get one alert when it turns **At risk**
+  (the forecast is above 90% of the budget) and one more if it goes **Over
+  budget**. Each happens at most once a month.
 
 ### One increase, explained
 
@@ -86,10 +113,18 @@ Clicking a row opens the full story for that increase:
 - **Before and after** — the daily cost with the day it started marked.
 - **Where it came from** — the increase split by usage type and, when
   available, by resource.
-- **Why** — the change that most likely started it, labelled **Likely** or
-  **Possible**, with who made it (for example, a deploy pipeline) and links to
-  Changes and the Map. If no change is found, it says so instead of guessing.
+- **Why** — up to three changes that could have started it, each labelled
+  **Likely** or **Possible**, with who made it (for example, a deploy pipeline)
+  and links to Changes and the Map. When several changes fit equally well,
+  none is singled out: all are **Possible**, closest in time first. If
+  resource-level data is off, the page suggests turning it on to narrow the
+  list down.
+- **No guessing.** **No change found in the 48 h before** appears only when the
+  change history covers that whole window. If it does not, the card says
+  **Change history incomplete for that window** instead.
 - **Who** — the owner and the rule that picked them, such as the `team` tag.
+  The owner is the team with the most cost on that line since it started.
+  Untagged cost counts as **Unallocated** and can be the owner.
 - **Fix** — the matching saving, with the monthly amount, effort, risk and
   guide.
 
@@ -110,6 +145,10 @@ works offline and fits on two pages:
    their reasons, and **About this report** — which accounts it covers, the cost
    measure and the last complete day.
 
+Until AWS closes the month's bill on the 5th, the report is marked **Not
+final**. [Read your FinOps report](./aws-finops-report.md) walks through it
+block by block.
+
 Other exports:
 
 | Export | What you get |
@@ -125,14 +164,29 @@ You can ask about cost in plain language, such as *"Why did AWS cost go up in
 October?"*, from **Ask AI** on the page, in web **Chat**, or in the
 `versus-devops` command line tool. You get the same answer in each place.
 
+The agent uses these read-only tools:
+
+| Tool | What it answers |
+|---|---|
+| `cost_breakdown` | Total, change, forecast and spend by service, account, account group, region or team |
+| `cost_drivers` | What moved the cost between two periods, by cause, with owners |
+| `cost_increases` | Detected increases with start day, monthly impact, owner and status |
+| `cost_increase_detail` | One increase: where it came from, the change that likely started it, the owner rule and related savings |
+| `savings_opportunities` | Savings found, with monthly amount, effort, risk and owner |
+| `budget_status` | Each budget against month-to-date cost and the forecast: on track, at risk or over budget |
+| `cost_accounts` | The accounts behind the bill, with status, group, cost, change, top driver and top team |
+| `get_aws_connection` | The AWS connection: each account's status and freshness, denied services with the fix, and gaps |
+
 - **Versus computes every number.** The AI only explains the results and links
   to the exact rows it used. It never calculates or invents a figure or a cause.
-- **Asking never costs a paid AWS request.** The agent reads the cost data
-  Versus already has.
-- **The agent only reads.** Marking expected, dismissing a saving, budgets and
-  exports stay in the page; the agent links you there.
+- **Asking never costs a paid AWS request.** The tools read only the cost data
+  and connection state Versus already stores. They never call AWS. If an answer
+  needs data Versus has not fetched, the tool says so and links to the page.
+- **The agent only reads.** Marking expected, dismissing a saving, budgets, the
+  paid refresh and exports stay in the page; the agent links you there.
 
-See the [DevOps Agent](../agent/devops-agent.md) for how Chat works today.
+See the [DevOps Agent](../agent/devops-agent.md) for how Chat works today, and
+the [Tool Reference](../agent/tools/overview.md) for the tool catalog.
 
 ### Light theme
 
@@ -173,10 +227,18 @@ PDF. Enterprise adds automation and governance, not different answers.
 - **Once a day.** Cost data refreshes once a day (09:00 by default). AWS cost
   data itself lags by up to 24 hours, so more refreshes would not show anything
   new. An admin can press **Refresh now** once a day.
+- **One replica refreshes.** With Postgres, Versus must reach the database
+  directly or through a session-mode pooler. See
+  [Connection pooling and AWS cost refresh](../configuration/postgres-storage.md#connection-pooling-and-aws-cost-refresh).
+- **When a day counts.** A day is complete 24 hours after it ends. Later days
+  are drawn dashed and are left out of comparisons and increase checks.
 - **A hard limit on AWS charges.** AWS charges $0.01 for each Cost Explorer
   request. Versus makes **at most 20 paid requests a day** — about **$0.20 a
   day**, or around $6 a month at most. If a day's plan would go over, it skips
   the least important reads and the page names what it skipped.
+- **Looking deeper costs a request.** Opening more detail for one account and
+  service in an Organization spends one paid request. Only admins can do it,
+  and it never uses the requests the next scheduled refresh needs.
 - **No billing account details.** It never reads invoices, payment methods or
   billing account settings. Those permissions are blocked in the role.
 - **Management account: cost only.** If you connect the management (payer)
@@ -256,8 +318,9 @@ unlocks on the 5th, so a frozen report matches the invoice.
 
 ![FinOps daily cost chart for November with complete days to Nov 3 and Nov 4 drawn as a dashed bar marked partial](../docs/images/aws-finops-state-12-partial-day.png)
 
-The last complete day is named and today is drawn dashed, kept out of the
-total. Increases never fire on a partial day, so nothing alerts early.
+A day counts as complete 24 hours after it ends. The last complete day is
+named, and later days are drawn dashed and kept out of the total. Increases
+never fire on a partial day, so nothing alerts early.
 
 ### Short history
 
@@ -316,9 +379,11 @@ $50; the cost was steady*.
 
 ![FinOps What moved the cost where one increase says No change found and another says no change history yet, with amount, service, owner and status still shown](../docs/images/aws-finops-state-08-no-change-found.png)
 
-When no change happened near the start of an increase, the row says **No change
-found**. Versus never guesses a reason. The amount, service, owner and status
-are still shown.
+When change history covers the whole window and nothing changed near the
+start, the row says **No change found**. When the history is not complete for
+that window, it says **Change history incomplete** instead, so a gap never
+looks like a clean result. Versus never guesses a reason. The amount, service,
+owner and status are still shown.
 
 #### Credits and one-time fees
 
@@ -370,6 +435,11 @@ only**: their cost is known, but the reason says **Not connected** with
 **Connect**. Organization-level items such as an unused Savings Plan get their
 own rows. Spend can be grouped by account groups you define in config.
 
+With many accounts, some cross figures are estimated splits and carry **≈**.
+Some savings checks need usage detail that is not read for every account, so
+they show as **Not checked … needs usage detail (Organization)**. An admin can
+open more detail for one account and service; that spends one paid request.
+
 #### The Accounts tab
 
 ![FinOps Accounts tab: a table of 48 accounts grouped with subtotals, each with status, cost, change, top driver, top team and a 30-day trend](../docs/images/aws-finops-state-21-organization-accounts.png)
@@ -380,8 +450,9 @@ change, filter cost-only or new accounts, and export to CSV.
 
 ## Status
 
-The FinOps agent is **in development** as part of AWS Harness. There is no
-release date yet, and this page describes the design preview.
+The FinOps agent is **in development** as part of AWS Harness and is not in a
+release yet. There is no release date, and the screenshots on this page come
+from the design preview.
 
 This first step only reads. If actions on AWS are added later, they will only
 run from the `versus-devops` command line tool with your own AWS credentials,

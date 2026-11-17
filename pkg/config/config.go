@@ -543,6 +543,15 @@ func loadConfigFromPath(path string) (*Config, error) {
 	} else if !os.IsNotExist(statErr) {
 		return nil, fmt.Errorf("cannot access connectors file")
 	}
+	setEnableFromEnv("VERSUS_CONNECTORS_AWS_ENABLE", &loaded.Connectors.AWS.Enable)
+	// The FinOps switch: Cost Explorer reads are opt-in.
+	setEnableFromEnv("VERSUS_CONNECTORS_AWS_OPTIONAL_DATA_COST_EXPLORER", &loaded.Connectors.AWS.OptionalData.CostExplorer)
+	if err := applyAWSCollectEnvironment(&loaded.Connectors.AWS); err != nil {
+		return nil, err
+	}
+	if err := applyAWSFinOpsEnvironment(&loaded.Connectors.AWS.FinOps); err != nil {
+		return nil, err
+	}
 
 	if strings.TrimSpace(loaded.PublicHost) != "" {
 		normalized, err := weborigin.Normalize(loaded.PublicHost)

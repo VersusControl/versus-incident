@@ -7,7 +7,6 @@ CREATE TABLE kubernetes_evidence_partition_migration (
  observation_revision BIGINT NOT NULL DEFAULT 0,
  complete BOOLEAN NOT NULL DEFAULT FALSE
 );
-INSERT INTO kubernetes_evidence_partition_migration(singleton) VALUES(TRUE);
 
 CREATE TABLE kubernetes_evidence_events_partitioned
  (LIKE kubernetes_evidence_events INCLUDING DEFAULTS,

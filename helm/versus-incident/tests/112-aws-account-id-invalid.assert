@@ -1,0 +1,2 @@
+# EXPECT_FAIL: the binary would refuse the account at start.
+connectors\.aws\.accounts\[0\]\.accountId="11112222333" is not a 12-digit AWS account ID

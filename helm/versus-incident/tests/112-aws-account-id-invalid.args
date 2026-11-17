@@ -1,0 +1,5 @@
+# An account ID that is not 12 digits.
+--set
+connectors.aws.enable=true
+--set
+connectors.aws.accounts[0].accountId=11112222333

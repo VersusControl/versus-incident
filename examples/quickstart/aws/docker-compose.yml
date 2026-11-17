@@ -1,0 +1,35 @@
+# AWS quickstart: Versus reads one AWS account and its cost, with file storage.
+#
+#   export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=us-east-1
+#   export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+#   docker compose up -d
+#
+# config/connectors.yaml reads the account and region from these variables, so
+# no file needs editing. The port binds to 127.0.0.1 only. See README.md.
+
+services:
+  versus:
+    image: ${VERSUS_IMAGE:-ghcr.io/versuscontrol/versus-incident:latest}
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?export AWS_ACCESS_KEY_ID, the access key ID of the quickstart IAM user}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?export AWS_SECRET_ACCESS_KEY, the secret access key of the quickstart IAM user}
+      AWS_REGION: ${AWS_REGION:?export AWS_REGION, the region Versus reads, for example us-east-1}
+      AWS_ACCOUNT_ID: ${AWS_ACCOUNT_ID:?export AWS_ACCOUNT_ID, the 12-digit account ID from aws sts get-caller-identity}
+    volumes:
+      # Mount single files so the templates shipped in the image stay in place.
+      # connectors.yaml must sit next to config.yaml to be read.
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      - ./config/connectors.yaml:/app/config/connectors.yaml:ro
+      - versus-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  versus-data:

@@ -1,0 +1,6 @@
+# The AWS connector turned on with no other values: the chart's collection,
+# application and FinOps defaults are the loader's defaults, and Cost Explorer
+# stays off.
+connectors:
+  aws:
+    enable: true

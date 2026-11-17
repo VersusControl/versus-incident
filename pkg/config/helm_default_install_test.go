@@ -115,7 +115,9 @@ func TestKubectlManifestReadsUserCreatedSignInSecret(t *testing.T) {
 }
 
 // A default install renders disabled channels as `enable: false` only, no
-// proxy block and, with the Kubernetes connector off, no connector settings.
+// proxy block and, with the Kubernetes connector off, no Kubernetes connector
+// settings (the AWS block is always rendered; its chart defaults are the
+// loader's defaults).
 // The loader must accept that config as it is, with no error and no log
 // output, and both body-logging switches must be off. Turning the connector
 // on must load just as cleanly, reading the cluster with in_cluster.
@@ -133,8 +135,8 @@ func TestHelmDefaultRenderLoadsClean(t *testing.T) {
 func assertChartRenderLoadsClean(t *testing.T, scenario string, mode string) {
 	t.Helper()
 	files := renderChartFiles(t, scenario)
-	if mode == "" && strings.Contains(files["connectors.yaml"], "connectors:") {
-		t.Fatalf("connector settings rendered while the connector is off:\n%s", files["connectors.yaml"])
+	if mode == "" && strings.Contains(files["connectors.yaml"], "kubernetes:") {
+		t.Fatalf("Kubernetes connector settings rendered while the connector is off:\n%s", files["connectors.yaml"])
 	}
 	if strings.Contains(files["config.yaml"], "proxy:") || strings.Contains(files["config.yaml"], "TELEGRAM_BOT_TOKEN") {
 		t.Fatalf("default render still carries proxy or disabled-channel keys:\n%s", files["config.yaml"])

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -369,4 +371,60 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestHelmChartRendersAWSConnectors proves the chart's AWS connector block
+// round-trips through the real loader: account identity, explicit versus auto
+// regions, the external-ID placeholder, and the budget and optional-data
+// defaults all survive rendering.
+func TestHelmChartRendersAWSConnectors(t *testing.T) {
+	t.Setenv("VERSUS_AWS_EXTERNAL_ID", "external-value")
+	loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, "20-config-coverage")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	aws := loaded.Connectors.AWS
+	if !aws.Enable || len(aws.Accounts) != 2 {
+		t.Fatalf("aws connector = %+v", aws)
+	}
+	first, second := aws.Accounts[0], aws.Accounts[1]
+	if first.AccountID != "111122223333" || first.Auth.Mode != "assume_role" || first.Auth.ExternalID != "external-value" || !reflect.DeepEqual(first.Regions, []string{"us-east-1", "eu-west-1"}) {
+		t.Fatalf("first account = %+v", first)
+	}
+	if second.AccountID != "444455556666" || len(second.Regions) != 0 || second.Auth.Mode != "default_chain" {
+		t.Fatalf("second account = %+v", second)
+	}
+	if aws.Budgets.MaxRequestsPerSecond != 2 || aws.HealthCheckInterval != "5m" || aws.OptionalData.CostExplorer || aws.OptionalData.SecurityHub {
+		t.Fatalf("aws defaults = %+v", aws)
+	}
+	collect := aws.Collect
+	if collect.Enable || collect.InventoryInterval() != 30*time.Minute || collect.HealthInterval() != time.Minute || collect.ChangesInterval() != 10*time.Minute {
+		t.Fatalf("aws collect = %+v", collect)
+	}
+	if collect.MaxGenerations() != 12 || collect.MaxAge() != 48*time.Hour || collect.ChangeRetention() != 72*time.Hour {
+		t.Fatalf("aws collect history = %+v", collect.History)
+	}
+	if !reflect.DeepEqual(aws.Applications.Sources, []string{"tags", "cloudformation"}) || !reflect.DeepEqual(aws.Applications.TagKeys, []string{"app"}) {
+		t.Fatalf("aws applications = %+v", aws.Applications)
+	}
+}
+
+// TestHelmChartAWSCollectDefaults renders the chart's own defaults and
+// checks they match the loader's defaults, so the chart and the binary
+// never disagree about collection.
+func TestHelmChartAWSCollectDefaults(t *testing.T) {
+	loaded, err := loadConfigFromPath(writeRenderedConfig(t, renderChartFiles(t, "105-aws-connector-defaults")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	collect := loaded.Connectors.AWS.Collect
+	if !collect.Enable || collect.InventoryInterval() != DefaultAWSInventoryInterval || collect.HealthInterval() != DefaultAWSHealthInterval ||
+		collect.ChangesInterval() != DefaultAWSChangesInterval || collect.MaxGenerations() != DefaultAWSHistoryGenerations ||
+		collect.MaxAge() != DefaultAWSHistoryMaxAge || collect.ChangeRetention() != DefaultAWSChangeRetention {
+		t.Fatalf("chart collect defaults = %+v", collect)
+	}
+	if !reflect.DeepEqual(loaded.Connectors.AWS.Applications.EffectiveSources(), DefaultAWSApplicationSources()) ||
+		!reflect.DeepEqual(loaded.Connectors.AWS.Applications.EffectiveTagKeys(), DefaultAWSApplicationTagKeys()) {
+		t.Fatalf("chart applications = %+v", loaded.Connectors.AWS.Applications)
+	}
 }

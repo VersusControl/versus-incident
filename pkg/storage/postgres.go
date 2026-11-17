@@ -41,6 +41,7 @@ type PostgresOptions struct {
 }
 
 type postgresProvider struct {
+	*sqlTables
 	evidenceQueryMu         sync.Mutex
 	evidenceQueries         map[string]evidenceCountSnapshot
 	evidenceQueryGeneration uint64
@@ -69,6 +70,8 @@ type postgresProvider struct {
 	// evidenceChunkFault lets in-package tests act inside one save
 	// transaction, before it writes, for example to fail or delay it.
 	evidenceChunkFault func(ctx context.Context, tx *sql.Tx, part, size int) error
+	// sessionLocks counts the connections pinned by held session locks.
+	sessionLocks sessionLockPool
 }
 
 var (
@@ -88,6 +91,72 @@ var (
 // catalog store can run their own migrations and typed queries on the same
 // pool. The pool is owned by this provider — callers MUST NOT Close it.
 func (p *postgresProvider) DB() *sql.DB { return p.db }
+
+// tablesRead returns the table statements bound to the read pool, so an
+// inventory read never takes a write connection and every statement sees a
+// committed transaction only. Writes keep using the primary pool.
+func (p *postgresProvider) tablesRead() *sqlTables {
+	if p.historyDB == nil {
+		return p.sqlTables
+	}
+	return &sqlTables{postgres: true, db: p.historyDB, rollupsReady: p.sqlTables.rollupsReady}
+}
+
+func (p *postgresProvider) AWSUnits(ctx context.Context, scope tenancy.OrgScope, query AWSUnitQuery) ([]AWSUnitStatus, error) {
+	return p.tablesRead().AWSUnits(ctx, scope, query)
+}
+
+func (p *postgresProvider) AWSAccountView(ctx context.Context, scope tenancy.OrgScope, account string, asOf time.Time) (AWSSnapshotView, error) {
+	return p.tablesRead().AWSAccountView(ctx, scope, account, asOf)
+}
+
+func (p *postgresProvider) AWSResources(ctx context.Context, scope tenancy.OrgScope, query AWSResourceQuery) ([]AWSResource, error) {
+	return p.tablesRead().AWSResources(ctx, scope, query)
+}
+
+func (p *postgresProvider) AWSHealth(ctx context.Context, scope tenancy.OrgScope, query AWSHealthQuery) ([]AWSHealth, error) {
+	return p.tablesRead().AWSHealth(ctx, scope, query)
+}
+
+func (p *postgresProvider) AWSSecurityFlags(ctx context.Context, scope tenancy.OrgScope, query AWSFlagQuery) ([]AWSSecurityFlag, error) {
+	return p.tablesRead().AWSSecurityFlags(ctx, scope, query)
+}
+
+func (p *postgresProvider) AWSChanges(ctx context.Context, scope tenancy.OrgScope, query AWSChangeQuery) ([]AWSChange, error) {
+	return p.tablesRead().AWSChanges(ctx, scope, query)
+}
+
+func (p *postgresProvider) AWSChangeCoverage(ctx context.Context, scope tenancy.OrgScope, account, region string) ([]AWSPairCoverage, error) {
+	return p.tablesRead().AWSChangeCoverage(ctx, scope, account, region)
+}
+
+func (p *postgresProvider) AWSPairs(ctx context.Context, scope tenancy.OrgScope) ([]AWSPair, error) {
+	return p.tablesRead().AWSPairs(ctx, scope)
+}
+
+func (p *postgresProvider) FinOpsCostLines(ctx context.Context, scope tenancy.OrgScope, query FinOpsCostQuery) ([]FinOpsCostLine, error) {
+	return p.tablesRead().FinOpsCostLines(ctx, scope, query)
+}
+
+func (p *postgresProvider) FinOpsCostTotals(ctx context.Context, scope tenancy.OrgScope, query FinOpsCostQuery, groupBy ...FinOpsDimension) ([]FinOpsCostTotal, error) {
+	return p.tablesRead().FinOpsCostTotals(ctx, scope, query, groupBy...)
+}
+
+func (p *postgresProvider) FinOpsIncreases(ctx context.Context, scope tenancy.OrgScope, query FinOpsIncreaseQuery) ([]FinOpsIncrease, error) {
+	return p.tablesRead().FinOpsIncreases(ctx, scope, query)
+}
+
+func (p *postgresProvider) FinOpsSavingDecisions(ctx context.Context, scope tenancy.OrgScope) ([]FinOpsSavingDecision, error) {
+	return p.tablesRead().FinOpsSavingDecisions(ctx, scope)
+}
+
+func (p *postgresProvider) FinOpsReport(ctx context.Context, scope tenancy.OrgScope, month string) (FinOpsReport, bool, error) {
+	return p.tablesRead().FinOpsReport(ctx, scope, month)
+}
+
+func (p *postgresProvider) FinOpsReports(ctx context.Context, scope tenancy.OrgScope) ([]FinOpsReport, error) {
+	return p.tablesRead().FinOpsReports(ctx, scope)
+}
 
 // defaultConnectBudget bounds the total time NewPostgres will spend retrying
 // the initial Postgres reachability check before giving up. It is overridable
@@ -317,13 +386,17 @@ func NewPostgres(opts PostgresOptions) (Provider, error) {
 
 	// Values outside 1..1024 fall back to the default.
 	saveChunk := postgresPositiveOption(opts.EvidenceSaveChunk, "KUBERNETES_EVIDENCE_SAVE_CHUNK", defaultEvidenceSaveChunk)
-	p := &postgresProvider{db: db, observationHeartbeat: heartbeat, evidenceRetention: retention, evidenceSaveChunk: saveChunk, evidenceSaveTimeout: defaultEvidenceSaveTimeout}
+	p := &postgresProvider{sqlTables: newPostgresTables(db), db: db, observationHeartbeat: heartbeat, evidenceRetention: retention, evidenceSaveChunk: saveChunk, evidenceSaveTimeout: defaultEvidenceSaveTimeout}
 	if err := p.migrate(); err != nil {
 		if hint := pgSetupHint(err, dbName); hint != "" {
 			log.Printf("%s", hint)
 		}
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: postgres migrate: %w", err)
+	}
+	if err := assertTableSchema(context.Background(), db, true); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	p.historyDB, err = sql.Open("pgx", opts.DSN)
 	if err != nil {
@@ -528,8 +601,23 @@ const ossMigrationLedger = "versus_schema_migrations"
 // re-run would drop the typed tables on every boot).
 func (p *postgresProvider) migrate() error {
 	return WithMigrationLock(p.db, func() error {
-		return RunSQLMigrations(p.db, migrationFiles, "migrations", ossMigrationLedger)
+		if err := RunSQLMigrations(p.db, migrationFiles, "migrations", ossMigrationLedger); err != nil {
+			return err
+		}
+		return seedRequiredRows(p.db)
 	})
+}
+
+// seedRequiredRows inserts the rows the code expects to exist from the first
+// start. Migrations hold schema only, so these rows are written here, on
+// every open, and an existing row is left as it is.
+func seedRequiredRows(db *sql.DB) error {
+	// The evidence partition switch keeps its progress in a single row that
+	// the copy and retention passes lock and update; neither creates it.
+	if _, err := db.Exec(`INSERT INTO kubernetes_evidence_partition_migration(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING`); err != nil {
+		return fmt.Errorf("storage: seed evidence partition progress: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -282,5 +283,72 @@ func TestAutoPromoteAfterNormalization(t *testing.T) {
 				t.Errorf("AutoPromoteAfter = %d, want %d", c.Agent.Catalog.AutoPromoteAfter, tc.want)
 			}
 		})
+	}
+}
+
+// The AWS quickstart ships config.yaml with a sibling connectors.yaml that
+// the user never edits: the account and region come from the environment the
+// compose file passes through. Loading the shipped files with those variables
+// set must give one default-chain account with that ID and region, the AWS
+// connector on, and Cost Explorer on.
+func TestAWSQuickstartExampleLoadsAccountFromEnvironment(t *testing.T) {
+	t.Setenv("AGENT_AI_PROVIDER", "")
+	t.Setenv("GATEWAY_SECRET", "change-me")
+	t.Setenv("AWS_ACCOUNT_ID", "111122223333")
+	t.Setenv("AWS_REGION", "eu-west-1")
+	t.Setenv("VERSUS_CONNECTORS_AWS_ENABLE", "")
+	t.Setenv("VERSUS_CONNECTORS_AWS_OPTIONAL_DATA_COST_EXPLORER", "")
+
+	c, err := loadConfigFromPath("../../examples/quickstart/aws/config/config.yaml")
+	if err != nil {
+		t.Fatalf("load AWS quickstart config: %v", err)
+	}
+	if c.Storage.Type != "file" {
+		t.Errorf("Storage.Type = %q, want file", c.Storage.Type)
+	}
+	if c.GatewaySecret != "change-me" {
+		t.Errorf("GatewaySecret not taken from GATEWAY_SECRET")
+	}
+	aws := c.Connectors.AWS
+	if !aws.Enable {
+		t.Error("AWS connector is off")
+	}
+	if !aws.OptionalData.CostExplorer {
+		t.Error("Cost Explorer is off")
+	}
+	if len(aws.Accounts) != 1 {
+		t.Fatalf("accounts = %+v, want exactly one", aws.Accounts)
+	}
+	account := aws.Accounts[0]
+	if account.AccountID != "111122223333" {
+		t.Errorf("account ID = %q, want the AWS_ACCOUNT_ID value", account.AccountID)
+	}
+	if account.Auth.Mode != "default_chain" || account.Auth.RoleARN != "" || account.Auth.ExternalID != "" {
+		t.Errorf("auth = %+v, want default_chain with no role", account.Auth)
+	}
+	if len(account.Regions) != 1 || account.Regions[0] != "eu-west-1" {
+		t.Errorf("regions = %v, want the AWS_REGION value", account.Regions)
+	}
+	wantTags := []string{"Name", "app", "service", "team", "env"}
+	if strings.Join(aws.Tags.ValueAllowlist, ",") != strings.Join(wantTags, ",") {
+		t.Errorf("tag allowlist = %v, want %v", aws.Tags.ValueAllowlist, wantTags)
+	}
+	if aws.FinOps.MaxPaidRequestsPerDay != DefaultFinOpsMaxPaidRequests || aws.FinOps.TeamTagKey != DefaultFinOpsTeamTagKey ||
+		aws.FinOps.RefreshTime != DefaultFinOpsRefreshTime || aws.FinOps.CostSourceAccount != "" {
+		t.Errorf("finops = %+v, want the defaults", aws.FinOps)
+	}
+}
+
+// The quickstart account ID and region are only ever filled from the
+// environment. Left unset, the load fails on the account instead of starting
+// with an empty or placeholder account.
+func TestAWSQuickstartExampleRejectsMissingAccountID(t *testing.T) {
+	t.Setenv("AGENT_AI_PROVIDER", "")
+	t.Setenv("AWS_ACCOUNT_ID", "")
+	t.Setenv("AWS_REGION", "us-east-1")
+
+	_, err := loadConfigFromPath("../../examples/quickstart/aws/config/config.yaml")
+	if err == nil || !strings.Contains(err.Error(), "connectors.aws.accounts[0]") {
+		t.Fatalf("load with no AWS_ACCOUNT_ID: err = %v, want an account error", err)
 	}
 }

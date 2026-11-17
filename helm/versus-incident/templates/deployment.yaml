@@ -665,6 +665,25 @@ spec:
             {{- end }}
             {{- end }}
 
+            {{- /* AWS keys for the AWS connector's default_chain accounts, read
+                   from a Secret the operator creates. Only the Secret name and
+                   key names are in the manifest; the keys never reach the
+                   ConfigMap or the chart's own Secret. */}}
+            {{- $awsConnector := (.Values.connectors | default dict).aws | default dict }}
+            {{- $awsCredentials := $awsConnector.credentials | default dict }}
+            {{- if and $awsConnector.enable $awsCredentials.existingSecret }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $awsCredentials.existingSecret | quote }}
+                  key: {{ $awsCredentials.accessKeyIdKey | default "AWS_ACCESS_KEY_ID" | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $awsCredentials.existingSecret | quote }}
+                  key: {{ $awsCredentials.secretAccessKeyKey | default "AWS_SECRET_ACCESS_KEY" | quote }}
+            {{- end }}
+
             {{- /* Operator-supplied env. The agent_sources.yaml block is
                    rendered verbatim from values, so credentials there must be
                    written as ${VAR} and supplied here (or via extraEnvFrom)

@@ -347,6 +347,8 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 		}
 		runtimeTools = append(runtimeTools, elasticsearchtools.New(elasticsearchSources)...)
 		runtimeTools = append(runtimeTools, k8stools.NewForRegistry(kubernetesService)...)
+		runtimeTools = append(runtimeTools, awsRuntimeTools()...)
+		runtimeTools = append(runtimeTools, finopsRuntimeTools()...)
 		var extensionLogTools, otherExtensions []core.Tool
 		for _, candidate := range extensionTools {
 			if candidate.Name() == "discover_log_fields" || candidate.Name() == "read_log_records" {
@@ -646,7 +648,9 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(kubernetesConfigured(connectors.Kubernetes), "Kubernetes cluster")},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": configured(hasEmbedder, "AI embedder"), "runbook_index": configured(hasEmbedder && store != nil, "Runbook index"), "dependency_graph": configured(hasGraph, "Dependency graph"),
-			"change_feed": configured(hasGit || (store != nil && kubernetesConfigured(connectors.Kubernetes)), "Change feed"),
+			"change_feed":   configured(hasGit || (store != nil && kubernetesConfigured(connectors.Kubernetes)), "Change feed"),
+			"cost_data":     configured(connectors.AWS.CostDataEnabled() && boundFinOps() != nil, "Cloud cost data"),
+			"aws_connector": configured(connectors.AWS.Enable && boundAWS() != nil, "AWS connector"),
 		},
 	}
 }
@@ -691,7 +695,9 @@ func buildToolAvailabilitySnapshot(configured aitools.Snapshot, reader commontoo
 		},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": resolved(configured.Capabilities["ai_embedder"], embedder != nil), "runbook_index": resolved(configured.Capabilities["runbook_index"], runbooks != nil), "dependency_graph": resolved(configured.Capabilities["dependency_graph"], graph != nil && graph.Len() > 0),
-			"change_feed": resolved(configured.Capabilities["change_feed"], changes != nil),
+			"change_feed":   resolved(configured.Capabilities["change_feed"], changes != nil),
+			"cost_data":     resolved(configured.Capabilities["cost_data"], boundFinOps() != nil),
+			"aws_connector": resolved(configured.Capabilities["aws_connector"], boundAWS() != nil),
 		},
 	}
 }

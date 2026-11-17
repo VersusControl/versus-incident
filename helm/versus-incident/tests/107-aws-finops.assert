@@ -1,0 +1,6 @@
+owner: "platform"
+team_tag_key: "squad"
+target_coverage: 0.7
+monthly_usd: 30000
+timezone: "Europe/Berlin"
+slack_summary: true

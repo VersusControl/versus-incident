@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 	"github.com/google/uuid"
 )
@@ -15,6 +16,7 @@ import (
 // memoryProvider is an in-memory backend used by tests. It is concurrency-safe
 // and never returns transport errors. Not exposed as a config option.
 type memoryProvider struct {
+	*memoryTables
 	evidenceMu        sync.Mutex
 	localEvidence     *localEvidence
 	mu                sync.RWMutex
@@ -53,6 +55,7 @@ type memoryDetectionEpisode struct {
 // for tests; never select via the config factory.
 func NewMemory() Provider {
 	return &memoryProvider{
+		memoryTables:      newMemoryTables(),
 		blobs:             make(map[string][]byte),
 		blobAt:            make(map[string]time.Time),
 		episodes:          make(map[string]*memoryDetectionEpisode),
@@ -952,4 +955,168 @@ func (m *memoryProvider) DeleteByID(domain, id string) error {
 	default:
 		return ErrUnknownDomain
 	}
+}
+
+// RegisterAWSPending records every unit that has no sync state yet as
+// pending under one lock, so a reader during a first sync sees the plan's
+// fixed total from the start. Units that already have a state are left
+// alone, and a fenced guard refuses the whole plan before anything changes.
+func (m *memoryProvider) RegisterAWSPending(_ context.Context, scope tenancy.OrgScope, units []AWSUnit, guard *uint64) error {
+	for _, unit := range units {
+		if !validAWSUnit(unit) {
+			return ErrInvalidAWSInventory
+		}
+	}
+	scope = inventoryScope(scope)
+	m.memoryTables.mu.Lock()
+	defer m.memoryTables.mu.Unlock()
+	for _, unit := range units {
+		if err := m.checkGuard(scope.Write, unit.Account, guard); err != nil {
+			return err
+		}
+	}
+	for _, unit := range units {
+		key := memoryUnitKey{org: scope.Write, unit: unit}
+		if m.units[key] != nil {
+			continue
+		}
+		m.units[key] = &memoryUnit{sync: AWSSyncState{State: AWSSyncPending}}
+	}
+	return nil
+}
+
+// CommitAWSUnit commits one unit's generation. A candidate time that falls
+// before the current generation's start is clamped to it under the same lock
+// as the commit, so a clock behind the last writer cannot close a row before
+// it begins.
+func (m *memoryProvider) CommitAWSUnit(_ context.Context, scope tenancy.OrgScope, unit AWSUnit, candidate AWSCandidate, guard *uint64) (AWSCommit, error) {
+	rows, err := prepareAWSCommit(unit, candidate)
+	if err != nil {
+		return AWSCommit{}, err
+	}
+	scope = inventoryScope(scope)
+	m.memoryTables.mu.Lock()
+	defer m.memoryTables.mu.Unlock()
+	if err := m.checkGuard(scope.Write, unit.Account, guard); err != nil {
+		return AWSCommit{}, err
+	}
+	key := memoryUnitKey{org: scope.Write, unit: unit}
+	entry := m.units[key]
+	if entry == nil {
+		entry = &memoryUnit{}
+		m.units[key] = entry
+	}
+	current := -1
+	for index := range entry.generations {
+		if !entry.generations[index].closed {
+			current = index
+		}
+	}
+	at := rows.at
+	if current >= 0 && entry.generations[current].from.After(at) {
+		at = entry.generations[current].from
+	}
+	commitState := func(seq uint64) {
+		entry.sync = AWSSyncState{State: AWSSyncOK, Generation: seq, LastGoodAt: at, AttemptedAt: at, VerifiedAt: at, Gaps: cloneTableJSON(rows.gaps)}
+	}
+	if current >= 0 && entry.generations[current].row.Digest == candidate.Digest {
+		entry.generations[current].row.VerifiedAt = at
+		commitState(entry.generations[current].row.Seq)
+		generation := entry.generations[current].row
+		generation.Gaps = cloneTableJSON(generation.Gaps)
+		return AWSCommit{Generation: generation, Unchanged: true}, nil
+	}
+	seq := entry.sync.Generation
+	if current >= 0 {
+		if entry.generations[current].row.Seq > seq {
+			seq = entry.generations[current].row.Seq
+		}
+		entry.generations[current].closed, entry.generations[current].to = true, at
+	}
+	seq++
+	generation := AWSGeneration{Seq: seq, Digest: candidate.Digest, CommittedAt: at, VerifiedAt: at, Count: len(rows.resources), Gaps: cloneTableJSON(rows.gaps)}
+	entry.generations = append(entry.generations, memoryVersion[AWSGeneration]{row: generation, from: at})
+	entry.resources = swapMemoryRows(entry.resources, rows.resources, rows.digests[0], at)
+	entry.health = swapMemoryRows(entry.health, rows.health, rows.digests[1], at)
+	entry.flags = swapMemoryRows(entry.flags, rows.flags, rows.digests[2], at)
+	commitState(seq)
+	generation.Gaps = cloneTableJSON(generation.Gaps)
+	return AWSCommit{Generation: generation}, nil
+}
+
+// AWSAccountView reads one account's units and rows under one lock, so a
+// concurrent commit or purge cannot pair two generations. An unreadable view
+// is an error, never a mixed answer.
+func (m *memoryProvider) AWSAccountView(_ context.Context, scope tenancy.OrgScope, account string, asOf time.Time) (AWSSnapshotView, error) {
+	scope = inventoryScope(scope)
+	asOf = tableTime(asOf)
+	m.memoryTables.mu.RLock()
+	defer m.memoryTables.mu.RUnlock()
+	view := AWSSnapshotView{Units: make([]AWSUnitStatus, 0), Resources: make([]AWSResource, 0), Health: make([]AWSHealth, 0), Flags: make([]AWSSecurityFlag, 0)}
+	for _, key := range m.visibleUnits(scope) {
+		if key.unit.Account != account {
+			continue
+		}
+		entry := m.units[key]
+		status := AWSUnitStatus{Org: key.org, Unit: key.unit, Sync: entry.sync}
+		status.Sync.Gaps = cloneTableJSON(status.Sync.Gaps)
+		for _, version := range entry.generations {
+			if version.at(asOf) {
+				generation := version.row
+				generation.Gaps = cloneTableJSON(generation.Gaps)
+				status.Generation = &generation
+			}
+		}
+		view.Units = append(view.Units, status)
+		for _, version := range entry.resources {
+			if version.at(asOf) {
+				view.Resources = append(view.Resources, copyAWSResource(version.row))
+			}
+		}
+		for _, version := range entry.health {
+			if !version.at(asOf) {
+				continue
+			}
+			row := version.row
+			if row.Children != nil {
+				row.Children = append([]string(nil), row.Children...)
+			}
+			row.Detail = cloneTableJSON(row.Detail)
+			view.Health = append(view.Health, row)
+		}
+		for _, version := range entry.flags {
+			if !version.at(asOf) {
+				continue
+			}
+			row := version.row
+			row.Detail = cloneTableJSON(row.Detail)
+			view.Flags = append(view.Flags, row)
+		}
+	}
+	sort.SliceStable(view.Resources, func(left, right int) bool {
+		a, b := view.Resources[left], view.Resources[right]
+		if a.Account != b.Account || a.Region != b.Region || a.Service != b.Service {
+			return lessAWSUnit(AWSUnit{a.Account, a.Region, a.Service}, AWSUnit{b.Account, b.Region, b.Service})
+		}
+		return a.ARN < b.ARN
+	})
+	sort.SliceStable(view.Health, func(left, right int) bool {
+		a, b := view.Health[left], view.Health[right]
+		for _, pair := range [][2]string{{a.Account, b.Account}, {a.Region, b.Region}, {a.Service, b.Service}, {a.ARN, b.ARN}, {a.Kind, b.Kind}, {a.Ref, b.Ref}} {
+			if pair[0] != pair[1] {
+				return pair[0] < pair[1]
+			}
+		}
+		return false
+	})
+	sort.SliceStable(view.Flags, func(left, right int) bool {
+		a, b := view.Flags[left], view.Flags[right]
+		for _, pair := range [][2]string{{a.Account, b.Account}, {a.Region, b.Region}, {a.Service, b.Service}, {a.ARN, b.ARN}, {a.Flag, b.Flag}} {
+			if pair[0] != pair[1] {
+				return pair[0] < pair[1]
+			}
+		}
+		return false
+	})
+	return view, nil
 }

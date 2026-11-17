@@ -629,6 +629,30 @@ type BlobCAS interface {
 	CompareAndSwapBlob(key string, expected, replacement []byte) (swapped bool, err error)
 }
 
+// SessionLocker is an optional capability for work that must run on one
+// replica at a time when several replicas share the backend. TryLockSession
+// never waits: acquired is false when another holder has the key, and unlock
+// is then nil. A caller releases a held key with unlock; the key is also
+// released when the holder's session ends.
+//
+// Only the shared Postgres backend implements it. Memory and file storage
+// serve one process, so callers treat a backend without it as always
+// acquired and rely on their in-process locks.
+type SessionLocker interface {
+	TryLockSession(ctx context.Context, key int64) (unlock func(), acquired bool, err error)
+}
+
+// SessionLockVerifier is an optional capability of a SessionLocker that can
+// tell whether a key it granted is still held. A session lock has no lease:
+// the server may end the holding session (a dropped connection, an
+// idle-session timeout, a terminated backend) without the holder noticing.
+// A holder asks before each write it makes under the lock and stops when the
+// answer is false or an error, so it never writes as if it still held the
+// key.
+type SessionLockVerifier interface {
+	SessionLockHeld(ctx context.Context, key int64) (held bool, err error)
+}
+
 // SQLAccessor is an optional capability a backend may implement on top of
 // Provider. It exposes the backend's underlying *sql.DB so an
 // out-of-tree consumer — the enterprise module and the OSS Postgres catalog

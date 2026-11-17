@@ -9,6 +9,9 @@
   - [Multi-Cluster](/agent/kubernetes/multi-cluster)
   - [Auto Detect Issue](/agent/kubernetes/auto-detect-issue)
 
+- AWS
+  - [Quickstart](/agent/aws/quickstart)
+
 - SRE Agent
   - [Introduction](/agent/agent-introduction)
   - [Training Mode](/agent/training-mode)

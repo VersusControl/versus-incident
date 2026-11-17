@@ -22,6 +22,8 @@ func TestCatalogIsCompleteOrderedAndUnique(t *testing.T) {
 		GroupK8s,
 		GroupK8s,
 		GroupK8s, GroupK8s, GroupK8s, GroupK8s, GroupK8s,
+		GroupAWS,
+		GroupFinOps, GroupFinOps, GroupFinOps, GroupFinOps, GroupFinOps, GroupFinOps, GroupFinOps,
 	}
 	got := Catalog()
 	if len(got) != len(wantGroups) {
@@ -72,6 +74,11 @@ func TestCatalogDestinationsAreExactAndSafe(t *testing.T) {
 		"list_helm_releases": {docsKubernetes, ""}, "get_helm_release": {docsKubernetes, ""},
 		"diagnose_k8s_workload": {docsKubernetes, ""},
 		"propose_action":        {docsKubernetes, ""},
+		"get_aws_connection":    {docsTools, "/aws/settings"},
+		"cost_breakdown":        {docsTools, "/aws/finops"}, "cost_drivers": {docsTools, "/aws/finops"},
+		"cost_increases": {docsTools, "/aws/finops"}, "cost_increase_detail": {docsTools, "/aws/finops"},
+		"savings_opportunities": {docsTools, "/aws/finops"}, "budget_status": {docsTools, "/aws/finops"},
+		"cost_accounts": {docsTools, "/aws/finops"},
 	}
 	got := make(map[string][2]string, len(want))
 	for _, metadata := range Catalog() {
@@ -209,6 +216,8 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 	}{
 		{"kubernetes", SectionConnector, "kubernetes", []string{"get_cluster_overview", "discover_k8s_resources", "query_k8s_resources", "get_k8s_resource", "list_workloads", "get_workload", "list_k8s_events", "get_pod_logs", "get_workload_logs", "list_k8s_issues", "get_k8s_changes", "get_k8s_neighborhood", "top_k8s_resources", "list_gitops_apps", "get_rollout_status", "list_rollouts", "list_helm_releases", "get_helm_release", "diagnose_k8s_workload"}},
 		{"kubernetes-actions", SectionConnector, "kubernetes", []string{"propose_action"}},
+		{"aws", SectionConnector, "aws", []string{"get_aws_connection"}},
+		{"aws-finops", SectionConnector, "aws", []string{"cost_breakdown", "cost_drivers", "cost_increases", "cost_increase_detail", "savings_opportunities", "budget_status", "cost_accounts"}},
 		{"source-control", SectionConnector, "git", []string{"recent_changes"}},
 		{"logs", SectionDataSource, "logs", []string{"get_related_logs", "discover_log_fields", "read_log_records"}},
 		{"elasticsearch-logs", SectionDataSource, "elasticsearch", []string{"list_log_indices", "get_log_mappings", "search_logs", "get_log_shards"}},
@@ -226,7 +235,7 @@ func TestToolsetsAreExactOrderedAndOwnEveryVisibleTool(t *testing.T) {
 		if got[index].ID != want[index].id || got[index].Section != want[index].section || got[index].IconKey != want[index].icon || !reflect.DeepEqual(got[index].ToolNames, want[index].children) {
 			t.Errorf("Toolsets()[%d] = %#v, want id=%q section=%q icon=%q children=%v", index, got[index], want[index].id, want[index].section, want[index].icon, want[index].children)
 		}
-		if (got[index].ID == "kubernetes" || got[index].ID == "elasticsearch-logs" || got[index].ID == "describe_baseline") && got[index].Permission != core.PermissionInfrastructureView {
+		if (got[index].ID == "kubernetes" || got[index].ID == "aws" || got[index].ID == "aws-finops" || got[index].ID == "elasticsearch-logs" || got[index].ID == "describe_baseline") && got[index].Permission != core.PermissionInfrastructureView {
 			t.Errorf("Toolsets()[%d] permission = %q, want %q", index, got[index].Permission, core.PermissionInfrastructureView)
 		}
 		if got[index].ID == "kubernetes-actions" && got[index].Permission != core.PermissionAgentApprove {

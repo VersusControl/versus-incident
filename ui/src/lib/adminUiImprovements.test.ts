@@ -52,10 +52,11 @@ describe("Item 2 — top-bar AI/webhook split + no sidebar count", () => {
     expect(topbar.includes("showCountWindow = true")).toBe(true);
   });
 
-  it("the sidebar shows NO incident count (badge removed entirely)", () => {
-    // No open-count source, no badge field, no badge render on the nav item.
+  it("the sidebar shows NO incident count", () => {
+    // No open-count source and no incident tally anywhere in the nav. The
+    // optional row badge is a static label only — it never reads a count.
     expect(sidebar.includes("useOpenIncidentCount")).toBe(false);
-    expect(sidebar.includes("badge")).toBe(false);
+    expect(sidebar.includes("incidentCounts")).toBe(false);
   });
 });
 

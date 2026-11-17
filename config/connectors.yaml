@@ -24,3 +24,27 @@
 #       - cluster_id: staging
 #         endpoint: https://staging.example
 #         auth: {mode: token_file, token_file: /run/k8s/staging/token}
+
+# AWS accounts defined here are read-only in the UI. Accounts created through
+# the wizard are stored in the configured storage backend. The external ID must
+# reference an environment variable so the secret never lands in this file.
+# connectors:
+#   aws:
+#     enable: true
+#     accounts:
+#       - account_id: "111122223333"
+#         display_name: Production
+#         regions: auto
+#         auth:
+#           mode: assume_role
+#           role_arn: arn:aws:iam::111122223333:role/versus-reader
+#           external_id: ${VERSUS_AWS_EXTERNAL_ID}
+#     tags:
+#       value_allowlist: [Name, app, service, team, env]
+#     optional_data:
+#       cost_explorer: false   # FinOps cost is read only when this is true
+#     finops:
+#       team_tag_key: team
+#       max_paid_requests_per_day: 20   # paid Cost Explorer requests per day, $0.01 each
+#       refresh_time: "09:00"           # once a day, report.timezone
+#       cost_source_account: ""         # payer account ID; empty = each account reads its own

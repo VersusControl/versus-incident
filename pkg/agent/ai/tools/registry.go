@@ -14,6 +14,8 @@ const (
 	GroupCommon Group = "common"
 	GroupVersus Group = "versus"
 	GroupK8s    Group = "k8s"
+	GroupFinOps Group = "finops"
+	GroupAWS    Group = "aws"
 )
 
 // Entry binds a tool to the domain group that owns it.
@@ -93,7 +95,15 @@ const (
 	docsTools      = "https://docs.versusincident.com/#/agent/tools/overview"
 	docsVersus     = docsTools + "?id=versus-tools"
 	docsKubernetes = "https://docs.versusincident.com/#/agent/connectors/kubernetes"
+	docsFinOpsUI   = "/aws/finops"
+	docsAWSUI      = "/aws/settings"
 )
+
+// awsConnectorRequirement gates the AWS tools on a connected AWS connector.
+var awsConnectorRequirement = Requirement{Kind: RequirementCapability, Capabilities: []string{"aws_connector"}}
+
+// costDataRequirement gates the FinOps tools on cached cloud cost data.
+var costDataRequirement = Requirement{Kind: RequirementCapability, Capabilities: []string{"cost_data"}}
 
 // Catalog returns every known tool in UI order, including planned tools whose
 // runtime implementation has not landed yet.
@@ -128,6 +138,8 @@ func Toolsets() []ToolsetMetadata {
 var toolsets = []ToolsetMetadata{
 	{ID: "kubernetes", Section: SectionConnector, DisplayName: "Kubernetes", Description: "Inspect cluster health, workloads, resources, issues, changes, relationships, GitOps, Rollouts, Helm releases and diagnosis.", IconKey: "kubernetes", ToolNames: []string{"get_cluster_overview", "discover_k8s_resources", "query_k8s_resources", "get_k8s_resource", "list_workloads", "get_workload", "list_k8s_events", "get_pod_logs", "get_workload_logs", "list_k8s_issues", "get_k8s_changes", "get_k8s_neighborhood", "top_k8s_resources", "list_gitops_apps", "get_rollout_status", "list_rollouts", "list_helm_releases", "get_helm_release", "diagnose_k8s_workload"}, Requirement: Requirement{Kind: RequirementIntegration, Integration: "kubernetes"}, DocsURL: docsKubernetes, UIPath: "/agent/kubernetes", Visibility: VisibilityAlways, Permission: core.PermissionInfrastructureView},
 	{ID: "kubernetes-actions", Section: SectionConnector, DisplayName: "Kubernetes actions", Description: "Propose allow-listed workload changes for human approval through a separate actor credential.", IconKey: "kubernetes", ToolNames: []string{"propose_action"}, Requirement: Requirement{Kind: RequirementCapability, Capabilities: []string{"kubernetes_actions"}}, DocsURL: docsKubernetes, UIPath: "/agent/kubernetes", Visibility: VisibilityAlways, Permission: core.PermissionAgentApprove},
+	{ID: "aws", Section: SectionConnector, DisplayName: "AWS", Description: "Read the AWS connection from stored state: accounts, status, freshness, denied services with fixes and sync gaps. Never calls AWS.", IconKey: "aws", ToolNames: []string{"get_aws_connection"}, Requirement: awsConnectorRequirement, DocsURL: docsTools, UIPath: docsAWSUI, Visibility: VisibilityAlways, Permission: core.PermissionInfrastructureView},
+	{ID: "aws-finops", Section: SectionConnector, DisplayName: "AWS FinOps", Description: "Read cached AWS cost: breakdown, drivers, increases, savings, budgets and accounts. Never calls a paid billing API.", IconKey: "aws", ToolNames: []string{"cost_breakdown", "cost_drivers", "cost_increases", "cost_increase_detail", "savings_opportunities", "budget_status", "cost_accounts"}, Requirement: costDataRequirement, DocsURL: docsTools, UIPath: docsFinOpsUI, Visibility: VisibilityAlways, Permission: core.PermissionInfrastructureView},
 	{ID: "source-control", Section: SectionConnector, DisplayName: "Source control", Description: "Read recent source changes to correlate deployments with incidents.", IconKey: "git", ToolNames: []string{"recent_changes"}, Requirement: Requirement{Kind: RequirementCapability, Capabilities: []string{"change_feed"}}, DocsURL: "https://docs.versusincident.com/#/agent/tools/recent-changes", Visibility: VisibilityAlways},
 	{ID: "logs", Section: SectionDataSource, DisplayName: "Logs", Description: "Read bounded redacted logs related to a concrete service and time window.", IconKey: "logs", ToolNames: []string{"get_related_logs", "discover_log_fields", "read_log_records"}, Requirement: Requirement{Kind: RequirementDataSource, SignalKind: "logs"}, DocsURL: "https://docs.versusincident.com/#/agent/data-sources", UIPath: "/agent/logs", Visibility: VisibilityAlways},
 	{ID: "elasticsearch-logs", Section: SectionDataSource, DisplayName: "Elasticsearch", Description: "Discover mappings and shard health, and search bounded data in configured log indices.", IconKey: "elasticsearch", ToolNames: []string{"list_log_indices", "get_log_mappings", "search_logs", "get_log_shards"}, Requirement: Requirement{Kind: RequirementDataSource, SignalKind: "elasticsearch"}, DocsURL: "https://docs.versusincident.com/#/agent/data-sources", UIPath: "/agent/logs", Visibility: VisibilityAlways, Permission: core.PermissionInfrastructureView},
@@ -187,6 +199,14 @@ var catalog = []Metadata{
 	{Group: GroupK8s, Name: "get_helm_release", DisplayName: "Helm release details", Description: "Inspect one Helm release revision history from Secret metadata labels only.", DocsURL: docsKubernetes, Requirement: Requirement{Kind: RequirementIntegration, Integration: "kubernetes"}},
 	{Group: GroupK8s, Name: "diagnose_k8s_workload", DisplayName: "Diagnose Kubernetes workload", Description: "Collect bounded workload, warning-event and scrubbed pod-log evidence.", DocsURL: docsKubernetes, Requirement: Requirement{Kind: RequirementIntegration, Integration: "kubernetes"}},
 	{Group: GroupK8s, Name: "propose_action", DisplayName: "Propose Kubernetes action", Description: "Propose a typed Kubernetes change for a principal with action approval permission.", DocsURL: docsKubernetes, Requirement: Requirement{Kind: RequirementCapability, Capabilities: []string{"kubernetes_actions"}}},
+	{Group: GroupAWS, Name: "get_aws_connection", DisplayName: "AWS connection", Description: "Read the AWS connection status: accounts, last check, sync freshness, denied services with fixes, regions not enabled and sync gaps.", DocsURL: docsTools, UIPath: docsAWSUI, Requirement: awsConnectorRequirement},
+	{Group: GroupFinOps, Name: "cost_breakdown", DisplayName: "Cost breakdown", Description: "Read cached cloud cost for a period: total, change, forecast and spend by service, account, region or team.", DocsURL: docsTools, UIPath: docsFinOpsUI, Requirement: costDataRequirement},
+	{Group: GroupFinOps, Name: "cost_drivers", DisplayName: "Cost drivers", Description: "Explain what moved cloud cost between two periods, by cause and owner.", DocsURL: docsTools, UIPath: docsFinOpsUI, Requirement: costDataRequirement},
+	{Group: GroupFinOps, Name: "cost_increases", DisplayName: "Cost increases", Description: "List detected cost increases with start day, monthly impact, owner and status.", DocsURL: docsTools, UIPath: docsFinOpsUI, Requirement: costDataRequirement},
+	{Group: GroupFinOps, Name: "cost_increase_detail", DisplayName: "Cost increase detail", Description: "Explain one cost increase: cause tree, likely change, owner rule and related savings.", DocsURL: docsTools, UIPath: docsFinOpsUI, Requirement: costDataRequirement},
+	{Group: GroupFinOps, Name: "savings_opportunities", DisplayName: "Savings opportunities", Description: "List cloud savings with monthly saving, effort, risk and owner as read-only guides.", DocsURL: docsTools, UIPath: docsFinOpsUI, Requirement: costDataRequirement},
+	{Group: GroupFinOps, Name: "budget_status", DisplayName: "Budget status", Description: "Compare month-to-date cost and forecast with each budget.", DocsURL: docsTools, UIPath: docsFinOpsUI, Requirement: costDataRequirement},
+	{Group: GroupFinOps, Name: "cost_accounts", DisplayName: "Cost by account", Description: "List the accounts behind the cost source with status, cost, change, top driver and top team.", DocsURL: docsTools, UIPath: docsFinOpsUI, Requirement: costDataRequirement},
 }
 
 func init() {

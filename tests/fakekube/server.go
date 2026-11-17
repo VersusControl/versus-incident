@@ -264,7 +264,25 @@ type countingWriter struct {
 	bytes int64
 }
 
+// WriteHeader and Write give every response a non-HTML content type and turn
+// off browser content sniffing. A handler may set a more specific type first;
+// a body written without one is labelled plain text instead of being sniffed,
+// so request text echoed into a response is never rendered as markup.
+func (writer *countingWriter) WriteHeader(status int) {
+	header := writer.ResponseWriter.Header()
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	header.Set("X-Content-Type-Options", "nosniff")
+	writer.ResponseWriter.WriteHeader(status)
+}
+
 func (writer *countingWriter) Write(body []byte) (int, error) {
+	header := writer.ResponseWriter.Header()
+	if header.Get("Content-Type") == "" {
+		header.Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	header.Set("X-Content-Type-Options", "nosniff")
 	written, err := writer.ResponseWriter.Write(body)
 	writer.bytes += int64(written)
 	return written, err
@@ -622,7 +640,7 @@ func (server *Server) metrics(writer http.ResponseWriter, request *http.Request)
 		}
 		page, err := server.store.List(source.resource, namespace, request.URL.Query())
 		if err != nil {
-			http.Error(writer, err.Error(), http.StatusBadRequest)
+			http.Error(writer, "invalid metrics request", http.StatusBadRequest)
 			return
 		}
 		items := make([]any, 0, len(page.Items))

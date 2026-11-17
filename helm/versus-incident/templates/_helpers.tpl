@@ -394,3 +394,18 @@ the password never appears in a command line.
       key: {{ include "versus-incident.redisSecretKey" . }}
 {{- end }}
 {{- end -}}
+
+{{/*
+An AWS account ID as a string. --set reads 111122223333 as a number and an
+unquoted ID in a values file arrives as a float; both are printed back as the
+digits, so the rendered ID is never in exponent form. A number loses any
+leading zero, which the 12-digit check then reports.
+*/}}
+{{- define "versus-incident.awsAccountId" -}}
+{{- if kindIs "float64" . -}}
+{{- printf "%.0f" . -}}
+{{- else if kindIs "invalid" . -}}
+{{- else -}}
+{{- toString . -}}
+{{- end -}}
+{{- end -}}

@@ -3446,8 +3446,1232 @@ export function createKubernetesApi(cluster?: string) {
   };
 }
 
+// ---------- AWS connector (AWS Harness settings) ----------
+//
+// The settings surface is read-only by design: the only writes are the connect
+// wizard, account bookkeeping and the two option endpoints. Every payload below
+// is snake_case on the wire, matching the Go handlers one-for-one.
+
+export type AwsConnectMethod =
+  | "cloudformation"
+  | "terraform"
+  | "existing_role"
+  | "local_profile"
+  | "organizations";
+
+export type AwsAccountStatus = "connected" | "disconnected";
+
+export type AwsServiceStatus =
+  | "readable"
+  | "not_used"
+  | "denied"
+  | "not_on_plan"
+  | "not_checked";
+
+// AwsErrorCode is the CLOSED vocabulary the server reports. Anything else is
+// treated as `unknown` and described generically — AWS's own message text is
+// never surfaced, because it can carry account ids and resource names.
+export type AwsErrorCode =
+  | "no_server_identity"
+  | "account_mismatch"
+  | "role_not_found"
+  | "trust_denied"
+  | "external_id_mismatch"
+  | "session_duration_invalid"
+  | "region_disabled"
+  | "throttled"
+  | "timeout"
+  | "network"
+  | "refresh_in_progress";
+
+// Counts are numbers; the names behind denials and plan gaps travel beside
+// them as arrays, so the row can name the service instead of only counting it.
+export interface AwsServiceCounts {
+  total: number;
+  readable: number;
+  not_used: number;
+  not_checked: number;
+}
+
+export interface AwsAccountRegions {
+  selected: string[];
+  enabled: number;
+  not_enabled: string[];
+}
+
+export interface AwsApiUse {
+  used_rps: number;
+  budget_rps: number;
+}
+
+export interface AwsAccount {
+  account_id: string;
+  display_name: string;
+  source: "config" | "wizard";
+  status: AwsAccountStatus;
+  checked_at?: string | null;
+  disconnected_since?: string | null;
+  error_code?: AwsErrorCode | null;
+  services: AwsServiceCounts;
+  regions: AwsAccountRegions;
+  api_use: AwsApiUse;
+  role_arn: string;
+  /** Services the role could not read; the row names the first. */
+  denied_services: string[];
+  /** Services the plan does not include; never counted as denials. */
+  not_on_plan_services: string[];
+  /**
+   * Collection freshness and first-sync progress. Absent from servers that
+   * predate collection; state "off" when collection is turned off.
+   */
+  sync?: AwsAccountSync;
+}
+
+/** off | pending | syncing | ok | partial | failed */
+export type AwsSyncState = "off" | "pending" | "syncing" | "ok" | "partial" | "failed";
+
+/** One service across the account's regions; units are service × region. */
+export interface AwsServiceSync {
+  service: string;
+  state: AwsSyncState;
+  units_done: number;
+  units_total: number;
+  last_good_at: string | null;
+  /** Named gaps: throttled | denied | not_checked | not_enabled. */
+  gaps: string[];
+}
+
+export interface AwsAccountSync {
+  state: AwsSyncState;
+  /** Newest committed unit; the UI renders the age. */
+  synced_at: string | null;
+  first_sync: boolean;
+  units_done: number;
+  units_total: number;
+  services: AwsServiceSync[];
+}
+
+export type AwsOptionalDataKey =
+  | "cost_explorer"
+  | "config"
+  | "security_hub"
+  | "trusted_advisor";
+
+// Where an editable setting came from: `config` is explicitly configured and
+// therefore read-only in the UI; `default` is unset (editable); `wizard` is a
+// value stored through this screen (editable).
+export type AwsValueSource = "config" | "default" | "wizard";
+
+export interface AwsOptionalDataEntry {
+  /** How many accounts have this paid read turned on. */
+  on: number;
+  /** Only `config` locks the control; `default` and `wizard` stay editable. */
+  source: AwsValueSource;
+}
+
+export type AwsOptionalData = Partial<Record<AwsOptionalDataKey, AwsOptionalDataEntry>>;
+
+export interface AwsPrivacy {
+  sent: string[];
+  never_sent: string[];
+  tag_value_allowlist: string[];
+  tag_value_allowlist_source: AwsValueSource;
+  ai: { enabled: boolean; provider: string; model: string };
+  self_test: {
+    passing: boolean;
+    last_run_at?: string | null;
+    leaks_24h: number;
+  };
+}
+
+export interface AwsCapabilities {
+  organizations: boolean;
+  can_write: boolean;
+}
+
+export interface AwsBudget {
+  /** What the limiter is using now, as reported by the server. */
+  used_rps: number;
+  /** Configured ceiling per account and region. */
+  budget_rps: number;
+  source: AwsValueSource;
+}
+
+export interface AwsSettings {
+  enabled: boolean;
+  principal_arn?: string | null;
+  accounts: AwsAccount[];
+  optional_data: AwsOptionalData;
+  privacy: AwsPrivacy;
+  capabilities: AwsCapabilities;
+  budget?: AwsBudget;
+  /** What to change when `enabled` is false. */
+  enable_hint?: { config_key: string; env_var: string };
+}
+
+export interface AwsDraftService {
+  service: string;
+  status: AwsServiceStatus;
+  items?: number;
+  /** Closed probe failure code; the reason words are derived from it. */
+  error_code?: string | null;
+  fix_actions?: string[] | null;
+  retryable?: boolean;
+}
+
+export interface AwsDraftCounts {
+  total: number;
+  readable: number;
+  not_used: number;
+  denied: number;
+  not_on_plan: number;
+  not_checked: number;
+  pending: number;
+}
+
+export interface AwsAssumeResult {
+  ok: boolean;
+  latency_ms?: number | null;
+  error_code?: AwsErrorCode | null;
+}
+
+export interface AwsConnectDraft {
+  draft_id: string;
+  method: AwsConnectMethod;
+  external_id_masked: string;
+  principal_arn?: string | null;
+  template_url?: string | null;
+  terraform_snippet?: string | null;
+  role_arn?: string | null;
+  assume?: AwsAssumeResult | null;
+  services?: AwsDraftService[];
+  counts?: Partial<AwsDraftCounts> | null;
+  fix_policy?: string | null;
+  probe_id?: string | null;
+}
+
+export interface AwsRegionOption {
+  region: string;
+  enabled: boolean;
+  opt_in_status?: string;
+  resources_found: number;
+}
+
+export interface AwsAccountRemoval {
+  purge?: "pending";
+}
+
+export interface AwsErrorInfo {
+  code: AwsErrorCode | "unknown";
+  title: string;
+  detail: string;
+  fix?: string;
+}
+
+// AWS_ERROR_TEXT is the only place an AWS-facing failure is put into words.
+// Each entry says what happened and the exact thing to change.
+export const AWS_ERROR_TEXT: Record<AwsErrorCode, AwsErrorInfo> = {
+  no_server_identity: {
+    code: "no_server_identity",
+    title: "The Versus server has no AWS identity",
+    detail:
+      "Versus signs in with the access key in its environment, or the instance profile, task role or profile of the machine it runs on. AWS found none, or rejected it.",
+    fix: "Check AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or attach an instance role, task role or profile, then restart Versus.",
+  },
+  account_mismatch: {
+    code: "account_mismatch",
+    title: "The AWS credentials belong to another account",
+    detail: "Versus signed in, but to a different AWS account than the one configured, so it reads nothing.",
+    fix: "Set the account ID to the account of the credentials (aws sts get-caller-identity), or use credentials of the configured account, then restart Versus.",
+  },
+  role_not_found: {
+    code: "role_not_found",
+    title: "Role not found",
+    detail: "AWS has no role at that ARN, or it lives in another account.",
+    fix: "Check the account id and role name in the ARN, then try again.",
+  },
+  trust_denied: {
+    code: "trust_denied",
+    title: "The role trust policy refused Versus",
+    detail: "The role's trust policy does not allow the Versus principal to assume it.",
+    fix: "Add the Versus principal ARN shown above to the role's trust policy.",
+  },
+  external_id_mismatch: {
+    code: "external_id_mismatch",
+    title: "Trust policy does not allow this ExternalId",
+    detail: "The role trusts a different ExternalId than the one this draft generated.",
+    fix: "Copy the ExternalId from this step into the role's trust condition (sts:ExternalId).",
+  },
+  session_duration_invalid: {
+    code: "session_duration_invalid",
+    title: "Session duration not allowed",
+    detail: "The role's maximum session duration is shorter than Versus asks for.",
+    fix: "Raise MaxSessionDuration on the role to at least 15 minutes.",
+  },
+  region_disabled: {
+    code: "region_disabled",
+    title: "Region not enabled for this account",
+    detail: "The account has not opted in to that region.",
+    fix: "Pick an enabled region, or enable the region in the AWS console.",
+  },
+  throttled: {
+    code: "throttled",
+    title: "AWS throttled the request",
+    detail: "Versus is backing off automatically and will retry.",
+    fix: "Nothing to do — the check retries on its own.",
+  },
+  timeout: {
+    code: "timeout",
+    title: "AWS did not answer in time",
+    detail: "The request timed out before AWS replied.",
+    fix: "Retry the check; if it keeps timing out, check the network path to AWS.",
+  },
+  network: {
+    code: "network",
+    title: "Could not reach AWS",
+    detail: "The connection to the AWS endpoint failed.",
+    fix: "Check egress, DNS and any proxy between Versus and AWS.",
+  },
+  refresh_in_progress: {
+    code: "refresh_in_progress",
+    title: "A cost refresh is running",
+    detail: "Try again in a few seconds.",
+  },
+};
+
+const UNKNOWN_AWS_ERROR: AwsErrorInfo = {
+  code: "unknown",
+  title: "The AWS request failed",
+  detail: "Versus could not complete the request for an unlisted reason.",
+  fix: "Retry; if it persists, check the Versus server logs.",
+};
+
+const AWS_ERROR_CODES = new Set<string>(Object.keys(AWS_ERROR_TEXT));
+
+/** Maps a closed error code (or anything else) to human words. */
+export function awsErrorText(code: string | null | undefined): AwsErrorInfo {
+  if (code && AWS_ERROR_CODES.has(code)) {
+    return AWS_ERROR_TEXT[code as AwsErrorCode];
+  }
+  return UNKNOWN_AWS_ERROR;
+}
+
+/** Reads the closed error code out of an ApiError body, when present. */
+export function awsErrorFrom(error: unknown): AwsErrorInfo {
+  return awsErrorText(errorCodeOf(error));
+}
+
+function errorCodeOf(error: unknown): string | undefined {
+  if (error instanceof ApiError && error.body && typeof error.body === "object") {
+    const body = error.body as { error?: unknown; code?: unknown };
+    if (typeof body.error === "string") return body.error;
+    if (typeof body.code === "string") return body.code;
+  }
+  return undefined;
+}
+
+export type FinOpsErrorCode =
+  | "paid_request_cap_reached"
+  | "reserved_for_scheduled_refresh"
+  | "store_unavailable"
+  | "cost_data_off"
+  | "cost_period_too_large"
+  | "reason_required"
+  | "until_invalid"
+  | "status_change_not_allowed"
+  | "already_frozen"
+  | "bill_not_closed"
+  | "report_not_month"
+  | "manual_refresh_used"
+  | "account_not_covered"
+  | "amount_overflow"
+  | "invalid_budget"
+  | "bad_query"
+  | "not_found";
+
+export interface FinOpsErrorInfo {
+  title: string;
+  detail?: string;
+}
+
+// FINOPS_ERROR_TEXT words the FinOps action failures. A code it does not
+// list falls back to the AWS table only for actions that call AWS.
+export const FINOPS_ERROR_TEXT: Record<FinOpsErrorCode, FinOpsErrorInfo> = {
+  paid_request_cap_reached: { title: "Daily AWS request limit reached", detail: "Try again tomorrow." },
+  reserved_for_scheduled_refresh: { title: "Requests kept for the daily refresh", detail: "Try again after it runs." },
+  store_unavailable: { title: "Storage is unavailable", detail: "Try again shortly." },
+  cost_data_off: { title: "Cost data is off", detail: "Turn it on in AWS settings." },
+  cost_period_too_large: { title: "Period too large", detail: "Choose a shorter period." },
+  reason_required: { title: "Add a reason" },
+  until_invalid: { title: "Pick a valid end date" },
+  status_change_not_allowed: { title: "This status can't be changed" },
+  already_frozen: { title: "This month's report is already saved" },
+  bill_not_closed: { title: "The bill isn't final yet", detail: "Save the report after the 5th." },
+  report_not_month: { title: "Pick a whole month" },
+  manual_refresh_used: { title: "Today's manual refresh is used", detail: "Try again tomorrow." },
+  account_not_covered: { title: "This account isn't in cost data", detail: "Check the account in AWS settings." },
+  amount_overflow: { title: "Amount too large", detail: "Enter a smaller amount." },
+  invalid_budget: { title: "Check the budget", detail: "Enter a positive amount." },
+  bad_query: { title: "Can't show this view", detail: "Reload the page." },
+  not_found: { title: "Not found", detail: "It may have been removed." },
+};
+
+/** Fallback for FinOps actions that change Versus state only; it never mentions AWS. */
+export const FINOPS_LOCAL_FALLBACK: FinOpsErrorInfo = { title: "Could not save", detail: "Try again." };
+
+const FINOPS_ERROR_CODES = new Set<string>(Object.keys(FINOPS_ERROR_TEXT));
+
+/** The FinOps or refresh wording for a known code, or null. */
+export function finopsKnownError(error: unknown): FinOpsErrorInfo | null {
+  const code = errorCodeOf(error);
+  if (code && FINOPS_ERROR_CODES.has(code)) return FINOPS_ERROR_TEXT[code as FinOpsErrorCode];
+  if (code === "refresh_in_progress") return AWS_ERROR_TEXT.refresh_in_progress;
+  return null;
+}
+
+/**
+ * Words a FinOps action failure. `aws` actions (the paid drill-down) fall
+ * back to the AWS table; `local` actions fall back to a plain "Could not save".
+ */
+export function finopsErrorFrom(error: unknown, kind: "aws" | "local"): FinOpsErrorInfo {
+  return finopsKnownError(error) ?? (kind === "aws" ? awsErrorFrom(error) : FINOPS_LOCAL_FALLBACK);
+}
+
+// Account actions (recheck, rename, remove) can fail inside Versus before
+// AWS is asked anything; those codes must not read as an AWS failure.
+const AWS_ACCOUNT_LOCAL_ERROR_TEXT: Record<string, FinOpsErrorInfo> = {
+  storage_unavailable: { title: "Storage is unavailable", detail: "Try again shortly." },
+  config_managed: { title: "Set in the config file", detail: "Change it in the config file." },
+};
+
+/** Words an AWS account action failure; Versus-side codes never mention AWS. */
+export function awsAccountErrorFrom(error: unknown): FinOpsErrorInfo {
+  const code = errorCodeOf(error);
+  if (code && Object.prototype.hasOwnProperty.call(AWS_ACCOUNT_LOCAL_ERROR_TEXT, code)) {
+    return AWS_ACCOUNT_LOCAL_ERROR_TEXT[code];
+  }
+  return awsErrorFrom(error);
+}
+
+// The current contract counts readable/not_used/not_checked as numbers and
+// names denials in `denied_services` / `not_on_plan_services`. Older servers
+// put arrays (or a bare count) inside `services`, so the normalizer accepts
+// that shape and lifts the names to the account, where the view reads them.
+type LegacyServiceCounts = AwsServiceCounts & {
+  denied?: unknown;
+  not_on_plan?: unknown;
+  not_checked?: unknown;
+};
+
+type LegacyBudget = {
+  used_rps?: unknown;
+  budget_rps?: unknown;
+  max_requests_per_second?: unknown;
+  source?: unknown;
+};
+
+function asCount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, value);
+  }
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function asStringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+}
+
+// A legacy count with no names keeps its size by carrying blank entries; the
+// views count the array and only name a non-empty service.
+function asServiceNames(primary: unknown, legacy: unknown): string[] {
+  const names = asStringList(primary);
+  if (names.length > 0) return names;
+  const legacyNames = asStringList(legacy);
+  if (legacyNames.length > 0) return legacyNames;
+  return Array.from({ length: asCount(primary) || asCount(legacy) }, () => "");
+}
+
+function normalizeAwsAccount(raw: AwsAccount): AwsAccount {
+  const services = (raw.services ?? {}) as LegacyServiceCounts;
+  return {
+    ...raw,
+    services: {
+      total: asCount(services.total),
+      readable: asCount(services.readable),
+      not_used: asCount(services.not_used),
+      not_checked: asCount(services.not_checked),
+    },
+    denied_services: asServiceNames(raw.denied_services, services.denied),
+    not_on_plan_services: asServiceNames(
+      raw.not_on_plan_services,
+      services.not_on_plan,
+    ),
+    regions: {
+      selected: raw.regions?.selected ?? [],
+      enabled: asCount(raw.regions?.enabled),
+      not_enabled: raw.regions?.not_enabled ?? [],
+    },
+    api_use: {
+      used_rps: asCount(raw.api_use?.used_rps),
+      budget_rps: asCount(raw.api_use?.budget_rps),
+    },
+    sync: raw.sync
+      ? {
+          ...raw.sync,
+          units_done: asCount(raw.sync.units_done),
+          units_total: asCount(raw.sync.units_total),
+          services: (raw.sync.services ?? []).map((sv) => ({
+            ...sv,
+            units_done: asCount(sv.units_done),
+            units_total: asCount(sv.units_total),
+            gaps: sv.gaps ?? [],
+          })),
+        }
+      : undefined,
+  };
+}
+
+function asValueSource(value: unknown): AwsValueSource {
+  return value === "config" ? "config" : value === "wizard" ? "wizard" : "default";
+}
+
+function normalizeAwsBudget(raw: AwsBudget | LegacyBudget | undefined): AwsBudget | undefined {
+  if (!raw) return undefined;
+  const legacy = raw as LegacyBudget;
+  return {
+    used_rps:
+      typeof legacy.used_rps === "number" && Number.isFinite(legacy.used_rps)
+        ? legacy.used_rps
+        : 0,
+    budget_rps: asCount(legacy.budget_rps) || asCount(legacy.max_requests_per_second),
+    source: asValueSource(legacy.source),
+  };
+}
+
+function normalizeAwsOptionalData(raw: AwsOptionalData | undefined): AwsOptionalData {
+  const out: AwsOptionalData = {};
+  for (const [key, entry] of Object.entries(raw ?? {})) {
+    if (!entry) continue;
+    out[key as AwsOptionalDataKey] = {
+      on: asCount(entry.on),
+      source: asValueSource(entry.source),
+    };
+  }
+  return out;
+}
+
+// A draft probe older than the `error_code` contract carries `reason`; lift it
+// so every view only ever reads one field.
+function normalizeAwsDraft(raw: AwsConnectDraft): AwsConnectDraft {
+  return {
+    ...raw,
+    services: (raw.services ?? []).map((service) => {
+      const legacy = service as AwsDraftService & { reason?: string | null };
+      return {
+        ...service,
+        error_code: service.error_code ?? legacy.reason ?? null,
+      };
+    }),
+  };
+}
+
+// The connector-off payload is just `{enabled:false}`. Normalize every
+// collection so a page never has to branch on a missing field before it can
+// say the connector is off.
+function normalizeAwsSettings(raw: AwsSettings): AwsSettings {
+  return {
+    ...raw,
+    accounts: (raw.accounts ?? []).map(normalizeAwsAccount),
+    budget: normalizeAwsBudget(raw.budget),
+    optional_data: normalizeAwsOptionalData(raw.optional_data),
+    privacy: raw.privacy
+      ? {
+          ...raw.privacy,
+          sent: raw.privacy.sent ?? [],
+          never_sent: raw.privacy.never_sent ?? [],
+          tag_value_allowlist: raw.privacy.tag_value_allowlist ?? [],
+          tag_value_allowlist_source: asValueSource(
+            raw.privacy.tag_value_allowlist_source,
+          ),
+        }
+      : {
+          sent: [],
+          never_sent: [],
+          tag_value_allowlist: [],
+          tag_value_allowlist_source: "default",
+          ai: { enabled: false, provider: "", model: "" },
+          self_test: { passing: true, last_run_at: null, leaks_24h: 0 },
+        },
+    capabilities: raw.capabilities ?? { organizations: false, can_write: false },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// FinOps (/api/admin/aws/finops/*). These types mirror the Go view structs in
+// pkg/finops/views.go field for field (JSON tags). Money is integer
+// micro-units (*_micros), shares and changes are basis points (*_bp), days
+// are "YYYY-MM-DD". Missing data is named (sync, reason, note fields), never
+// zero. A disabled source answers 200 with { enabled: false, reason }.
+// ---------------------------------------------------------------------------
+
+export type FinOpsDepth = "summary" | "details";
+export type FinOpsGroupBy =
+  | "service"
+  | "account"
+  | "account_group"
+  | "region"
+  | "team"
+  | "application"
+  | "resource"
+  | "cause";
+
+export interface FinOpsDateRange {
+  start: string;
+  end: string;
+}
+
+export interface FinOpsPeriod {
+  key: string;
+  label: string;
+  short: string;
+  range: FinOpsDateRange;
+  calendar: FinOpsDateRange;
+  open: boolean;
+  complete_days: number;
+}
+
+export interface FinOpsComparison {
+  key: string;
+  label: string;
+  short: string;
+  range: FinOpsDateRange;
+  available: boolean;
+  reason?: string;
+  first_full?: string;
+}
+
+export interface FinOpsTagStatus {
+  key: string;
+  active: boolean;
+  allowlisted: boolean;
+}
+
+export interface FinOpsMissingAccount {
+  id: string;
+  name: string;
+  reason: string;
+}
+
+export interface FinOpsCurrencyTotal {
+  currency: string;
+  amount_micros: number;
+}
+
+export interface FinOpsSync {
+  last_complete_day: string;
+  updated_at?: string;
+  partial_days?: string[];
+  stale: boolean;
+  stale_reason?: string;
+  accounts_readable: number;
+  accounts_total: number;
+  missing_accounts?: FinOpsMissingAccount[];
+  skipped_calls?: string[];
+  other_currencies?: FinOpsCurrencyTotal[];
+  partial: boolean;
+  learning: boolean;
+  previous_month_open: boolean;
+  resource_data: boolean;
+  team_tag: FinOpsTagStatus;
+  estimated?: string[];
+  notes?: string[];
+  /** First last-complete day with full detection (while learning). */
+  learning_until?: string;
+  /** The day the most recent open bill closes. */
+  bill_closes_on?: string;
+  next_refresh_at?: string;
+  /** Set with stale: since when, and the settled days not loaded yet. */
+  stale_detail?: { since?: string; days: string[] | null };
+}
+
+export interface FinOpsHeader {
+  enabled: boolean;
+  reason?: string;
+  period?: FinOpsPeriod;
+  compare?: FinOpsComparison;
+  depth?: string;
+  currency?: string;
+  measure?: string;
+  sync?: FinOpsSync;
+  links: { ui: string };
+  /** The account cost is read through: a management (payer) account or the account itself. */
+  cost_source?: FinOpsCostSource;
+}
+
+export interface FinOpsCostSource {
+  account_id: string;
+  /** The account's display name when known. */
+  account_name?: string;
+  /** management | account */
+  kind: string;
+  /** With several standalone accounts: how many read their own cost. */
+  count?: number;
+}
+
+export interface FinOpsDayAmount {
+  day: string;
+  amount_micros: number;
+  partial?: boolean;
+}
+
+export interface FinOpsChange {
+  base_micros: number;
+  change_micros: number;
+  change_bp: number;
+  direction: "up" | "down" | "same";
+  word: string;
+}
+
+export interface FinOpsForecast {
+  month: string;
+  amount_micros: number;
+  low_micros?: number;
+  high_micros?: number;
+  /** provider | estimate | none */
+  source: string;
+  reason?: string;
+}
+
+export interface FinOpsBudget {
+  id: string;
+  name: string;
+  scope: string;
+  scope_value?: string;
+  monthly_micros: number;
+  source: string;
+}
+
+export interface FinOpsBudgetLine extends FinOpsBudget {
+  read_only: boolean;
+  actual_micros: number;
+  forecast_micros: number;
+  forecast_source: string;
+  forecast_diff_micros: number;
+  /** on_track | at_risk | over_budget */
+  status: string;
+  status_word: string;
+  estimated?: boolean;
+}
+
+export interface FinOpsSavingsTotal {
+  monthly_micros: number;
+  count: number;
+  /** Open commitments, never added to monthly_micros or count. */
+  commitment_monthly_micros: number;
+  commitment_count: number;
+}
+
+export interface FinOpsSummaryBody {
+  answer: string;
+  total_micros: number;
+  change: FinOpsChange | null;
+  sparkline: FinOpsDayAmount[] | null;
+  forecast: FinOpsForecast;
+  budget: FinOpsBudgetLine | null;
+  savings: FinOpsSavingsTotal;
+  unallocated: { amount_micros: number; share_bp: number };
+  meter: { used: number; cap: number };
+  /** The scope bar's choices for the period. */
+  scope_options: FinOpsScopeOptions;
+}
+
+export interface FinOpsScopeOptions {
+  accounts: Array<{ id: string; name: string; kind: string }> | null;
+  regions: string[] | null;
+  teams: string[] | null;
+}
+
+export type FinOpsSummaryView = FinOpsHeader & FinOpsSummaryBody;
+
+export interface FinOpsOwner {
+  name: string;
+  /** tag | account | unallocated */
+  rule: string;
+  rule_text: string;
+  estimated?: boolean;
+}
+
+export interface FinOpsWhy {
+  /** found | none_found | collectors_pending | account_not_connected */
+  state: string;
+  text?: string;
+}
+
+export interface FinOpsExpected {
+  reason: string;
+  until: string;
+  by: string;
+  at: string;
+}
+
+export interface FinOpsBridgeRow {
+  id: string;
+  cause: string;
+  label: string;
+  amount_micros: number;
+  account?: string;
+  account_name?: string;
+  service?: string;
+  service_label?: string;
+  usage_type?: string;
+  record_type?: string;
+  resource_id?: string;
+  /** "too_large" when this row's account × service resource lines were too many to read; absent otherwise. */
+  resources?: string;
+  owner?: FinOpsOwner;
+  since?: string;
+  increase_id?: string;
+  status?: string;
+  /** connected | cost_only | payer (bill-level rows: unused Savings Plan, support, credits, tax). */
+  account_kind?: string;
+  why?: FinOpsWhy;
+  lines?: number;
+  sentence?: string;
+  expected?: FinOpsExpected;
+}
+
+export interface FinOpsColumnRule {
+  show: boolean;
+  note?: string;
+}
+
+export interface FinOpsBridgeBody {
+  available: boolean;
+  note?: string;
+  base_micros: number;
+  total_micros: number;
+  change_micros: number;
+  change_bp: number;
+  direction: string;
+  rows: FinOpsBridgeRow[] | null;
+  other?: FinOpsBridgeRow;
+  up_micros: number;
+  down_micros: number;
+  steady: boolean;
+  offset_note?: string;
+  steady_note?: string;
+  /** Set when resource-level lines were too many to read: rows name no resource, amounts are complete. */
+  resource_note?: string;
+  min_driver_micros: number;
+  owner_column: FinOpsColumnRule;
+  account_column: FinOpsColumnRule;
+}
+
+export type FinOpsBridgeView = FinOpsHeader & FinOpsBridgeBody;
+
+export interface FinOpsBreakdownOption {
+  group_by: string;
+  available: boolean;
+  /** single_value | dominant_value | no_team_tag | tag_not_active | same_tag | no_groups */
+  reason?: string;
+  note?: string;
+}
+
+export interface FinOpsBreakdownRow {
+  key: string;
+  label: string;
+  amount_micros: number;
+  base_micros?: number;
+  change_micros?: number;
+  share_bp: number;
+  owner?: FinOpsOwner;
+  estimated?: boolean;
+  count?: number;
+  inside?: FinOpsBreakdownRow[];
+}
+
+export interface FinOpsBreakdownBody {
+  group_by: string;
+  total_micros: number;
+  rows: FinOpsBreakdownRow[] | null;
+  options: FinOpsBreakdownOption[] | null;
+  default_group_by: string;
+}
+
+export type FinOpsBreakdownView = FinOpsHeader & FinOpsBreakdownBody;
+
+export interface FinOpsSuspect {
+  /** found | none_found | collectors_pending | account_not_connected */
+  state: string;
+  summary?: string;
+  actor?: string;
+  at?: string;
+  /** likely | possible */
+  confidence?: string;
+  /** Likely | Possible */
+  confidence_word?: string;
+  /** One of several changes that fit equally well (resource-level data off). */
+  tied?: boolean;
+  ref?: string;
+  note?: string;
+}
+
+export interface FinOpsIncrease {
+  id: string;
+  title: string;
+  sentence: string;
+  account: string;
+  account_name: string;
+  account_kind?: string;
+  service: string;
+  service_label: string;
+  usage_type?: string;
+  started_on: string;
+  daily_before_micros: number;
+  daily_now_micros: number;
+  monthly_impact_micros: number;
+  period_change_micros: number;
+  /** The amount the title and sentence state; 0 when they state none. */
+  stated_change_micros: number;
+  cause: string;
+  owner: FinOpsOwner;
+  suspect_change: FinOpsSuspect;
+  /** Up to three ranked candidate changes; the first is suspect_change. */
+  suspects: FinOpsSuspect[] | null;
+  /** The alert sent for the increase (acknowledgement is not reported back). */
+  alert?: { channel: string; sent_at: string };
+  status: string;
+  expected?: FinOpsExpected;
+  alerted_at?: string;
+  resolved_on?: string;
+}
+
+export interface FinOpsIncreasesView extends FinOpsHeader {
+  status: string;
+  items: FinOpsIncrease[] | null;
+  learning: boolean;
+  learning_note?: string;
+}
+
+export interface FinOpsCauseNode {
+  usage_type: string;
+  label: string;
+  amount_micros: number;
+  resources?: Array<{ id: string; amount_micros: number }>;
+}
+
+export interface FinOpsUsageSignal {
+  label: string;
+  before_micros: number;
+  after_micros: number;
+  unit: string;
+}
+
+export interface FinOpsGuide {
+  steps?: string[];
+  console_path?: string;
+  snippet?: string;
+  doc_url?: string;
+}
+
+export interface FinOpsSaving {
+  id: string;
+  kind: string;
+  title: string;
+  monthly_micros: number;
+  /** minutes | hours | days */
+  effort: string;
+  /** none | low | needs_testing */
+  risk: string;
+  account?: string;
+  region?: string;
+  resource_ids?: string[];
+  team?: string;
+  guide?: FinOpsGuide;
+  /** Where monthly_micros comes from: billed | provider | list_price. */
+  basis?: string;
+  /** monthly_micros is an upper bound ("up to"). */
+  up_to?: boolean;
+  /** Resources the item covers. */
+  count?: number;
+  /** Other actions on the same resource; never added to totals. */
+  alternatives?: Array<{ kind: string; title: string; monthly_micros: number; basis?: string }>;
+  /** A commitment priced on today's usage, before other savings; outside the total. */
+  before_other_savings?: boolean;
+  line: string;
+  owner: FinOpsOwner;
+  /** open | dismissed */
+  status: string;
+  dismissed?: { dismissed: boolean; reason?: string; by?: string; at?: string };
+}
+
+export interface FinOpsStatusEvent {
+  at: string;
+  by: string;
+  from: string;
+  to: string;
+  reason?: string;
+  until?: string;
+}
+
+export interface FinOpsIncreaseDetailView extends FinOpsHeader {
+  increase: FinOpsIncrease;
+  series: FinOpsDayAmount[] | null;
+  cause_tree: FinOpsCauseNode[] | null;
+  /** available | off | too_large (resources not named; amounts complete) */
+  resource_data: string;
+  resource_note?: string;
+  usage_signal: FinOpsUsageSignal | null;
+  related_savings: FinOpsSaving[] | null;
+  history: FinOpsStatusEvent[] | null;
+}
+
+export interface FinOpsSavingsView extends FinOpsHeader {
+  total: FinOpsSavingsTotal;
+  items: FinOpsSaving[] | null;
+  /** Savings checks that could not run; named, never $0. */
+  gaps: Array<{ check: string; reason: string }> | null;
+}
+
+export interface FinOpsAccountRow {
+  id: string;
+  name: string;
+  /** connected | cost_only */
+  kind: string;
+  /** ok | not_readable | new | closed */
+  status: string;
+  error_code?: string;
+  group?: string;
+  cost_micros: number;
+  change_micros: number | null;
+  top_driver: { label: string; amount_micros: number } | null;
+  top_team?: string;
+  top_team_estimated?: boolean;
+  sparkline_micros: number[] | null;
+  first_cost?: string;
+  closed_on?: string;
+}
+
+export interface FinOpsAccountGroupRow {
+  name: string;
+  cost_micros: number;
+  change_micros: number | null;
+  count: number;
+}
+
+export interface FinOpsAccountsView extends FinOpsHeader {
+  total_micros: number;
+  accounts: FinOpsAccountRow[] | null;
+  groups: FinOpsAccountGroupRow[] | null;
+}
+
+export interface FinOpsFrozen {
+  at: string;
+  by: string;
+}
+
+export interface FinOpsReportView extends FinOpsHeader {
+  generated_at: string;
+  frozen: FinOpsFrozen | null;
+  /** False before the bill closes; freeze_note says why. */
+  can_freeze: boolean;
+  freeze_note?: string;
+  /** True while the provider may still change the month's numbers. */
+  not_final: boolean;
+  summary: FinOpsSummaryBody;
+  bridge: FinOpsBridgeBody;
+  spend_by_service: FinOpsBreakdownRow[] | null;
+  spend_by_account: FinOpsBreakdownRow[] | null;
+  /** Null unless team tags split the cost. */
+  spend_by_team: FinOpsBreakdownRow[] | null;
+  savings: { total: FinOpsSavingsTotal; top: FinOpsSaving[] | null };
+  notes: {
+    expected: FinOpsIncrease[] | null;
+    coverage: { accounts: string; last_complete_day: string; measure_label: string };
+    missing: string[] | null;
+  };
+  copy_summary: string;
+}
+
+export interface FinOpsReportRef {
+  month: string;
+  frozen: FinOpsFrozen;
+  total_micros: number;
+}
+
+/** Tables the CSV export can write. */
+export type FinOpsCsvTable = "breakdown" | "increases" | "savings";
+
+/** Query parameters shared by the FinOps read routes. */
+export interface FinOpsQuery {
+  period?: string;
+  compare?: string;
+  accounts?: string[];
+  regions?: string[];
+  teams?: string[];
+  group_by?: FinOpsGroupBy;
+  depth?: FinOpsDepth;
+}
+
+export function finopsQueryString(q: FinOpsQuery): string {
+  const p = new URLSearchParams();
+  if (q.period) p.set("period", q.period);
+  if (q.compare) p.set("compare", q.compare);
+  if (q.accounts?.length) p.set("accounts", q.accounts.join(","));
+  if (q.regions?.length) p.set("regions", q.regions.join(","));
+  if (q.teams?.length) p.set("teams", q.teams.join(","));
+  if (q.group_by) p.set("group_by", q.group_by);
+  if (q.depth) p.set("depth", q.depth);
+  const s = p.toString();
+  return s ? `?${s}` : "";
+}
+
+const FINOPS = "/api/admin/aws/finops";
+
+/** Download URL of the CSV export with the active filters. */
+export function finopsExportCsvUrl(q: FinOpsQuery, table: FinOpsCsvTable = "breakdown"): string {
+  const qs = finopsQueryString(q);
+  return `${FINOPS}/export.csv${qs ? `${qs}&` : "?"}table=${table}`;
+}
+
+const finopsApi = {
+  finopsSummary: (q: FinOpsQuery = {}) =>
+    request<FinOpsSummaryView>(`${FINOPS}/summary${finopsQueryString(q)}`),
+  finopsBridge: (q: FinOpsQuery = {}) =>
+    request<FinOpsBridgeView>(`${FINOPS}/bridge${finopsQueryString(q)}`),
+  finopsBreakdown: (q: FinOpsQuery = {}) =>
+    request<FinOpsBreakdownView>(`${FINOPS}/breakdown${finopsQueryString(q)}`),
+  finopsSavings: (q: FinOpsQuery = {}) =>
+    request<FinOpsSavingsView>(`${FINOPS}/savings${finopsQueryString(q)}`),
+  finopsIncrease: (id: string, q: FinOpsQuery = {}) =>
+    request<FinOpsIncreaseDetailView>(
+      `${FINOPS}/increases/${encodeURIComponent(id)}${finopsQueryString(q)}`,
+    ),
+  finopsAccounts: (q: FinOpsQuery = {}) =>
+    request<FinOpsAccountsView>(`${FINOPS}/accounts${finopsQueryString(q)}`),
+  finopsReport: (q: FinOpsQuery = {}) =>
+    request<FinOpsReportView>(`${FINOPS}/report${finopsQueryString(q)}`),
+  /** Freeze a closed month as the monthly report. */
+  finopsFreezeReport: (month: string) =>
+    request<FinOpsReportView>(`${FINOPS}/reports`, {
+      method: "POST",
+      body: JSON.stringify({ month }),
+    }),
+  /**
+   * Paid: reads one account and AWS service by usage type and team tag
+   * (one request, more for extra pages; cached for the day).
+   */
+  finopsDrillDown: (body: { account: string; service: string }) =>
+    request<{ drilled: boolean }>(`${FINOPS}/drilldown`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Dismiss a saving with a reason; it leaves the list and the total. Changes nothing in AWS. */
+  finopsDismissSaving: (id: string, reason: string) =>
+    request<{ dismissed: boolean }>(`${FINOPS}/savings/${encodeURIComponent(id)}/dismiss`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
+  /** Mark an increase expected (reason and an end date within 90 days) or open again. */
+  finopsSetIncreaseStatus: (
+    id: string,
+    body: { status: "expected"; reason: string; until: string } | { status: "open" },
+  ) =>
+    request<FinOpsIncrease>(`${FINOPS}/increases/${encodeURIComponent(id)}/status`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+};
+
+const awsSettingsApi = {
+  awsSettings: () =>
+    request<AwsSettings>("/api/admin/aws/settings").then(normalizeAwsSettings),
+
+  createAwsDraft: (body: { method: AwsConnectMethod }) =>
+    request<AwsConnectDraft>("/api/admin/aws/connect/drafts", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // The full ExternalId is only handed out to admins through this audited
+  // endpoint; the settings payload always carries the masked form.
+  revealAwsExternalId: (draftId: string) =>
+    request<{ external_id: string }>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}/external-id`,
+    ).then((r) => r.external_id),
+
+  verifyAwsDraft: (draftId: string, body: { role_arn: string }) =>
+    request<{ probe_id: string }>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}/verify`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  awsDraft: (draftId: string) =>
+    request<AwsConnectDraft>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}`,
+    ).then(normalizeAwsDraft),
+
+  discoverAwsRegions: (draftId: string) =>
+    request<AwsRegionOption[]>(
+      `/api/admin/aws/connect/drafts/${encodeURIComponent(draftId)}/regions`,
+      { method: "POST" },
+    ),
+
+  createAwsAccount: (body: {
+    draft_id: string;
+    display_name: string;
+    regions: string[];
+  }) =>
+    request<AwsAccount>("/api/admin/aws/accounts", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }).then(normalizeAwsAccount),
+
+  updateAwsAccount: (
+    accountId: string,
+    body: { display_name?: string; regions?: string[] },
+  ) =>
+    request<AwsAccount>(`/api/admin/aws/accounts/${encodeURIComponent(accountId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }).then(normalizeAwsAccount),
+
+  // The account is gone on success. `purge: "pending"` means its cost data
+  // is cleared at the next cost refresh rather than right away.
+  deleteAwsAccount: (accountId: string) =>
+    request<AwsAccountRemoval | undefined>(
+      `/api/admin/aws/accounts/${encodeURIComponent(accountId)}`,
+      { method: "DELETE" },
+    ),
+
+  recheckAwsAccount: (accountId: string) =>
+    request<void>(
+      `/api/admin/aws/accounts/${encodeURIComponent(accountId)}/recheck`,
+      { method: "POST" },
+    ),
+
+  updateAwsOptions: (body: {
+    optional_data?: Partial<Record<AwsOptionalDataKey, boolean>>;
+    max_requests_per_second?: number;
+  }) =>
+    request<AwsSettings>("/api/admin/aws/settings/options", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  updateAwsPrivacy: (body: { tag_value_allowlist: string[] }) =>
+    request<AwsSettings>("/api/admin/aws/settings/privacy", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+};
+
 export const api = {
   ...agentCapabilitiesApi,
+  ...awsSettingsApi,
+  ...finopsApi,
   ...createKubernetesApi(),
   kubernetesClusters: async () => normalizeKubernetesClusters(await request<Partial<KubernetesClusters> | null>("/api/admin/kubernetes/clusters")),
   /**

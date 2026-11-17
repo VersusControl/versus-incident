@@ -1,0 +1,14 @@
+# The keys come from the user's Secret as env, the account renders with
+# default_chain, and the chart's own Secret holds no AWS key.
+^            - name: AWS_ACCESS_KEY_ID$
+^            - name: AWS_SECRET_ACCESS_KEY$
+^                  name: "versus-aws"$
+^                  key: "AWS_ACCESS_KEY_ID"$
+^                  key: "AWS_SECRET_ACCESS_KEY"$
+^          - account_id: "111122223333"$
+regions: \["us-east-1"\]
+mode: "default_chain"
+cost_explorer: true
+!aws_access_key_id
+!aws_secret_access_key
+!e\+11

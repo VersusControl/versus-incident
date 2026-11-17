@@ -127,7 +127,50 @@ data:
       max_retry_backoff: 512
       tls: true
   connectors.yaml: |
-    # The Kubernetes connector is off (connectors.kubernetes.enabled=false).
+    connectors:
+      # The Kubernetes connector is off (connectors.kubernetes.enabled=false).
+      aws:
+        enable: false
+        accounts:
+          []
+        tags:
+          value_allowlist: ["Name","app","service","team","env"]
+        budgets:
+          max_requests_per_second: 2
+        optional_data:
+          cost_explorer: false
+          security_hub: false
+          config: false
+          trusted_advisor: false
+        health_check_interval: "5m"
+        collect:
+          enable: true
+          intervals:
+            inventory: "15m"
+            health: "2m"
+            changes: "5m"
+          history:
+            max_generations: 48
+            max_age: "168h"
+            change_retention: "336h"
+        applications:
+          sources: ["appregistry","cloudformation","tags"]
+          tag_keys: ["app","service"]
+        finops:
+          team_tag_key: "team"
+          min_increase_usd_per_month: 100
+          min_driver_usd: 50
+          target_coverage: 0.8
+          max_paid_requests_per_day: 20
+          refresh_time: "09:00"
+          cost_source_account: ""
+          budgets:
+            []
+          account_groups:
+            []
+          report:
+            timezone: "UTC"
+            slack_summary: false
   slack_message.tmpl: |
     {{- range .alerts }}
     *{{ .status | upper }}: {{ .labels.alertname }}* ({{ or .labels.severity "none" }})
@@ -181,7 +224,7 @@ spec:
         app.kubernetes.io/name: versus-incident
         app.kubernetes.io/instance: versus-incident
       annotations:
-        checksum/config: f5ed3938ffb6cf60416691c9916d8be8d021f99d2e06a8218f3a47fcb39e2c62
+        checksum/config: 6ff4d120d923671cb4c0f967f369ca9372fd9a07952191aa221726fa0c0d75c2
         checksum/secret: ec8fcf0c4dddb86d91954f4bf31a91b032a51848a4fa1ea0a24e221c068f23b6
     spec:
       serviceAccountName: versus-incident

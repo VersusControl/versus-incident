@@ -167,7 +167,7 @@ func TestAgentToolsetsListReturnsChildFreeCardsInServerOrder(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&rows); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"kubernetes", "kubernetes-actions", "source-control", "logs", "elasticsearch-logs", "metrics", "traces", "find_runbook", "describe_dependencies", "describe_baseline"}
+	want := []string{"kubernetes", "kubernetes-actions", "aws", "aws-finops", "source-control", "logs", "elasticsearch-logs", "metrics", "traces", "find_runbook", "describe_dependencies", "describe_baseline"}
 	if len(rows) != len(want) {
 		t.Fatalf("rows = %d, want %d", len(rows), len(want))
 	}

@@ -134,6 +134,13 @@ timeline events behind it.
 You can see which reads were made, how long they took, how many tokens were
 used and which model answered.
 
+The same answers are available to the DevOps agent in web **Chat** and the
+`versus-devops` command line tool, through read-only tools that never call AWS:
+`get_aws_connection` for the connection status, and `cost_breakdown`,
+`cost_drivers`, `cost_increases`, `cost_increase_detail`,
+`savings_opportunities`, `budget_status` and `cost_accounts` for cost. See the
+[Tool Reference](../agent/tools/overview.md#aws-tools).
+
 ### Get connected
 
 ![AWS Harness Settings: the accounts list, a three step connect panel and a privacy summary](../docs/images/aws-harness-settings.png)
@@ -142,6 +149,9 @@ Connecting an account is three steps: choose how to create the read-only role,
 check access with one line per service, then pick regions. Access is checked
 service by service, so a missing permission shows up as one clear line with the
 exact fix — not as a broken dashboard.
+
+See [Connect your AWS account](/in-development/aws-harness-connect) for the
+methods, the External ID, what each access check means and how to fix a denial.
 
 ## Safe and simple by design
 

@@ -1,0 +1,6 @@
+# The AWS connector with paid Cost Explorer reads turned on for the FinOps page.
+connectors:
+  aws:
+    enable: true
+    optionalData:
+      costExplorer: true
