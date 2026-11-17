@@ -19,6 +19,16 @@
       ]
     },
     {
+      "name": "docs-build",
+      "description": "The docs site build tool and its workflow and page list. Turns on the docs link check.",
+      "paths": [
+        "tools/devdocs/**",
+        ".github/workflows/docs.yml",
+        ".github/dev-docs.json"
+      ],
+      "enables": ["docs"]
+    },
+    {
       "name": "ui",
       "description": "The web UI. Turns on the ui job.",
       "paths": ["ui/**"],
@@ -103,8 +113,14 @@
     },
     {
       "name": "ci",
-      "description": "CI definitions and this change-detection tool. Turns on everything.",
-      "paths": [".github/**", "tools/cichanges/**", "tools/docscheck/**"],
+      "description": "CI definitions and this change-detection tool. Turns on everything. The docs site workflow and page list belong to docs-build.",
+      "paths": [
+        ".github/**",
+        "!.github/workflows/docs.yml",
+        "!.github/dev-docs.json",
+        "tools/cichanges/**",
+        "tools/docscheck/**"
+      ],
       "all": true
     }
   ]

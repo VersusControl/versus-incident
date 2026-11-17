@@ -9,8 +9,8 @@
 // build copies main's site to --out, then for each listed page copies it
 // from dev, with any linked file under docs/images that main lacks, puts an
 // "In development" badge under its title, points every tagged reference to the configured image at --tag, and
-// adds the sidebar entries main's sidebar lacks. Without --dev it copies
-// main's site alone. The repository files are never changed. validate is a
+// adds the sidebar entries main's sidebar lacks (when dev has a sidebar, only
+// for the pages it lists). Without --dev it copies main's site alone. The repository files are never changed. validate is a
 // local check that rejects unknown keys in the list; build warns about them
 // and goes on, and fails only when a listed page is missing on dev.
 //
@@ -165,6 +165,9 @@ func printReport(stdout, stderr io.Writer, r *Report, image, tag string) {
 	fmt.Fprintf(stdout, "linked files copied from dev: %d\n", len(r.Assets))
 	for _, p := range r.SidebarAdded {
 		fmt.Fprintf(stdout, "sidebar entry added: %s\n", p)
+	}
+	for _, p := range r.NotInSidebar {
+		fmt.Fprintf(stdout, "no sidebar entry (dev's sidebar does not list it): %s\n", p)
 	}
 	for _, p := range r.NoHeading {
 		fmt.Fprintf(stderr, "::warning file=src/%s::No \"# \" title on this dev page, so it has no In development badge\n", p)
