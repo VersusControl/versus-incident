@@ -1,7 +1,5 @@
 # Connect your AWS account
 
-_In development — not released yet_
-
 Connecting an account lets AWS Harness read its resource metadata. It takes a
 few minutes, writes nothing to your account, and shows you exactly what Versus
 can read before you save. New to AWS Harness? [See the

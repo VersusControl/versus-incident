@@ -1,7 +1,5 @@
 # AWS Harness
 
-_In development — not released yet_
-
 **One place to see what you have in AWS, how it is connected, and why something
 broke.** AWS Harness reads your accounts (read-only) and turns them into a
 dashboard your team can actually understand: what exists, where it runs, what

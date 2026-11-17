@@ -1,7 +1,5 @@
 # AWS FinOps Agent
 
-_In development — not released yet_
-
 **See what your AWS bill is, what moved it and why, who owns each part, and
 what you can save — in words a manager can read.** The FinOps agent reads your
 AWS cost data once a day (read-only) and turns it into one page and a two-page
