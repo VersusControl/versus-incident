@@ -81,12 +81,15 @@ func PickDevTag(tags []string, commits []string) (tag string, found bool) {
 }
 
 // Affected reports whether a change to the dev branch can change the site:
-// a listed page, a docs image or the list itself. The build always runs
+// a listed page, a docs image, the list itself, or dev's sidebar, which
+// places the groups main lacks. The build always runs
 // main's tools, so tool changes on dev do not count.
 func Affected(cfg *Config, files []string) bool {
 	always := []string{
 		"src/docs/images/**",
 		".github/dev-docs.json",
+		// dev's sidebar decides where a group main lacks is placed.
+		"src/_sidebar.md",
 	}
 	for _, f := range files {
 		for _, p := range always {
