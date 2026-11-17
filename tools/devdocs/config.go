@@ -19,14 +19,18 @@ type Config struct {
 
 // Page is one entry of the list. Path is relative to src/ and may use globs;
 // "**" matches any number of folders. Sidebar, when set, adds a sidebar entry
-// for each matching page that main's sidebar does not already have.
+// for each matching page that main's sidebar does not already have. When dev
+// has a sidebar, only the pages it lists get one, under dev's group and with
+// dev's link text when those are plain text; the others are published
+// without an entry.
 type Page struct {
 	Path    string   `json:"path"`
 	Sidebar *Sidebar `json:"sidebar,omitempty"`
 }
 
-// Sidebar names the sidebar group, and optionally the link text. Without a
-// title the page's first heading is used.
+// Sidebar names the sidebar group, and optionally the link text. Dev's
+// sidebar link text comes first; without either, the page's first heading is
+// used.
 type Sidebar struct {
 	Group string `json:"group"`
 	Title string `json:"title,omitempty"`

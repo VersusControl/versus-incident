@@ -95,6 +95,9 @@ type Report struct {
 	NoHeading     []string
 	Rewrites      map[string]int
 	SidebarAdded  []string
+	// NotInSidebar are dev pages dev's sidebar does not list: they are
+	// published without a sidebar entry.
+	NotInSidebar  []string
 	MissingAssets []string
 	// KeptMain are linked files main already has; main's copy is kept.
 	KeptMain []string
@@ -125,7 +128,9 @@ func isSymlink(fsys fs.FS, name string) bool {
 
 // Overlay applies the dev pages to a copy of main's site in place: it copies
 // each listed page from dev, adds the badge, rewrites the image to tag, and
-// adds the missing sidebar entries. A file a dev page links to is copied only
+// adds the missing sidebar entries. When dev has a sidebar, only the pages it
+// lists get an entry, with its link text, and a new group goes where dev's
+// sidebar has it. A file a dev page links to is copied only
 // when it is under docs/images and main does not have it, so dev never
 // replaces anything main publishes except the listed pages themselves.
 func Overlay(cfg *Config, site Files, dev fs.FS, tag string) (*Report, error) {
@@ -204,7 +209,18 @@ func Overlay(cfg *Config, site Files, dev fs.FS, tag string) (*Report, error) {
 	}
 
 	if len(entries) > 0 {
-		sidebar, added := AddSidebarEntries(string(site["_sidebar.md"]), entries)
+		// When dev has a sidebar, it decides which dev pages get an entry,
+		// their link text and where a group main lacks goes. Without one (a
+		// symbolic link counts as none) every entry is added from the list,
+		// and a new group goes at the end.
+		var devSidebar string
+		if !isSymlink(dev, "_sidebar.md") {
+			if data, err := fs.ReadFile(dev, "_sidebar.md"); err == nil {
+				devSidebar = string(data)
+				entries, r.NotInSidebar = ListedOnDev(entries, devSidebar)
+			}
+		}
+		sidebar, added := AddSidebarEntries(string(site["_sidebar.md"]), devSidebar, entries)
 		if len(added) > 0 {
 			site["_sidebar.md"] = []byte(sidebar)
 		}

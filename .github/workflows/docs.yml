@@ -7,9 +7,10 @@ name: Deploy docs site to Pages
 # .github/dev-docs.json. Every run builds from both branches' current heads:
 # tools/devdocs copies the listed dev pages and the files they link to over
 # main's pages, marks each one "In development", points its Versus image at
-# the newest dev-<sha> image in the registry, and adds missing sidebar
-# entries. tools/docscheck then checks every internal link before deploying.
-# The repository files are never changed.
+# the newest dev-<sha> image in the registry, and adds the sidebar entries
+# main lacks for the pages dev's sidebar lists, placing a group main lacks
+# where dev's sidebar has it. tools/docscheck then checks every internal link
+# before deploying. The repository files are never changed.
 
 on:
   push:
@@ -35,8 +36,8 @@ permissions: {}
 
 jobs:
   # A push to dev rebuilds the site only when it touched a listed page, a docs
-  # image, the list or the build. A push to main is already narrowed by the
-  # path filter.
+  # image, the list, dev's sidebar (it places the groups main lacks) or the
+  # build. A push to main is already narrowed by the path filter.
   gate:
     name: Does this change the site
     runs-on: ubuntu-latest
@@ -94,7 +95,7 @@ jobs:
             else
               build=$(go run ./tools/devdocs affected --config .github/dev-docs.json --files "$RUNNER_TEMP/changed.txt")
               if [ "$build" != true ]; then
-                echo "::notice::Docs build skipped: this push to dev changed no listed page, docs image or the dev docs list"
+                echo "::notice::Docs build skipped: this push to dev changed no listed page, docs image, the dev docs list or the sidebar"
               fi
             fi
           fi
