@@ -247,6 +247,12 @@ func TestCommittedOSSConfig(t *testing.T) {
 		{"routes", []string{"pkg/routes/api.go"}, []string{"go-controllers", "image"}, false},
 		{"workflow", []string{".github/workflows/dev.yml"}, nil, true},
 		{"the change tool itself", []string{"tools/cichanges/main.go"}, nil, true},
+		{"docs build tool and its workflow", []string{"tools/devdocs/sidebar.go", ".github/workflows/docs.yml"}, []string{"docs", "docs-build"}, false},
+		{"docs page list", []string{".github/dev-docs.json"}, []string{"docs", "docs-build"}, false},
+		{"docs workflow beside the main workflow", []string{".github/workflows/docs.yml", ".github/workflows/dev.yml"}, nil, true},
+		{"group map", []string{".github/ci-groups.json"}, nil, true},
+		{"other workflow", []string{".github/workflows/release.yaml"}, nil, true},
+		{"link checker", []string{"tools/docscheck/main.go"}, nil, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -263,6 +269,81 @@ func TestCommittedOSSConfig(t *testing.T) {
 				t.Errorf("groups on = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// TestCommittedOSSConfigDocsBuild follows a change to the docs site build
+// through every output the workflow reads: the link check runs, the tool's
+// own package is the only one tested, and no Go group (which picks the race
+// shards and the image) switches on. The package list is what go list
+// reports for the tool and a few module packages around it.
+func TestCommittedOSSConfigDocsBuild(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "ci-groups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := mustConfig(t, string(data))
+	var pkgs []ListPackage
+	pkgs = append(pkgs, ListPackage{ImportPath: "fmt", Name: "fmt", Standard: true})
+	pkgs = append(pkgs, pkgEntries("main", "tools/devdocs", []string{"fmt"}, nil, func(lp *ListPackage) {
+		lp.GoFiles = []string{"config.go", "main.go", "page.go", "sidebar.go", "site.go", "tag.go"}
+		lp.TestGoFiles = []string{"devdocs_test.go"}
+	})...)
+	pkgs = append(pkgs, pkgEntries("main", "tools/cichanges", []string{"fmt"}, nil, nil)...)
+	pkgs = append(pkgs, pkgEntries("main", "tools/docscheck", []string{"fmt"}, nil, nil)...)
+	pkgs = append(pkgs, pkgEntries("config", "pkg/config", []string{"fmt"}, nil, nil)...)
+	pkgs = append(pkgs, pkgEntries("main", "cmd", []string{p("pkg/config"), "fmt"}, nil, nil)...)
+
+	files := []string{"tools/devdocs/sidebar.go", ".github/workflows/docs.yml"}
+	sel := Select(cfg, files, false, "")
+	if sel.Full {
+		t.Fatalf("full run (%s), want only the docs groups", sel.Reason)
+	}
+	if got, want := onGroups(sel), []string{"docs", "docs-build"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("groups on = %v, want %v", got, want)
+	}
+	for name, on := range sel.Groups {
+		if on && strings.HasPrefix(name, "go-") {
+			t.Errorf("Go group %s is on; it would start a race shard", name)
+		}
+	}
+	goPkgs := GoPackages(files, pkgs)
+	if want := []string{p("tools/devdocs")}; !reflect.DeepEqual(goPkgs, want) {
+		t.Errorf("go_packages = %v, want %v", goPkgs, want)
+	}
+	if !GoChanged(sel, goPkgs) {
+		t.Error("go = false: the Test job would skip the tool's tests and vet")
+	}
+
+	// The workflow and page list alone touch no Go package, so the Test job
+	// stays off.
+	listOnly := []string{".github/workflows/docs.yml", ".github/dev-docs.json"}
+	sel = Select(cfg, listOnly, false, "")
+	if goPkgs := GoPackages(listOnly, pkgs); len(goPkgs) != 0 || GoChanged(sel, goPkgs) {
+		t.Errorf("workflow and page list only: go_packages = %v, go = %t, want none and false", goPkgs, GoChanged(sel, goPkgs))
+	}
+}
+
+// TestNegationInAllGroup checks that a "!" pattern takes a file out of an
+// "all" group, and that the file then needs another group to claim it.
+func TestNegationInAllGroup(t *testing.T) {
+	cfg := mustConfig(t, `{
+  "groups": [
+    {"name": "docs", "paths": ["src/**"]},
+    {"name": "site", "paths": ["tools/site/**", ".github/workflows/site.yml"], "enables": ["docs"]},
+    {"name": "ci", "paths": [".github/**", "!.github/workflows/site.yml"], "all": true}
+  ]
+}`)
+	sel := Select(cfg, []string{".github/workflows/site.yml"}, false, "")
+	if sel.Full || !reflect.DeepEqual(onGroups(sel), []string{"docs", "site"}) {
+		t.Errorf("excluded workflow: full = %t (%s), on = %v, want docs and site only", sel.Full, sel.Reason, onGroups(sel))
+	}
+	if sel := Select(cfg, []string{".github/workflows/ci.yml"}, false, ""); !sel.Full {
+		t.Error("another workflow is no longer a full run")
+	}
+	bare := mustConfig(t, `{"groups": [{"name": "ci", "paths": [".github/**", "!.github/workflows/site.yml"], "all": true}]}`)
+	if sel := Select(bare, []string{".github/workflows/site.yml"}, false, ""); !sel.Full || !reflect.DeepEqual(sel.Unmatched, []string{".github/workflows/site.yml"}) {
+		t.Errorf("an excluded file no group claims: full = %t, unmatched = %v, want a full run", sel.Full, sel.Unmatched)
 	}
 }
 
