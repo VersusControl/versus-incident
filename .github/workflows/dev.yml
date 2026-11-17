@@ -41,6 +41,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       docs: ${{ steps.groups.outputs.docs }}
+      docs-build: ${{ steps.groups.outputs.docs-build }}
       ui: ${{ steps.groups.outputs.ui }}
       helm: ${{ steps.groups.outputs.helm }}
       go-kubernetes: ${{ steps.groups.outputs.go-kubernetes }}
@@ -120,10 +121,14 @@ jobs:
           }
           detect "$force"
 
-          # A push to main that changed anything beyond docs runs the full
-          # suite before its image is built.
+          # Groups that never reach the release image: the docs pages and the
+          # docs site build. Any other group on counts as a code change.
+          not_code='^(docs|docs-build|full|go|go_packages)='
+
+          # A push to main that changed code runs the full suite before its
+          # image is built.
           if [ "$EVENT" = push ] && [ "$GITHUB_REF" = refs/heads/main ] && [ "$force" = false ] \
-            && grep -v -E '^(docs|full|go|go_packages)=' "$decision" | grep -q '=true$'; then
+            && grep -v -E "$not_code" "$decision" | grep -q '=true$'; then
             echo "Push to main changed code: running the full suite"
             detect true
           fi
@@ -131,7 +136,7 @@ jobs:
           on() { grep -qx "$1=true" "$decision"; }
 
           code=false
-          if grep -v -E '^(docs|full|go|go_packages)=' "$decision" | grep -q '=true$'; then code=true; fi
+          if grep -v -E "$not_code" "$decision" | grep -q '=true$'; then code=true; fi
 
           shards=""
           add_shard() { shards="${shards:+$shards,}\"$1\""; }
@@ -688,7 +693,8 @@ jobs:
           fi
           echo "Every job that ran passed"
 
-  # Images build only after ci-ok passes, and not for a docs-only change.
+  # Images build only after ci-ok passes, and not for a change to only the
+  # docs or the docs site build.
   # ci-ok runs even when an earlier job is skipped, so these jobs check its
   # result themselves rather than relying on the default success() rule.
   build-and-push-dev:
