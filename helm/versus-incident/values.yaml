@@ -487,6 +487,9 @@ connectors:
 # chart wires itself. Use these to supply values referenced as ${VAR} from
 # agent_sources.yaml, which is rendered verbatim into the ConfigMap.
 #   extraEnv:
+#     # Log detail: debug | info (default) | warn | error.
+#     - name: LOG_LEVEL
+#       value: debug
 #     - name: ELASTIC_PASSWORD
 #       valueFrom:
 #         secretKeyRef:
