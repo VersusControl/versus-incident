@@ -264,7 +264,10 @@ type Service struct {
 	evidenceHeartbeat time.Duration
 	historySaveGrace  time.Duration
 	cadenceDivisor    int
-	workloadAuthority inventoryAuthorityProofState
+	// optionalStartWindow bounds how long a cycle starts optional kind reads;
+	// zero means the default window.
+	optionalStartWindow time.Duration
+	workloadAuthority   inventoryAuthorityProofState
 	// namespaceReads holds one workload-read proof per namespace, for answers
 	// across all namespaces by an identity bound only inside namespaces.
 	namespaceReads *namespaceReadProofs
@@ -392,6 +395,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 	scoped.evidenceHeartbeat = service.evidenceHeartbeat
 	scoped.historySaveGrace = service.historySaveGrace
 	scoped.cadenceDivisor = service.cadenceDivisor
+	scoped.optionalStartWindow = service.optionalStartWindow
 	if configured != service.configuredCredentialID && service.client != nil {
 		scoped.scope.CredentialID = scoped.captureCredentialID()
 		scoped.persistentCredentialID = scoped.captureCredentialIDAtGeneration(0)
@@ -662,6 +666,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		fresh.evidenceHeartbeat = previous.evidenceHeartbeat
 		fresh.historySaveGrace = previous.historySaveGrace
 		fresh.cadenceDivisor = previous.cadenceDivisor
+		fresh.optionalStartWindow = previous.optionalStartWindow
 		fresh.recovery = previous.recovery
 		if err := fresh.validateCredential(ctx); err != nil {
 			fresh.identity.cancel()
@@ -927,6 +932,20 @@ func (service *Service) discoverVersion(ctx context.Context, group, version, api
 	}
 }
 
+// optionalKindQueued reports whether discovery serves a listable type that the
+// paced optional reads have not reached yet.
+func (service *Service) optionalKindQueued(generation inventoryGeneration, id string) bool {
+	if generation.Discovery == nil || service.resourceExcluded(id) {
+		return false
+	}
+	for _, definition := range canonicalInventoryResources(generation.Discovery.Resources) {
+		if definition.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // CachedResources serves display pages over the complete projected inventory.
 func (service *Service) CachedResources(ctx context.Context, options ListOptions) (ResourcePage, error) {
 	if options.ResourceID == "" || len(options.Continue) > 4096 || options.Namespace != "" && !safeSegment(options.Namespace) || !safeSelector(options.Labels) || !safeSelector(options.Fields) {
@@ -942,9 +961,13 @@ func (service *Service) CachedResources(ctx context.Context, options ListOptions
 			return page, readErr
 		}
 		page = ResourcePage{Items: []ProjectedResource{}, Sync: service.withSyncProgress(SyncStatus{State: "syncing"})}
-		if _, exists := generation.ResourceStatus[options.ResourceID]; !exists && len(generation.View.Kinds) > 0 && generation.PendingDiscovery {
-			// The core generation is published but other API groups are not
-			// discovered and listed yet: this type is loading, not empty.
+		_, listed := generation.ResourceStatus[options.ResourceID]
+		queued := !listed && len(generation.View.Kinds) > 0 && (generation.PendingDiscovery || service.optionalKindQueued(generation, options.ResourceID))
+		if queued {
+			// The core generation is published but this type is not listed
+			// yet, either because other API groups are not discovered or
+			// because its read is paced to a later cycle: it is loading, not
+			// empty.
 			page.Sync = SyncStatus{State: "partial", Partial: true, Pending: []string{options.ResourceID}, PendingKinds: generation.pendingKinds()}
 		}
 		if state, exists := generation.ResourceStatus[options.ResourceID]; exists {
@@ -961,7 +984,7 @@ func (service *Service) CachedResources(ctx context.Context, options ListOptions
 			if state.Error != "forbidden" && state.Error != "unauthorized" {
 				page.Items = append(page.Items, generation.Resources[options.ResourceID]...)
 			}
-		} else if len(generation.View.Kinds) > 0 && !generation.PendingDiscovery {
+		} else if len(generation.View.Kinds) > 0 && !queued {
 			return page, ErrNotFound
 		}
 	}

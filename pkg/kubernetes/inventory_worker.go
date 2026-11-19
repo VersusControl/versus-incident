@@ -81,6 +81,44 @@ func (service *Service) optionalInventoryDue(id string, state kubeindex.KindStat
 	return inventoryDue(state, service.collectionCadence(5*time.Minute), now)
 }
 
+// dueOptionalInventory returns the optional kinds due for a read this cycle,
+// the oldest attempt first. A kind whose read did not start in an earlier
+// cycle keeps its older attempt time, so it leads the next cycle and no kind
+// at the end of the list waits forever behind kinds read every cycle.
+func (service *Service) dueOptionalInventory(resources []ResourceDefinition, states map[string]kubeindex.KindStatus, now time.Time, recheck func(id string) bool) []ResourceDefinition {
+	due := []ResourceDefinition{}
+	for _, definition := range canonicalInventoryResources(resources) {
+		if service.resourceExcluded(definition.ID) {
+			continue
+		}
+		if service.optionalInventoryDue(definition.ID, states[definition.ID], now, recheck(definition.ID)) {
+			due = append(due, definition)
+		}
+	}
+	sort.SliceStable(due, func(left, right int) bool {
+		return states[due[left].ID].LastAttemptAt.Before(states[due[right].ID].LastAttemptAt)
+	})
+	return due
+}
+
+// optionalStageError names the failure of the optional stage from the kinds
+// whose reads failed. A denied kind is a steady gap in the reader role, shown
+// on the kind itself, so it is not a failure. Of the rest, the kind with the
+// lowest ID decides, so kinds that fail with different classes give the same
+// reason on every cycle instead of whichever read finished first.
+func optionalStageError(failed map[string]error) error {
+	chosen, chosenErr := "", error(nil)
+	for id, err := range failed {
+		if err == nil || errors.Is(err, ErrForbidden) {
+			continue
+		}
+		if chosenErr == nil || id < chosen {
+			chosen, chosenErr = id, err
+		}
+	}
+	return chosenErr
+}
+
 // discoveryResourcesChanged reports whether discovery now serves a different
 // set of listable APIs than before, as when a CRD is installed or removed.
 func discoveryResourcesChanged(previous *Discovery, current Discovery) bool {
@@ -741,24 +779,18 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	// keeps its last state and, being the oldest attempt, goes first next
 	// cycle. Reads are paced, so a cluster with many optional kinds spreads
 	// them over cycles instead of failing the ones at the end of the list.
-	optionalCtx, cancelOptional := context.WithTimeout(ctx, 10*time.Second)
+	optionalWindow := 10 * time.Second
+	if service.optionalStartWindow > 0 {
+		optionalWindow = service.optionalStartWindow
+	}
+	optionalCtx, cancelOptional := context.WithTimeout(ctx, optionalWindow)
 	defer cancelOptional()
 	additional := []ResourceDefinition{}
 	if !cold {
-		for _, definition := range canonicalInventoryResources(discovery.Resources) {
-			if service.resourceExcluded(definition.ID) {
-				continue
-			}
-			if service.optionalInventoryDue(definition.ID, states[definition.ID], now, recheckDenied || cache.takeRelist(definition.ID)) {
-				additional = append(additional, definition)
-			}
-		}
+		additional = service.dueOptionalInventory(discovery.Resources, states, now, func(id string) bool { return recheckDenied || cache.takeRelist(id) })
 	}
-	sort.SliceStable(additional, func(left, right int) bool {
-		return states[additional[left].ID].LastAttemptAt.Before(states[additional[right].ID].LastAttemptAt)
-	})
-	deferred := 0
-	for position, definition := range additional {
+	failedReads := map[string]error{}
+	for _, definition := range additional {
 		acquired := false
 		select {
 		case sem <- struct{}{}:
@@ -769,7 +801,6 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			if acquired {
 				<-sem
 			}
-			deferred = len(additional) - position
 			break
 		}
 		dirty = true
@@ -786,6 +817,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 			state.LastAttemptAt = now
 			if err != nil {
 				state.State, state.Partial, state.Error = "error", true, errorClass(err)
+				failedReads[definition.ID] = err
 			} else {
 				resources[definition.ID] = items
 				state = kubeindex.KindStatus{State: "ready", ObservedAt: now, CompletedAt: time.Now().UTC(), LastAttemptAt: now, Records: len(items)}
@@ -794,9 +826,11 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		}()
 	}
 	workers.Wait()
-	var additionalErr error
-	if deferred > 0 {
-		additionalErr = context.DeadlineExceeded
+	// Kinds left when the start window closes are paced to later cycles, so
+	// they are not a failure of this stage; a failed read or an ended cycle is.
+	additionalErr := optionalStageError(failedReads)
+	if err := ctx.Err(); err != nil {
+		additionalErr = err
 	}
 	service.recovery.stage("additional", additionalStarted, additionalErr)
 	if err := ctx.Err(); err != nil {
