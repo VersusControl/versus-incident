@@ -21,6 +21,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/controllers"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/report"
 	"github.com/VersusControl/versus-incident/pkg/routes"
@@ -42,7 +43,16 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
+// configureLogging applies LOG_LEVEL to the leveled logger and writes the
+// startup line naming the level in use. It runs before anything else logs.
+func configureLogging() {
+	lvl := logging.Setup(os.Getenv("LOG_LEVEL"))
+	logging.Infof("logging: level=%s", logging.LevelName(lvl))
+}
+
 func main() {
+	configureLogging()
+
 	err := c.LoadConfig("config/config.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)

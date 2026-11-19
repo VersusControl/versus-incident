@@ -104,6 +104,8 @@ services:
       - "127.0.0.1:3000:3000"
     environment:
       GATEWAY_SECRET: ${GATEWAY_SECRET:-change-me}
+      # Log detail: debug | info (default) | warn | error. Uncomment for more detail.
+      # LOG_LEVEL: debug
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:-versus}

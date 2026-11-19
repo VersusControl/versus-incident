@@ -43,6 +43,8 @@ services:
       postgres:
         condition: service_healthy
     environment: &versus-env
+      # Log detail: debug | info (default) | warn | error. Uncomment for more detail.
+      # LOG_LEVEL: debug
       # Storage: ONE shared Postgres (required for >1 replica). Both replicas
       # point at the SAME DSN.
       STORAGE_TYPE: postgres
