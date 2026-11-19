@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, type KubernetesClusterSummary, type KubernetesSyncHealthReport, type KubernetesSyncProgress } from "@/lib/api";
 import { kubernetesKey } from "@/lib/useKubernetesCluster";
@@ -319,6 +319,39 @@ describe("Kubernetes fleet", () => {
     expect(kubernetesKey("one", "overview")).toEqual(["kubernetes", "one", "overview"]);
     expect(kubernetesKey("two")).toEqual(["kubernetes", "two"]);
     expect(kubernetesKey(undefined)).toEqual(["kubernetes", "_"]);
+  });
+
+  it("lets clicks anywhere on a card reach the card link, except on the row's own action controls", () => {
+    const clusters = [summary("ready", "healthy"), summary("down", "unreachable"), syncing("prep", firstProgress)];
+    const LocationProbe = () => <output data-testid="location">{useLocation().search}</output>;
+    const retry = vi.fn();
+    render(<MemoryRouter><KubernetesFleet clusters={clusters} reports={reportsFor(clusters)} retry={retry} retrying={false} /><LocationProbe /></MemoryRouter>);
+    const passesClicks = (element: Element) => !element.closest(".pointer-events-none") || element.classList.contains("pointer-events-auto");
+    for (const id of ["ready", "down", "prep"]) {
+      const card = screen.getByRole("article", { name: `Cluster ${id}` });
+      const grid = card.querySelector("[data-row-grid]")!;
+      expect(grid.classList.contains("pointer-events-none")).toBe(true);
+      expect(card.querySelector("[data-actions-cell]")!.classList.contains("pointer-events-none")).toBe(true);
+      const actions = [...card.querySelectorAll("[data-actions-cell] a, [data-actions-cell] button")];
+      expect(actions).toHaveLength(1);
+      for (const action of actions) expect(action.classList.contains("pointer-events-auto")).toBe(true);
+      // Nothing else drawn over the card link takes the click.
+      const overlay = [grid, ...grid.querySelectorAll("*"), ...card.querySelectorAll("[data-first-sync], [data-first-sync] *")].filter((element) => !actions.some((action) => action === element || action.contains(element)));
+      expect(overlay.filter((element) => passesClicks(element)).map((element) => element.outerHTML.slice(0, 80))).toEqual([]);
+      // The card link sits beside the content, never wrapping another control.
+      const link = within(card).getByRole("link", { name: new RegExp(`^Open cluster ${id}`) });
+      expect(link.parentElement).toBe(card);
+      expect(link.querySelector("a, button")).toBeNull();
+    }
+    expect(screen.getByRole("article", { name: "Cluster prep" }).querySelector("[data-first-sync]")!.classList.contains("pointer-events-none")).toBe(true);
+
+    fireEvent.click(within(screen.getByRole("article", { name: "Cluster ready" })).getByRole("link", { name: "Open cluster ready" }));
+    expect(screen.getByTestId("location").textContent).toBe("?cluster=ready");
+    fireEvent.click(within(screen.getByRole("article", { name: "Cluster ready" })).getByRole("link", { name: "Review issues" }));
+    expect(screen.getByTestId("location").textContent).toBe("?cluster=ready&view=issues");
+    fireEvent.click(within(screen.getByRole("article", { name: "Cluster down" })).getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("location").textContent).toBe("?cluster=ready&view=issues");
   });
 
   it("keeps rows horizontally scrollable and avoids readiness meters for an unreachable cluster", () => {

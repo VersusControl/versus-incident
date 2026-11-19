@@ -1,10 +1,13 @@
 package kubernetes
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -437,5 +440,81 @@ func TestNativeSigningSessionExpiryFencesPaginationAndPublication(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// A healthy capture cycle writes no stage lines: a stage that keeps
+// succeeding is quiet. A failure is logged when it starts or changes, a
+// repeat of the same failure is held back, and the success that ends a
+// failure is logged once. A restarted worker is always logged.
+func TestCaptureStageLogsOnlyFailuresAndRecoveries(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	recovery := &clusterRecovery{logf: func(format string, args ...any) { fmt.Fprintf(&output, format+"\n", args...) }}
+	lines := func() []string {
+		var logged []string
+		for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
+			if strings.Contains(line, "capture stage=") {
+				logged = append(logged, line[strings.Index(line, "stage="):strings.Index(line, " duration_ms")])
+			}
+		}
+		output.Reset()
+		return logged
+	}
+	expect := func(want ...string) {
+		t.Helper()
+		if got := lines(); strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("logged %q, want %q", got, want)
+		}
+	}
+	for range 3 {
+		for _, stage := range []string{"discovery", "indexed", "additional", "namespace", "usage", "payload", "cas", "journal"} {
+			recovery.stage(stage, time.Now(), nil)
+		}
+	}
+	expect()
+	recovery.stage("additional", time.Now(), errors.New("list failed"))
+	expect("stage=additional reason=collection_unavailable")
+	recovery.stage("additional", time.Now(), errors.New("list failed"))
+	expect()
+	recovery.stage("additional", time.Now(), context.Canceled)
+	expect("stage=additional reason=canceled")
+	recovery.stage("additional", time.Now(), nil)
+	expect("stage=additional reason=ready")
+	recovery.stage("additional", time.Now(), nil)
+	expect()
+	recovery.stage("usage", time.Now(), context.DeadlineExceeded)
+	expect("stage=usage reason=timeout")
+	recovery.recordStage("worker_recovery", time.Now(), nil, true)
+	expect("stage=worker_recovery reason=ready")
+}
+
+// Optional kinds that keep failing with different classes give the optional
+// stage the same reason on every cycle, whichever read finishes first, so the
+// failure is logged once and not again on each cycle.
+func TestOptionalStageFailureReasonIsStableAcrossCycles(t *testing.T) {
+	t.Parallel()
+	logged := 0
+	recovery := &clusterRecovery{logf: func(string, ...any) { logged++ }}
+	ids := []string{"example.com~v1~widgets", "example.com~v1~gadgets", "example.com~v1~gizmos"}
+	errs := []error{context.DeadlineExceeded, errors.New("list failed"), ErrForbidden}
+	for cycle := range 12 {
+		// Each cycle the reads finish in a different order.
+		failed := map[string]error{}
+		for offset := range ids {
+			index := (cycle + offset) % len(ids)
+			failed[ids[index]] = errs[index]
+		}
+		err := optionalStageError(failed)
+		if recoveryReason(err, "additional") != "collection_unavailable" {
+			t.Fatalf("cycle %d chose %v, want the failure of the lowest kind ID", cycle, err)
+		}
+		recovery.stage("additional", time.Now(), err)
+	}
+	if logged != 1 {
+		t.Fatalf("a steady pair of failing kinds logged %d stage lines over 12 cycles, want 1", logged)
+	}
+	if err := optionalStageError(map[string]error{ids[2]: ErrForbidden}); err != nil {
+		t.Fatalf("a denied optional kind failed the stage: %v", err)
 	}
 }

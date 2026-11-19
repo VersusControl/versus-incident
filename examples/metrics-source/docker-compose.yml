@@ -88,6 +88,8 @@ services:
     environment:
       # The license turns the sources on. Read from your shell or a local .env.
       LICENSE_KEY: ${LICENSE_KEY:-}
+      # Log detail: debug | info (default) | warn | error. Uncomment for more detail.
+      # LOG_LEVEL: debug
       # Licensed, you sign in as the built-in admin (the password is printed
       # once in the logs). Without a license the image runs in community mode
       # and this secret protects the admin API instead.

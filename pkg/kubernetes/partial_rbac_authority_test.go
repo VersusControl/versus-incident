@@ -112,6 +112,8 @@ type partialRoleCluster struct {
 	// those LISTs.
 	denyWidgets atomic.Bool
 	widgetLists atomic.Int64
+	// failWidgets answers 500 to those LISTs, as a failing API server does.
+	failWidgets atomic.Bool
 	// argoApps serves the Argo CD Application API with one object, and
 	// denyArgo answers 403 to its LISTs.
 	argoApps atomic.Bool
@@ -260,6 +262,10 @@ func newPartialRoleCluster(t *testing.T, gatewayAPI bool) *partialRoleCluster {
 			cluster.widgetLists.Add(1)
 			if cluster.denyWidgets.Load() {
 				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if cluster.failWidgets.Load() {
+				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 			writeJSON(w, map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "items": []any{}})
