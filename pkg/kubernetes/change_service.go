@@ -70,10 +70,13 @@ type changeStoreState struct {
 	captures          map[kubeindex.Scope]*captureLoop
 	lifecycle         context.Context
 	firstSeen         map[kubeindex.Scope]map[string]time.Time
-	journalFailed     map[kubeindex.Scope]bool
-	logActive         map[kubeindex.Scope]bool
-	logDone           map[kubeindex.Scope]chan struct{}
-	logCancel         map[kubeindex.Scope]context.CancelFunc
+	// settledBreaks holds, per scope, the broken roots whose break logs are
+	// captured, so an unchanged break is not resolved again every cycle.
+	settledBreaks map[kubeindex.Scope]map[string]settledBreak
+	journalFailed map[kubeindex.Scope]bool
+	logActive     map[kubeindex.Scope]bool
+	logDone       map[kubeindex.Scope]chan struct{}
+	logCancel     map[kubeindex.Scope]context.CancelFunc
 }
 
 type indexRefreshKey struct {
@@ -101,6 +104,7 @@ func newChangeStoreState() *changeStoreState {
 		stopped:           make(map[kubeindex.Scope]bool),
 		captures:          make(map[kubeindex.Scope]*captureLoop),
 		firstSeen:         map[kubeindex.Scope]map[string]time.Time{},
+		settledBreaks:     map[kubeindex.Scope]map[string]settledBreak{},
 		journalFailed:     map[kubeindex.Scope]bool{},
 		logActive:         map[kubeindex.Scope]bool{},
 		logDone:           map[kubeindex.Scope]chan struct{}{},

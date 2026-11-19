@@ -231,7 +231,7 @@ func (service *Service) newBreakManifest(ctx context.Context, root kubebreaks.Br
 	}
 	if service.evidenceStore() != nil {
 		lookup, stopLookup := context.WithTimeout(ctx, 500*time.Millisecond)
-		contextPage, err := service.historicalIssues(lookup, IssueOptions{RootUID: manifest.RootUID, Namespace: manifest.Namespace, Since: now.Add(-breaklogs.Retention), Until: now, Limit: 100})
+		contextPage, err := service.historicalIssues(lookup, IssueOptions{RootUID: manifest.RootUID, Namespace: manifest.Namespace, Since: now.Add(-breaklogs.Retention), Until: now, Limit: 100, itemsOnly: true})
 		stopLookup()
 		if err == nil {
 			for _, issue := range contextPage.Items {
