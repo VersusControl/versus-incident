@@ -231,6 +231,10 @@ type EvidenceQuery struct {
 	Type   string
 	Limit  int
 	Cursor string
+	// ItemsOnly asks for the page's items without its totals, for a caller
+	// that only looks rows up. A provider may skip the count read, leaving
+	// Total and Counts empty; the items and Next are unchanged.
+	ItemsOnly bool
 }
 
 type EvidencePage struct {
