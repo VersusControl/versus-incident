@@ -7,7 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/logging"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // evidenceBackfillLimits bounds one read-model conversion transaction.
@@ -100,7 +104,7 @@ func (p *postgresProvider) startEvidenceMaintenance() {
 		// converts. Each step has its own deadline and runs whatever the
 		// others did, so a busy partition swap never holds the heads pass back.
 		conversion, heads := evidenceBackgroundBackfill, evidenceBackgroundBackfill
-		var deferredLogged time.Time
+		var failureLogged time.Time
 		step := func(run func(context.Context) (bool, error)) (bool, error) {
 			stepCtx, stop := context.WithTimeout(ctx, evidenceBackgroundBackfill.batchTimeout)
 			defer stop()
@@ -125,9 +129,12 @@ func (p *postgresProvider) startEvidenceMaintenance() {
 			case more:
 				delay = time.Second
 			}
-			if err != nil && ctx.Err() == nil && time.Since(deferredLogged) >= time.Minute {
-				deferredLogged = time.Now()
-				log.Printf("storage: evidence read-model backfill deferred")
+			if ctx.Err() == nil {
+				if err != nil && time.Since(failureLogged) >= time.Minute {
+					failureLogged = time.Now()
+					logging.Debugf("storage: evidence background maintenance deferred: %s", utils.SafeErrorText(err))
+				}
+				p.noteMaintenanceResult(err)
 			}
 			timer := time.NewTimer(delay)
 			select {
@@ -140,6 +147,59 @@ func (p *postgresProvider) startEvidenceMaintenance() {
 	}()
 }
 
+// evidenceBackfillLockBusy answers a backfill whose shared partition lock
+// request ran past its lock timeout: compaction, on this replica or another,
+// holds the lock for a moment. The batch is skipped quietly and reported as
+// more work, so it is retried shortly without shrinking; any other error is
+// returned.
+func evidenceBackfillLockBusy(err error) (bool, error) {
+	if !lockNotAvailable(err) {
+		return false, err
+	}
+	logging.Debugf("storage: evidence backfill skipped a batch; compaction holds the partition lock")
+	return true, nil
+}
+
+// maintenanceStalledAfter is how long the background maintenance steps may
+// keep failing before the operator is warned.
+const maintenanceStalledAfter = 10 * time.Minute
+
+// noteMaintenanceResult tracks the background maintenance steps. A failure
+// is expected to heal on a later pass, so it is logged at debug only; one
+// that lasts maintenanceStalledAfter is warned about, throttled, and its end
+// then gets one info line.
+func (p *postgresProvider) noteMaintenanceResult(err error) {
+	now := p.compactionNow()
+	p.maintenanceLogMu.Lock()
+	if p.maintenanceStalled == nil {
+		p.maintenanceStalled = logging.NewThrottle(0, p.compactionNow)
+	}
+	throttle := p.maintenanceStalled
+	if err == nil {
+		p.maintenanceFailingSince = time.Time{}
+		p.maintenanceLogMu.Unlock()
+		if throttle.Clear("evidence maintenance", "storage: evidence background maintenance recovered") {
+			logging.Infof("storage: evidence background maintenance is running again")
+		}
+		return
+	}
+	if p.maintenanceFailingSince.IsZero() {
+		p.maintenanceFailingSince = now
+	}
+	failing := now.Sub(p.maintenanceFailingSince)
+	p.maintenanceLogMu.Unlock()
+	if failing < maintenanceStalledAfter {
+		return
+	}
+	cause := "database error"
+	if evidenceSaveTimedOut(err) {
+		cause = "timed out"
+	}
+	throttle.Fail(slog.LevelWarn, "evidence maintenance", cause,
+		"storage: evidence background maintenance has failed for %s (%s); history may answer not ready and retention may fall behind. Check database load and reachability, and run with LOG_LEVEL=debug to see each failure",
+		failing.Truncate(time.Minute), cause)
+}
+
 // Each batch locks one scope briefly. All markers, copied payloads and
 // supersession links commit together; a restart repeats an unfinished batch.
 // No history is deleted or expired by this upgrade.
@@ -149,11 +209,12 @@ func (p *postgresProvider) backfillEvidenceBatch(ctx context.Context, limits evi
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
-		return false, err
-	}
+	// The timeouts come first so that the lock request waits no longer.
 	if _, err = tx.ExecContext(ctx, fmt.Sprintf(`SET LOCAL statement_timeout='%dms'; SET LOCAL lock_timeout='100ms'; %s`, limits.statementTimeout.Milliseconds(), evidenceHeadsWriter)); err != nil {
 		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
+		return evidenceBackfillLockBusy(err)
 	}
 	var key, occurrenceCursor, versionCursor string
 	var sequence int64
@@ -287,7 +348,7 @@ func (p *postgresProvider) backfillEvidenceBatch(ctx context.Context, limits evi
 	if err = writeOccurrenceVersions(ctx, tx, key, state); err != nil {
 		return false, err
 	}
-	if err = writeOccurrenceReadModels(ctx, tx, key, state); err != nil {
+	if err = writeOccurrenceReadModels(ctx, tx, key, state, 0); err != nil {
 		return false, err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes s SET
@@ -320,11 +381,12 @@ func (p *postgresProvider) backfillEvidenceHeads(ctx context.Context, limit int)
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
-		return false, err
-	}
+	// The timeouts come first so that the lock request waits no longer.
 	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='100ms'; `+evidenceHeadsWriter); err != nil {
 		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
+		return evidenceBackfillLockBusy(err)
 	}
 	var key string
 	var cursor int64

@@ -13,6 +13,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 )
 
 func breakLogPods(records []kubeindex.Record, namespace, rootUID string) []kubeindex.Record {
@@ -124,18 +125,47 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		}
 	}
 	roots = logRoots
-	manifests := make([]breaklogs.Manifest, len(roots))
-	// Admit every root before slow container reads can consume this cycle.
-	for i := range roots {
-		root := &roots[i]
+	scope := service.indexScope()
+	service.changes.mu.Lock()
+	previous := service.changes.settledBreaks[scope]
+	service.changes.mu.Unlock()
+	// settled is rebuilt on every run from the roots still broken, so a root
+	// that recovered is forgotten and the record never outgrows the cluster.
+	settled := map[string]settledBreak{}
+	defer func() {
+		service.changes.mu.Lock()
+		service.changes.settledBreaks[scope] = settled
+		service.changes.mu.Unlock()
+	}()
+	changed := []kubebreaks.Break{}
+	fingerprints := []string{}
+	for _, root := range roots {
 		if root.Source == "first_seen" {
 			service.changes.mu.Lock()
-			first := service.changes.firstSeen[service.indexScope()][root.Root.Namespace+"\x00"+root.Root.UID]
+			first := service.changes.firstSeen[scope][root.Root.Namespace+"\x00"+root.Root.UID]
 			service.changes.mu.Unlock()
 			if !first.IsZero() {
 				root.BrokeAt = first
 			}
 		}
+		// A break whose manifest and logs are stored, and whose restarts,
+		// terminations and pods are what they were then, has nothing new to
+		// capture; resolving its occurrence again would only repeat a read.
+		fingerprint := logJobID(root, breakLogPods(snapshot.Records, root.Root.Namespace, root.Root.UID))
+		key := settledBreakKey(root)
+		if prior, known := previous[key]; known && prior.evidence == fingerprint && prior.stored(state) {
+			settled[key] = prior
+			continue
+		}
+		changed = append(changed, root)
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	logging.Debugf("kubernetes: break logs cluster=%q roots=%d unchanged=%d", service.scope.ClusterID, len(roots), len(roots)-len(changed))
+	roots = changed
+	manifests := make([]breaklogs.Manifest, len(roots))
+	// Admit every root before slow container reads can consume this cycle.
+	for i := range roots {
+		root := &roots[i]
 		manifests[i] = service.newBreakManifest(ctx, *root, state, now)
 		root.BrokeAt = manifests[i].BreakAt
 	}
@@ -144,13 +174,15 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		// manifest would not resolve by occurrence later. Retry next cycle.
 		kept := roots[:0]
 		keptManifests := manifests[:0]
+		keptFingerprints := fingerprints[:0]
 		for i := range roots {
 			if manifests[i].OccurrenceID != "" {
 				kept = append(kept, roots[i])
 				keptManifests = append(keptManifests, manifests[i])
+				keptFingerprints = append(keptFingerprints, fingerprints[i])
 			}
 		}
-		roots, manifests = kept, keptManifests
+		roots, manifests, fingerprints = kept, keptManifests, keptFingerprints
 	}
 
 	admissionContext := ctx
@@ -168,7 +200,9 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 	for i, root := range roots {
 		pods := breakLogPods(snapshot.Records, root.Root.Namespace, root.Root.UID)
 		job := logJobID(root, pods)
+		done := settledBreak{evidence: fingerprints[i], manifest: manifests[i].ID, job: job, pods: len(pods)}
 		if _, exists := state.Jobs[job]; exists {
+			settled[settledBreakKey(root)] = done
 			continue
 		}
 		manifest := manifests[i]
@@ -238,7 +272,38 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		if err != nil {
 			return
 		}
+		if completedJob != "" {
+			settled[settledBreakKey(root)] = done
+		}
 	}
+}
+
+// settledBreak records a break whose manifest and logs are stored: the
+// evidence they were captured from (the root's break time and, per pod and
+// container, its restarts and latest termination), the manifest it was filed
+// under and the completed log job.
+type settledBreak struct {
+	evidence, manifest, job string
+	pods                    int
+}
+
+func settledBreakKey(root kubebreaks.Break) string {
+	return root.Root.Namespace + "\x00" + root.Root.UID + "\x00" + root.Rule
+}
+
+// stored reports whether the capture state still holds the break's manifest
+// and completed log job. A manifest filed before its pods were known may still
+// be filled in, so it does not count as settled while pods exist.
+func (settled settledBreak) stored(state breaklogs.State) bool {
+	if _, done := state.Jobs[settled.job]; !done {
+		return false
+	}
+	for _, manifest := range state.Manifests {
+		if manifest.ID == settled.manifest {
+			return len(manifest.Pods) > 0 || settled.pods == 0
+		}
+	}
+	return false
 }
 
 func (service *Service) readBreakContainer(ctx context.Context, pod kubeindex.Record, rootUID string, container kubeindex.ContainerState, slot string, from, to time.Time) (breaklogs.Snapshot, *breaklogs.Gap) {

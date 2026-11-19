@@ -26,8 +26,11 @@ type SyncStatus struct {
 }
 
 type IssueOptions struct {
-	unpaged        bool
-	captureOnly    bool
+	unpaged     bool
+	captureOnly bool
+	// itemsOnly reads stored issues without their totals; Totals and Broken
+	// of the page are then not filled. For lookups by root only.
+	itemsOnly      bool
 	Since, Until   time.Time
 	Namespace      string
 	Severity       string
@@ -201,7 +204,7 @@ func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage)
 	}
 	for rootUID, positions := range need {
 		lookup, stop := context.WithTimeout(ctx, 500*time.Millisecond)
-		stored, err := service.historicalIssues(lookup, IssueOptions{RootUID: rootUID, Namespace: page.Items[positions[0]].Root.Namespace, Since: time.Now().UTC().Add(-breaklogs.Retention), Until: time.Now().UTC(), Limit: 100})
+		stored, err := service.historicalIssues(lookup, IssueOptions{RootUID: rootUID, Namespace: page.Items[positions[0]].Root.Namespace, Since: time.Now().UTC().Add(-breaklogs.Retention), Until: time.Now().UTC(), Limit: 100, itemsOnly: true})
 		stop()
 		if err != nil {
 			return err

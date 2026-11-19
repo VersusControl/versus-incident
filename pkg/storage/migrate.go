@@ -248,6 +248,19 @@ func RunSQLMigrations(db *sql.DB, fsys fs.FS, dir, ledgerTable string) error {
 				if statement == "" {
 					continue
 				}
+				// Dropping an index online waits for the queries using it
+				// instead of locking every reader and writer of its table,
+				// and repeats safely: an index already gone is skipped.
+				if strings.HasPrefix(statement, "DROP INDEX CONCURRENTLY IF EXISTS ") {
+					fields := strings.Fields(statement)
+					if len(fields) != 6 || !isSafeSQLIdentifier(fields[5]) {
+						return fmt.Errorf("storage: online migration %q has an invalid index drop", name)
+					}
+					if _, err := db.ExecContext(ctx, "DROP INDEX CONCURRENTLY IF EXISTS "+fields[5]); err != nil {
+						return fmt.Errorf("storage: online migration %q: %w", name, err)
+					}
+					continue
+				}
 				if !strings.HasPrefix(statement, "CREATE INDEX CONCURRENTLY IF NOT EXISTS ") {
 					return fmt.Errorf("storage: online migration %q contains unsupported statement", name)
 				}

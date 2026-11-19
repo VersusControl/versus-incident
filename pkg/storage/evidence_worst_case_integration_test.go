@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1037,8 +1038,9 @@ func TestPostgresRetainedTerminationDoesNotResurrectADroppedMonth(t *testing.T) 
 
 // TestPostgresRetentionDropDuringAnActiveSave runs retention while a save that
 // supersedes a row in the month being dropped is in flight. The two must
-// serialize: the save commits, the month is dropped afterwards, and no head
-// points at a removed row.
+// serialize: retention skips its round instead of waiting, so no later save
+// queues behind it; the save commits, the month is dropped by the next round,
+// and no head points at a removed row.
 func TestPostgresRetentionDropDuringAnActiveSave(t *testing.T) {
 	dsn := worstCaseDatabase(t)
 	p := worstCaseProvider(t, dsn, PostgresOptions{EvidenceRetention: "720h"})
@@ -1060,27 +1062,21 @@ func TestPostgresRetentionDropDuringAnActiveSave(t *testing.T) {
 	saved := make(chan error, 1)
 	go func() { saved <- p.CommitEvidence(context.Background(), scope, batch) }()
 	heldSavePID(t, worstAdmin(t, dsn))
-	type result struct {
-		more bool
-		err  error
+	months := worstMonthPartitions(t, p)
+	skipCtx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if more, err := p.compactEvidenceBatch(skipCtx); err != nil || more {
+		t.Fatalf("retention while a save held the month: more=%t err=%v, want a skipped round", more, err)
 	}
-	compacted := make(chan result, 1)
-	go func() {
-		more, err := p.compactEvidenceBatch(context.Background())
-		compacted <- result{more, err}
-	}()
-	select {
-	case r := <-compacted:
-		t.Fatalf("retention ran while a save held the month: more=%t err=%v", r.more, r.err)
-	case <-time.After(time.Second):
+	if after := worstMonthPartitions(t, p); !reflect.DeepEqual(after, months) {
+		t.Fatalf("month partitions after the skipped round %v, want %v kept while the save runs", after, months)
 	}
 	release()
 	if err := <-saved; err != nil {
 		t.Fatalf("the save lost to retention: %v", err)
 	}
-	r := <-compacted
-	if r.err != nil || !r.more {
-		t.Fatalf("retention after the save: more=%t err=%v", r.more, r.err)
+	if more, err := p.compactEvidenceBatch(t.Context()); err != nil || !more {
+		t.Fatalf("retention after the save: more=%t err=%v", more, err)
 	}
 	var oldRows, aging int
 	if err := p.db.QueryRow(`SELECT (SELECT COUNT(*) FROM kubernetes_evidence_events WHERE scope_key=$1 AND event_at<$2),(SELECT COUNT(*) FROM kubernetes_evidence_event_heads WHERE scope_key=$1 AND event_id='change:aging' AND event_at=$3)`, key, now.AddDate(0, -1, 0), at).Scan(&oldRows, &aging); err != nil {
@@ -1090,6 +1086,29 @@ func TestPostgresRetentionDropDuringAnActiveSave(t *testing.T) {
 		t.Fatalf("after the drop: old rows=%d, aging head on its new row=%d", oldRows, aging)
 	}
 	worstJournalConsistent(t, p, scope)
+}
+
+// worstMonthPartitions lists the month partitions of the journal and the
+// observations.
+func worstMonthPartitions(t *testing.T, p *postgresProvider) []string {
+	t.Helper()
+	rows, err := p.db.QueryContext(t.Context(), `SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid WHERE i.inhparent IN('kubernetes_evidence_events'::regclass,'kubernetes_evidence_occurrence_observations'::regclass) ORDER BY 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	names := []string{}
+	for rows.Next() {
+		var name string
+		if err = rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err = rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return names
 }
 
 // worstLog captures the standard logger for one test.
