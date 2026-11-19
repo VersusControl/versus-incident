@@ -65,6 +65,21 @@ func TestOccurrenceQueryPinsFreshnessPayloadAndDeletionGeneration(t *testing.T) 
 			if err != nil || first.Total != 13 || first.Next == "" {
 				t.Fatalf("first snapshot: %+v %v", first, err)
 			}
+			// A lookup that needs no totals gets the same page without them.
+			lookup := q
+			lookup.ItemsOnly = true
+			listed, err := store.QueryEvidence(t.Context(), scope, lookup)
+			if err != nil || listed.Next == "" || len(listed.Items) != len(first.Items) {
+				t.Fatalf("items-only page: %+v %v", listed, err)
+			}
+			for i := range listed.Items {
+				if listed.Items[i].ID != first.Items[i].ID || string(listed.Items[i].Payload) != string(first.Items[i].Payload) {
+					t.Fatalf("items-only item %d differs: %+v != %+v", i, listed.Items[i], first.Items[i])
+				}
+			}
+			if backend == "postgres" && (listed.Total != 0 || len(listed.Counts) != 0) {
+				t.Fatalf("items-only page still counted: total=%d counts=%v", listed.Total, listed.Counts)
+			}
 			cursorRaw, decodeErr := base64.RawURLEncoding.DecodeString(first.Next)
 			if decodeErr != nil {
 				t.Fatal(decodeErr)

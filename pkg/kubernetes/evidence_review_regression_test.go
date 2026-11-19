@@ -1433,3 +1433,118 @@ func TestLiveIssuesFailClosedWhenOccurrenceLookupFails(t *testing.T) {
 		})
 	}
 }
+
+// countingOccurrenceStore counts the stored occurrence reads a service makes
+// and how many of them asked for items only.
+type countingOccurrenceStore struct {
+	storage.Provider
+	storage.EvidenceStore
+	storage.BlobCAS
+	reads, itemsOnly *atomic.Int32
+}
+
+func (store countingOccurrenceStore) QueryEvidence(ctx context.Context, scope storage.EvidenceScope, query storage.EvidenceQuery) (storage.EvidencePage, error) {
+	if query.Type == "occurrence" {
+		store.reads.Add(1)
+		if query.ItemsOnly {
+			store.itemsOnly.Add(1)
+		}
+	}
+	return store.EvidenceStore.QueryEvidence(ctx, scope, query)
+}
+
+// openBreakForCapture stores one open crash-loop occurrence of a Deployment
+// and returns a ready inventory snapshot in which its pod still crash-loops,
+// with the service reading through a counting store.
+func openBreakForCapture(t *testing.T) (*Service, countingOccurrenceStore, kubeindex.Snapshot, time.Time) {
+	t.Helper()
+	service, store, scope := reviewHistoryService(t)
+	service.SetScrubber(breakLogScrubber{})
+	opened := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	root := ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "api", UID: "api-root"}
+	raw, _ := json.Marshal(Issue{Root: root, Rule: "pod.crash_loop", Severity: "warning", Broken: true, BrokeAt: &opened})
+	batch := storage.EvidenceBatch{ID: "capture:open", At: opened, Epoch: "synthetic", Issues: []storage.EvidenceIssue{{AuthorizationKind: "Pod", Key: "api", Namespace: root.Namespace, Kind: root.Kind, UID: root.UID, Rule: "pod.crash_loop", LastSeen: opened, Broken: true, Payload: raw}}}
+	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatal(err)
+	}
+	provider := service.usageProvider()
+	counting := countingOccurrenceStore{Provider: provider, EvidenceStore: provider.(storage.EvidenceStore), BlobCAS: provider.(storage.BlobCAS), reads: &atomic.Int32{}, itemsOnly: &atomic.Int32{}}
+	service.SetChangeStorage(counting)
+	now := time.Now().UTC()
+	kinds := map[string]kubeindex.KindStatus{}
+	for kind := range indexedResourceIDs {
+		kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: now, CompletedAt: now}
+	}
+	snapshot := kubeindex.Snapshot{Kinds: kinds, Records: []kubeindex.Record{
+		{Kind: "Namespace", Name: "kube-system", UID: "physical"},
+		{Kind: root.Kind, Namespace: root.Namespace, Name: root.Name, UID: root.UID},
+		{Kind: "Pod", Namespace: root.Namespace, Name: "api-0", UID: "pod", Phase: "Running", ReadyStatus: "False", CreatedAt: opened.Add(-time.Hour), ReadyTransitionAt: opened, Owners: []kubeindex.OwnerRef{{Kind: root.Kind, UID: root.UID, Controller: true}}, Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 2, TerminatedAt: now.Add(-time.Minute), TerminatedReason: "Error"}}},
+	}}
+	return service, counting, snapshot, opened
+}
+
+// A break whose manifest and logs are stored is not resolved again while its
+// restarts, terminations and pods stay the same; a new restart resolves it
+// again and captures the new logs.
+func TestBreakLogCaptureSkipsUnchangedBreakAndRefreshesOnNewRestart(t *testing.T) {
+	service, counting, snapshot, opened := openBreakForCapture(t)
+	service.captureBreakLogs(t.Context(), snapshot, "")
+	state, err := service.changeStore().BreakLogs(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counting.reads.Load() != 1 || len(state.Manifests) != 1 || state.Manifests[0].OccurrenceID == "" || !state.Manifests[0].BreakAt.Equal(opened) || len(state.Manifests[0].Pods) == 0 || len(state.Jobs) != 1 {
+		t.Fatalf("first capture: reads=%d manifests=%+v jobs=%d", counting.reads.Load(), state.Manifests, len(state.Jobs))
+	}
+	if counting.itemsOnly.Load() != counting.reads.Load() {
+		t.Fatalf("the manifest lookup read occurrence totals: %d of %d reads", counting.reads.Load()-counting.itemsOnly.Load(), counting.reads.Load())
+	}
+	for range 3 {
+		service.captureBreakLogs(t.Context(), snapshot, "")
+	}
+	if counting.reads.Load() != 1 {
+		t.Fatalf("an unchanged break was resolved again: reads=%d", counting.reads.Load())
+	}
+
+	pod := &snapshot.Records[2].Containers[0]
+	pod.RestartCount++
+	pod.TerminatedAt = time.Now().UTC().Add(-10 * time.Second)
+	service.captureBreakLogs(t.Context(), snapshot, "")
+	state, err = service.changeStore().BreakLogs(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counting.reads.Load() != 2 || len(state.Jobs) != 2 || len(state.Manifests) != 1 {
+		t.Fatalf("a new restart was not captured: reads=%d jobs=%d manifests=%d", counting.reads.Load(), len(state.Jobs), len(state.Manifests))
+	}
+	service.captureBreakLogs(t.Context(), snapshot, "")
+	if counting.reads.Load() != 2 {
+		t.Fatalf("the refreshed break was resolved again: reads=%d", counting.reads.Load())
+	}
+
+}
+
+// The Overview's live issue list keeps its totals and its pinned occurrences
+// when the pins are read without totals.
+func TestLiveIssuesPinOccurrencesFromItemsOnlyReads(t *testing.T) {
+	service, counting, snapshot, opened := openBreakForCapture(t)
+	live, err := service.Issues(pinInventory(t.Context(), inventoryGeneration{View: snapshot}), IssueOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var item Issue
+	for _, issue := range live.Items {
+		if issue.Root.UID == "api-root" && issue.Rule == "pod.crash_loop" {
+			item = issue
+		}
+	}
+	if item.OccurrenceID == "" || item.BrokeAt == nil || !item.BrokeAt.Equal(opened) {
+		t.Fatalf("live list did not pin the open occurrence: id=%q at=%v", item.OccurrenceID, item.BrokeAt)
+	}
+	if live.Totals["warning"] != 1 || live.Broken.Total != 1 || live.Broken.BySeverity["warning"] != 1 || live.Total != len(live.Items) {
+		t.Fatalf("live totals changed: totals=%v broken=%+v total=%d items=%d", live.Totals, live.Broken, live.Total, len(live.Items))
+	}
+	if counting.reads.Load() == 0 || counting.itemsOnly.Load() != counting.reads.Load() {
+		t.Fatalf("pins read occurrence totals: reads=%d items-only=%d", counting.reads.Load(), counting.itemsOnly.Load())
+	}
+}

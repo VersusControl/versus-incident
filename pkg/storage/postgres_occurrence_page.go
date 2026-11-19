@@ -181,7 +181,7 @@ func (p *postgresProvider) queryOccurrenceReadPage(ctx context.Context, tx *sql.
 			return page, ErrInvalidEvidence
 		}
 	}
-	if q.Cursor == "" && q.OccurrenceID == "" && q.Center.IsZero() {
+	if q.Cursor == "" && q.OccurrenceID == "" && q.Center.IsZero() && !q.ItemsOnly {
 		args := historySQLArgs{}
 		candidates := occurrenceCandidates(keys, q, c, 1001, false, &args)
 		values := []any(args)
