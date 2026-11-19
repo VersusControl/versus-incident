@@ -93,9 +93,12 @@ export function KubernetesFleet({ clusters, reports = {}, notice, retry, retryin
             const open = `Open cluster ${cluster.display_name || cluster.id}`;
             return <article key={cluster.id} aria-label={`Cluster ${cluster.id}`} className="card relative min-w-0 px-4 py-4">
               {/* The whole row is one link; its name carries the live progress
-                  the narrow line can only truncate. */}
+                  the narrow line can only truncate. Everything drawn over it
+                  lets clicks fall through to the link, except the row's own
+                  action controls, so empty space anywhere in the card opens
+                  the cluster. */}
               <Link to={`?cluster=${encodeURIComponent(cluster.id)}`} aria-label={preparing ? `${open}: Preparing first data, ${firstSyncProgressText(cluster.sync?.progress)}` : open} className="absolute inset-0 rounded-card focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent" />
-              <div className={`relative ${rowColumns}`}>
+              <div data-row-grid className={`pointer-events-none relative ${rowColumns}`}>
                 <div className="pointer-events-none relative min-w-0 space-y-1">
                   <h2 className="break-words text-sm font-semibold text-ink-50">{cluster.display_name || cluster.id}</h2>
                   <p className="break-all font-mono text-2xs text-ink-300">{cluster.id}</p>
@@ -115,8 +118,8 @@ export function KubernetesFleet({ clusters, reports = {}, notice, retry, retryin
                 <div className="pointer-events-none relative min-w-0 space-y-1 text-2xs text-ink-300">
                   {preparing ? <p>Preparing first data</p> : <p>{isZeroTime(cluster.observed_at) ? "Snapshot unavailable" : new Date(cluster.observed_at).toLocaleTimeString()}</p>}
                 </div>
-                <div className="relative flex items-center justify-end gap-2">
-                  {cluster.health === "unreachable" ? <button type="button" className="btn" disabled={retrying} onClick={retry}><RefreshCw size={12} aria-hidden="true" />Retry</button> : <Link className="btn whitespace-nowrap" to={`?cluster=${encodeURIComponent(cluster.id)}&view=issues`}><AlertTriangle size={12} aria-hidden="true" />Review issues</Link>}
+                <div data-actions-cell className="pointer-events-none relative flex items-center justify-end gap-2">
+                  {cluster.health === "unreachable" ? <button type="button" className="btn pointer-events-auto" disabled={retrying} onClick={retry}><RefreshCw size={12} aria-hidden="true" />Retry</button> : <Link className="btn pointer-events-auto whitespace-nowrap" to={`?cluster=${encodeURIComponent(cluster.id)}&view=issues`}><AlertTriangle size={12} aria-hidden="true" />Review issues</Link>}
                   <ChevronRight size={16} aria-hidden="true" className="pointer-events-none shrink-0 text-ink-300" />
                 </div>
               </div>
