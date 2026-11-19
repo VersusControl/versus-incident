@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -65,10 +64,11 @@ func evidencePartEnd(records []EvidenceRecord, start, size int) int {
 }
 
 // evidenceSaveTimedOut reports a save transaction that ran out of time, which
-// a smaller part can avoid.
+// a smaller part can avoid: its deadline, the database's statement timeout,
+// or its lock timeout.
 func evidenceSaveTimedOut(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pgErr) && pgErr.Code == "57014"
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pgErr) && (pgErr.Code == "57014" || pgErr.Code == "55P03")
 }
 
 // evidenceSaveError types the database's refusal of text it cannot hold. The
@@ -93,25 +93,4 @@ func (p *postgresProvider) evidenceCutoff() time.Time {
 		return time.Time{}
 	}
 	return time.Now().UTC().Add(-p.evidenceRetention)
-}
-
-// writeRetainedEvidenceEvents writes the records retention would keep. A
-// record older than the cutoff would be removed by the next retention pass,
-// and writing it would re-create a month retention already dropped, so it is
-// counted as expired and not written.
-func writeRetainedEvidenceEvents(ctx context.Context, tx *sql.Tx, key string, records []EvidenceRecord, heartbeat time.Duration, cutoff time.Time) (evidenceWriteStats, error) {
-	retained := records
-	if !cutoff.IsZero() {
-		retained = make([]EvidenceRecord, 0, len(records))
-		for _, record := range records {
-			if record.At.Before(cutoff) {
-				continue
-			}
-			retained = append(retained, record)
-		}
-	}
-	stats, err := writeEvidenceEvents(ctx, tx, key, retained, heartbeat)
-	stats.Offered = len(records)
-	stats.Expired = len(records) - len(retained)
-	return stats, err
 }

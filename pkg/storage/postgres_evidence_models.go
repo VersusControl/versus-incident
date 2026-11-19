@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -118,14 +119,52 @@ type evidenceWriteStats struct {
 // supersede or refresh are matched first (OFFSET 0 keeps them apart) and
 // then reached by their full partition key, so no plan probes a partition for
 // a record that changes nothing.
-func writeEvidenceEvents(ctx context.Context, tx *sql.Tx, key string, records []EvidenceRecord, heartbeat time.Duration) (stats evidenceWriteStats, err error) {
-	stats = evidenceWriteStats{Offered: len(records)}
-	if len(records) == 0 {
-		return stats, nil
+func writeEvidenceEvents(ctx context.Context, tx *sql.Tx, key string, records []EvidenceRecord, heartbeat time.Duration) (evidenceWriteStats, error) {
+	input, err := newEvidenceEventsInput(records, heartbeat, time.Time{})
+	if err != nil {
+		return evidenceWriteStats{Offered: len(records)}, err
 	}
-	input := make([]map[string]any, 0, len(records))
-	for _, record := range records {
-		input = append(input, map[string]any{
+	return writeEvidenceEventsInput(ctx, tx, key, input)
+}
+
+// evidenceEventsInput is the journal write of one save, built from its
+// records alone, so a save whose records are known before its transaction
+// builds it there and the transaction only runs statements.
+type evidenceEventsInput struct {
+	// offered counts the records given; expired those older than the
+	// retention cutoff, which are not written; retained those written.
+	offered, expired, retained int
+	// raw holds the retained records as the statement's JSON parameter, and
+	// ids their event IDs.
+	raw []byte
+	ids []string
+	// heartbeat is the crash refresh interval in seconds.
+	heartbeat float64
+}
+
+// newEvidenceEventsInput keeps the records retention would keep and encodes
+// them. A record older than the cutoff would be removed by the next retention
+// pass, and writing it would re-create a month retention already dropped, so
+// it is counted as expired and not written. A zero cutoff keeps every record.
+func newEvidenceEventsInput(records []EvidenceRecord, heartbeat time.Duration, cutoff time.Time) (evidenceEventsInput, error) {
+	retained := records
+	if !cutoff.IsZero() {
+		retained = make([]EvidenceRecord, 0, len(records))
+		for _, record := range records {
+			if record.At.Before(cutoff) {
+				continue
+			}
+			retained = append(retained, record)
+		}
+	}
+	input := evidenceEventsInput{offered: len(records), expired: len(records) - len(retained), retained: len(retained), heartbeat: max(heartbeat, time.Second).Seconds()}
+	if len(retained) == 0 {
+		return input, nil
+	}
+	rows := make([]map[string]any, 0, len(retained))
+	input.ids = make([]string, 0, len(retained))
+	for _, record := range retained {
+		rows = append(rows, map[string]any{
 			"event_id": record.ID, "event_version": evidenceVersion(record), "event_type": record.Type,
 			"event_at": record.At, "observed_at": record.ObservedAt, "namespace": record.Namespace, "resource_name": record.Name,
 			"kind": record.Kind, "authorization_kind": record.AuthorizationKind, "resource_uid": record.UID,
@@ -133,11 +172,24 @@ func writeEvidenceEvents(ctx context.Context, tx *sql.Tx, key string, records []
 			"payload": record.Payload, "is_break": record.Broken, "priority": record.Priority,
 			"gap_from": nullEvidenceTime(record.GapFrom), "gap_to": nullEvidenceTime(record.GapTo),
 		})
+		input.ids = append(input.ids, record.ID)
 	}
-	raw, err := json.Marshal(input)
+	raw, err := json.Marshal(rows)
 	if err != nil {
-		return stats, err
+		return input, err
 	}
+	input.raw = raw
+	return input, nil
+}
+
+// writeEvidenceEventsInput runs a save's journal write. Its statements use
+// only the prepared input and what they read.
+func writeEvidenceEventsInput(ctx context.Context, tx *sql.Tx, key string, input evidenceEventsInput) (stats evidenceWriteStats, err error) {
+	stats = evidenceWriteStats{Offered: input.offered, Expired: input.expired}
+	if input.retained == 0 {
+		return stats, nil
+	}
+	raw, ids := input.raw, input.ids
 	complete, err := evidenceHeadsComplete(ctx, tx, key)
 	if err != nil {
 		return stats, err
@@ -160,10 +212,6 @@ func writeEvidenceEvents(ctx context.Context, tx *sql.Tx, key string, records []
 		// heads name; their months, read (and the heads locked) first, are
 		// the partitions the updates name, so the plan covers those months
 		// only, and each row is still reached by its full key.
-		ids := make([]string, 0, len(records))
-		for _, record := range records {
-			ids = append(ids, record.ID)
-		}
 		rows, headsErr := tx.QueryContext(ctx, `SELECT DISTINCT 'evidence_event_month_'||to_char(event_at AT TIME ZONE 'UTC','YYYYMM') FROM(
  SELECT event_at FROM kubernetes_evidence_event_heads WHERE scope_key=$1 AND event_id=ANY($2::text[]) FOR UPDATE)h`, key, ids)
 		if headsErr != nil {
@@ -245,7 +293,7 @@ func writeEvidenceEvents(ctx context.Context, tx *sql.Tx, key string, records []
  observed_lag=GREATEST(s.observed_lag,COALESCE((SELECT MAX(r.observed_at-r.event_at) FROM refreshed r),'0'))
  WHERE s.scope_key=$1 RETURNING s.scope_key
  ) SELECT (SELECT COALESCE(MAX(sequence),0) FROM inserted),(SELECT COUNT(*) FROM inserted),(SELECT COUNT(*) FROM refreshed)`,
-		key, raw, max(heartbeat, time.Second).Seconds()).Scan(&stats.High, &stats.Inserted, &stats.Refreshed)
+		key, raw, input.heartbeat).Scan(&stats.High, &stats.Inserted, &stats.Refreshed)
 	return stats, err
 }
 
@@ -268,26 +316,46 @@ func occurrencePayloadFacts(raw json.RawMessage) occurrenceFacts {
 	return facts
 }
 
-func writeOccurrenceReadModels(ctx context.Context, tx *sql.Tx, key string, state evidenceState) error {
-	if len(state.Occurrences) == 0 {
-		return writeTemporalOccurrenceModels(ctx, tx, key, state)
-	}
-	input := make([]map[string]any, 0, len(state.Occurrences))
-	for _, issue := range state.Occurrences {
-		issueKey := issue.Key
-		if issue.ObservationOnly {
-			issueKey = issue.OccurrenceID
+// storedIssue is an issue row as a save read it, before the capture is
+// applied: the issue (its payload, with last_seen from its column), the
+// last_seen its payload was written with, its payload version, its last
+// observation time and whether its row is a complete read model.
+type storedIssue struct {
+	issue        EvidenceIssue
+	payloadSeen  time.Time
+	version      string
+	lastObserved time.Time
+	modelReady   bool
+}
+
+// writeOccurrenceReadModels writes the issue rows a save changes. With the
+// rows the save read (state.storedIssues), an issue whose row would differ
+// only in last_seen, last_observed_at, or the payload fields that are
+// measurements rather than identity (the ones sameIssueEvidence ignores) gets
+// a narrow update of last_seen and last_observed_at alone. Those columns are
+// in no index, so the update stays on the row's page and touches no index,
+// and last_seen stays exact for every reader and for the next save's
+// decision to resolve an issue. The whole row, payload included, is rewritten
+// when the issue's identity changes, when it opens or resolves, and at most
+// once per heartbeat otherwise, so its measurements trail by less than a
+// heartbeat. Without stored rows (the read-model conversion) every issue is
+// written whole.
+func writeOccurrenceReadModels(ctx context.Context, tx *sql.Tx, key string, state evidenceState, heartbeat time.Duration) error {
+	input, seen := occurrenceIssueRows(state, heartbeat)
+	if len(seen) > 0 {
+		raw, err := json.Marshal(seen)
+		if err != nil {
+			return err
 		}
-		payload := occurrencePayloadFacts(issue.Payload)
-		input = append(input, map[string]any{
-			"occurrence_id": issue.OccurrenceID, "issue_key": issueKey, "first_seen": issue.FirstSeen,
-			"last_seen": issue.LastSeen, "closed_at": issue.ClosedAt, "payload": issue,
-			"payload_version": state.OccurrenceHeads[issue.OccurrenceID], "root_uid": issue.UID,
-			"namespace": issue.Namespace, "kind": issue.Kind, "rule": issue.Rule,
-			"authorization_kind": issue.AuthorizationKind, "broken": issue.Broken, "severity": payload.Severity,
-			"broke_at": payload.BrokeAt, "last_observed_at": nullEvidenceTime(state.LastObservations[issue.OccurrenceID]),
-			"observation_only": issue.ObservationOnly,
-		})
+		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_issues AS old SET last_seen=x.last_seen,last_observed_at=x.last_observed_at
+ FROM jsonb_to_recordset($2::jsonb) AS x(occurrence_id text,last_seen timestamptz,last_observed_at timestamptz)
+ WHERE old.scope_key=$1 AND old.occurrence_id=x.occurrence_id AND old.last_seen<=x.last_seen
+ AND (old.last_seen,old.last_observed_at) IS DISTINCT FROM (x.last_seen,x.last_observed_at)`, key, raw); err != nil {
+			return err
+		}
+	}
+	if len(input) == 0 {
+		return writeTemporalOccurrenceModels(ctx, tx, key, state)
 	}
 	raw, err := json.Marshal(input)
 	if err != nil {
@@ -310,6 +378,74 @@ func writeOccurrenceReadModels(ctx context.Context, tx *sql.Tx, key string, stat
 		return err
 	}
 	return writeTemporalOccurrenceModels(ctx, tx, key, state)
+}
+
+// occurrenceIssueRows builds the issue rows a save writes whole, and the
+// narrow last_seen and last_observed_at updates of the others that moved; see
+// writeOccurrenceReadModels.
+func occurrenceIssueRows(state evidenceState, heartbeat time.Duration) (rows, seen []map[string]any) {
+	if heartbeat <= 0 {
+		heartbeat = 5 * time.Minute
+	}
+	rows = make([]map[string]any, 0, len(state.Occurrences))
+	for id, issue := range state.Occurrences {
+		version, lastObserved := state.OccurrenceHeads[id], state.LastObservations[id]
+		if stored, found := state.storedIssues[id]; found && issuePayloadCurrent(stored, issue, version, heartbeat) {
+			if !issue.LastSeen.Truncate(time.Microsecond).Equal(stored.issue.LastSeen.Truncate(time.Microsecond)) || !lastObserved.Truncate(time.Microsecond).Equal(stored.lastObserved.Truncate(time.Microsecond)) {
+				seen = append(seen, map[string]any{"occurrence_id": id, "last_seen": issue.LastSeen, "last_observed_at": nullEvidenceTime(lastObserved)})
+			}
+			continue
+		}
+		issueKey := issue.Key
+		if issue.ObservationOnly {
+			issueKey = issue.OccurrenceID
+		}
+		payload := occurrencePayloadFacts(issue.Payload)
+		rows = append(rows, map[string]any{
+			"occurrence_id": issue.OccurrenceID, "issue_key": issueKey, "first_seen": issue.FirstSeen,
+			"last_seen": issue.LastSeen, "closed_at": issue.ClosedAt, "payload": issue,
+			"payload_version": version, "root_uid": issue.UID,
+			"namespace": issue.Namespace, "kind": issue.Kind, "rule": issue.Rule,
+			"authorization_kind": issue.AuthorizationKind, "broken": issue.Broken, "severity": payload.Severity,
+			"broke_at": payload.BrokeAt, "last_observed_at": nullEvidenceTime(lastObserved),
+			"observation_only": issue.ObservationOnly,
+		})
+	}
+	return rows, seen
+}
+
+// issuePayloadCurrent reports whether a stored row needs no more than the
+// narrow freshness update: it is a complete read model with the save's
+// version, the issue differs at most in last_seen and in measurement fields
+// of its payload, and its payload was written less than a heartbeat before
+// this capture's last_seen. Every other column of the row is derived from
+// the issue, so it is unchanged too.
+func issuePayloadCurrent(stored storedIssue, issue EvidenceIssue, version string, heartbeat time.Duration) bool {
+	if !stored.modelReady || stored.version != version {
+		return false
+	}
+	if issue.LastSeen.Sub(stored.payloadSeen) >= heartbeat {
+		return false
+	}
+	before, beforeOK := issueRowIdentity(stored.issue)
+	after, afterOK := issueRowIdentity(issue)
+	return beforeOK && afterOK && bytes.Equal(before, after)
+}
+
+// issueRowIdentity encodes an issue without its last_seen and with only the
+// payload fields that are not measurements, in UTC, so two encodings are equal
+// exactly when the row would differ at most in those fields. It reports false
+// for an issue it cannot encode, which is then always written.
+func issueRowIdentity(issue EvidenceIssue) ([]byte, bool) {
+	issue.LastSeen = time.Time{}
+	issue.FirstSeen = issue.FirstSeen.UTC()
+	if issue.ClosedAt != nil {
+		closed := issue.ClosedAt.UTC()
+		issue.ClosedAt = &closed
+	}
+	issue.Payload = issueEvidenceIdentity(issue.Payload)
+	raw, err := json.Marshal(issue)
+	return raw, err == nil
 }
 
 // writeTemporalOccurrenceModels records each new occurrence version with the

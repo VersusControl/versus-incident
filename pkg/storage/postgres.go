@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 
 	// pgx stdlib driver — registers "pgx" with database/sql.
@@ -56,9 +57,23 @@ type postgresProvider struct {
 	// the months and before it reads any; tests change the months there.
 	evidenceMonthsListed func()
 	// maintenanceLogMu guards the times maintenance last logged progress.
-	maintenanceLogMu     sync.Mutex
-	headsLoggedAt        time.Time
-	swapWaitLoggedAt     time.Time
+	maintenanceLogMu sync.Mutex
+	headsLoggedAt    time.Time
+	swapWaitLoggedAt time.Time
+	// compactionLockedAt is when compaction last held the partition lock and
+	// compactionWaitedAt when it last waited for it; compactionStalled
+	// throttles the warning that retention is behind. maintenanceFailingSince
+	// is when the background steps started failing, zero while they succeed,
+	// and maintenanceStalled throttles the warning that they keep failing.
+	// Guarded by maintenanceLogMu.
+	compactionLockedAt      time.Time
+	compactionWaitedAt      time.Time
+	compactionStalled       *logging.Throttle
+	maintenanceFailingSince time.Time
+	maintenanceStalled      *logging.Throttle
+	// evidenceClock, when set, replaces time.Now for maintenance's lock and
+	// log bookkeeping; tests move it forward.
+	evidenceClock        func() time.Time
 	observationHeartbeat time.Duration
 	writeMu              sync.Mutex
 	amplifiedWrites      int
