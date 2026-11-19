@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -850,5 +851,127 @@ func TestFailingNamespaceIsNotReportedReadyThroughAnother(t *testing.T) {
 	cluster.cycle(nil, "Pod")
 	if report, err := cluster.service.SyncHealth(ctx); err != nil || report.State != "ready" {
 		t.Fatalf("after the namespace recovered the report did not return to ready: state=%s failing=%+v err=%v", report.State, report.Failing, err)
+	}
+}
+
+// stageReason is the reason the worker last recorded for one capture stage.
+func (cluster *partialRoleCluster) stageReason(stage string) string {
+	recovery := cluster.service.recovery
+	recovery.mu.Lock()
+	defer recovery.mu.Unlock()
+	return recovery.stages[stage].reason
+}
+
+// Optional kinds whose reads did not start before the window closed wait for
+// a later cycle. That pacing is planned, so the optional stage still ends
+// ready and writes no timeout line.
+func TestPacedOptionalReadsAreNotACaptureFailure(t *testing.T) {
+	t.Parallel()
+	cluster := newPartialRoleCluster(t, true)
+	cluster.extraGroups.Store(4)
+	cluster.service.optionalStartWindow = time.Nanosecond
+	cluster.start()
+	cluster.cycle(nil, "Pod")
+	if listed := cluster.widgetLists.Load(); listed != 0 {
+		t.Fatalf("%d optional reads started after the start window closed", listed)
+	}
+	if reason := cluster.stageReason("additional"); reason != "ready" {
+		t.Fatalf("paced optional reads recorded the stage as %q, want ready: %s", reason, cluster.stages())
+	}
+}
+
+// An optional kind whose read fails is a real failure of the optional stage,
+// while a kind the reader role may not list is a steady gap shown on the kind.
+func TestOptionalStageRecordsFailedReadsButNotDenials(t *testing.T) {
+	t.Parallel()
+	cluster := newPartialRoleCluster(t, true)
+	cluster.extraGroups.Store(2)
+	cluster.start()
+	cluster.cycle(nil, "Pod")
+	if cluster.widgetLists.Load() == 0 {
+		t.Fatal("the optional kinds were never listed")
+	}
+	cluster.failWidgets.Store(true)
+	cluster.ageOptionalAPIs(20 * time.Minute)
+	cluster.cycle(nil, "Pod")
+	if reason := cluster.stageReason("additional"); reason != "collection_unavailable" {
+		t.Fatalf("a failed optional read recorded the stage as %q, want collection_unavailable: %s", reason, cluster.stages())
+	}
+	cluster.failWidgets.Store(false)
+	cluster.denyWidgets.Store(true)
+	cluster.ageOptionalAPIs(20 * time.Minute)
+	cluster.cycle(nil, "Pod")
+	if reason := cluster.stageReason("additional"); reason != "ready" {
+		t.Fatalf("a denied optional kind recorded the stage as %q, want ready: %s", reason, cluster.stages())
+	}
+}
+
+// When a cycle can start only some of the due optional reads, the kinds left
+// over lead the next cycle. Every kind is read within the cycles the pace
+// needs, also beside kinds that fail and are retried on every cycle, and none
+// waits longer than a bounded number of cycles afterwards.
+func TestPacedOptionalReadsReachEveryKind(t *testing.T) {
+	t.Parallel()
+	service := &Service{}
+	const kinds, failing, perCycle = 40, 3, 7
+	resources := make([]ResourceDefinition, 0, kinds+failing)
+	for index := range kinds + failing {
+		name := fmt.Sprintf("kind%02d", index)
+		resources = append(resources, ResourceDefinition{ID: "example.com~v1~" + name, Group: "example.com", Version: "v1", Resource: name, Kind: name, Namespaced: true, Verbs: []string{"list"}, Available: true})
+	}
+	fails := map[string]bool{}
+	for _, definition := range resources[:failing] {
+		fails[definition.ID] = true
+	}
+	states := map[string]kubeindex.KindStatus{}
+	lastRead := map[string]int{}
+	firstRound := (kinds + failing + perCycle - 1) / perCycle
+	longestWait := 0
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for cycle := range 60 {
+		now := start.Add(time.Duration(cycle) * 30 * time.Second)
+		due := service.dueOptionalInventory(resources, states, now, func(string) bool { return false })
+		for _, definition := range due[:min(perCycle, len(due))] {
+			if fails[definition.ID] {
+				states[definition.ID] = kubeindex.KindStatus{State: "error", Partial: true, Error: "unavailable", LastAttemptAt: now}
+			} else {
+				states[definition.ID] = kubeindex.KindStatus{State: "ready", ObservedAt: now, CompletedAt: now, LastAttemptAt: now}
+			}
+			if previous, read := lastRead[definition.ID]; read {
+				longestWait = max(longestWait, cycle-previous)
+			}
+			lastRead[definition.ID] = cycle
+		}
+		if cycle == firstRound-1 && len(lastRead) != len(resources) {
+			t.Fatalf("after %d cycles only %d of %d optional kinds were read", firstRound, len(lastRead), len(resources))
+		}
+	}
+	for _, definition := range resources {
+		if last := lastRead[definition.ID]; 59-last > 2*firstRound+10 {
+			t.Fatalf("%s was last read on cycle %d of 60", definition.ID, last)
+		}
+	}
+	if longestWait > 2*firstRound+10 {
+		t.Fatalf("an optional kind waited %d cycles between reads", longestWait)
+	}
+}
+
+// A discovered optional kind the paced reads have not reached yet is shown as
+// loading, not as a type the cluster does not serve.
+func TestQueuedOptionalKindIsShownAsLoading(t *testing.T) {
+	t.Parallel()
+	service := &Service{}
+	queued := "example.com~v1~widgets"
+	generation := inventoryGeneration{
+		Discovery: &Discovery{Resources: []ResourceDefinition{{ID: queued, Group: "example.com", Version: "v1", Resource: "widgets", Kind: "Widget", Namespaced: true, Verbs: []string{"list"}, Available: true}}},
+		View:      kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready"}}},
+	}
+	ctx := context.WithValue(t.Context(), inventoryReadContextKey{}, generation)
+	page, err := service.CachedResources(ctx, ListOptions{ResourceID: queued})
+	if err != nil || page.Sync.State != "partial" || !page.Sync.Partial || !containsString(page.Sync.Pending, queued) {
+		t.Fatalf("a queued optional kind was not shown as loading: %+v err=%v", page.Sync, err)
+	}
+	if _, err := service.CachedResources(ctx, ListOptions{ResourceID: "example.com~v1~gadgets"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a type discovery does not serve answered %v, want not found", err)
 	}
 }

@@ -99,14 +99,14 @@ var sqliteIndexInclude = regexp.MustCompile(`\)\s+INCLUDE\s*\(([^()]*)\)`)
 // localTableMigrations are the migrations the local SQLite tables are built
 // from, in order.
 var localTableMigrations = []string{
-	"migrations/031_aws_inventory_tables.sql",
-	"migrations/032_finops_tables.sql",
-	"migrations/033_finops_cost_lines_region_index.sql",
-	"migrations/034_finops_cost_lines_totals_index.sql",
-	"migrations/035_finops_saving_decision_subject.sql",
-	"migrations/036_finops_cost_daily.sql",
-	"migrations/037_aws_change_feed.sql",
-	"migrations/038_aws_change_pairs_not_changes.sql",
+	"migrations/032_aws_inventory_tables.sql",
+	"migrations/033_finops_tables.sql",
+	"migrations/034_finops_cost_lines_region_index.sql",
+	"migrations/035_finops_cost_lines_totals_index.sql",
+	"migrations/036_finops_saving_decision_subject.sql",
+	"migrations/037_finops_cost_daily.sql",
+	"migrations/038_aws_change_feed.sql",
+	"migrations/039_aws_change_pairs_not_changes.sql",
 }
 
 // sqliteAddColumn matches one rendered ALTER TABLE … ADD COLUMN IF NOT

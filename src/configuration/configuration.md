@@ -299,6 +299,7 @@ The application relies on several environment variables to configure alerting se
 | Variable          | Description |
 |------------------|-------------|
 | `DEBUG_BODY`   | Set to `true` to enable print body send to Versus Incident. |
+| `LOG_LEVEL`    | How much the log shows for the parts of Versus that use leveled logging: `debug`, `info` (default), `warn` (or `warning`) or `error`, case-insensitive. `info` shows errors and warnings you can act on and startup lines; `debug` adds progress, timings, success lines and retries that heal on their own; `warn` and `error` show only those levels. Versus is moving to leveled logging one part at a time: lines from parts not moved yet always print, whatever the level. An unknown value logs one warning and uses `info`. Bodies are printed only with `DEBUG_BODY`. |
 
 ### Admin & Gateway
 | Variable          | Description |

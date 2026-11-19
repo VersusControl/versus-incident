@@ -1,4 +1,4 @@
-.agent-overview { min-width: 0; padding: 0 24px 32px; }
+.agent-overview { min-width: 0; padding: 24px 24px 32px; }
 .agent-overview-navigation { margin-bottom: 12px; overflow-x: auto; }
 .agent-overview-tabs { display: flex; gap: 4px; }
 .agent-overview-tabs button { display: inline-flex; align-items: center; gap: 7px; padding: 12px 14px; color: rgb(var(--ink-300)); font-size: 13px; position: relative; }
@@ -18,8 +18,8 @@
 .overview-stat-strip dd { color: rgb(var(--ink-50)); font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 8px; overflow-wrap: anywhere; }
 .overview-analysis-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 48px; margin-top: 28px; }
 .overview-empty { padding: 24px 0; color: rgb(var(--ink-300)); font-size: 13px; }
-.overview-event-list { display: grid; gap: 4px; }
-.overview-event-list li { display: flex; align-items: center; gap: 14px; padding: 12px 0; }
+.overview-event-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.overview-event-list li { display: flex; align-items: center; gap: 14px; min-width: 0; padding: 12px 0; }
 .overview-event-list li > div { flex: 1; }
 .overview-event-dot { height: 7px; width: 7px; flex-shrink: 0; border-radius: 50%; background: rgb(var(--accent)); }
 .overview-pattern-table { width: 100%; text-align: left; font-size: 12px; }

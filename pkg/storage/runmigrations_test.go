@@ -197,3 +197,58 @@ CREATE TABLE zz_parted_journal_a PARTITION OF zz_parted_journal FOR VALUES FROM 
 		t.Fatalf("indexes: plain=%d partitioned=%d partition=%d, want 0, 1, 1", plain, parted, partitions)
 	}
 }
+
+// An online migration may drop indexes concurrently. Running it again, or
+// over an index that is already gone, changes nothing; a drop whose index
+// name is not a plain identifier is refused. Postgres-gated.
+func TestRunSQLMigrations_OnlineIndexDrop(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("TEST_POSTGRES_DSN not set; skipping postgres tests")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer db.Close()
+	ledgers := []string{"zz_index_drop_ledger", "zz_index_drop_again_ledger", "zz_index_drop_bad_ledger"}
+	cleanup := func() {
+		_, _ = db.Exec("DROP TABLE IF EXISTS zz_drop_journal CASCADE")
+		for _, ledger := range ledgers {
+			_, _ = db.Exec("DROP TABLE IF EXISTS " + ledger + " CASCADE")
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+	if _, err = db.Exec(`CREATE TABLE zz_drop_journal(id INT, at TIMESTAMPTZ, seen TIMESTAMPTZ);
+CREATE INDEX zz_drop_at ON zz_drop_journal(at);
+CREATE INDEX zz_drop_seen ON zz_drop_journal(seen)`); err != nil {
+		t.Fatal(err)
+	}
+	fsys := fstest.MapFS{"m/001_drop.sql": {Data: []byte("-- versus:nontransactional\n" +
+		"DROP INDEX CONCURRENTLY IF EXISTS zz_drop_at;\n" +
+		"DROP INDEX CONCURRENTLY IF EXISTS zz_drop_absent;\n")}}
+	indexes := func() int {
+		t.Helper()
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pg_indexes WHERE tablename='zz_drop_journal'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	for _, ledger := range ledgers[:2] {
+		if err = storage.RunSQLMigrations(db, fsys, "m", ledger); err != nil {
+			t.Fatalf("drop migration with ledger %s: %v", ledger, err)
+		}
+		if got := indexes(); got != 1 {
+			t.Fatalf("after the drop migration (ledger %s) the table has %d indexes, want only zz_drop_seen", ledger, got)
+		}
+	}
+	bad := fstest.MapFS{"m/001_drop.sql": {Data: []byte("-- versus:nontransactional\nDROP INDEX CONCURRENTLY IF EXISTS zz_drop_seen CASCADE")}}
+	if err = storage.RunSQLMigrations(db, bad, "m", ledgers[2]); err == nil {
+		t.Fatal("a drop with extra clauses was accepted")
+	}
+	if got := indexes(); got != 1 {
+		t.Fatalf("a refused drop changed the indexes: %d", got)
+	}
+}

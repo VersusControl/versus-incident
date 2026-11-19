@@ -1453,6 +1453,58 @@ func TestBreakCaptureAdmitsEveryNamespaceBeforeSlowLogs(t *testing.T) {
 		t.Fatalf("slow root starved namespace admission: %+v", found)
 	}
 }
+
+// A cluster-scoped break that sorts after every namespaced break must neither
+// reach the manifest commit nor make a namespaced root run twice.
+func TestBreakCaptureLeavesOutATrailingClusterScopedBreak(t *testing.T) {
+	var mu sync.Mutex
+	reads := map[string]int{}
+	at := time.Now().UTC()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/log") {
+			mu.Lock()
+			reads[r.URL.Path]++
+			mu.Unlock()
+			fmt.Fprintf(w, "%s fatal before restart\n", at.Add(-2*time.Second).Format(time.RFC3339Nano))
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+	}))
+	defer upstream.Close()
+	service := newTestService(t, upstream.URL, Scope{OrgID: "default", ClusterID: "cluster"})
+	service.SetScrubber(breakLogScrubber{})
+	service.SetChangeStorage(storage.NewMemory())
+	defer service.StopCapture()
+	snapshot := kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready", ObservedAt: at}, "Node": {State: "ready", ObservedAt: at}}}
+	for _, namespace := range []string{"payments", "orders"} {
+		snapshot.Records = append(snapshot.Records, kubeindex.Record{Kind: "Pod", Namespace: namespace, Name: "api-0", UID: namespace + "-pod", CreatedAt: at.Add(-time.Hour), ReadyStatus: "False", Phase: "Running", ReadyTransitionAt: at.Add(-time.Minute), Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 1, TerminatedAt: at.Add(-time.Second), StateKnown: true}}})
+	}
+	snapshot.Records = append(snapshot.Records, kubeindex.Record{Kind: "Node", Name: "worker", UID: "zz-node", NodeReady: false})
+	roots, _ := classifyReadyBreaks(snapshot, at)
+	if len(roots) != 3 || roots[len(roots)-1].Root.Namespace != "" {
+		t.Fatalf("fixture must put the Node break after both namespaced breaks: %+v", roots)
+	}
+	service.captureBreakLogs(t.Context(), snapshot, "")
+	state, err := service.changeStore().BreakLogs(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]int{}
+	for _, manifest := range state.Manifests {
+		found[manifest.Namespace]++
+	}
+	if found["payments"] != 1 || found["orders"] != 1 || found[""] != 0 {
+		t.Fatalf("manifests by namespace: %+v", found)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, namespace := range []string{"payments", "orders"} {
+		if got := reads["/api/v1/namespaces/"+namespace+"/pods/api-0/log"]; got != 1 {
+			t.Fatalf("%s pod log read %d times, want once: %v", namespace, got, reads)
+		}
+	}
+}
+
 func TestBreakContainerCapturesCurrentlyTerminatedKubeletSlot(t *testing.T) {
 	at := time.Now().UTC().Add(-time.Minute)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

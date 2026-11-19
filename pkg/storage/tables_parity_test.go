@@ -1243,7 +1243,7 @@ func TestTablesParityCommitClampsClockSkew(t *testing.T) {
 func oldShapeTablesSchema(t *testing.T) string {
 	t.Helper()
 	var schema strings.Builder
-	for _, name := range []string{"migrations/031_aws_inventory_tables.sql", "migrations/032_finops_tables.sql", "migrations/033_finops_cost_lines_region_index.sql"} {
+	for _, name := range []string{"migrations/032_aws_inventory_tables.sql", "migrations/033_finops_tables.sql", "migrations/034_finops_cost_lines_region_index.sql"} {
 		data, err := fs.ReadFile(migrationFiles, name)
 		if err != nil {
 			t.Fatal(err)

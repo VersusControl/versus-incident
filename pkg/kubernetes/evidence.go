@@ -744,7 +744,7 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 	if options.OccurrenceID != "" {
 		root, namespace = "", ""
 	}
-	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Lookup: options.Context == "persisted", AuthorityNamespace: options.Namespace, OccurrenceID: options.OccurrenceID, Center: options.Center, Variant: variant, Since: options.Since, Until: options.Until, Namespace: namespace, Kind: options.Kind, RootUID: root, Type: "occurrence", Limit: normalizePageLimit(options.Limit), Cursor: options.Cursor})
+	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Lookup: options.Context == "persisted", AuthorityNamespace: options.Namespace, OccurrenceID: options.OccurrenceID, Center: options.Center, Variant: variant, Since: options.Since, Until: options.Until, Namespace: namespace, Kind: options.Kind, RootUID: root, Type: "occurrence", Limit: normalizePageLimit(options.Limit), Cursor: options.Cursor, ItemsOnly: options.itemsOnly})
 	if err != nil {
 		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}

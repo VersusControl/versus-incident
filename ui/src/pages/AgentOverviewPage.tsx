@@ -80,7 +80,7 @@ function AgentActivity() {
         !shadow.data?.length ? <p className="overview-empty">No preview events</p> :
         <ul className="overview-event-list">{shadow.data.slice(0, 6).map((event) => <li key={`${event.pattern_id}-${event.first_seen}`}>
           <span className="overview-event-dot" aria-hidden />
-          <div className="min-w-0"><Link to={`/agent/decisions/shadow/${encodeURIComponent(event.pattern_id)}`} className="block truncate text-sm text-ink-100" title={event.sample_message}>{event.sample_message || "Log event"}</Link><span className="text-xs text-ink-300">{decisionLabel(event.verdict)}</span></div>
+          <div className="min-w-0"><Link to={`/agent/decisions/shadow/${encodeURIComponent(event.pattern_id)}`} className="block text-sm text-ink-100 [overflow-wrap:anywhere]">{event.sample_message || "Log event"}</Link><span className="text-xs text-ink-300">{decisionLabel(event.verdict)}</span></div>
           <time className="shrink-0 text-xs text-ink-400" title={fmtAbs(event.last_seen)}>{fmtRel(event.last_seen)}</time>
         </li>)}</ul>}
     </section>

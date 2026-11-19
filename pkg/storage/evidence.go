@@ -231,6 +231,10 @@ type EvidenceQuery struct {
 	Type   string
 	Limit  int
 	Cursor string
+	// ItemsOnly asks for the page's items without its totals, for a caller
+	// that only looks rows up. A provider may skip the count read, leaving
+	// Total and Counts empty; the items and Next are unchanged.
+	ItemsOnly bool
 }
 
 type EvidencePage struct {
@@ -253,6 +257,9 @@ type EvidencePage struct {
 
 type evidenceState struct {
 	updatedOccurrences map[string]struct{}
+	// storedIssues are the issue rows a database save read before applying
+	// the capture, by occurrence; nil elsewhere.
+	storedIssues       map[string]storedIssue
 	RootLatest         map[string]string
 	RootCenters        map[string][]string
 	Occurrences        map[string]EvidenceIssue
@@ -678,25 +685,29 @@ func pinIssueBreakTime(previous, current json.RawMessage) json.RawMessage {
 }
 
 func sameIssueEvidence(a, b json.RawMessage) bool {
-	normalize := func(raw json.RawMessage) []byte {
-		var value map[string]any
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		decoder.UseNumber()
-		if decoder.Decode(&value) != nil || value == nil {
-			return raw
-		}
-		delete(value, "first_seen")
-		delete(value, "last_seen")
-		delete(value, "count")
-		// These are mutable measurements, not occurrence identity or lifecycle.
-		delete(value, "evidence")
-		for _, field := range []string{"examples", "of", "changes", "more_changes", "history", "gaps", "rebuilt", "untracked", "partial", "pending"} {
-			delete(value, field)
-		}
-		normalized, _ := json.Marshal(value)
-		return normalized
+	return bytes.Equal(issueEvidenceIdentity(a), issueEvidenceIdentity(b))
+}
+
+// issueEvidenceIdentity is an issue payload without its times and mutable
+// measurements: what makes two observations of an issue the same evidence.
+// A payload that is not a JSON object is its own identity.
+func issueEvidenceIdentity(raw json.RawMessage) []byte {
+	var value map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil || value == nil {
+		return raw
 	}
-	return bytes.Equal(normalize(a), normalize(b))
+	delete(value, "first_seen")
+	delete(value, "last_seen")
+	delete(value, "count")
+	// These are mutable measurements, not occurrence identity or lifecycle.
+	delete(value, "evidence")
+	for _, field := range []string{"examples", "of", "changes", "more_changes", "history", "gaps", "rebuilt", "untracked", "partial", "pending"} {
+		delete(value, field)
+	}
+	normalized, _ := json.Marshal(value)
+	return normalized
 }
 
 func issueEvidence(issue EvidenceIssue, batch EvidenceBatch, eventType string) EvidenceRecord {

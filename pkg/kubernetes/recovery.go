@@ -38,6 +38,8 @@ type clusterRecovery struct {
 	workers           int
 	firstReady        map[string]time.Time
 	attempts          uint64
+	// logf writes the stage lines; nil writes them to the standard logger.
+	logf func(format string, args ...any)
 }
 
 func (r *clusterRecovery) deadline() time.Time {
@@ -218,7 +220,7 @@ func (registry *ServiceRegistry) superviseCluster(ctx context.Context, clusterID
 		}
 		if restart {
 			current.startInventory(ctx)
-			recovery.stage("worker_recovery", time.Now(), nil)
+			recovery.recordStage("worker_recovery", time.Now(), nil, true)
 		}
 
 		attempt, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -383,7 +385,18 @@ func recoveryReason(err error, stage string) string {
 	return "collection_unavailable"
 }
 
+// stage records how one stage of a capture cycle ended. A healthy cluster
+// stays quiet: a stage that keeps succeeding writes no log line, and a
+// success is logged only when it ends a failure. A failure is logged when it
+// starts or changes reason, and repeats at most once a minute while it lasts.
 func (r *clusterRecovery) stage(stage string, started time.Time, err error) {
+	r.recordStage(stage, started, err, false)
+}
+
+// recordStage records a stage result; always logs it even when it is a
+// success that follows no failure, for one-off events such as a restarted
+// worker.
+func (r *clusterRecovery) recordStage(stage string, started time.Time, err error, always bool) {
 	if r == nil {
 		return
 	}
@@ -393,7 +406,11 @@ func (r *clusterRecovery) stage(stage string, started time.Time, err error) {
 	if r.stages == nil {
 		r.stages = map[string]recoveryStage{}
 	}
-	previous := r.stages[stage]
+	previous, seen := r.stages[stage]
+	if reason == "ready" && !always && (!seen || previous.reason == "ready") {
+		r.stages[stage] = recoveryStage{reason: reason, at: time.Now()}
+		return
+	}
 	if previous.reason == reason && time.Since(previous.at) < time.Minute {
 		return
 	}
@@ -402,7 +419,11 @@ func (r *clusterRecovery) stage(stage string, started time.Time, err error) {
 	if !r.lastCommitted.IsZero() {
 		age = int64(time.Since(r.lastCommitted).Seconds())
 	}
-	log.Printf("kubernetes: capture stage=%s reason=%s duration_ms=%d committed_age_s=%d failures=%d workers=%d attempts=%d", stage, reason, time.Since(started).Milliseconds(), age, r.failures, r.workers, r.attempts)
+	logf := r.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	logf("kubernetes: capture stage=%s reason=%s duration_ms=%d committed_age_s=%d failures=%d workers=%d attempts=%d", stage, reason, time.Since(started).Milliseconds(), age, r.failures, r.workers, r.attempts)
 }
 
 func (r *clusterRecovery) workerStarted() func() {
