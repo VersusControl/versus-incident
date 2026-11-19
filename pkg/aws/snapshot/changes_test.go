@@ -31,7 +31,7 @@ func TestChangesReportCoverageGaps(t *testing.T) {
 
 		found := []model.Change{
 			change("a", now.Add(-50*time.Minute), "ecs", "arn:aws:ecs:us-east-1:111122223333:service/versus/checkout"),
-			change("b", now.Add(-10*time.Minute), "lambda", "worker"),
+			change("b", now.Add(-10*time.Minute), "lambda", "arn:aws:lambda:us-east-1:111122223333:function:worker"),
 		}
 		if err := store.AppendChanges(account, region, found, []changes.Interval{{From: now.Add(-time.Hour), To: now}}, ""); err != nil {
 			t.Fatal(err)

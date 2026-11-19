@@ -9,6 +9,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleGauge,
+  History,
   Cloud,
   GitBranch,
   Flame,
@@ -274,6 +275,7 @@ export function SidebarContent({
           label: "AWS",
           icon: Cloud,
           children: [
+            { to: "/aws/changes", label: "Changes", icon: History },
             { to: "/aws/finops", label: "FinOps", icon: CircleDollarSign },
             { to: "/aws/settings", label: "Settings", icon: Settings },
           ],

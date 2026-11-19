@@ -719,24 +719,30 @@ func (s *Server) worldAlarms(writer http.ResponseWriter, _ awsRequest, w world) 
 	cpu := map[string]any{
 		"AlarmName": WorldAlarmCPU, "AlarmArn": w.arn("cloudwatch", "alarm:"+WorldAlarmCPU), "StateValue": "OK",
 		"MetricName": "CPUUtilization", "Namespace": "AWS/EC2",
-		"Dimensions":            []any{dimension("InstanceId", "i-0123456789abcdef0")},
-		"StateUpdatedTimestamp": cborTime{w.now.Add(-24 * time.Hour)},
+		"Dimensions":                 []any{dimension("InstanceId", "i-0123456789abcdef0")},
+		"StateUpdatedTimestamp":      cborTime{w.now.Add(-24 * time.Hour)},
+		"StateTransitionedTimestamp": cborTime{w.now.Add(-24 * time.Hour)},
 	}
 	targetErrors := map[string]any{
 		"AlarmName": WorldAlarm5xx, "AlarmArn": w.arn("cloudwatch", "alarm:"+WorldAlarm5xx), "StateValue": "OK",
 		"MetricName": "HTTPCode_Target_5XX_Count", "Namespace": "AWS/ApplicationELB",
-		"Dimensions":            []any{dimension("LoadBalancer", WorldLoadBalancerID)},
-		"StateUpdatedTimestamp": cborTime{w.now.Add(-24 * time.Hour)},
+		"Dimensions":                 []any{dimension("LoadBalancer", WorldLoadBalancerID)},
+		"StateUpdatedTimestamp":      cborTime{w.now.Add(-24 * time.Hour)},
+		"StateTransitionedTimestamp": cborTime{w.now.Add(-24 * time.Hour)},
 	}
 	composite := map[string]any{
 		"AlarmName": WorldCompositeAlarm, "AlarmArn": w.arn("cloudwatch", "alarm:"+WorldCompositeAlarm), "StateValue": "OK",
-		"AlarmRule":             `ALARM("` + WorldAlarm5xx + `") OR ALARM("` + WorldAlarmCPU + `")`,
-		"StateUpdatedTimestamp": cborTime{w.now.Add(-24 * time.Hour)},
+		"AlarmRule":                  `ALARM("` + WorldAlarm5xx + `") OR ALARM("` + WorldAlarmCPU + `")`,
+		"StateUpdatedTimestamp":      cborTime{w.now.Add(-24 * time.Hour)},
+		"StateTransitionedTimestamp": cborTime{w.now.Add(-24 * time.Hour)},
 	}
-	if w.badDeploy() {
-		fired := cborTime{BadDeployStart(w.now).Add(4 * time.Minute)}
-		targetErrors["StateValue"], targetErrors["StateUpdatedTimestamp"] = "ALARM", fired
-		composite["StateValue"], composite["StateUpdatedTimestamp"] = "ALARM", fired
+	if firedAt, firing := w.alarmFiring(); firing {
+		fired := cborTime{firedAt}
+		// The alarm transitioned when it fired; evaluation updates keep
+		// moving StateUpdatedTimestamp while it stays in ALARM.
+		updated := cborTime{w.now}
+		targetErrors["StateValue"], targetErrors["StateTransitionedTimestamp"], targetErrors["StateUpdatedTimestamp"] = "ALARM", fired, updated
+		composite["StateValue"], composite["StateTransitionedTimestamp"], composite["StateUpdatedTimestamp"] = "ALARM", fired, updated
 	}
 	writeCBORBody(writer, http.StatusOK, map[string]any{"MetricAlarms": []any{cpu, targetErrors}, "CompositeAlarms": []any{composite}})
 }
@@ -775,6 +781,22 @@ type trailEvent struct {
 	readOnly         bool
 	resources        []string
 	document         map[string]any
+	// exactID serves id as is; otherwise the ID is made unique per account
+	// and Region, as real CloudTrail event IDs are.
+	exactID bool
+	// noTime leaves EventTime out of the answer (a malformed event).
+	noTime bool
+	// rawDocument replaces the CloudTrailEvent document text.
+	rawDocument string
+}
+
+// eventID is the EventId one account and Region sees for a fixture event.
+// The global stream reads us-east-1, so it sees the same IDs as us-east-1.
+func (w world) eventID(event trailEvent) string {
+	if event.exactID || event.id == "" {
+		return event.id
+	}
+	return event.id + "-" + w.account + "-" + w.region
 }
 
 func assumedRole(account, role, session string) map[string]any {
@@ -797,6 +819,11 @@ const (
 )
 
 func (w world) trail() []trailEvent {
+	if events, ok := w.changeScenarioTrail(); ok {
+		events = append(events, w.extra...)
+		sort.Slice(events, func(left, right int) bool { return events[left].at.After(events[right].at) })
+		return events
+	}
 	events := []trailEvent{
 		{id: EventRunInstances, name: "RunInstances", source: "ec2.amazonaws.com", at: w.now.Add(-3 * time.Hour).Truncate(time.Second),
 			resources: []string{"i-0123456789abcdef0"},
@@ -855,14 +882,29 @@ func jsonTime(fields map[string]any, key string) (time.Time, bool) {
 }
 
 func (s *Server) worldLookupEvents(writer http.ResponseWriter, request awsRequest, w world) {
+	if s.refuseLookup(writer, request, w) {
+		return
+	}
 	fields := jsonBody(request)
 	start, hasStart := jsonTime(fields, "StartTime")
 	end, hasEnd := jsonTime(fields, "EndTime")
-	var selected []string
+	var matching []trailEvent
 	for _, event := range w.trail() {
 		if (hasStart && event.at.Before(start)) || (hasEnd && !event.at.Before(end)) {
 			continue
 		}
+		matching = append(matching, event)
+	}
+	// Page first, then encode only the page: a busy history stays cheap.
+	positions := make([]string, len(matching))
+	for index := range positions {
+		positions[index] = strconv.Itoa(index)
+	}
+	pagePositions, next := pageOf(positions, jsonString(fields, "NextToken"), jsonInt(fields, "MaxResults"))
+	var page []string
+	for _, position := range pagePositions {
+		index, _ := strconv.Atoi(position)
+		event := matching[index]
 		document := map[string]any{"eventVersion": "1.10", "eventName": event.name, "eventSource": event.source, "readOnly": event.readOnly}
 		for key, value := range event.document {
 			document[key] = value
@@ -871,12 +913,18 @@ func (s *Server) worldLookupEvents(writer http.ResponseWriter, request awsReques
 		for _, name := range event.resources {
 			resources = append(resources, map[string]any{"ResourceName": name})
 		}
-		selected = append(selected, mustJSON(map[string]any{
-			"EventId": event.id, "EventName": event.name, "EventSource": event.source, "EventTime": event.at.Unix(),
+		entry := map[string]any{
+			"EventId": w.eventID(event), "EventName": event.name, "EventSource": event.source, "EventTime": event.at.Unix(),
 			"ReadOnly": strconv.FormatBool(event.readOnly), "Resources": resources, "CloudTrailEvent": mustJSON(document),
-		}))
+		}
+		if event.noTime {
+			delete(entry, "EventTime")
+		}
+		if event.rawDocument != "" {
+			entry["CloudTrailEvent"] = event.rawDocument
+		}
+		page = append(page, mustJSON(entry))
 	}
-	page, next := pageOf(selected, jsonString(fields, "NextToken"), jsonInt(fields, "MaxResults"))
 	body := `{"Events":[` + strings.Join(page, ",") + `]`
 	if next != "" {
 		body += `,"NextToken":` + quote(next)

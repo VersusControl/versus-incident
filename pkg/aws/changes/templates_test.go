@@ -28,8 +28,8 @@ func sampleFields(template Template) map[string]string {
 
 func TestTemplateTableIsComplete(t *testing.T) {
 	table := Templates()
-	if len(table) != 40 {
-		t.Fatalf("templates = %d, want 40", len(table))
+	if len(table) != 45 {
+		t.Fatalf("templates = %d, want 45", len(table))
 	}
 	seen := map[string]bool{}
 	for _, template := range table {

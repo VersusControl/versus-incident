@@ -89,8 +89,11 @@ type world struct {
 	region   string
 	scenario string
 	now      time.Time
-	load     int
-	extra    []trailEvent
+	// start is when this server first served the scenario: a fixed anchor
+	// for histories whose event times must not move between reads.
+	start time.Time
+	load  int
+	extra []trailEvent
 }
 
 func (s *Server) worldFor(request awsRequest) world {
@@ -98,10 +101,19 @@ func (s *Server) worldFor(request awsRequest) world {
 	if request.scenario == ScenarioLoad5k {
 		load = s.LoadSize()
 	}
+	now := s.clock()
 	s.mu.Lock()
 	extra := append([]trailEvent(nil), s.lateEvents...)
+	start, ok := s.starts[request.scenario]
+	if !ok {
+		start = now.Truncate(time.Second)
+		if s.starts == nil {
+			s.starts = make(map[string]time.Time)
+		}
+		s.starts[request.scenario] = start
+	}
 	s.mu.Unlock()
-	return world{account: request.account.ID, region: request.region, scenario: request.scenario, now: s.clock(), load: load, extra: extra}
+	return world{account: request.account.ID, region: request.region, scenario: request.scenario, now: now, start: start, load: load, extra: extra}
 }
 
 // AddLateEvent makes CloudTrail serve one more write event from now on,
@@ -109,7 +121,7 @@ func (s *Server) worldFor(request awsRequest) world {
 func (s *Server) AddLateEvent(id, name, source string, at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lateEvents = append(s.lateEvents, trailEvent{id: id, name: name, source: source, at: at.UTC().Truncate(time.Second),
+	s.lateEvents = append(s.lateEvents, trailEvent{id: id, exactID: true, name: name, source: source, at: at.UTC().Truncate(time.Second),
 		document: map[string]any{"userIdentity": map[string]any{"type": "IAMUser", "arn": "arn:aws:iam::111122223333:user/late"}}})
 }
 
@@ -209,7 +221,9 @@ func (w world) stackARN() string {
 	return w.arn("cloudformation", "stack/"+WorldStack+"/00000000-0000-0000-0000-00000000aaaa")
 }
 
-func (w world) badDeploy() bool { return w.scenario == ScenarioBadDeploy }
+func (w world) badDeploy() bool {
+	return w.scenario == ScenarioBadDeploy || w.scenario == ScenarioChangesTiedSuspects
+}
 
 func (w world) revision() int {
 	if w.badDeploy() {

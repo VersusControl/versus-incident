@@ -538,6 +538,9 @@ func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
 	out.AWS = src.AWS
 	out.AWS.Applications.Sources = append([]string(nil), src.AWS.Applications.Sources...)
 	out.AWS.Applications.TagKeys = append([]string(nil), src.AWS.Applications.TagKeys...)
+	if src.AWS.Collect.Changes.RoutineEvents != nil {
+		out.AWS.Collect.Changes.RoutineEvents = append([]string{}, src.AWS.Collect.Changes.RoutineEvents...)
+	}
 	out.AWS.Tags.ValueAllowlist = append([]string(nil), src.AWS.Tags.ValueAllowlist...)
 	out.AWS.FinOps = cloneAWSFinOpsConfig(src.AWS.FinOps)
 	if src.AWS.Accounts != nil {

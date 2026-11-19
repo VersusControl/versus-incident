@@ -39,6 +39,12 @@ type RegionsView struct {
 	Selected   []string `json:"selected"`
 	Enabled    int      `json:"enabled"`
 	NotEnabled []string `json:"not_enabled"`
+	// StatusUnknown are selected Regions last read as not enabled whose
+	// opt-in status has not been read successfully since StatusReadAt (for
+	// about two health intervals): shown as "opt-in status not read since
+	// HH:MM", never as not enabled. They are polled meanwhile.
+	StatusUnknown []string   `json:"status_unknown"`
+	StatusReadAt  *time.Time `json:"status_read_at"`
 }
 
 // APIUseView is the shared limiter's meter for one account.

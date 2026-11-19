@@ -52,6 +52,10 @@ var requiredTableColumns = []struct {
 	{"finops_increases", []string{"suspects", "detail"}},
 	{"finops_increase_events", []string{"until_day"}},
 	{"finops_saving_decisions", []string{"payer", "account", "kind", "title", "orphaned_at"}},
+	{"aws_changes", []string{"error_code", "template", "session_class", "via", "recorded_at"}},
+	{"aws_change_counts", []string{"kind", "event_name", "minute", "events"}},
+	{"aws_change_gaps", []string{"gap_from", "gap_to", "reason", "detail"}},
+	{"aws_change_pairs", []string{"connected_at", "history_from", "last_poll_at", "late_arrivals", "dropped", "not_changes", "clock_skew_ms"}},
 }
 
 // assertTableSchema fails closed when the database lacks a column the code

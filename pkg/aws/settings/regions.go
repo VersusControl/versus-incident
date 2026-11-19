@@ -36,7 +36,7 @@ func (conn *Service) DiscoverRegions(ctx context.Context, org, draftID string) (
 	if accountID == "" {
 		accountID = accountIDFromRoleARN(draft.RoleARN)
 	}
-	regions, err := conn.discoverAccountRegions(ctx, accountID, credentials)
+	regions, err := conn.discoverAccountRegions(ctx, accountID, credentials, defaultHomeRegion)
 	if err != nil {
 		return nil, err
 	}
@@ -48,10 +48,13 @@ func (conn *Service) DiscoverRegions(ctx context.Context, org, draftID string) (
 		return nil, err
 	}
 	if draft.AccountID != "" {
+		unlock := conn.lockHealth(draft.AccountID)
 		if health, healthErr := conn.store.GetHealth(org, draft.AccountID); healthErr == nil {
 			health.Regions = regions
+			conn.markRegionsRead(&health, conn.now().UTC())
 			_ = conn.store.SaveHealth(org, health)
 		}
+		unlock()
 	}
 	return regions, nil
 }
@@ -60,10 +63,34 @@ func (conn *Service) DiscoverRegions(ctx context.Context, org, draftID string) (
 // presence. Every call goes through the shared per-account, per-region
 // limiter, so discovery is counted against the API-use meter and backs off
 // after a throttling reply like any other read.
-func (conn *Service) discoverAccountRegions(ctx context.Context, accountID string, credentials aws.CredentialsProvider) ([]RegionStatus, error) {
+func (conn *Service) discoverAccountRegions(ctx context.Context, accountID string, credentials aws.CredentialsProvider, home string) ([]RegionStatus, error) {
+	regions, err := conn.describeRegions(ctx, accountID, credentials, home)
+	if err != nil {
+		return nil, err
+	}
+	for index := range regions {
+		if !regions[index].Enabled {
+			continue
+		}
+		regions[index].ResourcesFound = conn.resourcesInRegion(ctx, accountID, credentials, regions[index].Region)
+	}
+	return regions, nil
+}
+
+// describeRegions reads every Region's opt-in status for the account, sorted
+// by name: one EC2 DescribeRegions call, signed in the account's home Region
+// (the partition's always-enabled one).
+func (conn *Service) describeRegions(ctx context.Context, accountID string, credentials aws.CredentialsProvider, home string) ([]RegionStatus, error) {
+	if home == "" {
+		home = defaultHomeRegion
+	}
+	host := "ec2." + home + ".amazonaws.com"
+	if strings.HasPrefix(home, "cn-") {
+		host += ".cn"
+	}
 	var output *ec2.DescribeRegionsOutput
-	err := conn.meteredCall(ctx, accountID, defaultHomeRegion, func(callCtx context.Context) error {
-		client := ec2.NewFromConfig(conn.awsConfig(credentials, defaultHomeRegion, "ec2."+defaultHomeRegion+".amazonaws.com"))
+	err := conn.meteredCall(ctx, accountID, home, func(callCtx context.Context) error {
+		client := ec2.NewFromConfig(conn.awsConfig(credentials, home, host))
 		var callErr error
 		output, callErr = client.DescribeRegions(callCtx, &ec2.DescribeRegionsInput{AllRegions: aws.Bool(true)})
 		return callErr
@@ -86,12 +113,6 @@ func (conn *Service) discoverAccountRegions(ctx context.Context, accountID strin
 	}
 	if len(regions) == 0 {
 		return nil, awsauth.ErrNetwork
-	}
-	for index := range regions {
-		if !regions[index].Enabled {
-			continue
-		}
-		regions[index].ResourcesFound = conn.resourcesInRegion(ctx, accountID, credentials, regions[index].Region)
 	}
 	sort.Slice(regions, func(left, right int) bool { return regions[left].Region < regions[right].Region })
 	return regions, nil

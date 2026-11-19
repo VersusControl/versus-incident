@@ -525,6 +525,31 @@ connectors:
         maxGenerations: 48
         maxAge: "168h"
         changeRetention: "336h"
+      # CloudTrail change poller and the Changes page. Env overrides:
+      # VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_{LOOKBACK,OVERLAP,PAGE_BUDGET,
+      # ROUTINE_EVENTS,BURST_WINDOW,BURST_MIN,FAILURE_KEEP,READ_CAP}.
+      changes:
+        # How far back the first poll of a Region reads (1h-336h).
+        lookback: "24h"
+        # Newest stretch re-read each poll and shown as "still arriving",
+        # because CloudTrail delivers events late (5m-2h). Raise it when
+        # Settings shows late arrivals.
+        overlap: "15m"
+        # LookupEvents pages per poll; 0 sizes it from the 2 requests/s
+        # CloudTrail limit and the poll interval (0-1000).
+        pageBudget: 0
+        # Agent and scheduler events counted per minute, not stored one
+        # row each (service:Action, at most 32). Empty list counts nothing.
+        routineEvents: ["ssm:UpdateInstanceInformation", "ecs:SubmitTaskStateChange", "ecs:SubmitContainerStateChange", "logs:CreateLogStream"]
+        # Failed attempts by one principal, error code and service within
+        # burstWindow of each other, at least burstMin, show as one row.
+        burstWindow: "10m"
+        burstMin: 5
+        # Failed attempts per principal, error code, action and hour kept
+        # as rows; the rest are counted (5-1000).
+        failureKeep: 20
+        # Most change rows one Changes answer reads (1000-200000).
+        readCap: 20000
     # Application resolver: source order and the tag keys the tag source reads.
     applications:
       sources: [appregistry, cloudformation, tags]

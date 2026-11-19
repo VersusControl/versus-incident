@@ -41,6 +41,10 @@ func New(service ServiceFunc, options ...Option) []core.Tool {
 	}
 	out := make([]core.Tool, 0, len(toolNames))
 	for _, name := range toolNames {
+		if name == ChangesToolName {
+			// Built over the change list by NewChanges.
+			continue
+		}
 		t := &tool{name: name, service: service, now: time.Now}
 		for _, option := range options {
 			option(t)

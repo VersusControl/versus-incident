@@ -39,8 +39,12 @@ type Usage struct {
 
 // Manager owns one limiter per account and region.
 type Manager struct {
-	mu       sync.Mutex
-	maxRPS   int
+	mu     sync.Mutex
+	maxRPS int
+	// ceiling caps a lane's rate whatever the configured rate is; zero
+	// means no cap.
+	ceiling  int
+	lanes    map[string]*Manager
 	now      func() time.Time
 	entries  map[string]*entry
 	expected map[string]map[string]struct{}
@@ -100,12 +104,63 @@ func (manager *Manager) SetMaxRPS(maxRPS int) {
 	}
 
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	manager.maxRPS = maxRPS
+	steady := manager.steady()
 	for _, item := range manager.entries {
-		item.limiter.SetLimit(rate.Limit(maxRPS))
-		item.limiter.SetBurst(Burst)
+		item.limiter.SetLimit(rate.Limit(steady))
+		item.limiter.SetBurst(manager.burst())
 	}
+	lanes := make([]*Manager, 0, len(manager.lanes))
+	for _, lane := range manager.lanes {
+		lanes = append(lanes, lane)
+	}
+	manager.mu.Unlock()
+	for _, lane := range lanes {
+		lane.SetMaxRPS(maxRPS)
+	}
+}
+
+// steady is the rate each limiter allows: the configured rate, capped by
+// the lane ceiling. The caller holds mu.
+func (manager *Manager) steady() int {
+	if manager.ceiling > 0 && manager.maxRPS > manager.ceiling {
+		return manager.ceiling
+	}
+	return manager.maxRPS
+}
+
+func (manager *Manager) burst() int {
+	if manager.ceiling > 0 && manager.ceiling < Burst {
+		return manager.ceiling
+	}
+	return Burst
+}
+
+// CloudTrailLane is the lane LookupEvents calls use. AWS allows two
+// LookupEvents requests per second per account and region, so the lane
+// never runs faster, whatever the configured budget.
+const CloudTrailLane = "cloudtrail"
+
+// CloudTrailMaxRPS is the LookupEvents rate AWS allows.
+const CloudTrailMaxRPS = 2
+
+// Lane returns a limiter set of its own for one API with a hard rate
+// ceiling. Its buckets and throttling pauses are separate from the shared
+// ones, so a throttle on that API pauses only that API. Callers also take
+// each call from the shared budget with WaitBudget, which meters it.
+func (manager *Manager) Lane(name string, ceiling int) *Manager {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.lanes == nil {
+		manager.lanes = make(map[string]*Manager)
+	}
+	if lane, ok := manager.lanes[name]; ok {
+		return lane
+	}
+	lane := newManager(manager.maxRPS, manager.now)
+	lane.ceiling = ceiling
+	manager.lanes[name] = lane
+	return lane
 }
 
 // MaxRPS reports the steady rate every limiter currently allows.
@@ -132,7 +187,28 @@ func (manager *Manager) Wait(ctx context.Context, accountID, region string) erro
 	}
 
 	manager.mu.Lock()
-	item.grants = append(item.grants, manager.now())
+	now := manager.now()
+	// Old grants are dropped as new ones arrive, so a lane whose meter is
+	// never read still holds one window of grants, not every grant ever.
+	item.grants = append(prune(item.grants, now.Add(-Window)), now)
+	manager.mu.Unlock()
+	return nil
+}
+
+// WaitBudget grants one call against the account's budget without
+// honouring a throttling pause. A call that runs in its own lane uses it:
+// the lane decides pauses for its API, and the shared budget still counts
+// and paces the call, so lanes never raise the account's total rate.
+func (manager *Manager) WaitBudget(ctx context.Context, accountID, region string) error {
+	item := manager.entry(accountID, region)
+	if err := item.limiter.Wait(ctx); err != nil {
+		return err
+	}
+	manager.mu.Lock()
+	now := manager.now()
+	// Old grants are dropped as new ones arrive, so a lane whose meter is
+	// never read still holds one window of grants, not every grant ever.
+	item.grants = append(prune(item.grants, now.Add(-Window)), now)
 	manager.mu.Unlock()
 	return nil
 }
@@ -210,7 +286,7 @@ func (manager *Manager) entry(accountID, region string) *entry {
 	item := &entry{
 		account: accountID,
 		region:  region,
-		limiter: rate.NewLimiter(rate.Limit(manager.maxRPS), Burst),
+		limiter: rate.NewLimiter(rate.Limit(manager.steady()), manager.burst()),
 	}
 	manager.entries[key] = item
 	return item

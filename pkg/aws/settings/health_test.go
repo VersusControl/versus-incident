@@ -372,3 +372,93 @@ func (recorder probeRecorder) Do(*http.Request) (*http.Response, error) {
 	*recorder.called = true
 	return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(strings.NewReader(""))}, nil
 }
+
+// healthLoopOnFakeClock runs the health loop for passes passes with every
+// wait taken on a fake clock, and returns each wait and each status seen.
+func healthLoopOnFakeClock(t *testing.T, passes int, failUntil int) (waits []time.Duration, statuses []string, disconnectedAt time.Time, start time.Time) {
+	t.Helper()
+	start = time.Date(2026, 11, 19, 3, 38, 0, 0, time.UTC)
+	now := start
+	store := testStore(t)
+	store.setClock(func() time.Time { return now })
+	fake := fakeaws.New(t, "new-account-connect")
+	attempts := 0
+	connector := NewService(store,
+		WithConfig(func() config.AWSConnectorConfig {
+			return config.AWSConnectorConfig{Enable: true, HealthCheckInterval: "5m", Budgets: config.AWSBudgetsConfig{MaxRequestsPerSecond: 1000},
+				Accounts: []config.AWSAccountConfig{{AccountID: "444455556666", Regions: []string{"us-east-1"},
+					Auth: config.AWSAuthConfig{Mode: "assume_role", RoleARN: "arn:aws:iam::444455556666:role/versus-reader"}}}}
+		}),
+		WithClock(func() time.Time { return now }),
+		WithHTTPClient(fake.HTTPClient()),
+		WithLimiter(limit.NewManager(1000)),
+		WithBaseProvider(staticBase),
+		WithAssumeRole(func(context.Context, aws.CredentialsProvider, string, string, string) (aws.CredentialsProvider, error) {
+			return aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("AKIAIOSFODNN7EXAMPLE", "secret", "session-444455556666")), nil
+		}),
+		WithIdentity(func(context.Context, aws.CredentialsProvider, string) (string, string, error) {
+			attempts++
+			if failUntil < 0 || attempts <= failUntil {
+				// The endpoint is not answering, as when a check runs before
+				// the AWS endpoint is up.
+				return "", "", awsauth.ErrNetwork
+			}
+			return "arn:aws:iam::444455556666:role/versus-reader", "444455556666", nil
+		}),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	connector.after = func(wait time.Duration) <-chan time.Time {
+		record, err := store.GetHealth("default", "444455556666")
+		if err != nil {
+			t.Fatal(err)
+		}
+		statuses = append(statuses, record.Status)
+		if record.Status == StatusDisconnected && disconnectedAt.IsZero() {
+			disconnectedAt = now
+		}
+		waits = append(waits, wait)
+		if len(waits) == passes {
+			cancel()
+			return make(chan time.Time)
+		}
+		now = now.Add(wait)
+		fired := make(chan time.Time, 1)
+		fired <- now
+		return fired
+	}
+	connector.healthLoop(ctx)
+	return waits, statuses, disconnectedAt, start
+}
+
+// TestFailedHealthCheckRetriesSoonWithBackoff: a check that fails once at
+// start-up (endpoint not ready yet) is retried after about 30 seconds and
+// connects, instead of showing "checking" for a whole interval. A real
+// outage reaches disconnected within about a minute, then backs off to the
+// interval and stays disconnected without flapping.
+func TestFailedHealthCheckRetriesSoonWithBackoff(t *testing.T) {
+	near := func(got, want time.Duration) bool { return got >= want-want/10 && got <= want+want/10 }
+
+	waits, statuses, _, _ := healthLoopOnFakeClock(t, 3, 1)
+	if statuses[0] != StatusChecking || !near(waits[0], 30*time.Second) {
+		t.Fatalf("first failure: status %q, next check in %s", statuses[0], waits[0])
+	}
+	if statuses[1] != StatusConnected || !near(waits[1], 5*time.Minute) {
+		t.Fatalf("after the retry: status %q, next check in %s", statuses[1], waits[1])
+	}
+
+	waits, statuses, disconnectedAt, start := healthLoopOnFakeClock(t, 8, -1)
+	if disconnectedAt.IsZero() || disconnectedAt.Sub(start) > time.Minute {
+		t.Fatalf("outage disconnected at %v (start %v); statuses %v", disconnectedAt, start, statuses)
+	}
+	for index, want := range []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute, 5 * time.Minute, 5 * time.Minute} {
+		if !near(waits[index], want) {
+			t.Fatalf("wait %d = %s, want about %s (all %v)", index, waits[index], want, waits)
+		}
+	}
+	for _, status := range statuses[1:] {
+		if status != StatusDisconnected {
+			t.Fatalf("steady outage flapped: %v", statuses)
+		}
+	}
+}

@@ -78,7 +78,8 @@ func TestResourceDetailRunsForOpenIncreases(t *testing.T) {
 }
 
 // TestTiedSuspectsAreAllPossibleWithTheResourceHint: without resource-level
-// cost the two deploys are listed together, closest first, each Possible,
+// cost the two deploys are listed together, the most recent before the end
+// of the start day first, each Possible,
 // with the hint; the sentence names none of them.
 func TestTiedSuspectsAreAllPossibleWithTheResourceHint(t *testing.T) {
 	_, _, svc := natSpikeScenario(t, "cost-nat-spike-two-nats", func(h *harness, _ *scenario) {
@@ -88,7 +89,7 @@ func TestTiedSuspectsAreAllPossibleWithTheResourceHint(t *testing.T) {
 		}
 	})
 	inc := natIncreaseView(t, svc)
-	if len(inc.Suspects) != 2 || inc.Suspects[0].Ref != "change:evt-inventory-7" || inc.Suspects[1].Ref != "change:evt-checkout-42" {
+	if len(inc.Suspects) != 2 || inc.Suspects[0].Ref != "change:evt-checkout-42" || inc.Suspects[1].Ref != "change:evt-inventory-7" {
 		t.Fatalf("tied order %+v", inc.Suspects)
 	}
 	for _, s := range inc.Suspects {
@@ -96,7 +97,7 @@ func TestTiedSuspectsAreAllPossibleWithTheResourceHint(t *testing.T) {
 			t.Fatalf("tied suspect %+v", s)
 		}
 	}
-	if !strings.Contains(inc.Sentence, "2 changes in the 48 h before fit equally well") || strings.Contains(inc.Sentence, "after ECS service") {
+	if !strings.Contains(inc.Sentence, "2 changes in the 48 h before fit equally well") || strings.Contains(inc.Sentence, "after Service") {
 		t.Fatalf("sentence %q", inc.Sentence)
 	}
 }

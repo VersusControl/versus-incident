@@ -35,6 +35,38 @@ const (
 	codeThrottledWord = "throttled"
 )
 
+// codeUnrecognizedClient is UnrecognizedClientException or AuthFailure
+// before the account's health resolves it (env.resolve). It is never
+// recorded as is.
+const codeUnrecognizedClient = "unrecognized_client"
+
+// AccountHealth is what the account's identity check last said.
+type AccountHealth int
+
+const (
+	// AccountHealthUnknown: no identity check has finished yet.
+	AccountHealthUnknown AccountHealth = iota
+	// AccountHealthHealthy: the account's credentials sign in.
+	AccountHealthHealthy
+	// AccountHealthFailing: the account's identity check is failing.
+	AccountHealthFailing
+)
+
+// resolve turns an ambiguous per-region refusal into its reason: with the
+// account's identity check failing it is a credential failure; otherwise
+// the credentials work, so the region is not enabled. That is still a real
+// gap until Settings records the region as off. A failing account is
+// also named by its outage when the change list is read.
+func (environment env) resolve(code string) string {
+	if code != codeUnrecognizedClient {
+		return code
+	}
+	if environment.identity == AccountHealthFailing {
+		return awsauth.ErrNoServerIdentity.Error()
+	}
+	return awsauth.ErrRegionDisabled.Error()
+}
+
 // errLocalBackoff is returned when the shared limiter is pausing this account
 // and region after a throttling reply. It is reported as throttled.
 var errLocalBackoff = errors.New("throttled")
@@ -82,8 +114,14 @@ type env struct {
 	credentials aws.CredentialsProvider
 	httpClient  aws.HTTPClient
 	limiter     *limit.Manager
-	retries     int
-	sleep       func(context.Context, time.Duration) error
+	// lane, when set, is the API's own limiter: its rate cap and its
+	// throttling pauses apply, and the shared limiter only meters the
+	// account's budget, so a throttle on this API pauses only this API.
+	lane    *limit.Manager
+	retries int
+	// identity is the account's health when the sync started.
+	identity AccountHealth
+	sleep    func(context.Context, time.Duration) error
 }
 
 // host returns the exact host a client may reach in endpointRegion.
@@ -147,9 +185,13 @@ func (handler limitMiddleware) HandleInitialize(ctx context.Context, input middl
 		metadata middleware.Metadata
 		err      error
 	)
+	pauser := environment.limiter
+	if environment.lane != nil {
+		pauser = environment.lane
+	}
 	for attempt := 0; attempt < attempts; attempt++ {
-		if environment.limiter != nil {
-			if waitErr := environment.limiter.Wait(ctx, environment.account, environment.region); waitErr != nil {
+		if pauser != nil {
+			if waitErr := pauser.Wait(ctx, environment.account, environment.region); waitErr != nil {
 				if !errors.Is(waitErr, limit.ErrBackoff) {
 					return output, metadata, waitErr
 				}
@@ -160,19 +202,24 @@ func (handler limitMiddleware) HandleInitialize(ctx context.Context, input middl
 				return output, metadata, err
 			}
 		}
+		if environment.lane != nil && environment.limiter != nil {
+			if waitErr := environment.limiter.WaitBudget(ctx, environment.account, environment.region); waitErr != nil {
+				return output, metadata, waitErr
+			}
+		}
 		output, metadata, err = next.HandleInitialize(ctx, input)
 		if err != nil && isThrottle(err) {
 			pause := 2 * time.Second
-			if environment.limiter != nil {
-				pause = environment.limiter.Throttled(environment.account, environment.region)
+			if pauser != nil {
+				pause = pauser.Throttled(environment.account, environment.region)
 			}
 			if attempt+1 < attempts && environment.pause(ctx, pause) == nil {
 				continue
 			}
 			return output, metadata, err
 		}
-		if environment.limiter != nil {
-			environment.limiter.Succeeded(environment.account, environment.region)
+		if pauser != nil {
+			pauser.Succeeded(environment.account, environment.region)
 		}
 		return output, metadata, err
 	}
@@ -230,9 +277,15 @@ func errorCode(err error) string {
 			return CodeDenied
 		case "SubscriptionRequiredException":
 			return CodeNotOnPlan
-		case "AuthFailure", "OptInRequired", "UnrecognizedClientException", "InvalidClientTokenId",
-			"RegionDisabledException", "RegionDisabled":
+		case "OptInRequired", "RegionDisabledException", "RegionDisabled":
 			return awsauth.ErrRegionDisabled.Error()
+		case "UnrecognizedClientException", "AuthFailure", "InvalidClientTokenId":
+			// AWS answers these both for a key it does not know and, with a
+			// session token, in a region that is not enabled (JSON, EC2 and
+			// query or XML services respectively); the account's health
+			// decides which (env.resolve). A revoked key fails the account's
+			// identity check, so it still reads as a credential failure.
+			return codeUnrecognizedClient
 		case "RequestTimeout", "RequestTimeoutException":
 			return awsauth.ErrTimeout.Error()
 		}
@@ -254,7 +307,8 @@ func errorCode(err error) string {
 // malformed token or key, or the signer could not load credentials at all.
 // It reads as no_server_identity, the code the health check gives the same
 // condition. An unrecognised token is ambiguous (AWS answers it for a
-// disabled opt-in region too), so only an explicitly expired one counts.
+// disabled opt-in region too), so only an explicitly expired one counts;
+// InvalidClientTokenId always names the key itself.
 func credentialsRejected(err error) bool {
 	var signing *v4.SigningError
 	if errors.As(err, &signing) || errors.Is(err, awsauth.ErrNoServerIdentity) {
@@ -267,7 +321,7 @@ func credentialsRejected(err error) bool {
 	switch apiError.ErrorCode() {
 	case "ExpiredToken", "ExpiredTokenException", "InvalidAccessKeyId", "SignatureDoesNotMatch", "MissingAuthenticationToken":
 		return true
-	case "UnrecognizedClientException", "InvalidClientTokenId", "AuthFailure":
+	case "UnrecognizedClientException", "AuthFailure", "InvalidClientTokenId":
 		return strings.Contains(strings.ToLower(apiError.ErrorMessage()), "expired")
 	}
 	return false

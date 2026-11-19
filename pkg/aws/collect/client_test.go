@@ -21,7 +21,7 @@ func TestErrorCodeIsClosedVocabulary(t *testing.T) {
 		"throttled":       &smithy.GenericAPIError{Code: "ThrottlingException", Message: "provider text"},
 		"denied":          &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "provider text"},
 		"not_on_plan":     &smithy.GenericAPIError{Code: "SubscriptionRequiredException"},
-		"region_disabled": &smithy.GenericAPIError{Code: "AuthFailure"},
+		"region_disabled": &smithy.GenericAPIError{Code: "OptInRequired"},
 		"timeout":         context.DeadlineExceeded,
 		"network":         errors.New("provider text"),
 	}

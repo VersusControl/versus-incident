@@ -9,9 +9,11 @@ export interface DropdownOption {
 
 // Dropdown is a custom, accessible replacement for the native <select> — the
 // browser default select renders inconsistently across platforms and can't be
-// themed. This one is a WAI-ARIA listbox: keyboard-driven (↑/↓ to move, Enter
-// to pick, Esc to close, Home/End to jump), closes on outside-click, and stays
-// inside its container's DOM so it works within a focus-trapped Modal.
+// themed. This one is a WAI-ARIA listbox: opening it moves focus to the list,
+// which tracks the highlighted option with aria-activedescendant. ↑/↓ move,
+// Home/End jump, Enter/Space pick, Esc closes; picking or Esc returns focus
+// to the button. It closes on outside-click and stays inside its container's
+// DOM so it works within a focus-trapped Modal.
 export function Dropdown({
   value,
   onChange,
@@ -20,6 +22,8 @@ export function Dropdown({
   disabled,
   id,
   className,
+  wrapOptions = false,
+  listClassName,
   "aria-label": ariaLabel,
 }: {
   value: string;
@@ -29,11 +33,16 @@ export function Dropdown({
   disabled?: boolean;
   id?: string;
   className?: string;
+  /** Wrap long option labels instead of truncating them (narrow screens). */
+  wrapOptions?: boolean;
+  /** Width of the open list; defaults to the button's width. */
+  listClassName?: string;
   "aria-label"?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const listId = useId();
 
@@ -55,6 +64,17 @@ export function Dropdown({
     if (open) setActive(selectedIndex >= 0 ? selectedIndex : 0);
   }, [open, selectedIndex]);
 
+  // React applies autoFocus only to form controls, so the list is focused
+  // here; without it the list's key handler never receives a key.
+  useEffect(() => {
+    if (open) listRef.current?.focus({ preventScroll: true });
+  }, [open]);
+
+  const close = (refocus: boolean) => {
+    setOpen(false);
+    if (refocus) buttonRef.current?.focus();
+  };
+
   // Keep the active option scrolled into view.
   useEffect(() => {
     if (!open) return;
@@ -66,7 +86,7 @@ export function Dropdown({
     const opt = options[index];
     if (opt) {
       onChange(opt.value);
-      setOpen(false);
+      close(true);
     }
   };
 
@@ -79,6 +99,12 @@ export function Dropdown({
       case " ":
         e.preventDefault();
         setOpen(true);
+        break;
+      case "Escape":
+        if (open) {
+          e.preventDefault();
+          setOpen(false);
+        }
         break;
     }
   };
@@ -108,10 +134,10 @@ export function Dropdown({
         break;
       case "Escape":
         e.preventDefault();
-        setOpen(false);
+        close(true);
         break;
       case "Tab":
-        setOpen(false);
+        close(false);
         break;
     }
   };
@@ -119,11 +145,13 @@ export function Dropdown({
   return (
     <div ref={rootRef} className={clsx("relative", className)}>
       <button
+        ref={buttonRef}
         type="button"
         id={id}
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? listId : undefined}
         aria-label={ariaLabel}
         className="input flex w-full items-center justify-between gap-2 pr-2.5 text-left disabled:cursor-not-allowed disabled:opacity-60"
         onClick={() => !disabled && setOpen((o) => !o)}
@@ -150,9 +178,8 @@ export function Dropdown({
           tabIndex={-1}
           aria-label={ariaLabel}
           aria-activedescendant={`${listId}-${active}`}
-          className="absolute z-overlay mt-1 max-h-60 w-full overflow-auto rounded-control border border-ink-500 bg-surface-raised p-1 shadow-overlay focus:outline-none"
+          className={clsx("absolute z-overlay mt-1 max-h-60 overflow-auto rounded-control border border-ink-500 bg-surface-raised p-1 shadow-overlay focus:outline-none", listClassName ?? "w-full")}
           onKeyDown={onListKeyDown}
-          autoFocus
         >
           {options.map((opt, i) => {
             const isSelected = opt.value === value;
@@ -175,7 +202,7 @@ export function Dropdown({
                   commit(i);
                 }}
               >
-                <span className="truncate">{opt.label}</span>
+                <span className={wrapOptions ? "min-w-0 break-words" : "truncate"}>{opt.label}</span>
                 {isSelected && (
                   <Check size={13} className="shrink-0 text-accent" aria-hidden />
                 )}

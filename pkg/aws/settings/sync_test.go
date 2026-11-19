@@ -338,6 +338,58 @@ func TestSyncViewShowsAServiceMissingInARegionAsNotAvailable(t *testing.T) {
 	}
 }
 
+// During the first sync, a selected Region that is not enabled fails its
+// units with region_disabled while the other Regions are still pending.
+// The account names the Region once; no service reads "not enabled" or
+// failed because of it.
+func TestSyncViewRegionNotEnabledNeverMarksAService(t *testing.T) {
+	service, _, snapshots := syncService(t, true)
+	var units []model.Unit
+	for _, name := range []string{"ec2", "ecs", "eks"} {
+		units = append(units, syncUnit(name, "ap-southeast-1"), syncUnit(name, "ap-southeast-7"))
+	}
+	snapshots.RecordPending(units)
+	for _, unit := range units {
+		if unit.Region == "ap-southeast-7" {
+			if err := snapshots.RecordFailure(unit, "region_disabled"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	view := service.syncView("111122223333")
+	if view.State != SyncStateSyncing || !view.FirstSync {
+		t.Fatalf("first sync = %+v", view)
+	}
+	for _, entry := range view.Services {
+		if len(entry.Gaps) != 0 || entry.State == SyncStateFailed {
+			t.Fatalf("%s = %+v, want no gap and not failed", entry.Service, entry)
+		}
+	}
+	for _, unit := range units {
+		if unit.Region == "ap-southeast-1" {
+			snapshots.Commit(unit, snapshot.Candidate{})
+		}
+	}
+	if view := service.syncView("111122223333"); view.State != SyncStateOK {
+		t.Fatalf("after first sync = %+v, want ok", view)
+	}
+}
+
+// AWS Health off the support plan reads not_on_plan, as the probe and
+// compare say, never not_enabled.
+func TestSyncViewHealthOffThePlanReadsNotOnPlan(t *testing.T) {
+	service, _, snapshots := syncService(t, true)
+	unit := syncUnit("aws-health", model.GlobalRegion)
+	snapshots.RecordPending([]model.Unit{unit})
+	if err := snapshots.RecordFailure(unit, "not_on_plan"); err != nil {
+		t.Fatal(err)
+	}
+	view := service.syncView("111122223333")
+	if len(view.Services) != 1 || len(view.Services[0].Gaps) != 1 || view.Services[0].Gaps[0] != string(model.GapNotOnPlan) {
+		t.Fatalf("aws-health = %+v", view.Services)
+	}
+}
+
 // A Connected record saved before a restart proves nothing about the key
 // the restarted server holds. With another account's key, the first collect
 // and cost reads after the restart get no credentials, make exactly one STS

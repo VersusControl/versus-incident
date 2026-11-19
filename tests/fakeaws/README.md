@@ -54,6 +54,23 @@ fixture rejects every other value, including a missing one, with
 | `health-event` | Collector world plus an upcoming AWS Health event that affects `i-0123456789abcdef0` and a scheduled instance reboot |
 | `access-denied-burst` | Collector world where Lambda, SQS, SNS, EventBridge, Step Functions, Kinesis and the tagging API are denied, plus single detail calls (`DescribeTargetHealth`, `ListStackResources`, `GetBucketEncryption`, `ListAssociatedResources`) |
 | `load-5k` | Collector world plus 5,000 generated resources (instances, functions, queues, tables, topics) served in pages of at most 100. `SetLoadSize(n)` or `FAKEAWS_LOAD_SIZE=50000` for the large-account run |
+| `changes-quiet` | Collector world whose CloudTrail holds only a read event: a complete, quiet change window |
+| `changes-aws-service-only` | Only changes AWS services made (Auto Scaling `SetDesiredCapacity`, ECS `UpdateService` by `AWSService`) |
+| `changes-error-burst` | 12 failed `ssm:PutParameter` calls (`AccessDenied`) by role `config-sync`, one a minute |
+| `changes-busy` | 5,000 write events spread over the 24 hours before the scenario's first request; their times are absolute, so every read sees the same history |
+| `changes-cloudtrail-denied` | `LookupEvents` answers `AccessDeniedException` for the Staging account only |
+| `changes-throttled` | Every `LookupEvents` call answers `ThrottlingException` |
+| `changes-alarm-no-suspect` | The `checkout-5xx` alarm fired forty minutes ago; the only write event is three hours old |
+| `changes-unknown-actor` | One change by an identity of type `Unknown` through an API no template covers (`widgets:CreateWidget`) |
+| `role-session-expired` | Staging (`444455556666`, `RevokedAccount`) lost its reader role after connect: `AssumeRole` for it answers `AccessDenied` (not authorized to perform `sts:AssumeRole`) and every call signed with a Staging session token, `GetCallerIdentity` included, answers `ExpiredToken` (`ExpiredTokenException` on JSON APIs). Other accounts read the collector world. Switch to it after connect; two failed identity checks (two Rechecks) disconnect the account |
+| `region-not-enabled` | `af-south-1` (`NotEnabledRegion`) is an opt-in Region that is not enabled. `DescribeRegions` with `AllRegions=true` lists it as `not-opted-in` (without, it is absent). Every call signed for it fails as AWS fails it: EC2 `401 AuthFailure`, JSON and REST-JSON `UnrecognizedClientException`, query and XML `InvalidClientTokenId` (STS too). Holds for every request when it is the server's own scenario, so a change scenario can be layered on it per request |
+| `region-opt-in-unrecorded` | `region-not-enabled` for a Region Settings never learns about: `DescribeRegions` never lists `af-south-1`, every call there answers `401 OptInRequired` (a simplification: real JSON services answer `UnrecognizedClientException`, as `region-not-enabled` does). Also active for every request as the server's own scenario |
+| `changes-late-arrival` | One `events:PutRule` write a minute over the last 2 h, each delivered 20 min after it happened (`ChangesLateDelay`), later than the default 15-min overlap. Times and IDs are absolute minutes, so a poll finds about one late event per minute of polling inside coverage an earlier poll claimed |
+| `changes-malformed` | Two valid writes, one event whose `CloudTrailEvent` document is not JSON (well formed otherwise: stored, actor unknown), and three malformed events (`ChangesMalformedCount`): no `EventId`, no `EventTime`, a NUL byte in the event name. All are older than the overlap, so none is re-read |
+| `changes-hidden-values` | Writes carrying secret-shaped values (`HiddenCanaries()`): Lambda environment `DB_PASSWORD`, an EC2 tag `owner` (outside the tag allowlist), an SSM `SecureString` value, EC2 `userData`, a Secrets Manager `secretString` and an IAM `CreateAccessKey` secret in the response |
+| `changes-routine` | Routine agent events of 12 instances over the last 2 h on absolute five-minute boundaries (SSM `UpdateInstanceInformation`; ECS `SubmitTaskStateChange` every ten minutes) plus one real `RunInstances`. `ChangesRoutineCount(from, to)` is how many it serves one pair |
+| `changes-email-principal` | A change by IAM user `jane.doe@example.com`, one by SSO session `john.smith@example.com` (`ChangesEmailPrincipals()`), and 6 failed `ssm:PutParameter` calls by both through one permission set |
+| `changes-tied-suspects` | `bad-deploy`'s world and alarm with two `UpdateService` calls on `checkout`, by two pipelines 90 s apart, before the alarm: two candidates at the same scope |
 | `cost-nat-spike` | Cost Explorer, Budgets, Cost Optimization Hub and Compute Optimizer answer from `awsfix.CostNatSpike` (the NAT step after the checkout-api :41 -> :42 release) |
 | `cost-credits` | Billing calls from `awsfix.SingleAccount`: credit, tax, Savings Plan fee, budgets |
 | `cost-one-off-fee`, `cost-organization` | Billing calls from `awsfix.Organization`: management account `999999999999` sees every account (incl. cost-only `333333333333`) and the one-off support fee; any other caller sees only its own lines |
@@ -63,6 +80,8 @@ fixture rejects every other value, including a missing one, with
 | `cost-nat-spike-two-nats` | `awsfix.CostNatSpikeTwoNATs` (a second NAT gateway behind the inventory app); `GetCostAndUsageWithResources` answers `AccessDeniedException`, so the NAT line cannot be narrowed |
 | `cost-new-untagged-db` | `awsfix.CostNewUntaggedDB`: a full September, then an untagged database instance from Oct 20 |
 | `cost-unavailable` | `cost-nat-spike.json`; every Cost Explorer call answers `AccessDeniedException: User not enabled for cost explorer access` |
+
+CloudTrail `EventId`s are unique per account and Region (the fixture ID plus `-<account>-<region>`), as real ones are, so two accounts or Regions never share a stored row. The global stream reads us-east-1 and sees the us-east-1 IDs. Events added with `AddLateEvent` keep their ID as given.
 
 ### Collector world
 

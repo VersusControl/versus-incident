@@ -3,7 +3,10 @@ package collect
 import (
 	"context"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
@@ -58,6 +61,9 @@ func (c *call) alarmTarget(dimensions []cwtypes.Dimension) []string {
 		add(c.arn("elasticache", "cluster:"+value))
 	}
 	if value := values["AutoScalingGroupName"]; value != "" {
+		// The dimension carries only the group name. The name form is the
+		// canonical reference of a group (names are unique per account and
+		// Region); readers resolve it to the inventory's ARN.
 		add(c.arn("autoscaling", "autoScalingGroup:*:autoScalingGroupName/"+value))
 	}
 	return targets
@@ -98,9 +104,27 @@ func collectCloudWatch(ctx context.Context, c *call) (result, error) {
 		}
 	}
 
+	return c.alarms(metrics, composites), nil
+}
+
+// alarms turns metric and composite alarms into inventory and health.
+//
+// An alarm in ALARM is a health signal on every resource it monitors: one
+// signal per resource, each with the alarm ARN as Ref, so no target is
+// dropped. A composite alarm in ALARM monitors its children's resources
+// (the firing children's, or every child's when none of them fires here).
+// An alarm whose resources cannot be resolved writes one signal without a
+// resource: its resource is unknown and it never gets a suspect.
+//
+// The start is the state transition (StateTransitionedTimestamp), which does
+// not move while the alarm keeps firing; StateUpdatedTimestamp also moves on
+// evaluation updates and would slide the suspect window. A missing start
+// stays unknown (the zero time), never "now".
+func (c *call) alarms(metrics []cwtypes.MetricAlarm, composites []cwtypes.CompositeAlarm) result {
 	var out result
-	inAlarm := make(map[string]string)
+	inAlarm := make(map[string]bool)
 	byName := make(map[string]string)
+	targetsOf := make(map[string][]string)
 	for _, alarm := range metrics {
 		name := deref(alarm.AlarmName)
 		arn := deref(alarm.AlarmArn)
@@ -114,6 +138,7 @@ func collectCloudWatch(ctx context.Context, c *call) (result, error) {
 			}
 		}
 		targets := c.alarmTarget(dimensions)
+		targetsOf[arn] = targets
 		for _, target := range targets {
 			resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationMonitors, Target: target})
 		}
@@ -121,45 +146,108 @@ func collectCloudWatch(ctx context.Context, c *call) (result, error) {
 		if alarm.StateValue != cwtypes.StateValueAlarm {
 			continue
 		}
-		inAlarm[arn] = name
-		subject := ""
-		if len(targets) > 0 {
-			subject = targets[0]
-		}
+		inAlarm[arn] = true
 		summary := "Alarm " + name + " is in ALARM"
 		if metric := deref(alarm.MetricName); metric != "" {
 			summary += " (" + metric + ")"
 		}
-		out.health = append(out.health, c.healthItem(subject, model.SourceAlarm, model.HealthCritical, summary, derefTime(alarm.StateUpdatedTimestamp), arn))
+		out.health = append(out.health, c.alarmSignals(targets, summary, derefTime(alarm.StateTransitionedTimestamp), arn, nil)...)
+	}
+	compositeChildren := make(map[string][]string, len(composites))
+	for _, alarm := range composites {
+		arn := deref(alarm.AlarmArn)
+		byName[deref(alarm.AlarmName)] = arn
+	}
+	for _, alarm := range composites {
+		arn := deref(alarm.AlarmArn)
+		for _, match := range compositeChild.FindAllStringSubmatch(deref(alarm.AlarmRule), -1) {
+			child := strings.TrimSpace(match[1])
+			if !strings.HasPrefix(child, "arn:") {
+				child = byName[child]
+			}
+			if child != "" && !slices.Contains(compositeChildren[arn], child) {
+				compositeChildren[arn] = append(compositeChildren[arn], child)
+			}
+		}
+	}
+	for _, alarm := range composites {
+		if alarm.StateValue == cwtypes.StateValueAlarm {
+			inAlarm[deref(alarm.AlarmArn)] = true
+		}
 	}
 	for _, alarm := range composites {
 		name := deref(alarm.AlarmName)
 		arn := deref(alarm.AlarmArn)
 		resource := c.newResource(arn, "composite-alarm", name, strings.ToLower(string(alarm.StateValue)))
 		resource.Attributes = map[string]string{model.AttrID: name}
-		var children []string
-		for _, match := range compositeChild.FindAllStringSubmatch(deref(alarm.AlarmRule), -1) {
-			child := strings.TrimSpace(match[1])
-			if !strings.HasPrefix(child, "arn:") {
-				child = byName[child]
-			}
-			if child == "" {
-				continue
-			}
+		var firing []string
+		for _, child := range compositeChildren[arn] {
 			resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationMonitors, Target: child})
-			if _, firing := inAlarm[child]; firing {
-				children = append(children, child)
+			if inAlarm[child] {
+				firing = append(firing, child)
 			}
 		}
 		out.resources = append(out.resources, resource)
 		if alarm.StateValue != cwtypes.StateValueAlarm {
 			continue
 		}
-		item := c.healthItem("", model.SourceAlarm, model.HealthCritical, "Composite alarm "+name+" is in ALARM", derefTime(alarm.StateUpdatedTimestamp), arn)
-		item.Children = children
-		out.health = append(out.health, item)
+		sources := firing
+		if len(sources) == 0 {
+			sources = compositeChildren[arn]
+		}
+		var targets []string
+		for _, child := range sources {
+			for _, target := range leafTargets(child, compositeChildren, targetsOf, map[string]bool{arn: true}) {
+				if !slices.Contains(targets, target) {
+					targets = append(targets, target)
+				}
+			}
+		}
+		out.health = append(out.health, c.alarmSignals(targets, "Composite alarm "+name+" is in ALARM",
+			derefTime(alarm.StateTransitionedTimestamp), arn, firing)...)
 	}
-	return out, nil
+	return out
+}
+
+// leafTargets are the resources a child alarm monitors; a nested composite
+// contributes its own children's resources. visited stops rule cycles.
+func leafTargets(child string, compositeChildren, targetsOf map[string][]string, visited map[string]bool) []string {
+	if visited[child] {
+		return nil
+	}
+	visited[child] = true
+	if targets, metric := targetsOf[child]; metric {
+		return targets
+	}
+	var out []string
+	for _, grandchild := range compositeChildren[child] {
+		out = append(out, leafTargets(grandchild, compositeChildren, targetsOf, visited)...)
+	}
+	return out
+}
+
+// alarmSignals writes one health signal per distinct monitored resource, or
+// one without a resource when none is known.
+func (c *call) alarmSignals(targets []string, summary string, since time.Time, ref string, children []string) []model.Health {
+	distinct := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target != "" && !slices.Contains(distinct, target) {
+			distinct = append(distinct, target)
+		}
+	}
+	sort.Strings(distinct)
+	if len(distinct) == 0 {
+		distinct = []string{""}
+	}
+	out := make([]model.Health, 0, len(distinct))
+	for _, target := range distinct {
+		item := c.healthItem(target, model.SourceAlarm, model.HealthCritical, summary, since, ref)
+		if len(children) > 0 {
+			item.Children = append([]string(nil), children...)
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // collectCloudFormation lists stacks with their status and, for the first

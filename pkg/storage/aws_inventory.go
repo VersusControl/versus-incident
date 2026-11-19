@@ -143,6 +143,9 @@ type AWSRetentionSweep struct {
 	// KeepGenerations is how many newest generations each unit keeps; it
 	// must be at least one.
 	KeepGenerations int
+	// KeepFor, when set, sizes a unit's cap by its collection kind; a value
+	// below one falls back to KeepGenerations.
+	KeepFor func(unit AWSUnit) int
 	// Batch is the most rows one statement deletes. Zero uses the default.
 	Batch int
 	// Deadline stops the pass early; zero means no time budget.
@@ -293,6 +296,17 @@ type AWSChange struct {
 	Summary     string            `json:"summary,omitempty"`
 	Fields      map[string]string `json:"fields,omitempty"`
 	Detail      json.RawMessage   `json:"detail,omitempty"`
+	// ErrorCode is set on a failed attempt; Template names the sentence
+	// template. Both are columns so buckets and bursts group in SQL.
+	ErrorCode    string `json:"error_code,omitempty"`
+	Template     string `json:"template,omitempty"`
+	SessionClass string `json:"session_class,omitempty"`
+	// Via names the AWS service that made the call for the principal
+	// (cloudformation, servicecatalog), so a stack run can be grouped.
+	Via string `json:"via,omitempty"`
+	// RecordedAt is when the row was first stored. Rows stored before the
+	// column existed read zero.
+	RecordedAt time.Time `json:"recorded_at,omitzero"`
 }
 
 // AWSInterval is a half-open time interval [From, To).
@@ -506,7 +520,7 @@ func cleanAWSFlag(unit AWSUnit, row AWSSecurityFlag) (AWSSecurityFlag, error) {
 
 func cleanAWSChange(account, region string, row AWSChange) (AWSChange, error) {
 	if !validTableKey(row.EventID) || row.Account != account || row.Region != region || row.EventTime.IsZero() ||
-		!validTableStrings(row.Service, row.EventName, row.ActorClass, row.Actor, row.ResourceARN, row.App, row.Summary) ||
+		!validTableStrings(row.Service, row.EventName, row.ActorClass, row.Actor, row.ResourceARN, row.App, row.Summary, row.ErrorCode, row.Template, row.SessionClass, row.Via) ||
 		!validTableMap(row.Fields) || !validTableJSON(row.Detail) {
 		return AWSChange{}, ErrInvalidAWSInventory
 	}

@@ -247,8 +247,17 @@ func (stack *finopsStack) seedInventory(scenario *awsfix.CostScenario) {
 		t.Fatalf("scenario encode: %v", err)
 	}
 	var data struct {
-		Inventory      []model.Resource   `json:"inventory"`
-		Changes        []model.Change     `json:"changes"`
+		Inventory  []model.Resource `json:"inventory"`
+		CloudTrail []struct {
+			Account   string    `json:"account"`
+			Region    string    `json:"region"`
+			ID        string    `json:"event_id"`
+			Name      string    `json:"event_name"`
+			Source    string    `json:"event_source"`
+			Time      time.Time `json:"event_time"`
+			Resources []string  `json:"resources"`
+			Raw       string    `json:"cloudtrail_event"`
+		} `json:"cloudtrail"`
 		ChangeCoverage []changes.Interval `json:"change_coverage"`
 	}
 	if err := json.Unmarshal(raw, &data); err != nil {
@@ -265,9 +274,25 @@ func (stack *finopsStack) seedInventory(scenario *awsfix.CostScenario) {
 		}
 	}
 	byRegion := map[[2]string][]model.Change{}
-	for _, change := range data.Changes {
+	// The history is CloudTrail as AWS returns it; ingest normalizes it.
+	for _, event := range data.CloudTrail {
+		change, ok := changes.Normalize(event.Account, event.Region, changes.Event{ID: event.ID, Name: event.Name, Source: event.Source,
+			Time: event.Time, Resources: event.Resources, Raw: event.Raw})
+		if !ok {
+			continue
+		}
 		key := [2]string{change.Account, change.Region}
 		byRegion[key] = append(byRegion[key], change)
+	}
+	// The account's global stream is read over the same span as its Regions.
+	accounts := map[string]bool{}
+	for key := range byRegion {
+		accounts[key[0]] = true
+	}
+	for account := range accounts {
+		if _, ok := byRegion[[2]string{account, model.GlobalRegion}]; !ok {
+			byRegion[[2]string{account, model.GlobalRegion}] = nil
+		}
 	}
 	for key, found := range byRegion {
 		if err := stack.snapshots.AppendChanges(key[0], key[1], found, data.ChangeCoverage, ""); err != nil {
@@ -466,7 +491,7 @@ func natIncrease(t *testing.T, stack *finopsStack) map[string]any {
 func likelyCheckoutRelease(nat map[string]any) bool {
 	suspect := jsonPath(nat, "suspect_change")
 	return jsonString(suspect, "confidence_word") == "Likely" && strings.Contains(jsonString(suspect, "summary"), "checkout-api") &&
-		strings.Contains(jsonString(suspect, "summary")+jsonString(nat, "sentence"), ":42 (was :41)")
+		strings.Contains(jsonString(suspect, "summary")+jsonString(nat, "sentence"), "checkout-api:42")
 }
 
 func natSpikeFinOpsGroup(t *testing.T) {

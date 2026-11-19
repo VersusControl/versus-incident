@@ -149,6 +149,14 @@ func (p *postgresProvider) AWSPairs(ctx context.Context, scope tenancy.OrgScope)
 	return p.tablesRead().AWSPairs(ctx, scope)
 }
 
+func (p *postgresProvider) AWSChangeFeed(ctx context.Context, scope tenancy.OrgScope, query AWSChangeFeedQuery) (AWSChangeFeed, error) {
+	return p.tablesRead().AWSChangeFeed(ctx, scope, query)
+}
+
+func (p *postgresProvider) AWSChangesByID(ctx context.Context, scope tenancy.OrgScope, ids []string) ([]AWSChange, error) {
+	return p.tablesRead().AWSChangesByID(ctx, scope, ids)
+}
+
 func (p *postgresProvider) FinOpsCostLines(ctx context.Context, scope tenancy.OrgScope, query FinOpsCostQuery) ([]FinOpsCostLine, error) {
 	return p.tablesRead().FinOpsCostLines(ctx, scope, query)
 }

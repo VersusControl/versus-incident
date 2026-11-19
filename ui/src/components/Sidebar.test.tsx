@@ -486,7 +486,7 @@ describe("Sidebar — AWS connector submenu", () => {
     await renderSettled();
     expect(navSections().Connectors).toEqual(["/agent/kubernetes"]);
     fireEvent.click(screen.getByRole("button", { name: /AWS/ }));
-    expect(navSections().Connectors).toEqual(["/agent/kubernetes", "/aws/finops", "/aws/settings"]);
+    expect(navSections().Connectors).toEqual(["/agent/kubernetes", "/aws/changes", "/aws/finops", "/aws/settings"]);
   });
 
   it("lists the AWS child in the collapsed rail's flyout", async () => {

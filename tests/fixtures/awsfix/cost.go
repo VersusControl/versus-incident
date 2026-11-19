@@ -40,9 +40,12 @@ type CostScenario struct {
 	Recommendations  []HubRecommendation    `json:"recommendations"`
 	ComputeOptimizer []ComputeOptimizerItem `json:"compute_optimizer,omitempty"`
 	// Inventory, Changes and ChangeCoverage seed the snapshot store.
-	Inventory      []Resource `json:"inventory,omitempty"`
-	Changes        []Change   `json:"changes,omitempty"`
-	ChangeCoverage []Interval `json:"change_coverage,omitempty"`
+	Inventory []Resource `json:"inventory,omitempty"`
+	// CloudTrail is the change history as LookupEvents returns it. Consumers
+	// run each event through the product's normalizer, so the stored
+	// changes carry exactly the resource references real ingest produces.
+	CloudTrail     []CloudTrailEvent `json:"cloudtrail,omitempty"`
+	ChangeCoverage []Interval        `json:"change_coverage,omitempty"`
 }
 
 // DateRange is a half-open day range: End is the first day not billed.
@@ -171,27 +174,19 @@ type Relation struct {
 	Target string `json:"target"`
 }
 
-// Change is one recorded write event.
-type Change struct {
-	ID          string    `json:"id"`
-	Time        time.Time `json:"time"`
-	Account     string    `json:"account"`
-	Region      string    `json:"region"`
-	Service     string    `json:"service"`
-	EventSource string    `json:"event_source"`
-	EventName   string    `json:"event_name"`
-	Template    string    `json:"template"`
-	Summary     string    `json:"summary"`
-	Resources   []string  `json:"resources,omitempty"`
-	Actor       Actor     `json:"actor"`
-	ErrorCode   string    `json:"error_code,omitempty"`
-}
-
-// Actor is who made a change.
-type Actor struct {
-	Class         string `json:"class"`
-	PrincipalType string `json:"principal_type,omitempty"`
-	PrincipalARN  string `json:"principal_arn,omitempty"`
+// CloudTrailEvent is one LookupEvents record for one account and Region:
+// the lookup fields plus the CloudTrailEvent document (Raw), shaped as AWS
+// writes it (short names in requestParameters, versioned Lambda event
+// names, the resource list with names, not ARNs).
+type CloudTrailEvent struct {
+	Account   string    `json:"account"`
+	Region    string    `json:"region"`
+	ID        string    `json:"event_id"`
+	Name      string    `json:"event_name"`
+	Source    string    `json:"event_source"`
+	Time      time.Time `json:"event_time"`
+	Resources []string  `json:"resources,omitempty"`
+	Raw       string    `json:"cloudtrail_event"`
 }
 
 // Interval is a span the change history covers.

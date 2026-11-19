@@ -68,7 +68,11 @@ func ValidUnit(unit model.Unit) bool {
 
 // Options bounds the history and names the application sources.
 type Options struct {
-	MaxGenerations  int
+	MaxGenerations int
+	// GenerationsFor, when set, caps one unit's generations by its
+	// collection kind, sized from the kind's interval so every kind keeps a
+	// day of history; a value below one falls back to MaxGenerations.
+	GenerationsFor  func(service string) int
 	MaxAge          time.Duration
 	ChangeRetention time.Duration
 	// AppSources is the resolver order; any of appregistry, cloudformation,
@@ -213,6 +217,41 @@ func (store *Store) effectiveOptions() Options {
 	return options
 }
 
+// keep is a unit's generation cap.
+func (options Options) keep(service string) int {
+	if options.GenerationsFor != nil {
+		if sized := options.GenerationsFor(service); sized >= 1 {
+			return sized
+		}
+	}
+	return options.MaxGenerations
+}
+
+// UnitHistory reports how far back each matching unit's kept snapshots
+// reach. A backend without the capability answers ErrNoStorage.
+func (store *Store) UnitHistory(ctx context.Context, query Query) ([]storage.AWSUnitHistory, error) {
+	if !store.ready() {
+		return nil, ErrNoStorage
+	}
+	history, ok := store.inventory.(storage.AWSUnitHistoryStore)
+	if !ok {
+		return nil, ErrNoStorage
+	}
+	units, err := history.AWSUnitHistory(ctx, store.scope, storage.AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service})
+	if err != nil || !store.bounded {
+		return units, err
+	}
+	// History rows that ended before now − max_age are pruned, so a state
+	// before that is incomplete even when an older generation is kept.
+	cutoff := store.clock().Add(-store.effectiveOptions().MaxAge)
+	for index := range units {
+		if units[index].Oldest.Before(cutoff) {
+			units[index].Oldest = cutoff
+		}
+	}
+	return units, nil
+}
+
 func pairKey(account, region string) string { return account + "/" + region }
 
 // invalidateViews drops the cached views of one account.
@@ -306,6 +345,7 @@ func (store *Store) sweepOnce(ctx context.Context, unit model.Unit) (storage.AWS
 			HistoryBefore:   now.Add(-options.MaxAge),
 			ChangeBefore:    now.Add(-options.ChangeRetention),
 			KeepGenerations: options.MaxGenerations,
+			KeepFor:         func(unit storage.AWSUnit) int { return options.keep(unit.Service) },
 			Batch:           store.sweepBatch,
 			Cursor:          store.sweep,
 		}
@@ -327,7 +367,7 @@ func (store *Store) sweepOnce(ctx context.Context, unit model.Unit) (storage.AWS
 	}
 	result := storage.AWSRetentionResult{Cursor: storage.AWSRetentionCursor{}}
 	if unit.Service != "" {
-		removed, err := store.inventory.PruneAWSUnitHistory(ctx, store.scope, storageUnit(unit), options.MaxGenerations)
+		removed, err := store.inventory.PruneAWSUnitHistory(ctx, store.scope, storageUnit(unit), options.keep(unit.Service))
 		if err != nil {
 			log.Printf("aws retention unit prune failed, history kept: %v", err)
 			return result, err

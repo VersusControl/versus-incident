@@ -51,6 +51,16 @@ type Options struct {
 	// ChangeLookback and ChangeOverlap shape the CloudTrail windows.
 	ChangeLookback time.Duration
 	ChangeOverlap  time.Duration
+	// ChangesInterval is the poll interval; the automatic page budget is
+	// sized from it. ChangePageBudget, when positive, overrides it.
+	ChangesInterval  time.Duration
+	ChangePageBudget int
+	// RoutineEvents (service:Action) are counted, not stored row by row.
+	// Nil takes DefaultRoutineEvents; an empty list counts nothing.
+	RoutineEvents []string
+	// FailureKeep is how many failed attempts per principal, error code,
+	// event and hour are kept as rows.
+	FailureKeep int
 }
 
 // DefaultAppTagKeys is the tag application source when none is configured.
@@ -68,6 +78,8 @@ type Collector struct {
 	retries    int
 	options    func() Options
 	logf       func(format string, args ...any)
+	// accountHealth reads the account's identity check; unknown when nil.
+	accountHealth func(account string) AccountHealth
 
 	mu      sync.Mutex
 	running map[string]bool
@@ -122,6 +134,17 @@ func WithOptions(read func() Options) Option {
 	}
 }
 
+// WithAccountHealth reads an account's last identity check, which decides
+// whether a per-region UnrecognizedClientException means unknown
+// credentials or a region that is not enabled.
+func WithAccountHealth(read func(account string) AccountHealth) Option {
+	return func(collector *Collector) {
+		if read != nil {
+			collector.accountHealth = read
+		}
+	}
+}
+
 // WithLogger receives one line per failed unit. Lines carry identifiers and
 // closed error codes only, never provider text or resource data.
 func WithLogger(logf func(format string, args ...any)) Option {
@@ -165,6 +188,9 @@ const (
 	// OutcomeKept means the attempt failed and the last good generation, if
 	// any, stays current.
 	OutcomeKept Outcome = "kept"
+	// OutcomeSkipped means another replica holds the unit's poll; this one
+	// read nothing and wrote nothing.
+	OutcomeSkipped Outcome = "skipped"
 )
 
 // UnitReport is one unit's result.
@@ -184,7 +210,7 @@ type Report struct {
 func (report Report) Failed() int {
 	failed := 0
 	for _, unit := range report.Units {
-		if unit.Outcome != OutcomeCommitted {
+		if unit.Outcome != OutcomeCommitted && unit.Outcome != OutcomeSkipped {
 			failed++
 		}
 	}
@@ -265,7 +291,7 @@ func plan(accountID string, regions []string, kinds []Kind) []plannedUnit {
 			})
 		}
 	}
-	if wantKind(kinds, KindChanges) {
+	if wantKind(kinds, KindChanges) && len(regions) > 0 {
 		for _, region := range regions {
 			planned = append(planned, plannedUnit{
 				spec:           spec{service: snapshot.ChangeService, kind: KindChanges},
@@ -274,6 +300,9 @@ func plan(accountID string, regions []string, kinds []Kind) []plannedUnit {
 				endpointRegion: region,
 			})
 		}
+		// Global-service events live only in us-east-1: one global stream
+		// per account reads them whether or not us-east-1 is selected.
+		planned = append(planned, globalChangeUnit(accountID))
 	}
 	return planned
 }
@@ -288,6 +317,9 @@ func (collector *Collector) effectiveOptions() Options {
 	}
 	if options.ChangeOverlap <= 0 {
 		options.ChangeOverlap = DefaultChangeOverlap
+	}
+	if options.RoutineEvents == nil {
+		options.RoutineEvents = DefaultRoutineEvents()
 	}
 	return options
 }
@@ -337,6 +369,10 @@ func (collector *Collector) Sync(ctx context.Context, target Target, kinds ...Ki
 	}
 
 	report := Report{Units: make([]UnitReport, 0, len(planned))}
+	identity := AccountHealthUnknown
+	if collector.accountHealth != nil {
+		identity = collector.accountHealth(target.AccountID)
+	}
 	for _, item := range planned {
 		if err := ctx.Err(); err != nil {
 			return report, err
@@ -345,6 +381,7 @@ func (collector *Collector) Sync(ctx context.Context, target Target, kinds ...Ki
 			return report, snapshot.ErrPurged
 		}
 		environment := env{
+			identity:    identity,
 			account:     target.AccountID,
 			region:      item.limiterRegion,
 			credentials: target.Credentials,
@@ -390,7 +427,7 @@ func (collector *Collector) runUnit(ctx context.Context, c *call, entry spec) Un
 		return report
 	}
 	if err != nil {
-		report.ErrorCode = errorCode(err)
+		report.ErrorCode = c.env.resolve(errorCode(err))
 		if report.ErrorCode == CodeNotInRegion {
 			if !collector.store.HasGeneration(c.unit) {
 				return collector.notInRegion(c, report)

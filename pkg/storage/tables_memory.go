@@ -20,6 +20,9 @@ type memoryTables struct {
 	units     map[memoryUnitKey]*memoryUnit
 	changes   map[string]map[string]AWSChange
 	coverage  map[memoryPairKey][]AWSInterval
+	counts    map[string]map[string]AWSChangeCount
+	gapLabels map[memoryPairKey][]AWSChangeGapReason
+	pairState map[memoryPairKey]AWSChangePairState
 	lines     map[string]map[finOpsLineKey]FinOpsCostLine
 	daily     map[string]map[finOpsDailyRowKey]finOpsDailyRow
 	increases map[string]map[string]FinOpsIncrease
@@ -65,6 +68,9 @@ func newMemoryTables() *memoryTables {
 		units:     map[memoryUnitKey]*memoryUnit{},
 		changes:   map[string]map[string]AWSChange{},
 		coverage:  map[memoryPairKey][]AWSInterval{},
+		counts:    map[string]map[string]AWSChangeCount{},
+		gapLabels: map[memoryPairKey][]AWSChangeGapReason{},
+		pairState: map[memoryPairKey]AWSChangePairState{},
 		lines:     map[string]map[finOpsLineKey]FinOpsCostLine{},
 		daily:     map[string]map[finOpsDailyRowKey]finOpsDailyRow{},
 		increases: map[string]map[string]FinOpsIncrease{},
@@ -215,42 +221,9 @@ func (m *memoryTables) UpdateAWSSync(_ context.Context, scope tenancy.OrgScope, 
 	return nil
 }
 
-func (m *memoryTables) AppendAWSChanges(_ context.Context, scope tenancy.OrgScope, account, region string, changes []AWSChange, covered []AWSInterval, guard *uint64) error {
-	if !validTableKey(account) || !validTableKey(region) {
-		return ErrInvalidAWSInventory
-	}
-	cleaned := make([]AWSChange, 0, len(changes))
-	for _, change := range changes {
-		row, err := cleanAWSChange(account, region, change)
-		if err != nil {
-			return err
-		}
-		cleaned = append(cleaned, row)
-	}
-	scope = inventoryScope(scope)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.checkGuard(scope.Write, account, guard); err != nil {
-		return err
-	}
-	stored := m.changes[scope.Write]
-	if stored == nil {
-		stored = map[string]AWSChange{}
-		m.changes[scope.Write] = stored
-	}
-	for _, change := range cleaned {
-		stored[change.EventID] = change
-	}
-	if len(covered) > 0 {
-		key := memoryPairKey{scope.Write, account, region}
-		merged := mergeAWSIntervals(append(append([]AWSInterval(nil), m.coverage[key]...), covered...))
-		if len(merged) == 0 {
-			delete(m.coverage, key)
-		} else {
-			m.coverage[key] = merged
-		}
-	}
-	return nil
+func (m *memoryTables) AppendAWSChanges(ctx context.Context, scope tenancy.OrgScope, account, region string, changes []AWSChange, covered []AWSInterval, guard *uint64) error {
+	_, err := m.RecordAWSChangePoll(ctx, scope, AWSChangePoll{Account: account, Region: region, At: time.Now(), Changes: changes, Covered: covered, strict: true}, guard)
+	return err
 }
 
 func (m *memoryTables) PurgeAWSAccount(_ context.Context, scope tenancy.OrgScope, account, region string) error {
@@ -278,6 +251,21 @@ func (m *memoryTables) PurgeAWSAccount(_ context.Context, scope tenancy.OrgScope
 	for key := range m.coverage {
 		if key.org == org && matches(key.account, key.region) {
 			delete(m.coverage, key)
+		}
+	}
+	for key := range m.gapLabels {
+		if key.org == org && matches(key.account, key.region) {
+			delete(m.gapLabels, key)
+		}
+	}
+	for key := range m.pairState {
+		if key.org == org && matches(key.account, key.region) {
+			delete(m.pairState, key)
+		}
+	}
+	for id, count := range m.counts[org] {
+		if matches(count.Account, count.Region) {
+			delete(m.counts[org], id)
 		}
 	}
 	return nil
@@ -372,12 +360,6 @@ func (m *memoryTables) PruneAWSChanges(_ context.Context, scope tenancy.OrgScope
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var total int64
-	for id, change := range m.changes[scope.Write] {
-		if change.EventTime.Before(before) {
-			delete(m.changes[scope.Write], id)
-			total++
-		}
-	}
 	for key, intervals := range m.coverage {
 		if key.org != scope.Write {
 			continue
@@ -388,6 +370,33 @@ func (m *memoryTables) PruneAWSChanges(_ context.Context, scope tenancy.OrgScope
 			continue
 		}
 		m.coverage[key] = trimmed
+	}
+	for key, labels := range m.gapLabels {
+		if key.org != scope.Write {
+			continue
+		}
+		kept := labels[:0]
+		for _, label := range labels {
+			if !label.To.After(before) {
+				continue
+			}
+			if label.From.Before(before) {
+				label.From = before
+			}
+			kept = append(kept, label)
+		}
+		m.gapLabels[key] = kept
+	}
+	for id, count := range m.counts[scope.Write] {
+		if count.Minute.Before(before) {
+			delete(m.counts[scope.Write], id)
+		}
+	}
+	for id, change := range m.changes[scope.Write] {
+		if change.EventTime.Before(before) {
+			delete(m.changes[scope.Write], id)
+			total++
+		}
 	}
 	return total, nil
 }
@@ -587,6 +596,8 @@ func (m *memoryTables) AWSChanges(_ context.Context, scope tenancy.OrgScope, que
 				continue
 			}
 			change.Fields, change.Detail = cloneTableMap(change.Fields), cloneTableJSON(change.Detail)
+			// The arrival time is read only by the change feed.
+			change.RecordedAt = time.Time{}
 			out = append(out, change)
 		}
 	}
@@ -606,6 +617,10 @@ func (m *memoryTables) AWSChangeCoverage(_ context.Context, scope tenancy.OrgSco
 	scope = inventoryScope(scope)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.changeCoverageLocked(scope, account, region), nil
+}
+
+func (m *memoryTables) changeCoverageLocked(scope tenancy.OrgScope, account, region string) []AWSPairCoverage {
 	out := make([]AWSPairCoverage, 0)
 	for key, intervals := range m.coverage {
 		if !scope.Contains(key.org) || account != "" && key.account != account || region != "" && key.region != region {
@@ -622,7 +637,7 @@ func (m *memoryTables) AWSChangeCoverage(_ context.Context, scope tenancy.OrgSco
 		}
 		return out[left].Region < out[right].Region
 	})
-	return out, nil
+	return out
 }
 
 func (m *memoryTables) AWSPairs(_ context.Context, scope tenancy.OrgScope) ([]AWSPair, error) {

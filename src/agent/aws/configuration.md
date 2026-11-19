@@ -42,7 +42,7 @@ accounts.
 | --- | --- | --- |
 | Inventory: VPCs, Lambda, EKS, DynamoDB, ElastiCache, SQS, SNS, EventBridge, Step Functions, Kinesis, API Gateway, Auto Scaling, S3, CloudFront, Route 53, IAM roles, tags | `Describe*`, `List*` and `Get*` metadata calls | 15 minutes (`collect.intervals.inventory`) |
 | Health: CloudWatch alarms, EC2, ECS, load balancers, RDS, CloudFormation stacks, AWS Health events | Status calls | 2 minutes (`collect.intervals.health`) |
-| Changes | CloudTrail `LookupEvents`, in each selected region | 5 minutes (`collect.intervals.changes`) |
+| Changes, shown on [AWS > Changes](/agent/aws/changes) | CloudTrail `LookupEvents`, in each selected region | 5 minutes (`collect.intervals.changes`) |
 | Cost, forecast, savings and budgets | Cost Explorer and the cost APIs, only when you turn FinOps on | Once a day (`finops.refresh_time`) |
 | Account access | Who Versus signs in as, plus one probe per service | Identity every 5 minutes (`health_check_interval`); services every 6 hours |
 
@@ -229,6 +229,10 @@ modes with IRSA or Pod Identity.
    **Connected**, with a count such as `22 of 24 readable`. Use **Recheck** to
    run the check again now.
 
+Settings shows times in your browser's local time, with no `UTC` suffix, for
+example `last run 14:21`. Times from an earlier day carry the date, for
+example `Nov 18 14:21`.
+
 One identity belongs to one account, so `default_chain` can read only one
 account. Use `assume_role` for the others.
 
@@ -362,11 +366,17 @@ then restart Versus.
   `1 not enabled` on the account, and the summary line says
   **Production has 1 region not enabled**. Opt in to the region in the AWS
   console, or remove it from the list.
+- **Opt-in status not read:** when Versus could not re-read a region's opt-in
+  status recently, the account's Regions cell shows a line such as
+  `af-south-1: opt-in status not read since 14:32`. Until the status is read
+  again, [AWS Changes](/agent/aws/changes#gaps-and-their-reasons) treats that
+  region as a real gap, not as **Not enabled in AWS**.
 - **Global services:** S3, CloudFront, Route 53, IAM and AWS Health are read
   once per account through `us-east-1`, whatever regions you list. Cost
   Explorer is global too.
 - **Changes to global services:** CloudTrail records them in `us-east-1`.
-  Include `us-east-1` in the list to see them.
+  Versus reads them from there whatever regions you list. See
+  [AWS Changes](/agent/aws/changes#iam-permissions).
 - **Sign-in region:** Versus checks the identity and assumes roles in the
   first listed region, or `us-east-1` with `auto`. Put an enabled region first.
 
@@ -611,6 +621,7 @@ All keys sit under `connectors.aws`.
 | `collect.history.max_generations` | `48` | Snapshots kept per service and region, 1 to 10000. |
 | `collect.history.max_age` | `168h` | How long older snapshots are kept, 1h to 8784h. |
 | `collect.history.change_retention` | `336h` | How long CloudTrail changes are kept, 1h to 8784h. |
+| `collect.changes.*` | see [Changes settings](/agent/aws/changes#settings) | The CloudTrail reader: lookback, overlap, page budget, routine events, bursts and read cap. |
 | `applications.sources` | `[appregistry, cloudformation, tags]` | Where Versus looks for a resource's application, in order. |
 | `applications.tag_keys` | `[app, service]` | Tag keys read for the application, up to 16. Only allowlisted keys are used. |
 | `finops.team_tag_key` | `team` | The one tag key for team ownership. |
@@ -728,12 +739,12 @@ errors stop Versus at startup and appear in its log.
 | **The role trust policy refused Versus** | The trust policy does not name the Versus role ARN | Put the exact Versus principal ARN in the trust policy, and allow `sts:AssumeRole` on the Versus identity. |
 | **Trust policy does not allow this ExternalId** | The external ID in the environment differs from the trust condition | Set the same value in both places. |
 | *Account* **is missing** *service* **access**; the row shows *service*`: Denied` | The role lacks that service's read | Add the actions Settings names, for example `Add elasticache:Describe* to versus-reader`. |
-| *Account* **is missing CloudTrail access** | `cloudtrail:LookupEvents` is not allowed, so changes are not read | Add `cloudtrail:LookupEvents` to the reader role. |
+| *Account* **is missing CloudTrail access** | `cloudtrail:LookupEvents` is not allowed, so changes are not read | Add `cloudtrail:LookupEvents` to the reader role. For other gaps on the Changes page, see [Changes troubleshooting](/agent/aws/changes#troubleshooting). |
 | A service shows **Not on plan** | The service needs a higher AWS Support plan, for example AWS Health | Expected. It is not counted as denied. |
 | **Region not enabled for this account**, or *account* **has 1 region not enabled** | A listed region is not opted in | Opt in to the region, or remove it from `regions`. |
 | **AWS throttled the request**, or a service shows **AWS throttled, retrying** | AWS asked Versus to slow down | Nothing to do; Versus backs off and retries. If it persists, lower `budgets.max_requests_per_second` or read fewer regions. |
 | **AWS did not answer in time** or **Could not reach AWS** | Network path to AWS | Check egress, DNS and firewalls. AWS calls do not use a proxy. |
-| *Account* **disconnected since** *time* | Two identity checks in a row failed, or the account ID did not match | Fix the cause shown on the account, then press **Recheck**. |
+| *Account* **disconnected since** *time*, for example `Staging disconnected since 14:21` | Two identity checks in a row failed, or the account ID did not match | Fix the cause shown on the account, then press **Recheck**. |
 | **Set in the config file** | You tried to rename or remove an account defined in the config | Change it in the config file. |
 | FinOps shows **Turn on** | Cost reads are off | Set `optional_data.cost_explorer: true`, then restart. |
 | **Waiting for the first complete day of cost data** | No full day has settled yet | Wait. See [When data appears](#when-data-appears). |

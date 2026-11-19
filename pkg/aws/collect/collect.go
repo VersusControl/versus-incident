@@ -43,6 +43,20 @@ const (
 )
 
 // spec describes one unit service.
+// KindOf names the collection kind of a unit service: health units run on
+// the health interval, the change poller on its own, the rest are inventory.
+func KindOf(service string) Kind {
+	if service == snapshot.ChangeService {
+		return KindChanges
+	}
+	for _, entry := range specs {
+		if entry.service == service {
+			return entry.kind
+		}
+	}
+	return KindInventory
+}
+
 type spec struct {
 	service string
 	global  bool
@@ -203,7 +217,7 @@ func (c *call) flag(resource string, kind model.SecurityFlagKind, summary string
 // remembered so the unit keeps its last good generation instead of
 // replacing detail with nothing.
 func (c *call) detailGap(operation string, err error) model.Gap {
-	code := errorCode(err)
+	code := c.env.resolve(errorCode(err))
 	if transientCode(code) && c.transientCode == "" {
 		c.transientCode = code
 	}

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/aws/changes"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
@@ -151,7 +152,16 @@ func statusAt(unit storage.AWSUnitStatus, asOf time.Time) (UnitStatus, []model.G
 		status.Sync = model.SyncState{State: model.SyncOK, LastGoodAt: status.VerifiedAt}
 	} else {
 		status.Sync = model.SyncState{State: model.SyncPending}
-		gaps = append(gaps, model.Gap{Account: status.Unit.Account, Region: status.Unit.Region, Service: status.Unit.Service, Reason: model.GapNotChecked})
+		// A service AWS does not offer in the Region, or that the
+		// account's plan does not include, had nothing to read then
+		// either: the past read names that, not a pending check.
+		reason := model.GapNotChecked
+		for _, standing := range []model.GapReason{model.GapNotInRegion, model.GapNotOnPlan} {
+			if readable && hasGapReason(sync.Gaps, standing) {
+				reason = standing
+			}
+		}
+		gaps = append(gaps, model.Gap{Account: status.Unit.Account, Region: status.Unit.Region, Service: status.Unit.Service, Reason: reason})
 	}
 	return status, gaps
 }
@@ -316,6 +326,13 @@ func (store *Store) accounts() ([]string, error) {
 }
 
 func (store *Store) accountViews(query Query) ([]accountView, error) {
+	return store.accountViewsWith(query, false)
+}
+
+// accountViewsWith is accountViews; keepTags leaves stored tag values in
+// place (names and applications are still redacted) for a caller that only
+// compares them and hides the values itself.
+func (store *Store) accountViewsWith(query Query, keepTags bool) ([]accountView, error) {
 	accounts := []string{query.Account}
 	if query.Account == "" {
 		listed, err := store.accounts()
@@ -334,7 +351,11 @@ func (store *Store) accountViews(query Query) ([]accountView, error) {
 		if allowlist != nil {
 			// The view is the caller's copy; the cache keeps what was stored.
 			for index := range view.resources {
+				tags := view.resources[index].Tags
 				model.RedactName(&view.resources[index], allowlist)
+				if keepTags {
+					view.resources[index].Tags = tags
+				}
 			}
 		}
 		views = append(views, view)
@@ -379,10 +400,17 @@ func matchResource(query Query, resource model.Resource) bool {
 	if query.App != "" && resource.App != query.App {
 		return false
 	}
-	if query.ARN != "" && resource.ARN != query.ARN {
+	if query.ARN != "" && resource.ARN != query.ARN && !sameResource(resource.ARN, query.ARN) {
 		return false
 	}
 	return true
+}
+
+// sameResource reports two valid ARNs of one resource (an Auto Scaling
+// group or stack by ID and by name, a role with or without its path).
+func sameResource(left, right string) bool {
+	key := changes.ResourceKey(left)
+	return key != "" && key == changes.ResourceKey(right)
 }
 
 func dataUnit(service string) bool {
@@ -408,7 +436,11 @@ func filterUnits(query Query, statuses []UnitStatus, gaps []model.Gap) ([]UnitSt
 // Resources lists resources matching the query as of query.AsOf, with the
 // status and gaps of every unit behind them.
 func (store *Store) Resources(_ context.Context, query Query) (ResourcesResult, error) {
-	views, err := store.accountViews(query)
+	return store.resources(query, false)
+}
+
+func (store *Store) resources(query Query, keepTags bool) (ResourcesResult, error) {
+	views, err := store.accountViewsWith(query, keepTags)
 	if err != nil {
 		return ResourcesResult{}, err
 	}
@@ -573,4 +605,13 @@ func accountFromARN(arn string) string {
 		return ""
 	}
 	return parts[4]
+}
+
+func hasGapReason(gaps []model.Gap, reason model.GapReason) bool {
+	for _, gap := range gaps {
+		if gap.Reason == reason {
+			return true
+		}
+	}
+	return false
 }

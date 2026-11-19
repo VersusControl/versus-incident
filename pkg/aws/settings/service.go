@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	mathrand "math/rand/v2"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -187,6 +188,8 @@ type Service struct {
 	assume     AssumeFunc
 	identity   IdentityFunc
 	now        func() time.Time
+	// after waits between health passes; tests drive it on a fake clock.
+	after      func(time.Duration) <-chan time.Time
 	templates  Templates
 	selfTester *SelfTester
 	snapshots  *snapshot.Store
@@ -209,7 +212,11 @@ type Service struct {
 	stopped   chan struct{}
 	wg        sync.WaitGroup
 	verifyWG  sync.WaitGroup
-	rootCtx   context.Context
+	// healthLocks holds one mutex per account; every read-modify-write of
+	// an account's health record runs under it, so a check that probes for
+	// a while never overwrites a failure another check recorded meanwhile.
+	healthLocks sync.Map
+	rootCtx     context.Context
 }
 
 // NewService builds the connector service over a store.
@@ -222,6 +229,7 @@ func NewService(store *Store, options ...Option) *Service {
 		httpClient: awsauth.NewHTTPClient(),
 		base:       awsauth.BaseProvider,
 		now:        time.Now,
+		after:      time.After,
 		templates:  DefaultTemplates(),
 		verifies:   make(map[string][]time.Time),
 		confirmed:  make(map[string]string),
@@ -629,6 +637,7 @@ func (conn *Service) CheckAccount(ctx context.Context, account AccountRecord) (H
 // checkAccount is the identity check shared by the scheduled loop and the
 // explicit Recheck, which forces a fresh service probe.
 func (conn *Service) checkAccount(ctx context.Context, account AccountRecord, forceProbe bool) (HealthRecord, error) {
+	defer conn.lockHealth(account.AccountID)()
 	previous, err := conn.store.GetHealth(conn.storageOrg(), account.AccountID)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return HealthRecord{}, err
@@ -668,13 +677,31 @@ func (conn *Service) checkAccount(ctx context.Context, account AccountRecord, fo
 	record.FailureSince = time.Time{}
 	record.ErrorCode = ""
 	record.ConsecutiveFailures = 0
+	// The identity result is saved as soon as it is known, so Settings shows
+	// the account connected while the slower region and service reads run.
+	if saveErr := conn.store.SaveHealth(conn.storageOrg(), record); saveErr != nil {
+		return record, saveErr
+	}
 
-	// An account configured with "regions: auto" has no selection yet; the
-	// first healthy check discovers the account's regions so the table and the
-	// budget show real numbers instead of 0 of 0.
-	if len(account.Regions) == 0 && len(record.Regions) == 0 {
-		if discovered, discoverErr := conn.discoverAccountRegions(ctx, account.AccountID, credentials); discoverErr == nil && len(discovered) > 0 {
+	due := forceProbe || len(record.ProbeResults) == 0 || record.ProbedAt.IsZero() || now.Sub(record.ProbedAt) >= ServiceProbeInterval
+	switch {
+	case len(account.Regions) == 0 && len(record.Regions) == 0:
+		// An account configured with "regions: auto" has no selection yet;
+		// the first healthy check discovers the account's regions so the
+		// table and the budget show real numbers instead of 0 of 0.
+		if discovered, discoverErr := conn.discoverAccountRegions(ctx, account.AccountID, credentials, home); discoverErr == nil && len(discovered) > 0 {
 			record.Regions = discovered
+			conn.markRegionsRead(&record, now)
+		}
+	case due || optInStale(account.Regions, record, now):
+		// Opt-in status is read again on the probe cadence, and on every
+		// check while a Region that matters is not enabled, for selected
+		// and auto accounts alike: a Region opted in later becomes expected
+		// and read, and one not enabled is named instead of read as quiet.
+		// A refused lookup keeps what was known.
+		if statuses, optInErr := conn.describeRegions(ctx, account.AccountID, credentials, home); optInErr == nil && len(statuses) > 0 {
+			record.Regions = keepResourcesFound(statuses, record.Regions)
+			conn.markRegionsRead(&record, now)
 		}
 	}
 
@@ -685,10 +712,9 @@ func (conn *Service) checkAccount(ctx context.Context, account AccountRecord, fo
 	if len(probeRegions) > 0 {
 		conn.limiter.Expect(account.AccountID, probeRegions)
 	}
-	due := forceProbe || len(record.ProbeResults) == 0 || record.ProbedAt.IsZero() || now.Sub(record.ProbedAt) >= ServiceProbeInterval
 	if due {
 		prober := probe.New(account.AccountID, credentials, conn.limiter, probe.WithHTTPClient(conn.httpClient))
-		record.ProbeResults = prober.ProbeAll(ctx, home)
+		record.ProbeResults = prober.ProbeAll(ctx, probeRegion(probeRegions, record.Regions))
 		record.ProbedAt = now
 	}
 	if saveErr := conn.store.SaveHealth(conn.storageOrg(), record); saveErr != nil {
@@ -716,13 +742,160 @@ func recordIdentityFailure(record *HealthRecord, identityErr error, now time.Tim
 	}
 }
 
+// lockHealth takes the account's health-record lock and returns its
+// release.
+func (conn *Service) lockHealth(accountID string) func() {
+	value, _ := conn.healthLocks.LoadOrStore(accountID, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
+}
+
+// recordRegionStatus stores the account's Region opt-in status on its
+// health record. A refused or failed lookup leaves the record as it was.
+func (conn *Service) recordRegionStatus(ctx context.Context, org string, account AccountRecord) {
+	home := homeRegion(account.Regions)
+	credentials, err := conn.credentials(ctx, account.RoleARN, account.ExternalID, home)
+	if err != nil {
+		return
+	}
+	statuses, err := conn.describeRegions(ctx, account.AccountID, credentials, home)
+	if err != nil || len(statuses) == 0 {
+		return
+	}
+	defer conn.lockHealth(account.AccountID)()
+	health, err := conn.store.GetHealth(org, account.AccountID)
+	if err != nil {
+		return
+	}
+	health.Regions = keepResourcesFound(statuses, health.Regions)
+	conn.markRegionsRead(&health, conn.now().UTC())
+	_ = conn.store.SaveHealth(org, health)
+}
+
+// keepResourcesFound carries each Region's resources-found mark from the
+// last discovery over to a fresh opt-in read.
+func keepResourcesFound(fresh, previous []RegionStatus) []RegionStatus {
+	found := make(map[string]bool, len(previous))
+	for _, region := range previous {
+		found[region.Region] = region.ResourcesFound
+	}
+	for index := range fresh {
+		fresh[index].ResourcesFound = fresh[index].Enabled && found[fresh[index].Region]
+	}
+	return fresh
+}
+
+// optInStale reports whether the account's Region opt-in status should be
+// read again now: never read, no longer fresh, or a Region that matters to
+// the account is recorded as not enabled (an opt-in can happen at any time,
+// and the collector polls the Region only once it is known enabled).
+func optInStale(selected []string, record HealthRecord, now time.Time) bool {
+	if len(record.Regions) == 0 || !record.regionsFresh(now) {
+		return true
+	}
+	for _, region := range record.Regions {
+		if !region.Enabled && (len(selected) == 0 || slices.Contains(selected, region.Region)) {
+			return true
+		}
+	}
+	return false
+}
+
+// healthInterval is the configured identity-check cadence.
+func (conn *Service) healthInterval() time.Duration {
+	if parsed, err := time.ParseDuration(conn.connector().HealthCheckInterval); err == nil && parsed > 0 {
+		return parsed
+	}
+	return DefaultHealthCheckInterval
+}
+
+// markRegionsRead records a successful opt-in read: its status counts as
+// confirmed for two health intervals, so one refused read in between does
+// not turn it unknown, and a Region refused for longer is polled again.
+func (conn *Service) markRegionsRead(record *HealthRecord, now time.Time) {
+	record.RegionsReadAt = now
+	record.RegionsFreshUntil = now.Add(2 * conn.healthInterval())
+}
+
+// regionsFresh reports whether the recorded opt-in status is still
+// confirmed at now.
+func (record HealthRecord) regionsFresh(now time.Time) bool {
+	return !record.RegionsFreshUntil.IsZero() && now.Before(record.RegionsFreshUntil)
+}
+
+// partitionHomes are the Regions every account of a partition has enabled.
+var partitionHomes = []struct{ prefix, home string }{
+	{"cn-", "cn-north-1"},
+	{"us-gov-", "us-gov-west-1"},
+}
+
+// homeRegion is where an account's STS calls are signed. It is the
+// partition's always-enabled Region (us-east-1 in the standard partition),
+// chosen from the partition of the selected Regions and never from their
+// sort order: the first selected Region may be an opt-in Region the account
+// has not enabled (af-south-1 sorts first), and signing STS there would
+// make the whole account look like bad credentials.
 func homeRegion(regions []string) string {
 	for _, region := range regions {
-		if awsauth.ValidateRegion(region) == nil {
+		if awsauth.ValidateRegion(region) != nil {
+			continue
+		}
+		for _, partition := range partitionHomes {
+			if strings.HasPrefix(region, partition.prefix) {
+				return partition.home
+			}
+		}
+		if strings.HasPrefix(region, "us-iso") {
+			// Isolated partitions have no fixed home; use the selection.
+			return region
+		}
+		return defaultHomeRegion
+	}
+	return defaultHomeRegion
+}
+
+// probeRegion is where an account's service probes run: the first selected
+// Region not known to be disabled, else the home Region.
+func probeRegion(selected []string, known []RegionStatus) string {
+	disabled := make(map[string]bool, len(known))
+	for _, region := range known {
+		disabled[region.Region] = !region.Enabled
+	}
+	for _, region := range selected {
+		if awsauth.ValidateRegion(region) == nil && !disabled[region] {
 			return region
 		}
 	}
-	return defaultHomeRegion
+	return homeRegion(selected)
+}
+
+// NotEnabledRegions lists the selected Regions confirmed not enabled in the
+// account now (an opt-in Region it has not opted in to), in the selection's
+// order. See NotEnabledRegionsAt.
+func (record HealthRecord) NotEnabledRegions(selected []string) []string {
+	return record.NotEnabledRegionsAt(selected, time.Now())
+}
+
+// NotEnabledRegionsAt lists the selected Regions confirmed not enabled at
+// now. A Region whose status is not known, or whose last successful read is
+// no longer fresh (refused for about two health intervals), is not listed:
+// it is polled, and its errors are real gaps.
+func (record HealthRecord) NotEnabledRegionsAt(selected []string, now time.Time) []string {
+	if !record.regionsFresh(now) {
+		return []string{}
+	}
+	known := make(map[string]bool, len(record.Regions))
+	for _, region := range record.Regions {
+		known[region.Region] = region.Enabled
+	}
+	out := []string{}
+	for _, region := range selected {
+		if enabled, ok := known[region]; ok && !enabled {
+			out = append(out, region)
+		}
+	}
+	return out
 }
 
 // Recheck runs an identity check and a fresh service probe now, ignoring the
@@ -810,34 +983,82 @@ func (conn *Service) backgroundContext() context.Context {
 	return context.Background()
 }
 
+// healthRetryFirst is the first wait after a failed identity check.
+const healthRetryFirst = 30 * time.Second
+
 func (conn *Service) healthLoop(ctx context.Context) {
 	interval := DefaultHealthCheckInterval
 	if parsed, err := time.ParseDuration(conn.connector().HealthCheckInterval); err == nil && parsed > 0 {
 		interval = parsed
 	}
+	failedPasses := 0
 	for {
-		conn.checkAll(ctx)
-		timer := time.NewTimer(jitter(interval))
+		if conn.checkAll(ctx) {
+			failedPasses++
+		} else {
+			failedPasses = 0
+		}
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
-		case <-timer.C:
+		case <-conn.after(jitter(healthWait(failedPasses, interval))):
 		}
 	}
 }
 
-func (conn *Service) checkAll(ctx context.Context) {
+// healthWait is the wait before the next health pass. A pass with a failed
+// identity check is retried soon, so a passing failure (an endpoint not
+// ready at start-up) clears in seconds and a real outage reaches
+// disconnected (two failures in a row) within about a minute. The retry
+// backs off, 30 s, 60 s, 120 s, up to the interval, so a steady failure
+// polls no faster than a healthy account and its state never flaps.
+func healthWait(failedPasses int, interval time.Duration) time.Duration {
+	if failedPasses <= 0 {
+		return interval
+	}
+	wait := healthRetryFirst
+	for pass := 1; pass < failedPasses && wait < interval; pass++ {
+		wait *= 2
+	}
+	return min(wait, interval)
+}
+
+// healthCheckParallel bounds the accounts one health pass checks at once.
+const healthCheckParallel = 4
+
+// checkAll checks every account, a few at a time so one slow account does
+// not hold the others at "unknown", and reports whether any identity check
+// failed.
+func (conn *Service) checkAll(ctx context.Context) bool {
 	accounts, err := conn.store.ListAccounts(conn.storageOrg())
 	if err != nil {
-		return
+		return true
 	}
+	var (
+		mu     sync.Mutex
+		failed bool
+		group  sync.WaitGroup
+	)
+	slots := make(chan struct{}, healthCheckParallel)
 	for _, account := range MergeAccounts(accounts, conn.connector().Accounts) {
-		if err := ctx.Err(); err != nil {
-			return
+		if ctx.Err() != nil {
+			break
 		}
-		_, _ = conn.CheckAccount(ctx, account)
+		slots <- struct{}{}
+		group.Add(1)
+		go func(account AccountRecord) {
+			defer group.Done()
+			defer func() { <-slots }()
+			record, err := conn.CheckAccount(ctx, account)
+			if err != nil || !record.AttemptOK {
+				mu.Lock()
+				failed = true
+				mu.Unlock()
+			}
+		}(account)
 	}
+	group.Wait()
+	return failed
 }
 
 func jitter(interval time.Duration) time.Duration {
@@ -1016,7 +1237,7 @@ func (conn *Service) accountViewWithOptions(org string, account AccountRecord, c
 	if err != nil {
 		return AccountView{}, err
 	}
-	selected, enabled, notEnabled := regionSelection(account.Regions, health.Regions)
+	selected, enabled, notEnabled, unknown := regionSelection(account.Regions, health, conn.now().UTC())
 	budget := conn.effectiveBudget(options)
 	if len(selected) > 0 {
 		conn.limiter.Expect(account.AccountID, selected)
@@ -1032,7 +1253,7 @@ func (conn *Service) accountViewWithOptions(org string, account AccountRecord, c
 		Status:      health.Status,
 		CheckedAt:   health.CheckedAt,
 		Services:    CountResults(health.ProbeResults),
-		Regions:     RegionsView{Selected: selected, Enabled: enabled, NotEnabled: notEnabled},
+		Regions:     regionsView(selected, enabled, notEnabled, unknown, health),
 		APIUse:      APIUseView{UsedRPS: usage.UsedRPS, BudgetRPS: usage.BudgetRPS},
 		RoleARN:     account.RoleARN,
 		Conflict:    conflict,
@@ -1052,7 +1273,11 @@ func (conn *Service) accountViewWithOptions(org string, account AccountRecord, c
 	return view, nil
 }
 
-func regionSelection(configured []string, discovered []RegionStatus) ([]string, int, []string) {
+// regionSelection splits the selection by what the last opt-in read said.
+// A Region read as not enabled is listed as not enabled only while that
+// read is fresh; after that its status is unknown.
+func regionSelection(configured []string, health HealthRecord, now time.Time) ([]string, int, []string, []string) {
+	discovered := health.Regions
 	enabledMap := make(map[string]bool, len(discovered))
 	for _, region := range discovered {
 		enabledMap[region.Region] = region.Enabled
@@ -1069,16 +1294,30 @@ func regionSelection(configured []string, discovered []RegionStatus) ([]string, 
 	if selected == nil {
 		selected = []string{}
 	}
-	notEnabled := []string{}
+	fresh := health.regionsFresh(now)
+	notEnabled, unknown := []string{}, []string{}
 	enabled := 0
 	for _, region := range selected {
 		if available, known := enabledMap[region]; known && !available {
-			notEnabled = append(notEnabled, region)
+			if fresh {
+				notEnabled = append(notEnabled, region)
+			} else {
+				unknown = append(unknown, region)
+			}
 			continue
 		}
 		enabled++
 	}
-	return selected, enabled, notEnabled
+	return selected, enabled, notEnabled, unknown
+}
+
+func regionsView(selected []string, enabled int, notEnabled, unknown []string, health HealthRecord) RegionsView {
+	view := RegionsView{Selected: selected, Enabled: enabled, NotEnabled: notEnabled, StatusUnknown: unknown}
+	if !health.RegionsReadAt.IsZero() {
+		at := health.RegionsReadAt.UTC()
+		view.StatusReadAt = &at
+	}
+	return view
 }
 
 // SaveOptions persists the wizard's optional-data and budget overrides and
@@ -1152,7 +1391,8 @@ func (conn *Service) Commit(ctx context.Context, org, draftID, displayName strin
 	if err := conn.store.SaveAccount(org, record); err != nil {
 		return AccountView{}, err
 	}
-	if err := conn.store.SaveHealth(org, HealthRecord{
+	unlock := conn.lockHealth(draft.AccountID)
+	health := HealthRecord{
 		AccountID:    draft.AccountID,
 		Status:       StatusConnected,
 		AttemptedAt:  conn.now().UTC(),
@@ -1161,10 +1401,26 @@ func (conn *Service) Commit(ctx context.Context, org, draftID, displayName strin
 		ProbedAt:     conn.now().UTC(),
 		ProbeResults: draft.Services,
 		Regions:      draft.Regions,
-	}); err != nil {
+	}
+	if len(draft.Regions) > 0 {
+		conn.markRegionsRead(&health, conn.now().UTC())
+	}
+	err = conn.store.SaveHealth(org, health)
+	unlock()
+	if err != nil {
 		return AccountView{}, err
 	}
 	_ = conn.store.DeleteDraft(org, draftID)
+	if len(draft.Regions) == 0 {
+		// The wizard skipped region discovery: read the selected Regions'
+		// opt-in status now, so a not-enabled one is named from the start
+		// instead of after the next health pass.
+		conn.verifyWG.Add(1)
+		go func() {
+			defer conn.verifyWG.Done()
+			conn.recordRegionStatus(conn.backgroundContext(), org, record)
+		}()
+	}
 	if conn.accountAdded != nil {
 		conn.accountAdded(record.AccountID)
 	}

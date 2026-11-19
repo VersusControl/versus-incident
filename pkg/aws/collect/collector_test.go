@@ -55,8 +55,9 @@ func TestSyncNormalizesEveryCatalogService(t *testing.T) {
 	if failed := report.Failed(); failed != 0 {
 		t.Fatalf("failed units = %d: %+v", failed, report.Units)
 	}
-	if len(report.Units) != len(Services()) {
-		t.Fatalf("units = %d, want %d", len(report.Units), len(Services()))
+	// Every catalog service, plus the account's global change stream.
+	if len(report.Units) != len(Services())+1 {
+		t.Fatalf("units = %d, want %d", len(report.Units), len(Services())+1)
 	}
 
 	result, err := h.store.Resources(context.Background(), snapshot.Query{Account: productionAccount})
@@ -304,7 +305,7 @@ func TestHealthNotOnPlanIsANamedGap(t *testing.T) {
 		t.Fatalf("statuses = %+v, %v", statuses, err)
 	}
 	sync := statuses[0].Sync
-	if sync.State != model.SyncFailed || sync.ErrorCode != CodeNotOnPlan || sync.Gaps[0].Reason != model.GapNotEnabled {
+	if sync.State != model.SyncFailed || sync.ErrorCode != CodeNotOnPlan || sync.Gaps[0].Reason != model.GapNotOnPlan {
 		t.Fatalf("not on plan = %+v", sync)
 	}
 }
@@ -562,7 +563,7 @@ func TestPlanCoversGlobalOnceAndRegionsEach(t *testing.T) {
 	for _, unit := range units {
 		perService[unit.Service]++
 	}
-	if perService["s3"] != 1 || perService["iam"] != 1 || perService["ec2"] != 2 || perService[snapshot.ChangeService] != 2 {
+	if perService["s3"] != 1 || perService["iam"] != 1 || perService["ec2"] != 2 || perService[snapshot.ChangeService] != 3 {
 		t.Fatalf("plan = %v", perService)
 	}
 	health := Plan(productionAccount, []string{"us-east-1"}, KindHealth)

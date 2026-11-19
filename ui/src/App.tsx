@@ -59,6 +59,10 @@ const AwsSettingsPage = lazyPage(
   () => import("./pages/aws/AwsSettingsPage"),
   "AwsSettingsPage",
 );
+const AwsChangesPage = lazyPage(
+  () => import("./pages/aws/changes/AwsChangesPage"),
+  "AwsChangesPage",
+);
 const AwsFinOpsPage = lazyPage(
   () => import("./pages/aws/finops/AwsFinOpsPage"),
   "AwsFinOpsPage",
@@ -144,6 +148,7 @@ export default function App() {
           <Route path="/agent/tools" element={<AgentToolsPage />} />
           <Route path="/agent/kubernetes" element={<KubernetesPage />} />
           <Route path="/aws/settings" element={<AwsSettingsPage />} />
+          <Route path="/aws/changes" element={<AwsChangesPage />} />
           <Route path="/aws/finops" element={<AwsFinOpsPage />} />
           <Route path="/aws/finops/increases/:id" element={<FinOpsIncreasePage />} />
           <Route path="/aws" element={<Navigate to="/aws/settings" replace />} />
