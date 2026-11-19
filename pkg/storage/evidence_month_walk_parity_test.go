@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -188,6 +189,9 @@ func TestPostgresMonthWalkMatchesOneStatement(t *testing.T) {
 func TestPostgresJournalReadRetriesWhenAMonthIsDropped(t *testing.T) {
 	if testing.Short() {
 		t.Skip("drops a month of history")
+	}
+	if os.Getenv("TEST_POSTGRES_DSN") == "" {
+		t.Skip("isolated Postgres required")
 	}
 	snapshotOwnDatabase(t)
 	p, scope := headsPartitionedProvider(t)

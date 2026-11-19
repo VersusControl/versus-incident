@@ -131,7 +131,15 @@ func evidenceFenced(ctx context.Context, batch EvidenceBatch, transaction func()
 func (p *postgresProvider) commitEvidencePart(parent context.Context, key string, scope EvidenceScope, batch EvidenceBatch, records []EvidenceRecord, part int, cutoff time.Time) (evidenceWriteStats, bool, error) {
 	var written evidenceWriteStats
 	committed := false
-	err := evidenceFenced(parent, batch, func() error {
+	// Every statement input that comes from the part alone is built before
+	// the transaction opens, so it never waits on this process while it holds
+	// the partition lock and the scope's checkpoint row.
+	partitions := evidencePartitionsFor(EvidenceBatch{At: batch.At, Records: records}, cutoff)
+	events, err := newEvidenceEventsInput(records, batch.ObservationHeartbeat, cutoff)
+	if err != nil {
+		return written, committed, err
+	}
+	err = evidenceFenced(parent, batch, func() error {
 		ctx, cancel, tx, err := p.beginEvidenceSave(parent, &batch)
 		if err != nil {
 			return err
@@ -143,7 +151,7 @@ func (p *postgresProvider) commitEvidencePart(parent context.Context, key string
 				return err
 			}
 		}
-		if err = prepareEvidencePartitions(ctx, tx, EvidenceBatch{At: batch.At, Records: records}, cutoff); err != nil {
+		if err = prepareEvidencePartitions(ctx, tx, partitions); err != nil {
 			return err
 		}
 		if err = evidenceSaveGuard(ctx, tx, batch); err != nil {
@@ -174,7 +182,7 @@ func (p *postgresProvider) commitEvidencePart(parent context.Context, key string
 		if checkpoint.ID != batch.Expected || batch.At.Before(checkpoint.At) {
 			return ErrEvidenceConflict
 		}
-		if written, err = writeRetainedEvidenceEvents(ctx, tx, key, records, batch.ObservationHeartbeat, cutoff); err != nil {
+		if written, err = writeEvidenceEventsInput(ctx, tx, key, events); err != nil {
 			return err
 		}
 		// Mark the save in progress and remember the highest sequence it
@@ -204,13 +212,18 @@ func (p *postgresProvider) beginEvidenceSave(parent context.Context, batch *Evid
 	if timeout <= 0 {
 		timeout = defaultEvidenceSaveTimeout
 	}
+	// The database bounds each statement and lock wait too, set before the
+	// partition lock is requested, so a wait ends even if this process stops
+	// watching it. Its limit is a second past the transaction's deadline, so
+	// a save normally ends on that deadline, and either reads as a timeout.
+	settings := fmt.Sprintf(`SET LOCAL plan_cache_mode = force_custom_plan; SET LOCAL statement_timeout='%[1]dms'; SET LOCAL lock_timeout='%[1]dms'; `, (timeout + time.Second).Milliseconds())
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		cancel()
 		return nil, nil, nil, err
 	}
-	if _, err = tx.ExecContext(ctx, `SET LOCAL plan_cache_mode = force_custom_plan; `+evidenceHeadsWriter); err != nil {
+	if _, err = tx.ExecContext(ctx, settings+evidenceHeadsWriter); err != nil {
 		_ = tx.Rollback()
 		cancel()
 		return nil, nil, nil, err
@@ -248,6 +261,11 @@ func evidenceSaveGuard(ctx context.Context, tx *sql.Tx, batch EvidenceBatch) err
 func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key string, scope EvidenceScope, batch EvidenceBatch, saved map[string]bool, savedHigh uint64, size, part int, cutoff time.Time) (evidenceWriteStats, []EvidenceRecord, error) {
 	var written evidenceWriteStats
 	var derived []EvidenceRecord
+	// The partitions come from the capture alone and are listed before the
+	// transaction opens. The records, read models and checkpoint it writes
+	// are derived from the issue state it reads, so they are built inside it,
+	// between the read and the writes, and nothing else runs there.
+	partitions := evidencePartitionsFor(batch, cutoff)
 	err := evidenceFenced(parent, batch, func() error {
 		ctx, cancel, tx, err := p.beginEvidenceSave(parent, &batch)
 		if err != nil {
@@ -257,7 +275,7 @@ func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key strin
 		defer tx.Rollback()
 		// Partitions first: their shared lock is always taken before the
 		// guard and checkpoint rows, as retention takes its own.
-		if err = prepareEvidencePartitions(ctx, tx, batch, cutoff); err != nil {
+		if err = prepareEvidencePartitions(ctx, tx, partitions); err != nil {
 			return err
 		}
 		state, err := loadEvidenceSaveState(ctx, tx, key, scope, batch)
@@ -287,7 +305,11 @@ func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key strin
 				return err
 			}
 		}
-		if written, err = writeRetainedEvidenceEvents(ctx, tx, key, pending, batch.ObservationHeartbeat, cutoff); err != nil {
+		events, err := newEvidenceEventsInput(pending, batch.ObservationHeartbeat, cutoff)
+		if err != nil {
+			return err
+		}
+		if written, err = writeEvidenceEventsInput(ctx, tx, key, events); err != nil {
 			return err
 		}
 		// Readers pin to this sequence: it covers every part of the capture.
@@ -296,7 +318,7 @@ func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key strin
 		if err = writeOccurrenceVersions(ctx, tx, key, state); err != nil {
 			return err
 		}
-		if err = writeOccurrenceReadModels(ctx, tx, key, state); err != nil {
+		if err = writeOccurrenceReadModels(ctx, tx, key, state, batch.ObservationHeartbeat); err != nil {
 			return err
 		}
 		raw, err := json.Marshal(state.Checkpoint)
@@ -331,7 +353,7 @@ func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope Ev
 	if err != nil {
 		return evidenceState{}, err
 	}
-	state := evidenceState{Active: map[string]EvidenceIssue{}, Occurrences: map[string]EvidenceIssue{}, OccurrenceVersions: map[string]EvidenceIssue{}, OccurrenceHeads: map[string]string{}}
+	state := evidenceState{Active: map[string]EvidenceIssue{}, Occurrences: map[string]EvidenceIssue{}, OccurrenceVersions: map[string]EvidenceIssue{}, OccurrenceHeads: map[string]string{}, storedIssues: map[string]storedIssue{}}
 	if err = json.Unmarshal(raw, &state.Checkpoint); err != nil {
 		return evidenceState{}, err
 	}
@@ -363,7 +385,7 @@ func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope Ev
 			historicalIDs = append(historicalIDs, evidenceDigest(issue.Key, "observation", at.UTC().Format("2006-01-02")))
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT payload,last_seen,payload_version,last_observed_at FROM kubernetes_evidence_issues WHERE scope_key=$1 AND ((closed_at IS NULL AND NOT observation_only) OR occurrence_id=ANY($2::text[]))`, key, historicalIDs)
+	rows, err := tx.QueryContext(ctx, `SELECT payload,last_seen,payload_version,last_observed_at,model_ready FROM kubernetes_evidence_issues WHERE scope_key=$1 AND ((closed_at IS NULL AND NOT observation_only) OR occurrence_id=ANY($2::text[]))`, key, historicalIDs)
 	if err != nil {
 		return evidenceState{}, err
 	}
@@ -372,7 +394,8 @@ func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope Ev
 		var lastSeen time.Time
 		var version string
 		var lastObserved sql.NullTime
-		if err = rows.Scan(&data, &lastSeen, &version, &lastObserved); err != nil {
+		var modelReady bool
+		if err = rows.Scan(&data, &lastSeen, &version, &lastObserved, &modelReady); err != nil {
 			rows.Close()
 			return evidenceState{}, err
 		}
@@ -381,7 +404,9 @@ func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope Ev
 			rows.Close()
 			return evidenceState{}, err
 		}
+		payloadSeen := issue.LastSeen
 		issue.LastSeen = lastSeen
+		state.storedIssues[issue.OccurrenceID] = storedIssue{issue: issue, payloadSeen: payloadSeen, version: version, lastObserved: lastObserved.Time, modelReady: modelReady}
 		if !issue.ObservationOnly {
 			state.Active[issue.Key] = issue
 		}

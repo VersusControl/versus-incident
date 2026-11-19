@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 )
 
@@ -167,11 +168,12 @@ func (p *postgresProvider) compactEvidenceBatch(ctx context.Context) (bool, erro
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(6216456209771226)`); err != nil {
-		return false, err
-	}
+	// The timeouts come first so that no lock request below waits past them.
 	if _, err = tx.ExecContext(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='100ms'; `+evidenceHeadsWriter); err != nil {
 		return false, err
+	}
+	if locked, lockErr := p.lockEvidenceForCompaction(ctx, tx); lockErr != nil || !locked {
+		return false, lockErr
 	}
 	var complete bool
 	if err = tx.QueryRowContext(ctx, `SELECT complete FROM kubernetes_evidence_partition_migration WHERE singleton FOR UPDATE`).Scan(&complete); err != nil {
@@ -305,7 +307,12 @@ func (p *postgresProvider) compactEvidenceBatch(ctx context.Context) (bool, erro
 			return false, err
 		}
 	}
-	return len(compacted) > 0, tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	// No month was past the cutoff, so retention has caught up.
+	p.noteRetentionLag(0)
+	return len(compacted) > 0, nil
 }
 
 // evidenceScopesIn lists the scopes holding rows in one month partition. A
@@ -348,14 +355,18 @@ func evidenceScopesProbe(partition string) string {
 	return "SELECT s.scope_key FROM kubernetes_evidence_scopes s WHERE EXISTS(SELECT 1 FROM " + partition + " p WHERE p.scope_key=s.scope_key)"
 }
 
-// prepareEvidencePartitions ensures the month partitions a save writes into.
-// A journal month that ends at or before the retention cutoff is never
-// created: retention has dropped or will drop it, and its records are not
-// written.
-func prepareEvidencePartitions(ctx context.Context, tx *sql.Tx, batch EvidenceBatch, cutoff time.Time) error {
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
-		return err
-	}
+// evidencePartition is one month partition a save writes into.
+type evidencePartition struct {
+	parent string
+	at     time.Time
+}
+
+// evidencePartitionsFor lists the month partitions a save writes into, one per
+// table and month, in a fixed order. A journal month that ends at or before
+// the retention cutoff is left out: retention has dropped or will drop it, and
+// its records are not written. It reads nothing from the database, so a save
+// computes it before its transaction opens.
+func evidencePartitionsFor(batch EvidenceBatch, cutoff time.Time) []evidencePartition {
 	eventTimes, observationTimes := map[string]time.Time{}, map[string]time.Time{}
 	for _, record := range batch.Records {
 		eventTimes[record.At.UTC().Format("2006-01")] = record.At
@@ -372,18 +383,38 @@ func prepareEvidencePartitions(ctx context.Context, tx *sql.Tx, batch EvidenceBa
 		eventTimes[batch.CoveredThrough.UTC().Format("2006-01")] = batch.CoveredThrough
 		observationTimes[batch.CoveredThrough.UTC().Format("2006-01")] = batch.CoveredThrough
 	}
+	partitions := make([]evidencePartition, 0, len(eventTimes)+len(observationTimes))
 	for _, entry := range []struct {
 		parent string
 		times  map[string]time.Time
 	}{{"kubernetes_evidence_events", eventTimes}, {"kubernetes_evidence_occurrence_observations", observationTimes}} {
-		for _, at := range entry.times {
+		months := make([]string, 0, len(entry.times))
+		for month := range entry.times {
+			months = append(months, month)
+		}
+		sort.Strings(months)
+		for _, name := range months {
+			at := entry.times[name]
 			month := time.Date(at.UTC().Year(), at.UTC().Month(), 1, 0, 0, 0, 0, time.UTC)
 			if entry.parent == "kubernetes_evidence_events" && !cutoff.IsZero() && !month.AddDate(0, 1, 0).After(cutoff) {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, `SELECT versus_ensure_evidence_partition(to_regclass($1::text),$2)`, entry.parent, at); err != nil {
-				return fmt.Errorf("storage: prepare evidence partition: %w", err)
-			}
+			partitions = append(partitions, evidencePartition{parent: entry.parent, at: at})
+		}
+	}
+	return partitions
+}
+
+// prepareEvidencePartitions takes the partition lock shared and ensures the
+// month partitions a save writes into, listed by evidencePartitionsFor. The
+// transaction's timeouts are set before it is called.
+func prepareEvidencePartitions(ctx context.Context, tx *sql.Tx, partitions []evidencePartition) error {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(6216456209771226)`); err != nil {
+		return err
+	}
+	for _, partition := range partitions {
+		if _, err := tx.ExecContext(ctx, `SELECT versus_ensure_evidence_partition(to_regclass($1::text),$2)`, partition.parent, partition.at); err != nil {
+			return fmt.Errorf("storage: prepare evidence partition: %w", err)
 		}
 	}
 	return nil
