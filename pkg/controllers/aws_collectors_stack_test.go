@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,9 +55,10 @@ const (
 	// awsCollectDefaultBudget is connectors.aws.budgets.max_requests_per_second
 	// when unset (pkg/config applies 2).
 	awsCollectDefaultBudget = 2
-	// One region: six regional health + aws-health, cloudtrail, fourteen
-	// regional inventory + four global inventory units.
-	awsCollectUnitsOneRegion = 26
+	// One region: six regional health + aws-health, the region's cloudtrail
+	// and the account's global change stream, fourteen regional inventory +
+	// four global inventory units.
+	awsCollectUnitsOneRegion = 27
 )
 
 // awsCollectDenied is what access-denied-burst denies outright.
@@ -147,6 +149,12 @@ type awsCollectStack struct {
 	recorder  *awsRequestRecorder
 	provider  storage.Provider
 
+	// skipPauses makes the collector's retry pauses return at once. Only an
+	// all-throttled pass sets it: every retry fails there anyway, so waiting
+	// out the 2-30 s backoffs proves nothing and dominated the suite's time.
+	// Passes that need a retry to succeed keep the real pauses.
+	skipPauses atomic.Bool
+
 	cfgMu sync.Mutex
 	cfg   config.AWSConnectorConfig
 }
@@ -155,6 +163,34 @@ func (stack *awsCollectStack) readConfig() config.AWSConnectorConfig {
 	stack.cfgMu.Lock()
 	defer stack.cfgMu.Unlock()
 	return stack.cfg
+}
+
+// pause is the collector's retry pause: the real wait, or none while an
+// all-throttled pass runs.
+func (stack *awsCollectStack) pause(ctx context.Context, duration time.Duration) error {
+	if stack.skipPauses.Load() {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// throttleEverything starts or ends a pass in which every AWS request is
+// throttled, with the collector's retry pauses skipped for its length.
+func (stack *awsCollectStack) throttleEverything(on bool) {
+	if on {
+		stack.skipPauses.Store(true)
+		stack.fake.SetThrottle(1)
+		return
+	}
+	stack.fake.SetThrottle(0)
+	stack.skipPauses.Store(false)
 }
 
 func newAWSCollectStack(t *testing.T, scenario string, options awsCollectOptions) *awsCollectStack {
@@ -200,6 +236,7 @@ func newAWSCollectStack(t *testing.T, scenario string, options awsCollectOptions
 	collector := awscollect.New(snapshots, limiter,
 		awscollect.WithLogger(log.Printf),
 		awscollect.WithHTTPClient(client),
+		awscollect.WithSleep(stack.pause),
 		awscollect.WithOptions(func() awscollect.Options {
 			return awscollect.Options{
 				TagAllowlist: service.TagValueAllowlist(),
@@ -479,8 +516,10 @@ func badDeployCollectGroup(t *testing.T) {
 		t.Fatalf("synced_at = %v (committed %s)", view.SyncedAt, committed)
 	}
 	t.Logf("Settings: synced %s ago, %d/%d units, %d services", time.Since(*view.SyncedAt).Round(time.Second), view.UnitsDone, view.Units, len(view.Services))
-	if len(view.Services) != awsCollectUnitsOneRegion {
-		t.Errorf("settings services = %d, want one per unit (%d)", len(view.Services), awsCollectUnitsOneRegion)
+	// The region's change poll and the account's global change stream are
+	// two units of one service.
+	if len(view.Services) != awsCollectUnitsOneRegion-1 {
+		t.Errorf("settings services = %d, want one per service (%d)", len(view.Services), awsCollectUnitsOneRegion-1)
 	}
 	for _, row := range view.Services {
 		if row.UnitsDone != row.Units || row.LastGoodAt == nil {
@@ -628,11 +667,11 @@ func throttledCollectGroup(t *testing.T) {
 
 	// Phase B: every request is throttled, so the retries run out. Every unit
 	// must keep its last good data and name the gap `throttled`.
-	stack.fake.SetThrottle(1)
+	stack.throttleEverything(true)
 	mark := time.Now()
 	stack.scheduler.Trigger(awsCollectAccount)
 	statuses := waitAttemptedAfter(t, stack.snapshots, awsCollectAccount, mark, 400*time.Second)
-	stack.fake.SetThrottle(0)
+	stack.throttleEverything(false)
 
 	failed := 0
 	codes := map[string]int{}
@@ -806,11 +845,11 @@ func secretCanaryCollectGroup(t *testing.T) {
 	connectCollectAccount(t, client, "Canary")
 	waitFirstSync(t, client, awsCollectAccount, 120*time.Second)
 	// A fully throttled pass exercises the failure and log paths too.
-	stack.fake.SetThrottle(1)
+	stack.throttleEverything(true)
 	mark := time.Now()
 	stack.scheduler.Trigger(awsCollectAccount)
 	waitAttemptedAfter(t, stack.snapshots, awsCollectAccount, mark, 400*time.Second)
-	stack.fake.SetThrottle(0)
+	stack.throttleEverything(false)
 	readSettings(t, client)
 
 	ctx := context.Background()

@@ -158,8 +158,8 @@ export function fmtStamp(iso: string | undefined): string {
 }
 
 /**
- * "08:00 UTC": a time of day in UTC, zone named, so FinOps and AWS settings
- * read the same clock as the source for every viewer.
+ * "08:00 UTC": a time of day in UTC, zone named, so FinOps reads the same
+ * clock as the source for every viewer.
  */
 export function fmtClock(iso: string | undefined): string {
   if (!iso) return "";

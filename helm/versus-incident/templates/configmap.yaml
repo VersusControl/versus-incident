@@ -452,6 +452,7 @@ data:
       {{- $awsCollect := $aws.collect | default dict }}
       {{- $awsIntervals := $awsCollect.intervals | default dict }}
       {{- $awsHistory := $awsCollect.history | default dict }}
+      {{- $awsChanges := $awsCollect.changes | default dict }}
       {{- $awsApplications := $aws.applications | default dict }}
       {{- $awsFinOps := $aws.finops | default dict }}
       {{- $awsFinOpsReport := $awsFinOps.report | default dict }}
@@ -503,6 +504,15 @@ data:
             max_generations: {{ $awsHistory.maxGenerations | default 48 }}
             max_age: {{ $awsHistory.maxAge | default "168h" | quote }}
             change_retention: {{ $awsHistory.changeRetention | default "336h" | quote }}
+          changes:
+            lookback: {{ $awsChanges.lookback | default "24h" | quote }}
+            overlap: {{ $awsChanges.overlap | default "15m" | quote }}
+            page_budget: {{ $awsChanges.pageBudget | default 0 }}
+            routine_events: {{ (hasKey $awsChanges "routineEvents") | ternary $awsChanges.routineEvents (list "ssm:UpdateInstanceInformation" "ecs:SubmitTaskStateChange" "ecs:SubmitContainerStateChange" "logs:CreateLogStream") | toJson }}
+            burst_window: {{ $awsChanges.burstWindow | default "10m" | quote }}
+            burst_min: {{ $awsChanges.burstMin | default 5 }}
+            failure_keep: {{ $awsChanges.failureKeep | default 20 }}
+            read_cap: {{ $awsChanges.readCap | default 20000 }}
         applications:
           sources: {{ $awsApplications.sources | default (list "appregistry" "cloudformation" "tags") | toJson }}
           tag_keys: {{ $awsApplications.tagKeys | default (list "app" "service") | toJson }}

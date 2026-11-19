@@ -52,7 +52,7 @@ func TestRedactTagsKeepsKeys(t *testing.T) {
 
 func TestGapReasonForCodeNeverReadsAsZero(t *testing.T) {
 	cases := map[string]GapReason{
-		"denied": GapDenied, "trust_denied": GapDenied, "not_on_plan": GapNotEnabled, "region_disabled": GapNotEnabled,
+		"denied": GapDenied, "trust_denied": GapDenied, "not_on_plan": GapNotOnPlan, "region_disabled": GapNotEnabled,
 		"throttled": GapThrottled, "timeout": GapNotChecked, "network": GapNotChecked, "": GapNotChecked, "anything": GapNotChecked,
 	}
 	for code, want := range cases {

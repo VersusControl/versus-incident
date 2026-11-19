@@ -3,7 +3,6 @@ package snapshot
 import (
 	"context"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/aws/changes"
@@ -31,7 +30,17 @@ type ChangesResult struct {
 	Changes  []model.Change `json:"changes"`
 	Gaps     []ChangeGap    `json:"gaps"`
 	Complete bool           `json:"complete"`
+	// Truncated is set when the read cap stopped the read; the answer is
+	// then incomplete.
+	Truncated bool `json:"truncated,omitempty"`
+	// Unavailable names why nothing could be answered, for example an
+	// as-of time before the window starts.
+	Unavailable string `json:"unavailable,omitempty"`
 }
+
+// UnavailableBeforeWindow means the as-of time is before the window: the
+// data stops before the window starts, so the window is unknown, not empty.
+const UnavailableBeforeWindow = "as_of_before_window"
 
 // Checkpoint returns the write organization's change coverage for one
 // account and region, with the poller's last attempt, success and error.
@@ -69,59 +78,41 @@ func (store *Store) AppendChanges(account, region string, found []model.Change, 
 }
 
 func (store *Store) appendChanges(account, region string, found []model.Change, covered []changes.Interval, errorCode string, guard *uint64) error {
-	unit := model.Unit{Account: account, Region: region, Service: ChangeService}
-	if !ValidUnit(unit) {
-		return ErrInvalidUnit
-	}
-	if !store.ready() {
-		return ErrNoStorage
-	}
-	rows := make([]storage.AWSChange, 0, len(found))
-	for _, change := range found {
-		if change.ID == "" || change.Account != account || change.Time.IsZero() {
-			continue
-		}
-		rows = append(rows, changeRow(region, change))
-	}
-	intervals := make([]storage.AWSInterval, 0, len(covered))
-	for _, interval := range covered {
-		intervals = append(intervals, storage.AWSInterval{From: interval.From, To: interval.To})
-	}
-	ctx := context.Background()
-	if err := store.inventory.AppendAWSChanges(ctx, store.scope, account, region, rows, intervals, guard); err != nil {
-		return storeError(err)
-	}
-	now := store.clock()
-	err := store.updateSync(unit, guard, func(state *storage.AWSSyncState, _ bool) bool {
-		state.AttemptedAt, state.ErrorCode = now, errorCode
-		if errorCode == "" {
-			state.LastGoodAt = now
-		}
-		return true
-	})
-	if err != nil {
-		return err
-	}
-	if store.bounded {
-		store.retain(ctx, unit)
-	}
-	return nil
+	return store.recordChangePoll(account, region, ChangePoll{Found: found, Covered: covered, ErrorCode: errorCode}, guard)
 }
 
 // Changes lists changes in [since, until) for the query's account, region,
-// service and ARN. AsOf, when set, caps until. Every account and region the
-// store expects coverage for reports its uncovered stretches as gaps.
+// service and ARN. AsOf, when set, caps until; an AsOf before since is
+// unavailable, never complete. Coverage and rows come from one snapshot, so
+// a retention sweep between them can never leave coverage over rows that
+// are gone. Every account and region the store expects coverage for reports
+// its uncovered stretches as gaps.
 func (store *Store) Changes(ctx context.Context, query Query, since, until time.Time) (ChangesResult, error) {
 	if !store.ready() {
 		return ChangesResult{}, ErrNoStorage
 	}
-	if !query.AsOf.IsZero() && query.AsOf.Before(until) {
-		until = query.AsOf
+	feeds, ok := store.inventory.(storage.AWSChangeFeedStore)
+	if !ok {
+		return ChangesResult{}, ErrNoStorage
 	}
 	result := ChangesResult{AsOf: query.AsOf, Since: since, Until: until, Changes: []model.Change{}, Gaps: []ChangeGap{}}
+	if !query.AsOf.IsZero() && query.AsOf.Before(since) {
+		result.Until, result.Unavailable = query.AsOf, UnavailableBeforeWindow
+		return result, nil
+	}
+	if !query.AsOf.IsZero() && query.AsOf.Before(until) {
+		until = query.AsOf
+		result.Until = until
+	}
 	if !until.After(since) {
 		result.Complete = true
 		return result, nil
+	}
+	feedQuery := storage.AWSChangeFeedQuery{Account: query.Account, Region: query.Region, Service: query.Service,
+		ResourceARN: query.ARN, ResourceKey: changes.ResourceKey(query.ARN), Since: since, Until: until, IncludeDetail: true}
+	stored, err := feeds.AWSChangeFeed(ctx, store.scope, feedQuery)
+	if err != nil {
+		return ChangesResult{}, err
 	}
 
 	type pair struct {
@@ -132,11 +123,7 @@ func (store *Store) Changes(ctx context.Context, query Query, since, until time.
 		coverage bool
 	}
 	pairs := make(map[string]*pair)
-	coverage, err := store.inventory.AWSChangeCoverage(ctx, store.scope, query.Account, query.Region)
-	if err != nil {
-		return ChangesResult{}, err
-	}
-	for _, entry := range coverage {
+	for _, entry := range stored.Coverage {
 		item := &pair{account: entry.Account, region: entry.Region, coverage: true}
 		for _, interval := range entry.Intervals {
 			item.covered = append(item.covered, changes.Interval{From: interval.From, To: interval.To})
@@ -174,11 +161,11 @@ func (store *Store) Changes(ctx context.Context, query Query, since, until time.
 			result.Gaps = append(result.Gaps, ChangeGap{Account: entry.account, Region: entry.region, From: gap.From, To: gap.To, Reason: reason})
 		}
 	}
-	rows, err := store.inventory.AWSChanges(ctx, store.scope, storage.AWSChangeQuery{Account: query.Account, Region: query.Region, Service: query.Service, Since: since, Until: until})
-	if err != nil {
-		return ChangesResult{}, err
-	}
-	for _, row := range rows {
+	for _, row := range stored.Rows {
+		if query.ARN != "" && feedQuery.ResourceKey == "" {
+			// Not an ARN: a short name never matches (canonical ARNs only).
+			break
+		}
 		change, ok := changeOf(row)
 		if !ok || change.Time.Before(since) || !change.Time.Before(until) {
 			continue
@@ -189,7 +176,8 @@ func (store *Store) Changes(ctx context.Context, query Query, since, until time.
 		result.Changes = append(result.Changes, change)
 	}
 	sortChanges(result.Changes)
-	result.Complete = len(result.Gaps) == 0 && len(pairs) > 0
+	result.Truncated = stored.Truncated
+	result.Complete = len(result.Gaps) == 0 && len(pairs) > 0 && !stored.Truncated
 	return result, nil
 }
 
@@ -202,15 +190,17 @@ func sortChanges(list []model.Change) {
 	})
 }
 
-// changeTouches reports whether a change names the ARN or the short
-// identifier at the end of it.
+// changeTouches reports whether a change names the ARN. Only canonical
+// ARNs match, folded so two valid ARNs of one resource agree: a short name
+// such as "api" is shared by a Lambda function and an ECS service in any
+// account, so matching on it would cross resources.
 func changeTouches(change model.Change, arn string) bool {
-	short := arn
-	if index := strings.LastIndexAny(arn, "/:"); index >= 0 {
-		short = arn[index+1:]
+	key := changes.ResourceKey(arn)
+	if key == "" {
+		return false
 	}
 	for _, resource := range change.Resources {
-		if resource == arn || resource == short || strings.HasSuffix(resource, "/"+short) {
+		if resource == arn || changes.ResourceKey(resource) == key {
 			return true
 		}
 	}

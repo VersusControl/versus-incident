@@ -12,6 +12,7 @@
 - AWS
   - [Quickstart](/agent/aws/quickstart)
   - [Configuration](/agent/aws/configuration)
+  - [Changes](/agent/aws/changes)
 
 - SRE Agent
   - [Introduction](/agent/agent-introduction)

@@ -64,6 +64,31 @@ type AWSCollectConfig struct {
 	Enable    bool                      `mapstructure:"enable"`
 	Intervals AWSCollectIntervalsConfig `mapstructure:"intervals"`
 	History   AWSCollectHistoryConfig   `mapstructure:"history"`
+	Changes   AWSCollectChangesConfig   `mapstructure:"changes"`
+}
+
+// AWSCollectChangesConfig shapes the CloudTrail change poller and the
+// change list. Every key has an environment override.
+type AWSCollectChangesConfig struct {
+	// Lookback is how far back a first poll reads.
+	Lookback string `mapstructure:"lookback"`
+	// Overlap is re-read on every poll and not claimed until a later one,
+	// because CloudTrail delivers events late.
+	Overlap string `mapstructure:"overlap"`
+	// PageBudget caps LookupEvents pages per poll; 0 sizes it from the
+	// CloudTrail rate and the poll interval.
+	PageBudget int `mapstructure:"page_budget"`
+	// RoutineEvents (service:Action) are counted, not stored row by row.
+	// Unset takes the default list; an empty list counts nothing.
+	RoutineEvents []string `mapstructure:"routine_events"`
+	// BurstWindow and BurstMin group failed attempts into one burst row.
+	BurstWindow string `mapstructure:"burst_window"`
+	BurstMin    int    `mapstructure:"burst_min"`
+	// FailureKeep is how many failed attempts per principal, error code,
+	// event and hour are stored as rows; the rest are counted.
+	FailureKeep int `mapstructure:"failure_keep"`
+	// ReadCap bounds the rows one change list answer reads.
+	ReadCap int `mapstructure:"read_cap"`
 }
 
 // AWSCollectIntervalsConfig is how often each kind of unit is re-read.
@@ -113,7 +138,107 @@ const (
 	awsCollectGenerationsEnv     = awsCollectEnvironmentPrefix + "HISTORY_MAX_GENERATIONS"
 	awsCollectMaxAgeEnv          = awsCollectEnvironmentPrefix + "HISTORY_MAX_AGE"
 	awsCollectChangeRetentionEnv = awsCollectEnvironmentPrefix + "HISTORY_CHANGE_RETENTION"
+	awsChangesEnvironmentPrefix  = awsCollectEnvironmentPrefix + "CHANGES_"
+	awsChangesLookbackEnv        = awsChangesEnvironmentPrefix + "LOOKBACK"
+	awsChangesOverlapEnv         = awsChangesEnvironmentPrefix + "OVERLAP"
+	awsChangesPageBudgetEnv      = awsChangesEnvironmentPrefix + "PAGE_BUDGET"
+	awsChangesRoutineEventsEnv   = awsChangesEnvironmentPrefix + "ROUTINE_EVENTS"
+	awsChangesBurstWindowEnv     = awsChangesEnvironmentPrefix + "BURST_WINDOW"
+	awsChangesBurstMinEnv        = awsChangesEnvironmentPrefix + "BURST_MIN"
+	awsChangesFailureKeepEnv     = awsChangesEnvironmentPrefix + "FAILURE_KEEP"
+	awsChangesReadCapEnv         = awsChangesEnvironmentPrefix + "READ_CAP"
 )
+
+// Change poller defaults and bounds.
+const (
+	DefaultAWSChangeLookback    = 24 * time.Hour
+	DefaultAWSChangeOverlap     = 15 * time.Minute
+	DefaultAWSChangeBurstWindow = 10 * time.Minute
+	DefaultAWSChangeBurstMin    = 5
+	DefaultAWSChangeFailureKeep = 20
+	DefaultAWSChangeReadCap     = 20000
+	minAWSChangeLookback        = time.Hour
+	maxAWSChangeLookback        = 14 * 24 * time.Hour
+	minAWSChangeOverlap         = 5 * time.Minute
+	maxAWSChangeOverlap         = 2 * time.Hour
+	maxAWSChangePageBudget      = 1000
+	maxAWSRoutineEvents         = 32
+	minAWSChangeBurstWindow     = time.Minute
+	maxAWSChangeBurstWindow     = time.Hour
+	minAWSChangeBurstMin        = 2
+	maxAWSChangeBurstMin        = 1000
+	minAWSChangeFailureKeep     = 5
+	maxAWSChangeFailureKeep     = 1000
+	minAWSChangeReadCap         = 1000
+	maxAWSChangeReadCap         = 200000
+)
+
+// DefaultAWSRoutineEvents are the agent and scheduler events counted, not
+// stored row by row.
+func DefaultAWSRoutineEvents() []string {
+	return []string{"ssm:UpdateInstanceInformation", "ecs:SubmitTaskStateChange", "ecs:SubmitContainerStateChange", "logs:CreateLogStream", "config:PutEvaluations"}
+}
+
+var awsRoutineEventShape = regexp.MustCompile(`^[a-z0-9-]{1,40}:[A-Za-z0-9]{1,128}$`)
+
+// HistoryHorizonWarning names a history setting that keeps less than the
+// 24 h the OSS compare and alarm line promise, or is empty. It warns rather
+// than fails: the deployment still works with shorter history and says
+// where history starts.
+func (collect AWSCollectConfig) HistoryHorizonWarning() string {
+	if collect.MaxAge() < 24*time.Hour {
+		return "connectors.aws.collect.history.max_age keeps less than 24h of snapshots; compare and the alarm line will show where history starts"
+	}
+	return ""
+}
+
+// ChangeLookback is how far back a first CloudTrail poll reads.
+func (collect AWSCollectConfig) ChangeLookback() time.Duration {
+	return durationOr(collect.Changes.Lookback, DefaultAWSChangeLookback)
+}
+
+// ChangeOverlap is the unsettled tail each poll re-reads.
+func (collect AWSCollectConfig) ChangeOverlap() time.Duration {
+	return durationOr(collect.Changes.Overlap, DefaultAWSChangeOverlap)
+}
+
+// ChangeBurstWindow is the gap that still joins two failed attempts.
+func (collect AWSCollectConfig) ChangeBurstWindow() time.Duration {
+	return durationOr(collect.Changes.BurstWindow, DefaultAWSChangeBurstWindow)
+}
+
+// ChangeBurstMin is the fewest failed attempts that form a burst.
+func (collect AWSCollectConfig) ChangeBurstMin() int {
+	if collect.Changes.BurstMin > 0 {
+		return collect.Changes.BurstMin
+	}
+	return DefaultAWSChangeBurstMin
+}
+
+// ChangeFailureKeep is how many failed attempts per key and hour are rows.
+func (collect AWSCollectConfig) ChangeFailureKeep() int {
+	if collect.Changes.FailureKeep > 0 {
+		return collect.Changes.FailureKeep
+	}
+	return DefaultAWSChangeFailureKeep
+}
+
+// ChangeReadCap bounds the rows one change list answer reads.
+func (collect AWSCollectConfig) ChangeReadCap() int {
+	if collect.Changes.ReadCap > 0 {
+		return collect.Changes.ReadCap
+	}
+	return DefaultAWSChangeReadCap
+}
+
+// ChangeRoutineEvents is the routine list: the configured one, or the
+// default when unset.
+func (collect AWSCollectConfig) ChangeRoutineEvents() []string {
+	if collect.Changes.RoutineEvents == nil {
+		return DefaultAWSRoutineEvents()
+	}
+	return append([]string{}, collect.Changes.RoutineEvents...)
+}
 
 func durationOr(value string, fallback time.Duration) time.Duration {
 	if parsed, err := time.ParseDuration(strings.TrimSpace(value)); err == nil && parsed > 0 {
@@ -618,6 +743,27 @@ func normalizeAWSDefaults(connector *AWSConnectorConfig) {
 	if collect.History.ChangeRetention == "" {
 		collect.History.ChangeRetention = DefaultAWSChangeRetention.String()
 	}
+	if collect.Changes.Lookback == "" {
+		collect.Changes.Lookback = DefaultAWSChangeLookback.String()
+	}
+	if collect.Changes.Overlap == "" {
+		collect.Changes.Overlap = DefaultAWSChangeOverlap.String()
+	}
+	if collect.Changes.BurstWindow == "" {
+		collect.Changes.BurstWindow = DefaultAWSChangeBurstWindow.String()
+	}
+	if collect.Changes.BurstMin == 0 {
+		collect.Changes.BurstMin = DefaultAWSChangeBurstMin
+	}
+	if collect.Changes.FailureKeep == 0 {
+		collect.Changes.FailureKeep = DefaultAWSChangeFailureKeep
+	}
+	if collect.Changes.ReadCap == 0 {
+		collect.Changes.ReadCap = DefaultAWSChangeReadCap
+	}
+	if collect.Changes.RoutineEvents == nil {
+		collect.Changes.RoutineEvents = DefaultAWSRoutineEvents()
+	}
 	if len(connector.Applications.Sources) == 0 {
 		connector.Applications.Sources = DefaultAWSApplicationSources()
 	}
@@ -656,6 +802,9 @@ func validateAWSCollect(collect AWSCollectConfig, applications AWSApplicationsCo
 			return fmt.Errorf("connectors.aws.collect.history.%s must be between 1h and 8784h", name)
 		}
 	}
+	if err := validateAWSChanges(collect.Changes); err != nil {
+		return err
+	}
 	seen := map[string]bool{}
 	for _, source := range applications.Sources {
 		switch source {
@@ -679,6 +828,49 @@ func validateAWSCollect(collect AWSCollectConfig, applications AWSApplicationsCo
 	return nil
 }
 
+// validateAWSChanges checks the change poller block against its bounds.
+func validateAWSChanges(changes AWSCollectChangesConfig) error {
+	durations := []struct {
+		name, value string
+		low, high   time.Duration
+		bounds      string
+	}{
+		{"lookback", changes.Lookback, minAWSChangeLookback, maxAWSChangeLookback, "1h and 336h"},
+		{"overlap", changes.Overlap, minAWSChangeOverlap, maxAWSChangeOverlap, "5m and 2h"},
+		{"burst_window", changes.BurstWindow, minAWSChangeBurstWindow, maxAWSChangeBurstWindow, "1m and 1h"},
+	}
+	for _, item := range durations {
+		if item.value == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(item.value)
+		if err != nil || parsed < item.low || parsed > item.high {
+			return fmt.Errorf("connectors.aws.collect.changes.%s must be between %s", item.name, item.bounds)
+		}
+	}
+	if changes.PageBudget < 0 || changes.PageBudget > maxAWSChangePageBudget {
+		return errors.New("connectors.aws.collect.changes.page_budget must be between 0 (automatic) and 1000")
+	}
+	if changes.BurstMin != 0 && (changes.BurstMin < minAWSChangeBurstMin || changes.BurstMin > maxAWSChangeBurstMin) {
+		return errors.New("connectors.aws.collect.changes.burst_min must be between 2 and 1000")
+	}
+	if changes.FailureKeep != 0 && (changes.FailureKeep < minAWSChangeFailureKeep || changes.FailureKeep > maxAWSChangeFailureKeep) {
+		return errors.New("connectors.aws.collect.changes.failure_keep must be between 5 and 1000")
+	}
+	if changes.ReadCap != 0 && (changes.ReadCap < minAWSChangeReadCap || changes.ReadCap > maxAWSChangeReadCap) {
+		return errors.New("connectors.aws.collect.changes.read_cap must be between 1000 and 200000")
+	}
+	if len(changes.RoutineEvents) > maxAWSRoutineEvents {
+		return errors.New("connectors.aws.collect.changes.routine_events must contain at most 32 entries")
+	}
+	for _, event := range changes.RoutineEvents {
+		if !awsRoutineEventShape.MatchString(event) {
+			return errors.New("connectors.aws.collect.changes.routine_events entries must look like service:Action")
+		}
+	}
+	return nil
+}
+
 // applyAWSCollectEnvironment applies the VERSUS_CONNECTORS_AWS_COLLECT_*
 // overrides on top of the loaded file and validates the result. An invalid
 // override fails the load without echoing the value.
@@ -697,6 +889,9 @@ func applyAWSCollectEnvironment(connector *AWSConnectorConfig) error {
 		awsCollectChangesEnv:         &connector.Collect.Intervals.Changes,
 		awsCollectMaxAgeEnv:          &connector.Collect.History.MaxAge,
 		awsCollectChangeRetentionEnv: &connector.Collect.History.ChangeRetention,
+		awsChangesLookbackEnv:        &connector.Collect.Changes.Lookback,
+		awsChangesOverlapEnv:         &connector.Collect.Changes.Overlap,
+		awsChangesBurstWindowEnv:     &connector.Collect.Changes.BurstWindow,
 	} {
 		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 			*target = value
@@ -709,6 +904,31 @@ func applyAWSCollectEnvironment(connector *AWSConnectorConfig) error {
 			return fmt.Errorf("%s must be a positive integer", awsCollectGenerationsEnv)
 		}
 		connector.Collect.History.MaxGenerations = generations
+		set = true
+	}
+	for name, target := range map[string]*int{
+		awsChangesPageBudgetEnv:  &connector.Collect.Changes.PageBudget,
+		awsChangesBurstMinEnv:    &connector.Collect.Changes.BurstMin,
+		awsChangesFailureKeepEnv: &connector.Collect.Changes.FailureKeep,
+		awsChangesReadCapEnv:     &connector.Collect.Changes.ReadCap,
+	} {
+		if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 0 {
+				return fmt.Errorf("%s must be a non-negative integer", name)
+			}
+			*target = parsed
+			set = true
+		}
+	}
+	if value, ok := os.LookupEnv(awsChangesRoutineEventsEnv); ok {
+		events := []string{}
+		for _, item := range strings.Split(value, ",") {
+			if item = strings.TrimSpace(item); item != "" {
+				events = append(events, item)
+			}
+		}
+		connector.Collect.Changes.RoutineEvents = events
 		set = true
 	}
 	if !set {

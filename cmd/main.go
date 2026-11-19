@@ -255,6 +255,7 @@ func main() {
 	// The agent's AWS tools read through the same settings service, snapshot
 	// store and limiter as the admin routes.
 	agent.ConfigureAWS(func() *awssettings.Service { return awsConnector.settings })
+	registerAWSChanges(app, store, cfg, awsConnector)
 	costScheduler := registerAWSFinOps(app, store, cfg, awsConnector)
 	costScheduler.Start(rootCtx)
 	if err := registerActionHistoryService(store); err != nil {
@@ -391,6 +392,9 @@ func registerAWSSettingsController(app *fiber.App, store storage.Provider, cfg *
 		return cfg.Connectors.AWS
 	}
 	scope := tenancy.DefaultOrgScope()
+	if warning := cfg.Connectors.AWS.Collect.HistoryHorizonWarning(); warning != "" && cfg.Connectors.AWS.Enable {
+		log.Printf("aws collect: %s", warning)
+	}
 	var service *awssettings.Service
 	snapshots := awssnapshot.New(store, scope, awssnapshot.WithTagAllowlist(func() []string {
 		// The same effective allowlist the collectors redact with at write.
@@ -401,7 +405,16 @@ func registerAWSSettingsController(app *fiber.App, store storage.Provider, cfg *
 	}), awssnapshot.WithOptions(func() awssnapshot.Options {
 		connector := current()
 		return awssnapshot.Options{
-			MaxGenerations:  connector.Collect.MaxGenerations(),
+			MaxGenerations: connector.Collect.MaxGenerations(),
+			GenerationsFor: func(service string) int {
+				switch awscollect.KindOf(service) {
+				case awscollect.KindHealth:
+					return connector.Collect.HealthMaxGenerations()
+				case awscollect.KindInventory:
+					return connector.Collect.InventoryMaxGenerations()
+				}
+				return connector.Collect.MaxGenerations()
+			},
 			MaxAge:          connector.Collect.MaxAge(),
 			ChangeRetention: connector.Collect.ChangeRetention(),
 			AppSources:      connector.Applications.EffectiveSources(),
@@ -413,10 +426,18 @@ func registerAWSSettingsController(app *fiber.App, store storage.Provider, cfg *
 	collector := awscollect.New(snapshots, limiter,
 		awscollect.WithHTTPClient(harnessClient),
 		awscollect.WithLogger(log.Printf),
+		awscollect.WithAccountHealth(collectAccountHealth(awssettings.NewStore(store, scope), scope.Write)),
 		awscollect.WithOptions(func() awscollect.Options {
+			collect := current().Collect
 			return awscollect.Options{
-				TagAllowlist: service.TagValueAllowlist(),
-				AppTagKeys:   current().Applications.EffectiveTagKeys(),
+				TagAllowlist:     service.TagValueAllowlist(),
+				AppTagKeys:       current().Applications.EffectiveTagKeys(),
+				ChangeLookback:   collect.ChangeLookback(),
+				ChangeOverlap:    collect.ChangeOverlap(),
+				ChangesInterval:  collect.ChangesInterval(),
+				ChangePageBudget: collect.Changes.PageBudget,
+				RoutineEvents:    collect.ChangeRoutineEvents(),
+				FailureKeep:      collect.ChangeFailureKeep(),
 			}
 		}),
 	)

@@ -68,8 +68,10 @@ type scenario struct {
 		Finding     string  `json:"finding"`
 	} `json:"compute_optimizer"`
 	// Inventory, Changes and ChangeCoverage seed the snapshot store.
-	Inventory      []model.Resource   `json:"inventory"`
-	Changes        []model.Change     `json:"changes"`
+	Inventory  []model.Resource  `json:"inventory"`
+	CloudTrail []cloudTrailEvent `json:"cloudtrail"`
+	// GlobalUnread leaves the accounts' global streams unread (test only).
+	GlobalUnread   bool               `json:"-"`
 	ChangeCoverage []changes.Interval `json:"change_coverage"`
 	// PageGroups caps the groups per page the fake returns.
 	PageGroups      int               `json:"page_groups"`
@@ -581,9 +583,20 @@ func loadInventory(t *testing.T, sc *scenario) *snapshot.Store {
 		}
 	}
 	byRegion := map[[2]string][]model.Change{}
-	for _, c := range sc.Changes {
+	for _, c := range sc.changes() {
 		k := [2]string{c.Account, c.Region}
 		byRegion[k] = append(byRegion[k], c)
+	}
+	// The account's global stream (IAM and other global services) is read
+	// over the same span as its Regions.
+	accounts := map[string]bool{}
+	for k := range byRegion {
+		accounts[k[0]] = true
+	}
+	for account := range accounts {
+		if _, ok := byRegion[[2]string{account, model.GlobalRegion}]; !ok && !sc.GlobalUnread {
+			byRegion[[2]string{account, model.GlobalRegion}] = nil
+		}
 	}
 	for k, cs := range byRegion {
 		if err := store.AppendChanges(k[0], k[1], cs, sc.ChangeCoverage, ""); err != nil {
@@ -591,6 +604,32 @@ func loadInventory(t *testing.T, sc *scenario) *snapshot.Store {
 		}
 	}
 	return store
+}
+
+// cloudTrailEvent is one scenario LookupEvents record.
+type cloudTrailEvent struct {
+	Account   string    `json:"account"`
+	Region    string    `json:"region"`
+	ID        string    `json:"event_id"`
+	Name      string    `json:"event_name"`
+	Source    string    `json:"event_source"`
+	Time      time.Time `json:"event_time"`
+	Resources []string  `json:"resources"`
+	Raw       string    `json:"cloudtrail_event"`
+}
+
+// changes runs the scenario's CloudTrail records through the ingest
+// normalizer, so suspects are matched on exactly what real ingest stores.
+func (s *scenario) changes() []model.Change {
+	out := make([]model.Change, 0, len(s.CloudTrail))
+	for _, e := range s.CloudTrail {
+		change, ok := changes.Normalize(e.Account, e.Region, changes.Event{ID: e.ID, Name: e.Name, Source: e.Source, Time: e.Time,
+			Resources: e.Resources, Raw: e.Raw})
+		if ok {
+			out = append(out, change)
+		}
+	}
+	return out
 }
 
 func unitOr(u string) string {

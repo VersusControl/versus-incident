@@ -113,6 +113,9 @@ type Server struct {
 	loadSize   int
 	now        func() time.Time
 	lateEvents []trailEvent
+	// starts holds each scenario's world start: the clock at its first
+	// served request.
+	starts map[string]time.Time
 
 	cost          costCounters
 	costThrottled bool
@@ -314,6 +317,9 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	parsed := parseRequest(request, body)
 	parsed.scenario = s.scenarioFor(request)
 	s.record(request.URL.Path, parsed.operation())
+	// AWS stamps every answer with its own time; the fake uses its clock,
+	// so a test that moves the local clock alone models clock skew.
+	writer.Header().Set("Date", s.clock().Format(http.TimeFormat))
 
 	s.mu.Lock()
 	expired := s.expiredToken
@@ -324,6 +330,9 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			code = "ExpiredTokenException"
 		}
 		writeErrorFor(writer, parsed, http.StatusForbidden, code, "The security token included in the request is expired")
+		return
+	}
+	if s.refuseState(writer, parsed, request.Header.Get("X-Amz-Security-Token") != "") {
 		return
 	}
 	if s.shouldThrottle(parsed) {

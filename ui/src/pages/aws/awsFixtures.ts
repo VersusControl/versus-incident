@@ -171,3 +171,16 @@ export function regionOptions(): AwsRegionOption[] {
     { region: "ap-southeast-1", enabled: false, opt_in_status: "not-opted-in", resources_found: 0 },
   ];
 }
+
+/** Staging with a stale opt-in read: ap-southeast-1 was last read as off two days ago. */
+export function staleOptInAccount(): AwsAccount {
+  return stagingAccount({
+    regions: {
+      selected: ["us-east-1", "eu-west-1", "ap-southeast-1"],
+      enabled: 3,
+      not_enabled: [],
+      status_unknown: ["ap-southeast-1"],
+      status_read_at: isoSecondsAgo(2 * 24 * 3600),
+    },
+  });
+}

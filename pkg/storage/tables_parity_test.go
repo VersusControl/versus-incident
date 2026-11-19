@@ -1719,7 +1719,7 @@ func TestFileTablesGainSavingDecisionSubject(t *testing.T) {
 	var schema strings.Builder
 	for _, name := range localTableMigrations {
 		if strings.Contains(name, "035_") {
-			continue
+			break
 		}
 		data, err := fs.ReadFile(migrationFiles, name)
 		if err != nil {
@@ -1825,6 +1825,9 @@ func linesReference(t *testing.T, store FinOpsStore, scope tenancy.OrgScope, que
 // ordered read of two. It holds after a day is replaced, a payer is deleted
 // and old days are pruned, each of which rewrites the rollups.
 func TestTablesParityFinOpsRollupAnswersLikeLines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("long rollup parity run; skipped under -short")
+	}
 	runTablesParity(t, func(t *testing.T, backend tablesBackend, orgs tablesOrgs, record tablesRecorder) {
 		ctx := context.Background()
 		store := backend.finops(t)

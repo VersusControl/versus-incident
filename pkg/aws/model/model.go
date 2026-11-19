@@ -196,25 +196,33 @@ type Actor struct {
 	PrincipalType string     `json:"principal_type,omitempty"`
 	PrincipalARN  string     `json:"principal_arn,omitempty"`
 	SessionClass  string     `json:"session_class,omitempty"`
+	// Via names the AWS service that made the call on the principal's
+	// behalf (cloudformation, servicecatalog). The change is still the
+	// principal's.
+	Via string `json:"via,omitempty"`
 }
 
 // Change is one write event in plain language. Fields holds only the
 // identifier fields the event's template allowlists; request and response
 // bodies are never kept.
 type Change struct {
-	ID          string            `json:"id"`
-	Time        time.Time         `json:"time"`
-	Account     string            `json:"account"`
-	Region      string            `json:"region"`
-	Service     string            `json:"service"`
-	EventSource string            `json:"event_source"`
-	EventName   string            `json:"event_name"`
-	Template    string            `json:"template"`
-	Summary     string            `json:"summary"`
-	Resources   []string          `json:"resources,omitempty"`
-	Actor       Actor             `json:"actor"`
-	ErrorCode   string            `json:"error_code,omitempty"`
-	Fields      map[string]string `json:"fields,omitempty"`
+	ID          string    `json:"id"`
+	Time        time.Time `json:"time"`
+	Account     string    `json:"account"`
+	Region      string    `json:"region"`
+	Service     string    `json:"service"`
+	EventSource string    `json:"event_source"`
+	EventName   string    `json:"event_name"`
+	Template    string    `json:"template"`
+	Summary     string    `json:"summary"`
+	// Resources are canonical ARNs only, resolved at ingest from the
+	// resource type, account and Region. A name that could not be resolved
+	// is kept in Unresolved instead, never guessed into an ARN.
+	Resources  []string          `json:"resources,omitempty"`
+	Unresolved []string          `json:"unresolved,omitempty"`
+	Actor      Actor             `json:"actor"`
+	ErrorCode  string            `json:"error_code,omitempty"`
+	Fields     map[string]string `json:"fields,omitempty"`
 }
 
 // SecurityFlagKind is the closed list of metadata-only checks.
@@ -248,6 +256,9 @@ const (
 	// GapNotInRegion means the service has no endpoint in the region: there
 	// is nothing to read there, which is not a failure.
 	GapNotInRegion GapReason = "not_available_in_region"
+	// GapNotOnPlan means the account's support plan does not offer the
+	// service (AWS Health on Basic support).
+	GapNotOnPlan GapReason = "not_on_plan"
 )
 
 // Gap is one named hole in a view: the unit (or one detail call inside it)
@@ -289,7 +300,9 @@ func GapReasonForCode(code string) GapReason {
 	switch code {
 	case "denied", "trust_denied", "external_id_mismatch", "role_not_found":
 		return GapDenied
-	case "not_on_plan", "region_disabled", "not_enabled":
+	case "not_on_plan":
+		return GapNotOnPlan
+	case "region_disabled", "not_enabled":
 		return GapNotEnabled
 	case "throttled":
 		return GapThrottled

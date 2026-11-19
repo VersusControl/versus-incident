@@ -1,5 +1,7 @@
 package awsfix
 
+import "encoding/json"
+
 // The NAT spike story: one production account whose checkout-api ECS service
 // moved from task definition :41 to :42 on Oct 20 (deployed by the
 // github-actions-prod pipeline), after which its traffic through NAT gateway
@@ -85,27 +87,20 @@ func CostNatSpike() *CostScenario {
 			resource(arnELB+"targetgroup/tg-web/2", "elbv2", "target-group", "tg-web", nil,
 				Relation{Type: "routes_to", Target: arnEC2 + "instance/i-0def"}),
 		},
-		Changes: []Change{
-			{ID: "evt-checkout-42", Time: mustTime("2026-10-20T14:02:00Z"), Account: prodAccount, Region: usEast1, Service: "ecs",
-				EventSource: "ecs.amazonaws.com", EventName: "UpdateService", Template: "ecs.update_service",
-				Summary:   "ECS service checkout-api updated to task definition :42 (was :41)",
-				Resources: []string{arnECS + "checkout-api"},
-				Actor:     Actor{Class: "pipeline", PrincipalType: "AssumedRole", PrincipalARN: pipelineARN}},
-			{ID: "evt-route", Time: mustTime("2026-10-15T20:00:00Z"), Account: prodAccount, Region: usEast1, Service: "ec2",
-				EventSource: "ec2.amazonaws.com", EventName: "CreateRoute", Template: "ec2.create_route",
-				Summary:   "Route added to route table rtb-private",
-				Resources: []string{arnEC2 + "route-table/rtb-private"},
-				Actor:     Actor{Class: "person", PrincipalType: "AssumedRole", PrincipalARN: "arn:aws:iam::111111111111:role/network-admin"}},
-			{ID: "evt-noise", Time: mustTime("2026-10-20T10:00:00Z"), Account: prodAccount, Region: usEast1, Service: "lambda",
-				EventSource: "lambda.amazonaws.com", EventName: "UpdateFunctionConfiguration", Template: "lambda.update_function",
-				Summary:   "Function other-fn configuration updated",
-				Resources: []string{arnLambda + "other-fn"},
-				Actor:     Actor{Class: "person"}},
-			{ID: "evt-failed", Time: mustTime("2026-10-20T09:00:00Z"), Account: prodAccount, Region: usEast1, Service: "ec2",
-				EventSource: "ec2.amazonaws.com", EventName: "DeleteNatGateway", Template: "ec2.delete_nat_gateway",
-				Summary:   "Attempt to delete NAT gateway nat-1a",
-				Resources: []string{arnEC2 + "natgateway/nat-1a"},
-				Actor:     Actor{Class: "person"}, ErrorCode: "AccessDenied"},
+		CloudTrail: []CloudTrailEvent{
+			// The release: ECS logs the cluster and service names, not the
+			// service ARN.
+			trail("evt-checkout-42", "2026-10-20T14:02:00Z", "ecs.amazonaws.com", "UpdateService", pipelineIdentity, "",
+				map[string]any{"cluster": "prod", "service": "checkout-api", "taskDefinition": "checkout-api:42", "forceNewDeployment": false}),
+			// A route change before the window; the route table is only an ID.
+			trail("evt-route", "2026-10-15T20:00:00Z", "ec2.amazonaws.com", "CreateRoute", personIdentity, "",
+				map[string]any{"routeTableId": "rtb-private", "destinationCidrBlock": "0.0.0.0/0", "natGatewayId": "nat-1a"}, "rtb-private"),
+			// An unrelated function: Lambda logs a versioned event name.
+			trail("evt-noise", "2026-10-20T10:00:00Z", "lambda.amazonaws.com", "UpdateFunctionConfiguration20150331v2", personIdentity, "",
+				map[string]any{"functionName": "other-fn", "timeout": 30}),
+			// A failed call on the line's own gateway is never a suspect.
+			trail("evt-failed", "2026-10-20T09:00:00Z", "ec2.amazonaws.com", "DeleteNatGateway", personIdentity, "Client.UnauthorizedOperation",
+				map[string]any{"natGatewayId": "nat-1a"}, "nat-1a"),
 		},
 		ChangeCoverage: []Interval{{From: mustTime("2026-09-25T00:00:00Z"), To: mustTime("2026-11-10T00:00:00Z")}},
 	}
@@ -129,12 +124,49 @@ func CostNatSpikeTwoNATs() *CostScenario {
 		withApp(resource(arnECS+"inventory-svc", "ecs", "service", "inventory-svc", map[string]string{"task_definition": "inventory-svc:7"},
 			Relation{Type: "in_subnet", Target: arnEC2 + "subnet/subnet-private-b"}), "inventory"),
 	)
-	s.Changes = append(s.Changes, Change{ID: "evt-inventory-7", Time: mustTime("2026-10-20T13:30:00Z"), Account: prodAccount, Region: usEast1,
-		Service: "ecs", EventSource: "ecs.amazonaws.com", EventName: "UpdateService", Template: "ecs.update_service",
-		Summary:   "ECS service inventory-svc updated to task definition :7 (was :6)",
-		Resources: []string{arnECS + "inventory-svc"},
-		Actor:     Actor{Class: "pipeline", PrincipalType: "AssumedRole", PrincipalARN: pipelineARN}})
+	s.CloudTrail = append(s.CloudTrail, trail("evt-inventory-7", "2026-10-20T13:30:00Z", "ecs.amazonaws.com", "UpdateService", pipelineIdentity, "",
+		map[string]any{"cluster": "prod", "service": "inventory-svc", "taskDefinition": "inventory-svc:7"}))
 	return s
+}
+
+// pipelineIdentity is the github-actions-prod deploy role's session.
+var pipelineIdentity = map[string]any{
+	"type": "AssumedRole", "arn": "arn:aws:sts::111111111111:assumed-role/github-actions-prod/gha-run-8812",
+	"sessionContext": map[string]any{"sessionIssuer": map[string]any{"type": "Role", "arn": pipelineARN, "userName": "github-actions-prod"}},
+}
+
+// personIdentity is an engineer in the console through the network-admin
+// role.
+var personIdentity = map[string]any{
+	"type": "AssumedRole", "arn": "arn:aws:sts::111111111111:assumed-role/network-admin/engineer-session",
+	"sessionContext": map[string]any{"sessionIssuer": map[string]any{"type": "Role", "arn": "arn:aws:iam::111111111111:role/network-admin", "userName": "network-admin"}},
+}
+
+// trail is one production-account us-east-1 LookupEvents record. The
+// document carries the identity, the request and, for a failed call, the
+// error code; userAgent follows the identity (a pipeline SDK or the
+// console). resources are the lookup's resource names.
+func trail(id, at, source, name string, identity map[string]any, errorCode string, request map[string]any, resources ...string) CloudTrailEvent {
+	agent := "console.amazonaws.com"
+	if identity["arn"] != nil && identity["arn"] == pipelineIdentity["arn"] {
+		agent = "aws-sdk-go-v2/1.30.3 os/linux lang/go#1.23"
+	}
+	document := map[string]any{
+		"eventVersion": "1.09", "userIdentity": identity, "eventTime": at, "eventSource": source, "eventName": name,
+		"awsRegion": usEast1, "sourceIPAddress": "203.0.113.10", "userAgent": agent,
+		"requestParameters": request, "responseElements": nil, "readOnly": false,
+		"eventType": "AwsApiCall", "managementEvent": true, "recipientAccountId": prodAccount, "eventID": id,
+	}
+	if errorCode != "" {
+		document["errorCode"] = errorCode
+		document["errorMessage"] = "You are not authorized to perform this operation."
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		panic(err)
+	}
+	return CloudTrailEvent{Account: prodAccount, Region: usEast1, ID: id, Name: name, Source: source, Time: mustTime(at),
+		Resources: resources, Raw: string(raw)}
 }
 
 // resource is a production-account us-east-1 resource.

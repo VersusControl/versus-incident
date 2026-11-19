@@ -20,7 +20,6 @@ var awsTemporalTables = []string{"aws_resources", "aws_health", "aws_security_fl
 var awsResourceColumns = []string{"org_id", "account", "region", "service", "arn", "resource_type", "app", "name", "state", "tags", "relations", "attributes", "detail", "digest", "valid_from"}
 var awsHealthColumns = []string{"org_id", "account", "region", "service", "arn", "kind", "ref", "state", "summary", "since", "children", "detail", "digest", "valid_from"}
 var awsFlagColumns = []string{"org_id", "account", "region", "service", "arn", "flag", "summary", "detail", "digest", "valid_from"}
-var awsChangeColumns = []string{"org_id", "event_id", "account", "region", "service", "event_time", "event_name", "actor_class", "actor", "resource_arn", "app", "summary", "fields", "detail"}
 
 func encodeTableJSON(value any) any {
 	switch typed := value.(type) {
@@ -323,52 +322,8 @@ func (t *sqlTables) UpdateAWSSync(ctx context.Context, scope tenancy.OrgScope, u
 }
 
 func (t *sqlTables) AppendAWSChanges(ctx context.Context, scope tenancy.OrgScope, account, region string, changes []AWSChange, covered []AWSInterval, guard *uint64) error {
-	if !validTableKey(account) || !validTableKey(region) {
-		return ErrInvalidAWSInventory
-	}
-	byID := make(map[string]AWSChange, len(changes))
-	for _, change := range changes {
-		cleaned, err := cleanAWSChange(account, region, change)
-		if err != nil {
-			return err
-		}
-		byID[cleaned.EventID] = cleaned
-	}
-	scope = inventoryScope(scope)
-	org := scope.Write
-	return t.write(ctx, func(tx *sql.Tx) error {
-		if err := t.lockAccount(ctx, tx, org, account, guard, len(covered) > 0); err != nil {
-			return err
-		}
-		rows := make([][]any, 0, len(byID))
-		for _, id := range sortedKeysOf(byID) {
-			change := byID[id]
-			rows = append(rows, []any{org, change.EventID, change.Account, change.Region, change.Service, t.at(change.EventTime), change.EventName, change.ActorClass,
-				change.Actor, change.ResourceARN, change.App, change.Summary, encodeTableJSON(change.Fields), jsonParam(change.Detail)})
-		}
-		const upsert = ` ON CONFLICT (org_id, event_id) DO UPDATE SET account = excluded.account, region = excluded.region, service = excluded.service,
- event_time = excluded.event_time, event_name = excluded.event_name, actor_class = excluded.actor_class, actor = excluded.actor,
- resource_arn = excluded.resource_arn, app = excluded.app, summary = excluded.summary, fields = excluded.fields, detail = excluded.detail`
-		if err := t.insertRows(ctx, tx, "aws_changes", awsChangeColumns, rows, upsert); err != nil {
-			return err
-		}
-		if len(covered) == 0 {
-			return nil
-		}
-		existing, err := t.pairCoverage(ctx, tx, org, account, region)
-		if err != nil {
-			return err
-		}
-		merged := mergeAWSIntervals(append(existing, covered...))
-		if _, err := tx.ExecContext(ctx, t.q(`DELETE FROM aws_change_coverage WHERE org_id = ? AND account = ? AND region = ?`), org, account, region); err != nil {
-			return err
-		}
-		coverage := make([][]any, len(merged))
-		for index, interval := range merged {
-			coverage[index] = []any{org, account, region, t.at(interval.From), t.at(interval.To)}
-		}
-		return t.insertRows(ctx, tx, "aws_change_coverage", []string{"org_id", "account", "region", "covered_from", "covered_until"}, coverage, "")
-	})
+	_, err := t.RecordAWSChangePoll(ctx, scope, AWSChangePoll{Account: account, Region: region, At: time.Now(), Changes: changes, Covered: covered, strict: true}, guard)
+	return err
 }
 
 func sortedKeysOf[T any](values map[string]T) []string {
@@ -397,7 +352,8 @@ func (t *sqlTables) pairCoverage(ctx context.Context, tx *sql.Tx, org, account, 
 	return out, rows.Err()
 }
 
-var awsAccountTables = []string{"aws_resources", "aws_health", "aws_security_flags", "aws_unit_generations", "aws_sync_units", "aws_changes", "aws_change_coverage"}
+var awsAccountTables = []string{"aws_resources", "aws_health", "aws_security_flags", "aws_unit_generations", "aws_sync_units", "aws_changes", "aws_change_coverage",
+	"aws_change_counts", "aws_change_gaps", "aws_change_pairs"}
 
 func (t *sqlTables) PurgeAWSAccount(ctx context.Context, scope tenancy.OrgScope, account, region string) error {
 	if !validTableKey(account) || region != "" && !validTableKey(region) {
@@ -499,17 +455,17 @@ func (t *sqlTables) PruneAWSChanges(ctx context.Context, scope tenancy.OrgScope,
 	org, cutoff := scope.Write, t.at(before)
 	var total int64
 	err := t.write(ctx, func(tx *sql.Tx) error {
+		if err := t.trimChangeTablesTx(ctx, tx, org, cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, t.q(`DELETE FROM aws_change_counts WHERE org_id = ? AND minute < ?`), org, cutoff); err != nil {
+			return err
+		}
 		result, err := tx.ExecContext(ctx, t.q(`DELETE FROM aws_changes WHERE org_id = ? AND event_time < ?`), org, cutoff)
 		if err != nil {
 			return err
 		}
-		if total, err = result.RowsAffected(); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, t.q(`DELETE FROM aws_change_coverage WHERE org_id = ? AND covered_until <= ?`), org, cutoff); err != nil {
-			return err
-		}
-		_, err = tx.ExecContext(ctx, t.q(`UPDATE aws_change_coverage SET covered_from = ? WHERE org_id = ? AND covered_from < ?`), cutoff, org, cutoff)
+		total, err = result.RowsAffected()
 		return err
 	})
 	return total, err
@@ -559,7 +515,13 @@ func (t *sqlTables) SweepAWSRetention(ctx context.Context, sweep AWSRetentionSwe
 					result.More, result.Cursor.Stage = true, "units"
 					return result, nil
 				}
-				generations, history, complete, err := t.sweepUnit(ctx, org, unit, sweep.KeepGenerations, batch, expired)
+				keep := sweep.KeepGenerations
+				if sweep.KeepFor != nil {
+					if sized := sweep.KeepFor(unit); sized >= 1 {
+						keep = sized
+					}
+				}
+				generations, history, complete, err := t.sweepUnit(ctx, org, unit, keep, batch, expired)
 				if err != nil {
 					return result, err
 				}
@@ -605,8 +567,22 @@ func (t *sqlTables) SweepAWSRetention(ctx context.Context, sweep AWSRetentionSwe
 	if stage == "changes" {
 		if !sweep.ChangeBefore.IsZero() {
 			cutoff := t.at(sweep.ChangeBefore)
+			// Coverage and gap labels are trimmed first, in the same
+			// transaction as the first row batch: a sweep stopped by its
+			// deadline leaves the stretch reading beyond_retention, never
+			// covered over rows already deleted.
+			first := true
 			for {
-				removed, err := t.sweepDelete(ctx, "aws_changes", `org_id = ? AND event_time < ?`, []any{org, cutoff}, batch)
+				var removed int64
+				var err error
+				if first {
+					removed, err = t.sweepDeleteWith(ctx, "aws_changes", `org_id = ? AND event_time < ?`, []any{org, cutoff}, batch, func(tx *sql.Tx) error {
+						return t.trimChangeTablesTx(ctx, tx, org, cutoff)
+					})
+					first = false
+				} else {
+					removed, err = t.sweepDelete(ctx, "aws_changes", `org_id = ? AND event_time < ?`, []any{org, cutoff}, batch)
+				}
 				if err != nil {
 					return result, err
 				}
@@ -619,8 +595,18 @@ func (t *sqlTables) SweepAWSRetention(ctx context.Context, sweep AWSRetentionSwe
 					return result, nil
 				}
 			}
-			if err := t.sweepChangeCoverage(ctx, org, cutoff); err != nil {
-				return result, err
+			for {
+				removed, err := t.sweepDelete(ctx, "aws_change_counts", `org_id = ? AND minute < ?`, []any{org, cutoff}, batch)
+				if err != nil {
+					return result, err
+				}
+				if removed < int64(batch) {
+					break
+				}
+				if expired() {
+					result.More, result.Cursor.Stage = true, "changes"
+					return result, nil
+				}
 			}
 		}
 	}
@@ -709,6 +695,12 @@ func (t *sqlTables) sweepUnit(ctx context.Context, org string, unit AWSUnit, kee
 // rows by their physical locator (ctid on Postgres, rowid in the SQLite
 // index) because neither dialect accepts DELETE ... LIMIT.
 func (t *sqlTables) sweepDelete(ctx context.Context, table, condition string, args []any, batch int) (int64, error) {
+	return t.sweepDeleteWith(ctx, table, condition, args, batch, nil)
+}
+
+// sweepDeleteWith is sweepDelete with before run first in the same
+// transaction.
+func (t *sqlTables) sweepDeleteWith(ctx context.Context, table, condition string, args []any, batch int, before func(*sql.Tx) error) (int64, error) {
 	if batch <= 0 {
 		batch = DefaultAWSRetentionBatch
 	}
@@ -719,6 +711,11 @@ func (t *sqlTables) sweepDelete(ctx context.Context, table, condition string, ar
 	statement := t.q(`DELETE FROM ` + table + ` WHERE ` + locator + ` IN (SELECT ` + locator + ` FROM ` + table + ` WHERE ` + condition + ` LIMIT ` + strconv.Itoa(batch) + `)`)
 	var removed int64
 	err := t.write(ctx, func(tx *sql.Tx) error {
+		if before != nil {
+			if err := before(tx); err != nil {
+				return err
+			}
+		}
 		result, err := tx.ExecContext(ctx, statement, args...)
 		if err != nil {
 			return err
@@ -727,17 +724,6 @@ func (t *sqlTables) sweepDelete(ctx context.Context, table, condition string, ar
 		return err
 	})
 	return removed, err
-}
-
-// sweepChangeCoverage trims coverage so it never claims a deleted stretch.
-func (t *sqlTables) sweepChangeCoverage(ctx context.Context, org string, cutoff any) error {
-	return t.write(ctx, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, t.q(`DELETE FROM aws_change_coverage WHERE org_id = ? AND covered_until <= ?`), org, cutoff); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, t.q(`UPDATE aws_change_coverage SET covered_from = ? WHERE org_id = ? AND covered_from < ?`), cutoff, org, cutoff)
-		return err
-	})
 }
 
 // tablesQuerier is the part of a *sql.DB or *sql.Tx a table read needs, so
@@ -1019,7 +1005,8 @@ func (t *sqlTables) changesSQL(scope tenancy.OrgScope, query AWSChangeQuery) (st
 	if !query.Until.IsZero() {
 		where.add("c.event_time < ?", t.at(query.Until))
 	}
-	return t.q(`SELECT c.event_id, c.account, c.region, c.service, c.event_time, c.event_name, c.actor_class, c.actor, c.resource_arn, c.app, c.summary, c.fields, c.detail
+	return t.q(`SELECT c.event_id, c.account, c.region, c.service, c.event_time, c.event_name, c.actor_class, c.actor, c.resource_arn, c.app, c.summary, c.fields, c.detail,
+ c.error_code, c.template, c.session_class, c.via
  FROM aws_changes c WHERE ` + where.String() + ` ORDER BY c.event_time, c.event_id` + limitClause(query.Limit)), where.args
 }
 
@@ -1043,7 +1030,8 @@ func (t *sqlTables) awsChanges(ctx context.Context, q tablesQuerier, scope tenan
 		var row AWSChange
 		var at tableTimeValue
 		var fields, detail []byte
-		if err := rows.Scan(&row.EventID, &row.Account, &row.Region, &row.Service, &at, &row.EventName, &row.ActorClass, &row.Actor, &row.ResourceARN, &row.App, &row.Summary, &fields, &detail); err != nil {
+		if err := rows.Scan(&row.EventID, &row.Account, &row.Region, &row.Service, &at, &row.EventName, &row.ActorClass, &row.Actor, &row.ResourceARN, &row.App, &row.Summary, &fields, &detail,
+			&row.ErrorCode, &row.Template, &row.SessionClass, &row.Via); err != nil {
 			return nil, err
 		}
 		row.EventTime = at.Time

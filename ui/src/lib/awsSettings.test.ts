@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
-import type { AwsAccount, AwsDraftService, AwsOptionalData } from "@/lib/api";
-import { ApiError, awsErrorFrom, awsErrorText } from "@/lib/api";
-import { fmtClock } from "@/lib/finops";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AwsAccount, AwsDraftService, AwsOptionalData, AwsSettings } from "@/lib/api";
+import { ApiError, awsErrorFrom, awsErrorText, normalizeAwsSettings } from "@/lib/api";
+import { disconnectedText, fmtClockOrDay } from "@/lib/awsChanges";
 import {
   AWS_SERVICE_CATALOG,
   AWS_SERVICE_TOTAL,
@@ -31,6 +31,8 @@ import {
 } from "@/lib/awsSettings";
 
 const NOW = new Date("2026-11-04T14:21:00Z");
+/** A time as the viewer reads it on the AWS pages: local clock, no zone suffix. */
+const local = (iso: string) => fmtClockOrDay(iso, NOW.toISOString());
 
 // Every field is set on purpose: no fixture is allowed to rely on a default
 // that could hide a missing value on the real payload.
@@ -120,7 +122,7 @@ describe("awsSettingsAnswer precedence", () => {
       NOW,
     );
     expect(answer.kind).toBe("disconnected");
-    expect(answer.segments[0].text).toBe("Staging disconnected since 13:05 UTC");
+    expect(answer.segments[0].text).toBe(`Staging disconnected since ${local("2026-11-04T13:05:00Z")}`);
     expect(answer.segments[1].text).toBe("; 1 account still connected");
     // The denied service is still in the payload, but the worst problem wins.
     expect(answer.segments.map((s) => s.text).join("")).not.toContain("ElastiCache");
@@ -305,7 +307,7 @@ describe("account rows", () => {
       NOW,
     );
     expect(words.label).toBe("Disconnected");
-    expect(words.detail).toBe("since 13:05 UTC");
+    expect(words.detail).toBe(`since ${local("2026-11-04T13:05:00Z")}`);
     expect(words.connected).toBe(false);
   });
 
@@ -314,7 +316,7 @@ describe("account rows", () => {
       account({ status: "disconnected", disconnected_since: "2026-11-04T13:05:00Z", error_code: "account_mismatch" }),
       NOW,
     );
-    expect(mismatch.detail).toBe("The AWS credentials belong to another account, since 13:05 UTC");
+    expect(mismatch.detail).toBe(`The AWS credentials belong to another account, since ${local("2026-11-04T13:05:00Z")}`);
     const noKey = accountStatusWords(
       account({ status: "disconnected", disconnected_since: null, error_code: "no_server_identity" }),
       NOW,
@@ -344,6 +346,34 @@ describe("account rows", () => {
     );
     expect(row.regionsLabel).toBe("1 of 1");
     expect(row.regionsDetail).toBe("all enabled");
+  });
+
+  it("keeps a stale Region opt-in read through the settings normalizer", () => {
+    // Shaped like the wire payload: only the fields the server sends.
+    const raw = {
+      enabled: true,
+      accounts: [
+        account({
+          regions: {
+            selected: ["af-south-1", "us-east-1"],
+            enabled: 1,
+            not_enabled: [],
+            status_unknown: ["af-south-1"],
+            status_read_at: "2026-11-04T14:08:06Z",
+          },
+        }),
+      ],
+    } as unknown as AwsSettings;
+    const settings = normalizeAwsSettings(raw);
+    const regions = settings.accounts[0].regions;
+    expect(regions.status_unknown).toEqual(["af-south-1"]);
+    expect(regions.status_read_at).toBe("2026-11-04T14:08:06Z");
+    const row = accountRow(settings.accounts[0], NOW);
+    expect(row.regionsLabel).toBe("1 of 2");
+    expect(row.regionsDetail).toBe(
+      `af-south-1: opt-in status not read since ${fmtClockOrDay("2026-11-04T14:08:06Z", NOW.toISOString())}`,
+    );
+    expect(row.regionsDetail).not.toMatch(/all enabled/);
   });
 
   it("keeps the API bar empty when the budget is unknown", () => {
@@ -391,13 +421,19 @@ describe("label maps", () => {
   });
 
   it("words a sync gap for a service missing in the region", () => {
-    expect(gapWords("not_available_in_region")).toBe("Not in this region");
+    expect(gapWords("not_available_in_region")).toBe("Not offered in this Region");
+  });
+
+  it("names a support-plan gap and service as not on this support plan, never Not enabled", () => {
+    expect(gapWords("not_on_plan")).toBe("Not on this support plan");
+    expect(serviceStatusLabel("not_on_plan")).toBe("Not on this support plan");
+    expect(gapWords("brand_new_reason")).toBe("brand new reason");
   });
 
   it("names a not-used probe with a known regional cause instead of Not used", () => {
-    expect(serviceStatusLabel("not_used", "not_available_in_region")).toBe("Not in this region");
+    expect(serviceStatusLabel("not_used", "not_available_in_region")).toBe("Not offered in this Region");
     expect(serviceStatusText("eks", "not_used", "not_available_in_region")).toBe(
-      "EKS: Not in this region",
+      "EKS: Not offered in this Region",
     );
     expect(serviceStatusLabel("not_used")).toBe("Not used");
   });
@@ -450,7 +486,7 @@ describe("privacy and optional data lines", () => {
     ).toBe("Leak check: passing, 0 leaks in 24 h");
     expect(
       selfTestLine({ passing: false, last_run_at: "2026-11-04T14:15:00Z", leaks_24h: 1 }, NOW),
-    ).toBe("Leak check: failing, last run 14:15 UTC, 1 leak in 24 h");
+    ).toBe(`Leak check: failing, last run ${local("2026-11-04T14:15:00Z")}, 1 leak in 24 h`);
   });
 });
 
@@ -489,7 +525,7 @@ describe("connect wizard derivations", () => {
 
   it("writes the legend without hiding a retry", () => {
     expect(legendWords(deriveDraftCounts(services))).toBe(
-      "2 readable · 1 not used · 1 denied · 1 not on plan · 1 not checked · 18 checking",
+      "2 readable · 1 not used · 1 denied · 1 not on this support plan · 1 not checked · 18 checking",
     );
   });
 
@@ -538,13 +574,45 @@ describe("refresh in progress wording", () => {
 });
 
 describe("times of day", () => {
-  it("prints AWS settings times in UTC with the zone, the same way FinOps does", () => {
-    // 23:30 UTC is a different hour, and often a different day, in any
-    // other zone, so a local-time format cannot pass this by chance.
+  it("prints AWS settings times in the viewer's clock with no zone suffix, through the formatter the Changes page uses", () => {
     const late = new Date("2026-11-04T23:40:00Z");
     const line = selfTestLine({ passing: true, last_run_at: "2026-11-04T23:30:00Z", leaks_24h: 0 }, late);
-    expect(line).toBe("Leak check: passing, last run 23:30 UTC, 0 leaks in 24 h");
-    expect(line).toContain(fmtClock("2026-11-04T23:30:00Z"));
+    expect(line).toBe(`Leak check: passing, last run ${fmtClockOrDay("2026-11-04T23:30:00Z", late.toISOString())}, 0 leaks in 24 h`);
+    expect(line).not.toContain("UTC");
+  });
+
+  it("Settings and Changes print the same disconnect instant identically", () => {
+    const at = "2026-11-04T13:05:00Z";
+    const changes = disconnectedText({ as_of: "2026-11-04T12:50:00Z", disconnected_at: at }, at, NOW.toISOString());
+    const settings = accountStatusWords(account({ status: "disconnected", disconnected_since: at }), NOW).detail;
+    const banner = awsSettingsAnswer({ enabled: true, accounts: [account({ status: "disconnected", disconnected_since: at })] }, NOW).segments[0].text;
+    const clock = changes.match(/^Disconnected (\d{2}:\d{2});/)?.[1];
+    expect(clock).toBeTruthy();
+    expect(settings).toBe(`since ${clock}`);
+    expect(banner).toBe(`Staging disconnected since ${clock}`);
+  });
+});
+
+describe("an instant from an earlier local day", () => {
+  // Los Angeles just past midnight on Nov 19; the disconnect fell at 23:50 on Nov 18.
+  const tz = process.env.TZ;
+  beforeEach(() => {
+    process.env.TZ = "America/Los_Angeles";
+  });
+  afterEach(() => {
+    process.env.TZ = tz;
+  });
+
+  it("Settings and Changes print a disconnect from the previous local day with the same date and time", () => {
+    const now = new Date("2026-11-19T08:00:42Z");
+    const since = "2026-11-19T07:50:37Z";
+    const disconnected = account({ status: "disconnected", disconnected_since: since });
+    const settings = accountStatusWords(disconnected, now).detail;
+    const banner = awsSettingsAnswer({ enabled: true, accounts: [disconnected] }, now).segments[0].text;
+    const changes = disconnectedText({ as_of: "2026-11-19T07:35:00Z", disconnected_at: since }, since, now.toISOString());
+    expect(settings).toBe("since Nov 18 23:50");
+    expect(banner).toBe("Staging disconnected since Nov 18 23:50");
+    expect(changes).toBe("Disconnected Nov 18 23:50; as of Nov 18 23:35");
   });
 });
 

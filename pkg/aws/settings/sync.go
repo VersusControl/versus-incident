@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -190,9 +191,20 @@ func (conn *Service) targets(ctx context.Context, needRegions bool) []CollectTar
 			}
 			continue
 		}
+		now := conn.now().UTC()
 		regions := account.Regions
 		if len(regions) == 0 {
 			regions = enabledRegions(health.Regions)
+			if len(health.Regions) > 0 && !health.regionsFresh(now) {
+				// The opt-in status is no longer confirmed: every known
+				// Region is polled, and one still off reads as a real gap.
+				regions = knownRegions(health.Regions)
+			}
+		}
+		if needRegions {
+			// A Region confirmed not enabled is not polled; it is polled
+			// again once a check finds it enabled or the status goes stale.
+			regions = withoutRegions(regions, health.NotEnabledRegionsAt(regions, now))
 		}
 		if needRegions && len(regions) == 0 {
 			continue
@@ -238,10 +250,17 @@ func (conn *Service) confirmIdentity(ctx context.Context, account AccountRecord,
 	}
 	if err != nil {
 		if errors.Is(err, ErrAccountMismatch) {
-			record := health
+			// Re-read under the account's lock: the record passed in may be
+			// older than one a health check saved meanwhile.
+			unlock := conn.lockHealth(account.AccountID)
+			record, readErr := conn.store.GetHealth(conn.storageOrg(), account.AccountID)
+			if readErr != nil {
+				record = health
+			}
 			record.AccountID = account.AccountID
 			recordIdentityFailure(&record, err, conn.now().UTC())
 			_ = conn.store.SaveHealth(conn.storageOrg(), record)
+			unlock()
 		}
 		return err
 	}
@@ -340,15 +359,22 @@ func (conn *Service) syncView(accountID string) AccountSyncView {
 		}
 		entry.view.Units++
 		view.Units++
+		// A unit in a Region that is not enabled has nothing to read. The
+		// account names the Region once ("1 region not enabled"); the
+		// service is neither failed nor not enabled because of it.
+		regionOff := regionNotEnabled(status.Sync)
 		if status.Sync.State != model.SyncPending && status.Sync.State != "" {
 			entry.view.UnitsDone++
 			view.UnitsDone++
 		}
-		if status.Sync.State == model.SyncFailed {
+		if status.Sync.State == model.SyncFailed && !regionOff {
 			entry.failed++
 			failed++
 		}
 		for _, gap := range status.Sync.Gaps {
+			if gap.Reason == model.GapNotEnabled {
+				continue
+			}
 			entry.gaps[string(gap.Reason)] = true
 		}
 		if last := status.Sync.LastGoodAt; !last.IsZero() {
@@ -403,4 +429,40 @@ func (conn *Service) syncView(accountID string) AccountSyncView {
 		view.State = SyncStateOK
 	}
 	return view
+}
+
+// regionNotEnabled reports a unit whose last attempt found its Region not
+// enabled for the account.
+func regionNotEnabled(sync model.SyncState) bool {
+	if sync.ErrorCode != "" && model.GapReasonForCode(sync.ErrorCode) == model.GapNotEnabled {
+		return true
+	}
+	for _, gap := range sync.Gaps {
+		if gap.Reason == model.GapNotEnabled {
+			return true
+		}
+	}
+	return false
+}
+
+func withoutRegions(regions, drop []string) []string {
+	if len(drop) == 0 {
+		return regions
+	}
+	out := make([]string, 0, len(regions))
+	for _, region := range regions {
+		if !slices.Contains(drop, region) {
+			out = append(out, region)
+		}
+	}
+	return out
+}
+
+func knownRegions(regions []RegionStatus) []string {
+	out := make([]string, 0, len(regions))
+	for _, region := range regions {
+		out = append(out, region.Region)
+	}
+	sort.Strings(out)
+	return out
 }

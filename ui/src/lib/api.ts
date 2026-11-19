@@ -5,6 +5,16 @@
 
 import type { LearnExclusions } from "@/lib/learnExclude";
 import { ANALYSIS_SSE_LIMITS, readEventStream, type ServerSentEvent } from "@/lib/sse";
+import {
+  changesQueryString,
+  compareQueryString,
+  groupQueryString,
+  type ChangesGroupPage,
+  type ChangesQuery,
+  type ChangesView,
+  type CompareQuery,
+  type CompareView,
+} from "@/lib/awsChanges";
 
 // LearnExclusionsWire is the raw enterprise learn-exclusion policy shape ON THE
 // WIRE. It differs from the UI's LearnExclusions in ONE field name: the
@@ -3497,6 +3507,13 @@ export interface AwsAccountRegions {
   selected: string[];
   enabled: number;
   not_enabled: string[];
+  /**
+   * Selected Regions whose opt-in status was last read as off, but that read
+   * is stale. They are still read and collected; never shown as not enabled.
+   */
+  status_unknown?: string[];
+  /** When the opt-in status was last read (RFC 3339), or null. */
+  status_read_at?: string | null;
 }
 
 export interface AwsApiUse {
@@ -3912,6 +3929,8 @@ function normalizeAwsAccount(raw: AwsAccount): AwsAccount {
       selected: raw.regions?.selected ?? [],
       enabled: asCount(raw.regions?.enabled),
       not_enabled: raw.regions?.not_enabled ?? [],
+      status_unknown: raw.regions?.status_unknown ?? [],
+      status_read_at: raw.regions?.status_read_at ?? null,
     },
     api_use: {
       used_rps: asCount(raw.api_use?.used_rps),
@@ -3980,7 +3999,7 @@ function normalizeAwsDraft(raw: AwsConnectDraft): AwsConnectDraft {
 // The connector-off payload is just `{enabled:false}`. Normalize every
 // collection so a page never has to branch on a missing field before it can
 // say the connector is off.
-function normalizeAwsSettings(raw: AwsSettings): AwsSettings {
+export function normalizeAwsSettings(raw: AwsSettings): AwsSettings {
   return {
     ...raw,
     accounts: (raw.accounts ?? []).map(normalizeAwsAccount),
@@ -4668,9 +4687,23 @@ const awsSettingsApi = {
     }),
 };
 
+// AWS Changes (/api/admin/aws/changes). Read-only; the types and query
+// strings live in ./awsChanges with the page's presentation rules.
+const AWS_CHANGES = "/api/admin/aws/changes";
+
+const awsChangesApi = {
+  awsChanges: (q: ChangesQuery = {}) =>
+    request<ChangesView>(`${AWS_CHANGES}${changesQueryString(q)}`),
+  awsChangesGroup: (id: string, cursor?: string | null, limit?: number) =>
+    request<ChangesGroupPage>(`${AWS_CHANGES}/groups/${encodeURIComponent(id)}${groupQueryString(cursor, limit)}`),
+  awsChangesCompare: (q: CompareQuery) =>
+    request<CompareView>(`${AWS_CHANGES}/compare${compareQueryString(q)}`),
+};
+
 export const api = {
   ...agentCapabilitiesApi,
   ...awsSettingsApi,
+  ...awsChangesApi,
   ...finopsApi,
   ...createKubernetesApi(),
   kubernetesClusters: async () => normalizeKubernetesClusters(await request<Partial<KubernetesClusters> | null>("/api/admin/kubernetes/clusters")),

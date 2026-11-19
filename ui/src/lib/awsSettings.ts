@@ -5,7 +5,7 @@
 // The rule the whole screen follows: a value is never invented. A probe that
 // did not answer is "not checked" — never "denied", never zero.
 
-import { fmtClock } from "@/lib/finops";
+import { fmtClockOrDay } from "@/lib/awsChanges";
 import { awsErrorText } from "@/lib/api";
 import type {
   AwsAccountSync,
@@ -90,7 +90,7 @@ export const SERVICE_STATUS_LABELS: Record<AwsServiceStatus, string> = {
   readable: "Readable",
   not_used: "Not used",
   denied: "Denied",
-  not_on_plan: "Not on plan",
+  not_on_plan: "Not on this support plan",
   not_checked: "Not checked",
 };
 
@@ -127,7 +127,7 @@ export function notCheckedReason(errorCode: string | null | undefined): string {
 // The service has no endpoint in the account's region. The probe settles as
 // not used, but the cause is known, so the grid names it.
 const NOT_IN_REGION_CODE = "not_available_in_region";
-const NOT_IN_REGION_WORDS = "Not in this region";
+const NOT_IN_REGION_WORDS = "Not offered in this Region";
 
 /** Status word for one probe result, naming a known cause over the plain status. */
 export function serviceStatusLabel(
@@ -260,7 +260,9 @@ function clockTime(iso: string | null | undefined, now: Date): string | undefine
   if (!Number.isFinite(t)) return undefined;
   // A future timestamp is a clock skew, not a fact worth printing.
   if (t > now.getTime() + 60_000) return undefined;
-  return fmtClock(iso);
+  // The viewer's clock with no zone suffix, through the same formatter the
+  // Changes page uses, so one moment reads the same on both pages.
+  return fmtClockOrDay(iso, now.toISOString());
 }
 
 function ageWords(iso: string | null | undefined, now: Date): string | undefined {
@@ -390,9 +392,9 @@ export function awsSettingsAnswer(
     return { kind: "denied", blocked: false, segments };
   }
 
-  const regionGap = accounts.find((a) => a.regions.not_enabled.length > 0);
+  const regionGap = accounts.find((a) => notEnabledRegions(a).length > 0);
   if (regionGap) {
-    const count = regionGap.regions.not_enabled.length;
+    const count = notEnabledRegions(regionGap).length;
     return {
       kind: "regions",
       blocked: false,
@@ -535,6 +537,7 @@ const GAP_WORDS: Record<string, string> = {
   denied: "Denied",
   not_checked: "Not checked",
   not_enabled: "Not enabled",
+  not_on_plan: SERVICE_STATUS_LABELS.not_on_plan,
   [NOT_IN_REGION_CODE]: NOT_IN_REGION_WORDS,
 };
 
@@ -581,13 +584,32 @@ export function syncProgress(sync: AwsAccountSync, peakTotal = 0): SyncProgress 
   return { ready, total, rows, label: total === 0 ? "Waiting" : `${ready} of ${total} ready` };
 }
 
+/**
+ * Regions known to be not enabled. A Region whose opt-in read is stale
+ * (`status_unknown`) is left out: it is still read and collected.
+ */
+export function notEnabledRegions(account: AwsAccount): string[] {
+  const unknown = new Set(account.regions.status_unknown ?? []);
+  return account.regions.not_enabled.filter((r) => !unknown.has(r));
+}
+
+/** "ap-southeast-1: opt-in status not read since 09:12" (with the date when not today), or null. */
+export function regionStatusUnknownText(account: AwsAccount, now: Date = new Date()): string | null {
+  const unknown = account.regions.status_unknown ?? [];
+  if (unknown.length === 0) return null;
+  const at = account.regions.status_read_at;
+  const since = at ? ` since ${fmtClockOrDay(at, now.toISOString())}` : "";
+  return `${unknown.join(", ")}: opt-in status not read${since}`;
+}
+
 /** Row view model: every number the table prints, derived in one place. */
 export function accountRow(account: AwsAccount, now: Date = new Date()): AwsAccountRow {
   const status = accountStatusWords(account, now);
   const services = account.services;
   const denied = account.denied_services.length;
   const deniedName = deniedServiceName(account);
-  const notEnabled = account.regions.not_enabled.length;
+  const notEnabled = notEnabledRegions(account).length;
+  const statusUnknown = regionStatusUnknownText(account, now);
   const apiBudget = account.api_use.budget_rps;
   const apiUsed = account.api_use.used_rps;
   const waiting = awaitingFirstCheck(account);
@@ -610,11 +632,18 @@ export function accountRow(account: AwsAccount, now: Date = new Date()): AwsAcco
     regionsLabel: waiting ? "Waiting" : `${account.regions.enabled} of ${account.regions.selected.length}`,
     regionsDetail: waiting
       ? ""
-      : notEnabled > 0
-        ? `${notEnabled} not enabled`
-        : account.regions.selected.length === 0
-          ? "none selected"
-          : "all enabled",
+      : [
+          notEnabled > 0
+            ? `${notEnabled} not enabled`
+            : account.regions.selected.length === 0
+              ? "none selected"
+              : statusUnknown
+                ? null
+                : "all enabled",
+          statusUnknown,
+        ]
+          .filter(Boolean)
+          .join("; "),
     apiLabel: `${apiUsed} of ${apiBudget} req/s`,
     apiFraction: apiBudget > 0 ? Math.min(1, Math.max(0, apiUsed / apiBudget)) : 0,
     apiUse: account.api_use,
@@ -765,14 +794,14 @@ export function draftIsRunning(services: AwsDraftService[] = []): boolean {
   return deriveDraftCounts(services).pending > 0;
 }
 
-/** "19 readable · 3 not used · 1 denied · 1 not on plan" (pending omitted). */
+/** "19 readable · 3 not used · 1 denied · 1 not on this support plan" (pending omitted). */
 export function legendWords(counts: AwsGridCounts): string {
   const parts = [
     `${counts.readable} readable`,
     `${counts.not_used} not used`,
     `${counts.denied} denied`,
   ];
-  if (counts.not_on_plan > 0) parts.push(`${counts.not_on_plan} not on plan`);
+  if (counts.not_on_plan > 0) parts.push(`${counts.not_on_plan} not on this support plan`);
   if (counts.not_checked > 0) parts.push(`${counts.not_checked} not checked`);
   if (counts.pending > 0) parts.push(`${counts.pending} checking`);
   return parts.join(" · ");

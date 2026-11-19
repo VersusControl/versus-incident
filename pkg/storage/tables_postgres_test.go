@@ -500,3 +500,44 @@ func TestPostgresFinOpsTotalsPlanUsesCoveringIndex(t *testing.T) {
 	}
 	t.Logf("totals plan:\n%s", plan)
 }
+
+// TestPostgresSweepWaitsForThePollOnTheSameAccount: the change sweep takes
+// the account lock a poll holds, so its coverage trim never interleaves
+// with a poll merging coverage for that account.
+func TestPostgresSweepWaitsForThePollOnTheSameAccount(t *testing.T) {
+	p := tablesPostgres(t)
+	ctx := context.Background()
+	scope := tenancy.DefaultOrgScope()
+	if _, err := p.db.Exec(`TRUNCATE aws_account_epochs, aws_changes, aws_change_coverage, aws_change_gaps, aws_change_counts, aws_change_pairs`); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	if _, err := p.RecordAWSChangePoll(ctx, scope, AWSChangePoll{Account: "111122223333", Region: "us-east-1", At: at,
+		Covered: []AWSInterval{{From: at.Add(-4 * time.Hour), To: at}}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	poll, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := poll.ExecContext(ctx, `SELECT epoch FROM aws_account_epochs WHERE org_id = $1 AND account = $2 FOR UPDATE`, scope.Write, "111122223333"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.SweepAWSRetention(ctx, AWSRetentionSweep{Scope: scope, ChangeBefore: at.Add(-2 * time.Hour), KeepGenerations: 1,
+			Cursor: AWSRetentionCursor{Stage: "changes"}})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("sweep finished while the account was locked by a poll: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := poll.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

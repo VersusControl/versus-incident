@@ -11,8 +11,10 @@ import {
   awsAccount,
   awsSettings,
   draft,
+  staleOptInAccount,
   stagingAccount,
 } from "./awsFixtures";
+import { fmtDayClock } from "@/lib/awsChanges";
 
 vi.mock("@/lib/api", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/api")>();
@@ -249,7 +251,7 @@ describe("AWS settings page", () => {
       awsSettings({ accounts: [awsAccount(), disconnected] }),
     );
     renderPage();
-    expect(await screen.findByText(/^Staging disconnected since \d{2}:\d{2} UTC$/)).toBeTruthy();
+    expect(await screen.findByText(/^Staging disconnected since (?:[A-Z][a-z]{2} \d{1,2} )?\d{2}:\d{2}$/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
 
     const production = screen.getByLabelText("Production 111122223333");
@@ -537,5 +539,18 @@ describe("AWS settings connect panel layout", () => {
     expect((await screen.findByTestId("secret-value")).textContent).toContain(
       "7f3a",
     );
+  });
+});
+
+describe("AWS settings Region opt-in status", () => {
+  it("shows a stale opt-in read as not read since a time, never as not enabled", async () => {
+    const account = staleOptInAccount();
+    vi.mocked(api.awsSettings).mockResolvedValue(awsSettings({ accounts: [awsAccount(), account] }));
+    renderPage();
+    const staging = await screen.findByLabelText("Staging 444455556666");
+    const since = fmtDayClock(account.regions.status_read_at);
+    expect(within(staging).getByText(`ap-southeast-1: opt-in status not read since ${since}`)).toBeTruthy();
+    expect(within(staging).queryByText(/not enabled/)).toBeNull();
+    expect(answerLine().textContent).not.toMatch(/not enabled/);
   });
 });

@@ -105,6 +105,8 @@ var localTableMigrations = []string{
 	"migrations/034_finops_cost_lines_totals_index.sql",
 	"migrations/035_finops_saving_decision_subject.sql",
 	"migrations/036_finops_cost_daily.sql",
+	"migrations/037_aws_change_feed.sql",
+	"migrations/038_aws_change_pairs_not_changes.sql",
 }
 
 // sqliteAddColumn matches one rendered ALTER TABLE … ADD COLUMN IF NOT

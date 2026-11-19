@@ -309,7 +309,7 @@ func TestCloudTrailChanges(t *testing.T) {
 			continue
 		}
 		rules++
-		if change.Template != "ec2.authorize_ingress" || !slices.Contains(change.Resources, groupID) || !strings.Contains(change.Summary, groupID) {
+		if change.Template != "ec2.authorize_ingress" || !slices.Contains(change.Resources, model.ARN("aws", "ec2", testRegion, emulatorAccount, "security-group/"+groupID)) || !strings.Contains(change.Summary, groupID) {
 			t.Errorf("inbound rule change: template %q resources %v summary %q, want the group %s", change.Template, change.Resources, change.Summary, groupID)
 		}
 	}
@@ -329,7 +329,7 @@ func TestCloudTrailChanges(t *testing.T) {
 			if change.Template != "ec2.run_instances" {
 				t.Errorf("RunInstances change: template %q, want ec2.run_instances", change.Template)
 			}
-			if !slices.Contains(change.Resources, webID) {
+			if !slices.Contains(change.Resources, model.ARN("aws", "ec2", testRegion, emulatorAccount, "instance/"+webID)) {
 				continue
 			}
 			found = true
@@ -341,6 +341,29 @@ func TestCloudTrailChanges(t *testing.T) {
 			t.Skip("the emulator's CloudTrail RunInstances event carries responseElements.instances[] (the SDK shape), not responseElements.instancesSet.items[] as AWS CloudTrail does (upstream defect), so no change can name the instance; tests/fakeaws covers the AWS shape")
 		}
 	})
+}
+
+// CloudTrail paging: LookupEvents pages are read to the end without a
+// repeat or a skip, every stored resource is a canonical ARN (short names
+// are kept apart as unresolved).
+func TestCloudTrailPagingAndCanonicalResources(t *testing.T) {
+	w := seeded(t)
+	w.requireCommitted(t, snapshot.ChangeService)
+	seen := map[string]bool{}
+	for _, change := range w.changes.Changes {
+		if seen[change.ID] {
+			t.Errorf("event %s stored twice across pages", change.ID)
+		}
+		seen[change.ID] = true
+		for _, resource := range change.Resources {
+			if !strings.HasPrefix(resource, "arn:aws:") {
+				t.Errorf("change %s %s stores the short name %q as a resource", change.EventName, change.ID, resource)
+			}
+		}
+	}
+	if len(seen) <= 50 {
+		t.Errorf("changes stored = %d, want more than one 50-event page", len(seen))
+	}
 }
 
 // ELBv2: the ALB in both subnets of the seeded VPC routes to the target

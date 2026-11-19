@@ -253,6 +253,11 @@ func (s *Server) writeDescribeRegions(writer http.ResponseWriter, request awsReq
 			xmlText("regionEndpoint", "ec2."+region+".amazonaws.com") +
 			xmlText("optInStatus", "opt-in-not-required") + "</item>"
 	}
+	for _, region := range s.notOptedInRegions(request) {
+		inner += "<item>" + xmlText("regionName", region) +
+			xmlText("regionEndpoint", "ec2."+region+".amazonaws.com") +
+			xmlText("optInStatus", "not-opted-in") + "</item>"
+	}
 	body := `<DescribeRegionsResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">` +
 		`<requestId>` + requestID + `</requestId><regionInfo>` + inner + `</regionInfo>` +
 		`</DescribeRegionsResponse>`

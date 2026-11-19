@@ -21,7 +21,7 @@ func TestAnalyzeAndChatGetAWSReadToolsAndNoActTools(t *testing.T) {
 	ConfigureAWS(func() *settings.Service { return service })
 	t.Cleanup(func() { ConfigureAWS(nil) })
 	runtime := awsRuntimeTools()
-	if !slices.Equal(names(runtime), awstools.ToolNames()) {
+	if !slices.Equal(names(runtime), awstools.ConnectionToolNames()) {
 		t.Fatalf("runtime AWS tools %v", names(runtime))
 	}
 	view, err := aitools.NewManager(storage.NewMemory()).LoadToolsets(tenancy.DefaultOrgScope())

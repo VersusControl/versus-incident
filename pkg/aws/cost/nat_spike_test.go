@@ -12,6 +12,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/aws/settings"
 	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
+	"github.com/VersusControl/versus-incident/pkg/aws/suspect"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/finops"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -71,7 +72,7 @@ func TestNatSpikeNamesTheCheckoutRelease(t *testing.T) {
 	_, _, svc := natSpike(t, nil)
 	inc := natIncreaseView(t, svc)
 	top := inc.Suspect
-	if top.State != "found" || !strings.Contains(top.Summary, "checkout-api") || !strings.Contains(top.Summary, ":42 (was :41)") ||
+	if top.State != "found" || !strings.Contains(top.Summary, "checkout-api") || top.Summary != "Service checkout-api updated to task definition checkout-api:42" ||
 		top.Actor != "github-actions-prod" || top.Confidence != "likely" || top.ConfidenceWord != "Likely" || top.Ref != "change:evt-checkout-42" {
 		t.Fatalf("suspect %+v", top)
 	}
@@ -83,7 +84,7 @@ func TestNatSpikeNamesTheCheckoutRelease(t *testing.T) {
 	if len(inc.Suspects) != 1 || inc.Suspects[0].Ref != top.Ref {
 		t.Fatalf("ranked suspects %+v", inc.Suspects)
 	}
-	if !strings.Contains(inc.Sentence, "after ECS service checkout-api updated to task definition :42 (was :41) by github-actions-prod") {
+	if !strings.Contains(inc.Sentence, "after Service checkout-api updated to task definition checkout-api:42 by github-actions-prod") {
 		t.Fatalf("sentence %q", inc.Sentence)
 	}
 	detail, err := svc.Increase(ctx, finops.Query{Period: "2026-10"}, inc.ID)
@@ -514,9 +515,9 @@ func TestUnrelatedDeployIsNeverLikely(t *testing.T) {
 		all = append(all, r)
 	}
 	d := finops.Detected{Key: finops.LineKey{Account: "111111111111", Service: "network.nat", UsageType: "USE1-NatGateway-Bytes"}}
-	scopes := relatedScopes(all, narrowResources(all, d, []string{"nat-1a"}))
-	if scopes["arn:aws:ecs:us-east-1:111111111111:service/prod/inventory-svc"] != scopeNone ||
-		scopes["arn:aws:ecs:us-east-1:111111111111:service/prod/checkout-api"] != scopeNetwork {
+	scopes := suspect.Related(all, narrowResources(all, d, []string{"nat-1a"}))
+	if scopes["arn:aws:ecs:us-east-1:111111111111:service/prod/inventory-svc"] != suspect.ScopeNone ||
+		scopes["arn:aws:ecs:us-east-1:111111111111:service/prod/checkout-api"] != suspect.ScopeNetwork {
 		t.Fatalf("scopes %v", scopes)
 	}
 	vm := finops.Detected{Key: finops.LineKey{Account: "111111111111", Service: "compute.vm", UsageType: "USE1-BoxUsage:m6i.large"}}

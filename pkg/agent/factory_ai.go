@@ -315,7 +315,7 @@ func buildAIs(cfg config.AgentConfig, connectors config.ConnectorsConfig, catalo
 		if kubernetesService != nil && store != nil {
 			kubernetesChanges = newKubernetesRegistryChangeFeed(kubernetesService, scope)
 		}
-		changes := mergeChangeFeeds(gitChanges, kubernetesChanges, newActionChangeFeed(actionService))
+		changes := mergeChangeFeeds(gitChanges, kubernetesChanges, newActionChangeFeed(actionService), newAWSChangeFeed(awsChangeSource(connectors)))
 
 		// Optional runbook-RAG seam for the find_runbook tool. When an
 		// embedding model is configured (tools.yaml
@@ -648,7 +648,7 @@ func configuredToolAvailabilitySnapshot(cfg config.AgentConfig, store storage.Pr
 		Integrations: map[string]aitools.DependencyStatus{"github": configured(hasGit, "GitHub"), "kubernetes": configured(kubernetesConfigured(connectors.Kubernetes), "Kubernetes cluster")},
 		Capabilities: map[string]aitools.DependencyStatus{
 			"ai_embedder": configured(hasEmbedder, "AI embedder"), "runbook_index": configured(hasEmbedder && store != nil, "Runbook index"), "dependency_graph": configured(hasGraph, "Dependency graph"),
-			"change_feed":   configured(hasGit || (store != nil && kubernetesConfigured(connectors.Kubernetes)), "Change feed"),
+			"change_feed":   configured(hasGit || (store != nil && kubernetesConfigured(connectors.Kubernetes)) || awsChangeSource(connectors) != nil, "Change feed"),
 			"cost_data":     configured(connectors.AWS.CostDataEnabled() && boundFinOps() != nil, "Cloud cost data"),
 			"aws_connector": configured(connectors.AWS.Enable && boundAWS() != nil, "AWS connector"),
 		},

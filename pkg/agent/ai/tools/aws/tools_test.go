@@ -93,6 +93,9 @@ func (h harness) connectWith(t *testing.T, accountID, name string, healthy bool)
 	}
 	health := settings.HealthRecord{AccountID: accountID, Status: settings.StatusConnected, AttemptedAt: fixedNow, AttemptOK: true, CheckedAt: fixedNow.Add(-time.Minute),
 		Regions: []settings.RegionStatus{{Region: "us-east-1", Enabled: true}, {Region: "ap-southeast-1", Enabled: false}},
+		// The opt-in status was read and is still fresh, so the region is
+		// confirmed off (a record without a fresh read means unknown).
+		RegionsReadAt: fixedNow, RegionsFreshUntil: time.Now().Add(365 * 24 * time.Hour),
 		ProbeResults: []probe.Result{
 			{Service: "ec2", Status: probe.StatusReadable, Items: 3},
 			{Service: "elasticache", Status: probe.StatusDenied, ErrorCode: probe.CodeDenied},
@@ -143,7 +146,7 @@ func TestAWSSpecMatchesRegistry(t *testing.T) {
 	for _, m := range aitools.Catalog() {
 		if m.Group == aitools.GroupAWS {
 			catalog = append(catalog, m.Name)
-			if m.DisplayName != displayNames[m.Name] || m.UIPath != settingsUI {
+			if m.DisplayName != displayNames[m.Name] || m.UIPath != uiPaths[m.Name] {
 				t.Errorf("%s metadata %+v", m.Name, m)
 			}
 		}

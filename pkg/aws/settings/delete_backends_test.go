@@ -31,6 +31,7 @@ type backend struct {
 type tablesProvider interface {
 	storage.Provider
 	storage.AWSInventoryStore
+	storage.AWSChangeFeedStore
 	storage.FinOpsStore
 }
 

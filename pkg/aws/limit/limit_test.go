@@ -104,3 +104,45 @@ func TestExpectFillsTheAccountBudget(t *testing.T) {
 		t.Fatalf("unexpected budget before any call: %#v", usage)
 	}
 }
+
+// LookupEvents runs in its own lane: never above the CloudTrail rate
+// whatever the configured budget, and a CloudTrail throttle pauses only
+// CloudTrail.
+func TestCloudTrailLaneCapsRateAndIsolatesThrottle(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	manager := newManager(10, clock.Now)
+	lane := manager.Lane(CloudTrailLane, CloudTrailMaxRPS)
+	if item := lane.entry("111111111111", "us-east-1"); float64(item.limiter.Limit()) != CloudTrailMaxRPS || item.limiter.Burst() > CloudTrailMaxRPS {
+		t.Fatalf("lane limiter = %v/%d", item.limiter.Limit(), item.limiter.Burst())
+	}
+	manager.SetMaxRPS(20)
+	if item := lane.entry("111111111111", "us-east-1"); float64(item.limiter.Limit()) != CloudTrailMaxRPS {
+		t.Fatalf("lane rate after a budget change = %v", item.limiter.Limit())
+	}
+	lane.Throttled("111111111111", "us-east-1")
+	if err := lane.Wait(context.Background(), "111111111111", "us-east-1"); !errors.Is(err, ErrBackoff) {
+		t.Fatalf("throttled lane = %v", err)
+	}
+	if err := manager.Wait(context.Background(), "111111111111", "us-east-1"); err != nil {
+		t.Fatalf("inventory paused by a CloudTrail throttle: %v", err)
+	}
+	if manager.Lane(CloudTrailLane, CloudTrailMaxRPS) != lane {
+		t.Fatal("lane not shared")
+	}
+}
+
+// Grants are dropped as new ones arrive, so a lane whose meter is never
+// read stays bounded to one window of grants.
+func TestGrantsStayBoundedWithoutReadingTheMeter(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	manager := newManager(1000, clock.Now)
+	for range 300 {
+		clock.now = clock.now.Add(time.Second)
+		if err := manager.WaitBudget(context.Background(), "111111111111", "us-east-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if grants := len(manager.entry("111111111111", "us-east-1").grants); grants > int(Window/time.Second)+1 {
+		t.Fatalf("grants kept = %d", grants)
+	}
+}

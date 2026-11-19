@@ -12,6 +12,8 @@ import (
 type inventoryProvider interface {
 	storage.Provider
 	storage.AWSInventoryStore
+	storage.AWSChangeFeedStore
+	storage.AWSUnitHistoryStore
 }
 
 // openBackend opens the provider the running test uses; eachBackend sets it.
@@ -46,7 +48,7 @@ func eachBackend(t *testing.T, fn func(t *testing.T)) {
 			}
 			t.Cleanup(func() { _ = provider.Close() })
 			if _, err := provider.(storage.SQLAccessor).DB().Exec(`TRUNCATE aws_account_epochs, aws_sync_units, aws_unit_generations, aws_resources,
- aws_health, aws_security_flags, aws_changes, aws_change_coverage`); err != nil {
+ aws_health, aws_security_flags, aws_changes, aws_change_coverage, aws_change_counts, aws_change_gaps, aws_change_pairs`); err != nil {
 				t.Fatal(err)
 			}
 			return provider.(inventoryProvider)

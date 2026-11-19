@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/aws/changes"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
@@ -91,13 +92,21 @@ func flagOf(row storage.AWSSecurityFlag) model.SecurityFlag {
 	return model.SecurityFlag{Resource: row.ARN, Account: row.Account, Region: detail.Region, Kind: model.SecurityFlagKind(row.Flag), Summary: row.Summary}
 }
 
+// changeDetail is the stored change with its resources' folded keys, which
+// the resource filter matches as well as the ARNs themselves.
+type changeDetail struct {
+	model.Change
+	ResourceKeys []string `json:"resource_keys,omitempty"`
+}
+
 // changeRow stores the whole change as its detail; the columns carry what
 // reads filter on.
 func changeRow(region string, change model.Change) storage.AWSChange {
 	row := storage.AWSChange{
 		EventID: change.ID, Account: change.Account, Region: region, Service: change.Service, EventTime: change.Time,
 		EventName: change.EventName, ActorClass: string(change.Actor.Class), Actor: change.Actor.PrincipalARN,
-		Summary: change.Summary, Fields: change.Fields, Detail: marshalDetail(change),
+		Summary: change.Summary, Fields: change.Fields, Detail: marshalDetail(changeDetail{Change: change, ResourceKeys: changes.ResourceKeys(change.Resources)}),
+		ErrorCode: change.ErrorCode, Template: change.Template, SessionClass: change.Actor.SessionClass, Via: change.Actor.Via,
 	}
 	if len(change.Resources) > 0 {
 		row.ResourceARN = change.Resources[0]

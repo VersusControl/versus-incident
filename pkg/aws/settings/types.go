@@ -108,6 +108,11 @@ type HealthRecord struct {
 	ProbedAt            time.Time      `json:"probed_at,omitzero"`
 	ProbeResults        []probe.Result `json:"probe_results,omitempty"`
 	Regions             []RegionStatus `json:"regions,omitempty"`
+	// RegionsReadAt is when Regions' opt-in status was last read
+	// successfully. A Region counts as confirmed not enabled only until
+	// RegionsFreshUntil; after that its status is unknown.
+	RegionsReadAt     time.Time `json:"regions_read_at,omitzero"`
+	RegionsFreshUntil time.Time `json:"regions_fresh_until,omitzero"`
 }
 
 // ServiceCounts summarises the probe grid without forcing a client to walk

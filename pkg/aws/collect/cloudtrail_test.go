@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/aws/changes"
+	"github.com/VersusControl/versus-incident/pkg/aws/limit"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
 	"github.com/VersusControl/versus-incident/tests/fakeaws"
@@ -37,8 +38,9 @@ func TestChangePollCoversWindowWithoutGaps(t *testing.T) {
 	if len(again.Changes) != len(result.Changes) {
 		t.Fatalf("changes %d -> %d after a repeat poll", len(result.Changes), len(again.Changes))
 	}
-	// Beyond the lookback nothing was read, so that stretch is a gap.
-	older, _ := h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount}, now.Add(-48*time.Hour), settled)
+	// Beyond the lookback nothing was read, so that stretch is a gap, on the
+	// region and on the account's global stream alike.
+	older, _ := h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount, Region: testRegion}, now.Add(-48*time.Hour), settled)
 	if older.Complete || len(older.Gaps) != 1 || older.Gaps[0].Reason != model.GapNotChecked {
 		t.Fatalf("pre-lookback window = %+v", older.Gaps)
 	}
@@ -52,7 +54,7 @@ func TestFailedChangePollIsAGapNotEmpty(t *testing.T) {
 		t.Fatalf("throttled poll = %+v", report.Units[0])
 	}
 	now := time.Now()
-	result, err := h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount}, now.Add(-time.Hour), now)
+	result, err := h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount, Region: testRegion}, now.Add(-time.Hour), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +64,7 @@ func TestFailedChangePollIsAGapNotEmpty(t *testing.T) {
 	// Once the shared backoff has passed, the next clean poll fills the
 	// window.
 	h.fake.SetThrottle(0)
-	h.limiter.Succeeded(productionAccount, testRegion)
+	h.limiter.Lane(limit.CloudTrailLane, limit.CloudTrailMaxRPS).Succeeded(productionAccount, testRegion)
 	mustSync(t, h, target(productionAccount), KindChanges)
 	result, _ = h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount}, now.Add(-time.Hour), now.Add(-DefaultChangeOverlap-time.Second))
 	if !result.Complete {
@@ -140,13 +142,16 @@ func TestRecentTailStaysAGapUntilReread(t *testing.T) {
 	if until := checkpoint.CoveredUntil(); until.IsZero() || until.After(settled) {
 		t.Fatalf("first poll claimed coverage until %s, after %s", until, settled)
 	}
-	tail, _ := h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount}, at.Add(-20*time.Minute), at)
+	tail, _ := h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount, Region: testRegion}, at.Add(-20*time.Minute), at)
 	if tail.Complete || len(tail.Gaps) != 1 || tail.Gaps[0].From.After(settled) || !tail.Gaps[0].To.Equal(at) {
 		t.Fatalf("unsettled tail = %+v", tail.Gaps)
 	}
 
 	h.fake.AddLateEvent("00000000-0000-0000-0000-0000000000c1", "PutRule", "events.amazonaws.com", at.Add(-2*time.Minute))
-	poll(at.Add(20 * time.Minute))
+	// Time passes for AWS too: a local clock alone moving ahead is skew.
+	later := at.Add(20 * time.Minute)
+	h.fake.SetClock(func() time.Time { return later })
+	poll(later)
 	window, _ := h.store.Changes(context.Background(), snapshot.Query{Account: productionAccount, Service: "eventbridge"}, at.Add(-5*time.Minute), at)
 	if !window.Complete || len(window.Changes) != 1 || window.Changes[0].EventName != "PutRule" {
 		t.Fatalf("late event after re-read = %+v", window)
@@ -177,7 +182,8 @@ func TestLookbackNeverPassesRetention(t *testing.T) {
 			t.Fatal("an event older than retention was fetched")
 		}
 	}
-	if h.fake.OperationCount("cloudtrail:LookupEvents") != 1 {
-		t.Fatalf("lookup pages = %d, want 1", h.fake.OperationCount("cloudtrail:LookupEvents"))
+	// One page for the region and one for the account's global stream.
+	if h.fake.OperationCount("cloudtrail:LookupEvents") != 2 {
+		t.Fatalf("lookup pages = %d, want 2", h.fake.OperationCount("cloudtrail:LookupEvents"))
 	}
 }
