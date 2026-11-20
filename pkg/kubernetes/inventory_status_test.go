@@ -1,13 +1,13 @@
 package kubernetes
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 )
@@ -50,21 +50,25 @@ var inventoryLogLinePattern = regexp.MustCompile(`^kubernetes: inventory (kind=[
 // The line carries only the kind, its state, its class and counts: no record
 // name, label, value, payload, or credential can reach it.
 func TestInventoryKindFailureLogsOncePerStateChangeWithoutRecordData(t *testing.T) {
-	var logs bytes.Buffer
-	previousWriter, previousFlags := log.Writer(), log.Flags()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-	})
+	collected := captureLogLines(t, "debug")
+	// debugLines returns the state-change lines, which are debug detail; the
+	// warnings are covered by the leveled-log tests.
+	debugLines := func() string {
+		var lines []string
+		for _, line := range collected.all() {
+			if detail, ok := strings.CutPrefix(line, "DEBUG "); ok && strings.HasPrefix(detail, "kubernetes: inventory ") {
+				lines = append(lines, detail)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
 	state := newInventoryKindLog()
 	scope := kubeindex.Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "epoch"}
 	failing := map[string]kubeindex.KindStatus{"Node": {State: "partial", Partial: true, Error: "record_rejected", Skipped: 3, Records: 12}}
 	state.report(scope, failing)
 	state.report(scope, failing)
-	if lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n"); len(lines) != 1 || lines[0] != "kubernetes: inventory kind=Node state=partial class=record_rejected skipped=3 records=12" {
-		t.Fatalf("repeated state wrote %q", logs.String())
+	if lines := debugLines(); lines != "kubernetes: inventory kind=Node state=partial class=record_rejected skipped=3 records=12" {
+		t.Fatalf("repeated state wrote %q", lines)
 	}
 	// A changed skip count is a new state and produces exactly one more line.
 	state.report(scope, map[string]kubeindex.KindStatus{"Node": {State: "partial", Partial: true, Error: "record_rejected", Skipped: 4, Records: 11}})
@@ -73,9 +77,9 @@ func TestInventoryKindFailureLogsOncePerStateChangeWithoutRecordData(t *testing.
 	// Recovery is a state change too.
 	state.report(scope, map[string]kubeindex.KindStatus{"Secret": {State: "ready", Records: 4}})
 	// A cycle that fails before any kind is listed still says why.
-	state.cycle(scope, ErrIncompleteInventory)
-	state.cycle(scope, ErrIncompleteInventory)
-	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
+	state.cycle(scope, ErrIncompleteInventory, true)
+	state.cycle(scope, ErrIncompleteInventory, true)
+	lines := strings.Split(debugLines(), "\n")
 	want := []string{
 		"kubernetes: inventory kind=Node state=partial class=record_rejected skipped=3 records=12",
 		"kubernetes: inventory kind=Node state=partial class=record_rejected skipped=4 records=11",
@@ -84,7 +88,7 @@ func TestInventoryKindFailureLogsOncePerStateChangeWithoutRecordData(t *testing.
 		"kubernetes: inventory cycle failed class=incomplete_pages",
 	}
 	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("log lines:\n%s", logs.String())
+		t.Fatalf("log lines:\n%s", strings.Join(collected.all(), "\n"))
 	}
 	for _, line := range lines {
 		if !inventoryLogLinePattern.MatchString(line) {
@@ -116,58 +120,85 @@ func TestFailedCycleMarksKindsWithItsOwnClass(t *testing.T) {
 
 // The cycle mark is cleared by a healthy cycle, so the same failure returning
 // later is written again instead of being suppressed forever.
+// The warning goes through the throttle: a failure that returns within one
+// window of clearing continues its episode, and one that returns later is
+// warned about again.
 func TestInventoryCycleFailureIsLoggedAgainAfterRecovery(t *testing.T) {
-	var logs bytes.Buffer
-	previousWriter, previousFlags := log.Writer(), log.Flags()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-	})
-	state := newInventoryKindLog()
+	logs := captureLogLines(t, "debug")
+	clock := newFakeClock()
+	state := newClockedKindLog(clock, 10*time.Minute)
 	scope := kubeindex.Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "epoch"}
-	state.cycle(scope, ErrIncompleteInventory)
-	state.cycle(scope, ErrIncompleteInventory)
-	if lines := strings.Count(logs.String(), "\n"); lines != 1 {
-		t.Fatalf("repeated cycle failure wrote %d lines: %q", lines, logs.String())
+	count := func(prefix string) int {
+		n := 0
+		for _, line := range logs.all() {
+			if strings.HasPrefix(line, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	state.cycle(scope, ErrIncompleteInventory, true)
+	state.cycle(scope, ErrIncompleteInventory, true)
+	if debug, warn := count("DEBUG kubernetes: inventory cycle failed"), count("WARN "); debug != 1 || warn != 1 {
+		t.Fatalf("repeated cycle failure wrote %d debug and %d warning lines: %q", debug, warn, logs.all())
+	}
+	want := `WARN kubernetes: cluster "cluster" inventory cycle failed class=incomplete_pages (incomplete list); check the API server, and any proxy in front of it, returns every page of a list`
+	if lines := logs.all(); !slices.Contains(lines, want) {
+		t.Fatalf("cycle warning missing: %q", lines)
 	}
 	state.cycleSucceeded(scope)
-	state.cycle(scope, ErrIncompleteInventory)
-	if lines := strings.Count(logs.String(), "\n"); lines != 2 {
-		t.Fatalf("a failure after recovery stayed silent: %q", logs.String())
+	state.cycle(scope, ErrIncompleteInventory, true)
+	if debug, warn := count("DEBUG kubernetes: inventory cycle failed"), count("WARN "); debug != 2 || warn != 1 {
+		t.Fatalf("a failure flapping within the window wrote %d debug and %d warning lines: %q", debug, warn, logs.all())
+	}
+	state.cycleSucceeded(scope)
+	clock.advance(11 * time.Minute)
+	state.cycle(scope, ErrIncompleteInventory, true)
+	if warn := count("WARN "); warn != 2 {
+		t.Fatalf("a failure after recovery stayed silent: %q", logs.all())
+	}
+	// A credential failure is warned about by the credential check, so the
+	// cycle adds its debug line only.
+	other := kubeindex.Scope{OrgID: "org", ClusterID: "other", CredentialID: "epoch"}
+	state.cycle(other, ErrUnauthorized, false)
+	if warn := count("WARN "); warn != 2 {
+		t.Fatalf("a credential failure was warned about twice: %q", logs.all())
 	}
 }
 
 // One logger is shared by every org-scoped service of a cluster, so its state has
 // to be per scope: one org's failure must not silence another org's line.
 func TestInventoryKindLogIsIsolatedPerScope(t *testing.T) {
-	var logs bytes.Buffer
-	previousWriter, previousFlags := log.Writer(), log.Flags()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(previousWriter)
-		log.SetFlags(previousFlags)
-	})
-	state := newInventoryKindLog()
+	collected := captureLogLines(t, "debug")
+	count := func(prefix string) int {
+		n := 0
+		for _, line := range collected.all() {
+			if strings.HasPrefix(line, prefix) {
+				n++
+			}
+		}
+		return n
+	}
+	state := newClockedKindLog(newFakeClock(), 10*time.Minute)
 	first := kubeindex.Scope{OrgID: "org-a", ClusterID: "cluster", CredentialID: "epoch"}
 	second := kubeindex.Scope{OrgID: "org-b", ClusterID: "cluster", CredentialID: "epoch"}
 	failing := map[string]kubeindex.KindStatus{"Node": {State: "error", Partial: true, Error: "forbidden"}}
 	state.report(first, failing)
 	state.report(second, failing)
-	if lines := strings.Count(logs.String(), "\n"); lines != 2 {
-		t.Fatalf("one org's line suppressed another's: %q", logs.String())
+	if debug, warn := count("DEBUG "), count("WARN "); debug != 2 || warn != 2 {
+		t.Fatalf("one org's line suppressed another's: %q", collected.all())
 	}
 	state.report(first, failing)
-	if lines := strings.Count(logs.String(), "\n"); lines != 2 {
-		t.Fatalf("repeat state logged again: %q", logs.String())
+	if debug, warn := count("DEBUG "), count("WARN "); debug != 2 || warn != 2 {
+		t.Fatalf("repeat state logged again: %q", collected.all())
 	}
-	// A credential rotation for one org is its own scope and logs once more.
+	// A credential rotation for one org is its own scope for the state
+	// lines, but the cluster and kind still fail the same way, so the
+	// warning is not repeated.
 	rotated := first
 	rotated.CredentialID = "next-epoch"
 	state.report(rotated, failing)
-	if lines := strings.Count(logs.String(), "\n"); lines != 3 {
-		t.Fatalf("credential epoch shared bookkeeping: %q", logs.String())
+	if debug, warn := count("DEBUG "), count("WARN "); debug != 3 || warn != 2 {
+		t.Fatalf("credential epoch shared bookkeeping: %q", collected.all())
 	}
 }

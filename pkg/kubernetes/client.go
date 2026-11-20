@@ -98,6 +98,15 @@ type Client struct {
 	authGeneration   atomic.Uint64
 	authContext      context.Context
 	authCancel       context.CancelFunc
+	// proofs caches identity proofs per token for sources whose renewals
+	// are proved; it is created on first use.
+	proofsMu sync.Mutex
+	proofs   *credentialProofs
+	// identityChanges counts principal-change rebuilds in a row, with the
+	// changed field names, for the warning that the identity is not stable.
+	identityMu      sync.Mutex
+	identityChanges int
+	identityFields  map[string]bool
 }
 
 func (client *Client) credentialEpochContext() (context.Context, context.CancelFunc) {
@@ -357,15 +366,21 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 		requestCredentialGeneration = service.identity.requestGeneration.Load()
 	}
 	if client.credentials != nil {
+		if err := client.requireCredentialEpoch(ctx); err != nil {
+			return nil, false, err
+		}
 		authorization, credentialErr := client.credentials.Authorization(requestCtx)
 		if credentialErr != nil {
 			return nil, false, credentialErr
 		}
 		if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
-			accepted, certificate, err := service.acceptCredentialForRequest(ctx, authorization)
+			// The admitted header can be the previous, proven token while
+			// the renewed one is still being proved.
+			admitted, accepted, certificate, err := service.acceptCredentialForRequest(ctx, authorization)
 			if err != nil {
 				return nil, false, err
 			}
+			authorization = admitted
 			requestService, requestCredentialGeneration = service, accepted
 			requestCertificate = certificate
 		} else {
@@ -402,6 +417,9 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 			client.backoffMu.Unlock()
 		}
 		currentRequest := requestService == nil || requestService.identity.requestGeneration.Load() == requestCredentialGeneration
+		if response.StatusCode == http.StatusUnauthorized && requestService != nil {
+			requestService.noteRejectedCredential(request.Header.Get("Authorization"))
+		}
 		if response.StatusCode == http.StatusUnauthorized && currentRequest {
 			if client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx)) && requestService != nil {
 				requestService.denyHistoryAuthority(ctx, apiPath, true)
@@ -458,6 +476,20 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 		}
 	}
 	return data, truncated, nil
+}
+
+// requireCredentialEpoch refuses a data request that is not bound to a
+// credential epoch when the source's renewed tokens must be proved first. Only
+// an epoch knows which token is proven; an unbound request would send whatever
+// the source returned last, including a candidate that has not been proved.
+func (client *Client) requireCredentialEpoch(ctx context.Context) error {
+	if _, proven := client.credentials.(provenCredentialSource); !proven {
+		return nil
+	}
+	if _, bound := ctx.Value(credentialEpochContextKey{}).(*Service); bound {
+		return nil
+	}
+	return ErrCredentialUnavailable
 }
 
 func (client *Client) requestURL(apiPath string) (string, error) {

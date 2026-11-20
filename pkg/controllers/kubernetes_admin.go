@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	kuberneteschanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubernetesindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 
 	"github.com/gofiber/fiber/v2"
@@ -282,6 +282,12 @@ func (controller *KubernetesAdminController) requireReportPermission(ctx *fiber.
 // failure keeps the code its own fault already has.
 func connectorResolutionError(err error) error {
 	if !errors.Is(err, kubernetes.ErrCredentialUnavailable) && !errors.Is(err, kubernetes.ErrUnauthorized) {
+		return err
+	}
+	if kubernetes.IsCredentialHostFailure(err) {
+		// The credential can be valid while its renewal's proof host or the
+		// cloud token host does not answer: that failure keeps its own code
+		// and remedy.
 		return err
 	}
 	// The cause stays attached for classification and logging; the answer a client
@@ -738,7 +744,9 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 		clusterID = service.Scope().ClusterID
 	}
 	detail := kubernetes.DiagnoseClusterError(err, multiple, clusterID)
-	log.Printf("kubernetes admin failure: code=%s retryable=%t", detail.Code, detail.Retryable)
+	// Per request, so debug: a failure the operator must act on is logged once
+	// by the component that detected it, not again for every request.
+	logging.Debugf("kubernetes admin failure: code=%s retryable=%t", detail.Code, detail.Retryable)
 	// A connector fault can still have a report to give. The cluster's durable
 	// first ready moment is local state, so it survives the credential that wrote
 	// it, and a surface needs it exactly when every cluster read is failing. The

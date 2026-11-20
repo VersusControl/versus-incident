@@ -136,6 +136,9 @@ type partialRoleCluster struct {
 	// clusterSecretLists counts those LISTs.
 	denyClusterSecrets atomic.Bool
 	clusterSecretLists atomic.Int64
+	// failSecrets answers 500 to every Secret LIST, as an API server whose
+	// storage for Secrets is failing does.
+	failSecrets atomic.Bool
 
 	mu             sync.Mutex
 	secretAnswered chan struct{}
@@ -293,6 +296,9 @@ func newPartialRoleCluster(t *testing.T, gatewayAPI bool) *partialRoleCluster {
 			return
 		case list && strings.HasPrefix(path, "/api/v1/namespaces/") && strings.HasSuffix(path, "/pods") && cluster.denyNamespacedPods.Load():
 			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		case list && strings.HasSuffix(path, "/secrets") && cluster.failSecrets.Load():
+			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		case (list || r.Method == http.MethodGet && query.Has("labelSelector")) && strings.HasSuffix(path, "/secrets") && cluster.denySecrets.Load():
 			if path == "/api/v1/secrets" && cluster.order.Load() == secretOrderLast {

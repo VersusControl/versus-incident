@@ -90,9 +90,12 @@ func TestListK8sIssuesBrokenView(t *testing.T) {
 	}
 	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster"}, 0)
 	service.SetChangeStorage(storage.NewMemory())
+	// The registry is built before capture starts, as at boot: it wires the
+	// service the capture worker then reads.
+	registry := kubernetes.NewServiceRegistry(service)
 	warmToolInventory(t, service)
 	ctx := core.WithCallerAuthorization(t.Context(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
-	for _, tool := range NewForRegistry(kubernetes.NewServiceRegistry(service)) {
+	for _, tool := range NewForRegistry(registry) {
 		if tool.Name() != "list_k8s_issues" {
 			continue
 		}

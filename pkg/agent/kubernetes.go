@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
@@ -28,8 +29,27 @@ func ConfigureKubernetesIssueAlerts(registry *kubernetes.ServiceRegistry, sink f
 func NewKubernetesRegistry(cfg config.KubernetesConnectorConfig, scope tenancy.OrgScope) (*kubernetes.ServiceRegistry, []error) {
 	entries := []kubernetes.ClusterEntry{}
 	errorsFound := []error{}
-	for _, entry := range cfg.Resolved() {
-		service, err := NewKubernetesService(entry.KubernetesToolConfig, scope)
+	resolved := cfg.Resolved()
+	// Each cluster's first credential check may wait on its cloud token host
+	// up to its own bound. The clusters are built side by side, so a token
+	// host that drops packets delays startup by one bound, not one per cluster.
+	type built struct {
+		service *kubernetes.Service
+		err     error
+	}
+	results := make([]built, len(resolved))
+	var wg sync.WaitGroup
+	for i, entry := range resolved {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			service, err := NewKubernetesService(entry.KubernetesToolConfig, scope)
+			results[i] = built{service: service, err: err}
+		}()
+	}
+	wg.Wait()
+	for i, entry := range resolved {
+		service, err := results[i].service, results[i].err
 		if service == nil && err == nil && !cfg.Multiple {
 			continue
 		}

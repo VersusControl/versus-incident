@@ -233,7 +233,12 @@ func (p *fileProvider) evidenceIndex() (*localEvidence, error) {
 		if !isLocalEvidenceKey(key) {
 			continue
 		}
-		lock := fileBlobLock(p.blobPath(key))
+		path, err := p.blobPath(key)
+		if err != nil {
+			_ = index.db.Close()
+			return nil, err
+		}
+		lock := fileBlobLock(path)
 		lock.Lock()
 		var exists bool
 		err = index.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM evidence_scopes WHERE key=?)`, key).Scan(&exists)

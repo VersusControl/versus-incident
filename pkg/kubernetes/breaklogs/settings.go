@@ -50,10 +50,11 @@ type Settings struct {
 }
 
 type Alerts struct {
-	Enabled   bool      `json:"enabled"`
-	Level     string    `json:"level"`
-	EnabledAt time.Time `json:"enabled_at"`
-	UpdatedBy string    `json:"updated_by"`
+	Enabled       bool      `json:"enabled"`
+	Level         string    `json:"level"`
+	EnabledAt     time.Time `json:"enabled_at"`
+	UpdatedBy     string    `json:"updated_by"`
+	EvaluatedFrom time.Time `json:"evaluated_from,omitzero"`
 }
 
 type Health struct {

@@ -299,6 +299,9 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 		requestGeneration = service.identity.requestGeneration.Load()
 	}
 	if client.credentials != nil {
+		if err := client.requireCredentialEpoch(ctx); err != nil {
+			return nil, err
+		}
 		credentialContext, cancel := context.WithTimeout(ctx, 10*time.Second)
 		authorization, credentialErr := client.credentials.Authorization(credentialContext)
 		cancel()
@@ -306,10 +309,11 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 			return nil, ErrCredentialUnavailable
 		}
 		if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
-			accepted, pinned, err := service.acceptCredentialForRequest(ctx, authorization)
+			admitted, accepted, pinned, err := service.acceptCredentialForRequest(ctx, authorization)
 			if err != nil {
 				return nil, err
 			}
+			authorization = admitted
 			requestService, requestGeneration, certificate = service, accepted, pinned
 		} else {
 			certificate, err = client.credentials.ClientCertificate(&tls.CertificateRequestInfo{})
@@ -336,6 +340,9 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 	}
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
+		if response.StatusCode == http.StatusUnauthorized && requestService != nil {
+			requestService.noteRejectedCredential(request.Header.Get("Authorization"))
+		}
 		if response.StatusCode == http.StatusUnauthorized && (requestService == nil || requestService.identity.requestGeneration.Load() == requestGeneration) {
 			if client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx)) && requestService != nil {
 				requestService.denyHistoryAuthority(ctx, apiPath, true)

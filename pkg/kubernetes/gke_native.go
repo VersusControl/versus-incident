@@ -196,12 +196,18 @@ func requestGoogleToken(ctx context.Context, client *http.Client, endpoint strin
 		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	response, err := client.Do(request)
-	if err != nil {
-		return nil, errors.New("GKE credential endpoint unavailable")
+	if unavailable := tokenEndpointUnavailable(client, response, err, "GKE credential endpoint unavailable"); unavailable != nil {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		return nil, unavailable
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, googleResponseLimit+1))
-	if err != nil || len(body) > googleResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+	if err != nil {
+		return nil, tokenEndpointUnavailable(client, nil, err, "GKE credential endpoint unavailable")
+	}
+	if len(body) > googleResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, errors.New("GKE credential endpoint rejected the request")
 	}
 	var document struct {
@@ -226,12 +232,18 @@ func impersonatedGoogleToken(ctx context.Context, client *http.Client, endpoint,
 	request.Header.Set("Authorization", "Bearer "+bearer)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := client.Do(request)
-	if err != nil {
-		return nil, errors.New("GKE impersonation endpoint unavailable")
+	if unavailable := tokenEndpointUnavailable(client, response, err, "GKE impersonation endpoint unavailable"); unavailable != nil {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		return nil, unavailable
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, googleResponseLimit+1))
-	if err != nil || len(data) > googleResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
+	if err != nil {
+		return nil, tokenEndpointUnavailable(client, nil, err, "GKE impersonation endpoint unavailable")
+	}
+	if len(data) > googleResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, errors.New("GKE impersonation endpoint rejected the request")
 	}
 	var document struct {
@@ -261,12 +273,18 @@ func (source *gkeMetadataTokenSource) Token(ctx context.Context) (*oauth2.Token,
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?scopes="+url.QueryEscape(googleCloudPlatformScope), nil)
 	request.Header.Set("Metadata-Flavor", "Google")
 	response, err := source.client.Do(request)
-	if err != nil {
-		return nil, errors.New("GKE metadata credentials unavailable")
+	if unavailable := tokenEndpointUnavailable(source.client, response, err, "GKE metadata credentials unavailable"); unavailable != nil {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		return nil, unavailable
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, googleResponseLimit+1))
-	if err != nil || len(body) > googleResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 || response.Header.Get("Metadata-Flavor") != "Google" {
+	if err != nil {
+		return nil, tokenEndpointUnavailable(source.client, nil, err, "GKE metadata credentials unavailable")
+	}
+	if len(body) > googleResponseLimit || response.StatusCode < 200 || response.StatusCode >= 300 || response.Header.Get("Metadata-Flavor") != "Google" {
 		return nil, errors.New("invalid GKE metadata credential response")
 	}
 	var document struct {
