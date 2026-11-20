@@ -388,8 +388,11 @@ func TestFleetSummaryVersionAndIssues(t *testing.T) {
 		services = append(services, service)
 		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, Provider: "generic"}, Service: service})
 	}
+	// Register the services before capture starts, as production does: the
+	// registry hands each service its recovery state, which capture reads.
+	registry := kubernetes.NewClusterRegistry(true, entries)
 	warmScenarioInventory(t, services...)
-	summaries := kubernetes.NewClusterRegistry(true, entries).Summaries(t.Context(), "default", nil)
+	summaries := registry.Summaries(t.Context(), "default", nil)
 	for index, summary := range summaries {
 		if summary.Version != "v1.30.4" || summary.Issues == nil || *summary.Issues != 0 || summary.Nodes != index+1 || summary.Pods != index+2 {
 			t.Fatalf("fleet summary=%+v", summary)
