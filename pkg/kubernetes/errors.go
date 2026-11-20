@@ -452,7 +452,21 @@ func DiagnoseError(err error) ErrorDetail {
 	var denied *permissionDeniedError
 	var build *connectorBuildError
 	var refused *endpointRefusedError
+	var proofFailure *proofError
 	switch {
+	case errors.As(err, &proofFailure):
+		// Never named a rejected credential: the credential may be fine, and
+		// nothing was rebuilt.
+		if proofFailure.class == "clock_skew" {
+			return ErrorDetail{Code: proofFailure.Code(), Message: "Versus cannot yet prove that the renewed cluster credential belongs to the same identity, because the token's validity times disagree with this server's clock, so requests pause.", Action: "Check that this server's clock is synchronized (NTP); requests resume when the proof succeeds.", Retryable: true}
+		}
+		if proofFailure.class == "jwks_host_not_allowed" {
+			return ErrorDetail{Code: proofFailure.Code(), Message: "Versus cannot yet prove that the renewed cluster credential belongs to the same identity, because its proof keys are published on a host outside the allowed hosts for this cloud, so requests pause.", Action: "Check that the connector's cloud environment matches the cluster's tenant; requests resume when the proof succeeds.", Retryable: true}
+		}
+		if proofFailure.class == "review_denied" {
+			return ErrorDetail{Code: proofFailure.Code(), Message: "Versus cannot yet prove that the renewed cluster credential belongs to the same identity, because the cluster refuses its identity review, so requests pause.", Action: "Check that the cluster credential may create identity reviews (selfsubjectreviews); requests resume when the proof succeeds.", Retryable: true}
+		}
+		return ErrorDetail{Code: proofFailure.Code(), Message: "Versus cannot yet prove that the renewed cluster credential belongs to the same identity, so requests pause.", Action: "Check that Versus can reach the identity proof host; requests resume when the proof succeeds.", Retryable: true}
 	case errors.As(err, &build):
 		return connectorBuildDetail(build.cause)
 	case errors.As(err, &refused):
@@ -512,6 +526,10 @@ func DiagnoseError(err error) ErrorDetail {
 		return ErrorDetail{Code: "request_too_large", Message: "The log stream request is larger than this endpoint accepts.", Action: "Resume from a line timestamp instead of carrying the whole resume state in the request.", Retryable: false}
 	case errors.Is(err, ErrInvalidEndpoint):
 		return ErrorDetail{Code: "connector_configuration_invalid", Message: "The Kubernetes endpoint or network policy is invalid.", Action: "Check connectors.kubernetes.endpoint, endpoint_cidrs, and allow_private_networks, then restart Versus.", Retryable: false}
+	case errors.Is(err, ErrTokenEndpointUnavailable):
+		// Same code, so every surface still treats the cluster as unreadable;
+		// only the remedy differs, because the credential may be fine.
+		return ErrorDetail{Code: "credential_unavailable", Message: "The cloud token endpoint did not answer, so Kubernetes credentials are unavailable for now.", Action: "Check that Versus can reach the cloud token endpoint (DNS, egress, proxy); Versus keeps retrying and connects when it answers.", Retryable: true}
 	case errors.Is(err, ErrCredentialUnavailable):
 		return ErrorDetail{Code: "credential_unavailable", Message: "Kubernetes credentials are unavailable.", Action: "Configure a credential source for connectors.kubernetes.auth.mode and restart Versus. For EKS, provide IRSA, Pod Identity, environment credentials, or a static selected profile.", Retryable: false}
 	case errors.Is(err, ErrUnauthorized):

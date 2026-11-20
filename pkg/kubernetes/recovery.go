@@ -2,15 +2,19 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -20,7 +24,40 @@ import (
 type recoveryScope struct {
 	next   time.Time
 	denied bool
+	// cause explains why requests wait: the identity proof that could not be
+	// completed, or a token host that gave no answer. It is nil when the last
+	// failure said nothing more than that the credential is unavailable. A held
+	// request answers with it, so a passing outage is never reported as a
+	// credential to fix.
+	cause error
 }
+
+// tokenEndpointCause is the held answer while the cloud token host gives no
+// answer: still a credential fault, so every surface fails closed, but one
+// that says Versus keeps retrying. It is a fixed value, so nothing the token
+// host sent is kept.
+var tokenEndpointCause = credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
+
+// explainingCause is the part of a failure that tells a held request why it
+// waits, or nil when the failure explains nothing beyond unavailability.
+func explainingCause(err error) error {
+	var proof *proofError
+	if errors.As(err, &proof) {
+		return proof
+	}
+	if errors.Is(err, ErrTokenEndpointUnavailable) {
+		return tokenEndpointCause
+	}
+	return nil
+}
+
+// heldRequest marks the answer to a request the recovery gate held back. It
+// is the gate's own decision, not a new attempt, so it is never recorded as a
+// failure.
+type heldRequest struct{ cause error }
+
+func (held *heldRequest) Error() string { return held.cause.Error() }
+func (held *heldRequest) Unwrap() error { return held.cause }
 
 // clusterRecovery survives credential epochs. Neither request traffic nor a
 // successor's construction is evidence of recovery; only publication resets it.
@@ -38,8 +75,100 @@ type clusterRecovery struct {
 	workers           int
 	firstReady        map[string]time.Time
 	attempts          uint64
-	// logf writes the stage lines; nil writes them to the standard logger.
+	// logf writes the stage lines; nil writes them at debug level.
 	logf func(format string, args ...any)
+	// cluster names the cluster in warnings; connected is set once its first
+	// readable cycle has been reported.
+	cluster   string
+	connected bool
+	// warned holds the credential failure reasons warned about since the last
+	// publication, so a recovery clears each of them.
+	warned map[string]struct{}
+	// inFlight counts the credential rebuilds running now; a request that
+	// finds one is held instead of queueing behind it.
+	inFlight int
+	// closed is set when the registry closes.
+	closed bool
+}
+
+// beginAttempt marks a credential rebuild in flight for orgID. The failure
+// that made the rebuild necessary is kept as the held answer's cause when it
+// explains the wait, so requests held meanwhile are told why. It changes
+// neither the retry schedule nor the failure count.
+func (r *clusterRecovery) beginAttempt(orgID string, err error) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inFlight++
+	if cause := explainingCause(err); cause != nil {
+		if r.scopes == nil {
+			r.scopes = map[string]*recoveryScope{}
+		}
+		scope := r.scopes[orgID]
+		if scope == nil {
+			scope = &recoveryScope{}
+			r.scopes[orgID] = scope
+		}
+		scope.cause = cause
+	}
+}
+
+func (r *clusterRecovery) endAttempt() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inFlight--
+}
+
+// close marks the recovery of a closed registry: nothing that finishes
+// afterwards is recorded or warned about.
+func (r *clusterRecovery) close() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+}
+
+// attemptInFlight reports whether a credential rebuild is running now.
+func (r *clusterRecovery) attemptInFlight() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inFlight > 0
+}
+
+// reportConnected writes the one line per process that says a cluster is
+// connected, after its first cycle that read at least one kind. A cluster that
+// answers nothing is not reported as connected; its failure is warned about
+// instead.
+func (r *clusterRecovery) reportConnected(cluster string, kinds map[string]kubeindex.KindStatus) {
+	if r == nil {
+		return
+	}
+	ready := 0
+	for _, status := range kinds {
+		if status.State == "ready" {
+			ready++
+		}
+	}
+	if ready == 0 {
+		return
+	}
+	r.mu.Lock()
+	logged := r.connected
+	r.connected = true
+	r.mu.Unlock()
+	if !logged {
+		logging.Infof("kubernetes: cluster %q connected, %d of %d kinds readable", cluster, ready, len(kinds))
+	}
 }
 
 func (r *clusterRecovery) deadline() time.Time {
@@ -58,24 +187,59 @@ func (r *clusterRecovery) deadline() time.Time {
 // it behind unavailability. The empty key is the credential itself, whose answer
 // applies to every scope.
 func (r *clusterRecovery) requestGate(orgID string) bool {
+	return r.requestGateError(orgID) != nil
+}
+
+// requestGateError is the answer a gated request gets, or nil when the scope
+// may serve. It is the credential fault the gate stands for, carrying the
+// stored cause that explains the wait when there is one.
+func (r *clusterRecovery) requestGateError(orgID string) error {
 	if r == nil {
-		return false
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	credential, scope := r.scopes[""], r.scopes[orgID]
 	if credential != nil && credential.denied || scope != nil && scope.denied {
-		return false
+		return nil
 	}
 	now := time.Now()
-	if credential != nil && now.Before(credential.next) {
-		return true
+	for _, gated := range []*recoveryScope{credential, scope} {
+		if gated != nil && now.Before(gated.next) {
+			return gatedCause(credential, scope)
+		}
 	}
-	return scope != nil && now.Before(scope.next)
+	return nil
 }
 
-// gate applies the scope's decision to the shared retry schedule.
-func (r *clusterRecovery) gate(orgID string, now time.Time, denied bool) {
+// gatedError is the answer for a request held back while recovery waits for
+// its next attempt: the stored cause when one is recorded, otherwise the bare
+// credential fault.
+func (r *clusterRecovery) gatedError(orgID string) error {
+	if r == nil {
+		return ErrCredentialUnavailable
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return gatedCause(r.scopes[""], r.scopes[orgID])
+}
+
+// gatedCause picks the stored cause, the credential's own before the org
+// scope's. A stored cause stands until a publication clears it or a failure
+// that says something else about the credential replaces it.
+func gatedCause(credential, scope *recoveryScope) error {
+	for _, gated := range []*recoveryScope{credential, scope} {
+		if gated != nil && gated.cause != nil {
+			return &heldRequest{cause: gated.cause}
+		}
+	}
+	return &heldRequest{cause: ErrCredentialUnavailable}
+}
+
+// gate applies the scope's decision to the shared retry schedule. cause
+// explains the decision, or is nil. A failure that says nothing about the
+// credential (keepCause) leaves the stored cause in place.
+func (r *clusterRecovery) gate(orgID string, now time.Time, denied bool, cause error, keepCause bool) {
 	if r.scopes == nil {
 		r.scopes = map[string]*recoveryScope{}
 	}
@@ -87,6 +251,9 @@ func (r *clusterRecovery) gate(orgID string, now time.Time, denied bool) {
 	if denied {
 		scope.denied = true
 	}
+	if !keepCause {
+		scope.cause = cause
+	}
 	scope.next = maxTime(scope.next, now)
 }
 
@@ -94,8 +261,12 @@ func (r *clusterRecovery) gate(orgID string, now time.Time, denied bool) {
 // identity could read the cluster again.
 func (r *clusterRecovery) recovered() {
 	for _, scope := range r.scopes {
-		scope.next, scope.denied = time.Time{}, false
+		scope.next, scope.denied, scope.cause = time.Time{}, false, nil
 	}
+	for reason := range r.warned {
+		problems().Clear(credentialProblemKey(r.cluster, reason), "kubernetes: cluster %q credential check recovered", r.cluster)
+	}
+	r.warned = nil
 }
 
 // answerDenied reports whether the API server answered that this identity may not
@@ -129,14 +300,36 @@ func (r *clusterRecovery) failed(err error, client *Client, orgID string) {
 	// An answered denial is recorded before anything else, because concurrent
 	// failures from a single attempt must not drop the one fact that has to reach
 	// the reader: the API server refused this identity.
+	// A held request's answer is the gate's own decision, not an attempt. An
+	// answered denial joined to it is still recorded.
 	denied := answerDenied(err)
+	var held *heldRequest
+	if errors.As(err, &held) && !denied {
+		return
+	}
+	cause := explainingCause(err)
+	// A context that ran out or was cancelled only says the attempt stopped
+	// waiting, not why the credential failed. It still counts toward the retry
+	// schedule, so the supervisor keeps backing off, but it never replaces the
+	// cause the gate answers with: a request must keep hearing about the proof
+	// outage, not be told to rotate a credential.
+	keepCause := cause == nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.closed {
+		return
+	}
 	now := time.Now()
 	// Concurrent failures from a single attempt do not multiply the streak, but the
 	// scope gate still follows every recorded failure.
 	if now.Before(r.next) && r.failures > 0 {
-		r.gate(orgID, r.next, denied)
+		r.gate(orgID, r.next, denied, cause, keepCause)
+		// The retry is already scheduled, so nothing new is logged at debug, but
+		// the warning still follows a change of cause (a token host that stops
+		// timing out and starts refusing); the throttle drops a repeat.
+		if !keepCause {
+			r.warnCredential(recoveryReason(err, "credential_recovery"))
+		}
 		return
 	}
 	r.failures++
@@ -148,8 +341,35 @@ func (r *clusterRecovery) failed(err error, client *Client, orgID string) {
 		r.next = maxTime(r.next, client.backoffUntil)
 		client.backoffMu.Unlock()
 	}
-	r.gate(orgID, r.next, denied)
-	log.Printf("kubernetes: recovery stage=credential_recovery reason=%s attempt=%d retry_ms=%d", recoveryReason(err, "credential_recovery"), r.failures, time.Until(r.next).Milliseconds())
+	r.gate(orgID, r.next, denied, cause, keepCause)
+	reason := recoveryReason(err, "credential_recovery")
+	logging.Debugf("kubernetes: recovery stage=credential_recovery reason=%s attempt=%d retry_ms=%d", reason, r.failures, time.Until(r.next).Milliseconds())
+	// An attempt that stopped waiting names no cause the operator can act on,
+	// and a warning would hide the proof outage behind a timeout.
+	if !keepCause {
+		r.warnCredential(reason)
+	}
+}
+
+// warnCredential writes the throttled warning for a failed credential check:
+// once for each cause, then at most once per throttle window while that cause
+// lasts. Each cause keeps its own throttle entry, so a token host that
+// alternates between two answers warns about each once per window, not on
+// every attempt.
+func (r *clusterRecovery) warnCredential(reason string) {
+	if cause, check, ok := problemCause(reason, false); ok {
+		if r.warned == nil {
+			r.warned = map[string]struct{}{}
+		}
+		r.warned[reason] = struct{}{}
+		problems().Fail(slog.LevelWarn, credentialProblemKey(r.cluster, reason), reason, "kubernetes: cluster %q credential check failed reason=%s (%s); %s", r.cluster, reason, cause, check)
+	}
+}
+
+// credentialProblemKey is the warning throttle key for one credential failure
+// cause of a cluster.
+func credentialProblemKey(cluster, reason string) string {
+	return problemKey("", cluster, "credential|"+reason)
 }
 
 func (r *clusterRecovery) committed(revision string) {
@@ -224,7 +444,7 @@ func (registry *ServiceRegistry) superviseCluster(ctx context.Context, clusterID
 		}
 
 		attempt, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_, err := registry.resolveCluster(attempt, current.scope.OrgID, clusterID)
+		_, err := registry.resolveCluster(attempt, current.scope.OrgID, clusterID, nil)
 		cancel()
 		if err != nil && ctx.Err() == nil {
 			recovery.failed(err, current.client, current.scope.OrgID)
@@ -357,15 +577,20 @@ func captureRefusalReason(err error) string {
 
 func recoveryReason(err error, stage string) string {
 	var saveFailure *captureStorageError
+	var proofFailure *proofError
 	switch {
 	case err == nil:
 		return "ready"
+	case errors.As(err, &proofFailure):
+		return proofFailure.Code()
 	case errors.Is(err, errInventoryLeaseLost), errors.Is(err, storage.ErrEvidenceConflict):
 		return "lease_lost"
 	case errors.As(err, &saveFailure) && saveFailure.rejected:
 		return "storage_rejected"
 	case errors.As(err, &saveFailure):
 		return "storage_unavailable"
+	case errors.Is(err, ErrTokenEndpointUnavailable):
+		return "token_endpoint_unavailable"
 	case errors.Is(err, ErrCredentialUnavailable):
 		return "credential_unavailable"
 	case errors.Is(err, ErrUnauthorized):
@@ -421,7 +646,7 @@ func (r *clusterRecovery) recordStage(stage string, started time.Time, err error
 	}
 	logf := r.logf
 	if logf == nil {
-		logf = log.Printf
+		logf = logging.Debugf
 	}
 	logf("kubernetes: capture stage=%s reason=%s duration_ms=%d committed_age_s=%d failures=%d workers=%d attempts=%d", stage, reason, time.Since(started).Milliseconds(), age, r.failures, r.workers, r.attempts)
 }
@@ -468,5 +693,91 @@ func (r *clusterRecovery) reserveReplacement(renewal bool) {
 	if renewal {
 		reason = "credential_renewal"
 	}
-	log.Printf("kubernetes: recovery stage=epoch_rebuild reason=%s attempt=%d retry_ms=%d", reason, r.replacementStreak, time.Until(r.next).Milliseconds())
+	logging.Debugf("kubernetes: recovery stage=epoch_rebuild reason=%s attempt=%d retry_ms=%d", reason, r.replacementStreak, time.Until(r.next).Milliseconds())
+}
+
+// identityFieldNames is the fixed set of field names an identity-change line
+// may carry. A key name read from the cluster is never logged.
+var identityFieldNames = []string{"username", "uid", "groups", "extra:oid"}
+
+// unstableIdentityRebuilds is how many principal-change rebuilds in a row
+// raise the warning that a cluster identity is not stable.
+const unstableIdentityRebuilds = 3
+
+// changedIdentityFields names the reviewed identity fields that differ
+// between two review principals, from identityFieldNames only. It returns
+// nil when either principal is not a review principal.
+func changedIdentityFields(previous, next string) []string {
+	decode := func(principal string) (reviewedUserInfo, bool) {
+		var user reviewedUserInfo
+		encoded, found := strings.CutPrefix(principal, "self-subject-review:")
+		return user, found && json.Unmarshal([]byte(encoded), &user) == nil
+	}
+	before, okBefore := decode(previous)
+	after, okAfter := decode(next)
+	if !okBefore || !okAfter {
+		return nil
+	}
+	changed := map[string]bool{
+		"username":  before.Username != after.Username,
+		"uid":       before.UID != after.UID,
+		"groups":    !slices.Equal(before.Groups, after.Groups),
+		"extra:oid": !slices.Equal(before.Extra["oid"], after.Extra["oid"]),
+	}
+	var fields []string
+	for _, name := range identityFieldNames {
+		if changed[name] {
+			fields = append(fields, name)
+		}
+	}
+	return fields
+}
+
+func identityFieldList(fields []string) string {
+	if len(fields) == 0 {
+		return "principal"
+	}
+	return strings.Join(fields, ",")
+}
+
+// noteIdentityChange records a principal-change rebuild for cluster. Each one
+// logs its changed field names at debug; the third in a row warns once per
+// throttle window that the identity is not stable.
+func (client *Client) noteIdentityChange(cluster string, fields []string) {
+	if client == nil {
+		return
+	}
+	client.identityMu.Lock()
+	client.identityChanges++
+	if client.identityFields == nil {
+		client.identityFields = map[string]bool{}
+	}
+	for _, field := range fields {
+		client.identityFields[field] = true
+	}
+	count := client.identityChanges
+	var seen []string
+	for _, name := range identityFieldNames {
+		if client.identityFields[name] {
+			seen = append(seen, name)
+		}
+	}
+	client.identityMu.Unlock()
+	logging.Debugf("kubernetes: cluster %q identity changed at a credential renewal fields=%s; rebuilding collection", cluster, identityFieldList(fields))
+	if count >= unstableIdentityRebuilds {
+		problems().Fail(slog.LevelWarn, problemKey("", cluster, "identity_unstable"), "unstable",
+			"kubernetes: cluster %q identity is not stable: %s changed on %d credential renewals in a row (identity changed), and each change rebuilds collection; check the cluster's authentication setup, or report it with this line", cluster, identityFieldList(seen), count)
+	}
+}
+
+// noteIdentityKept ends a run of principal-change rebuilds: a renewal kept
+// the same identity.
+func (client *Client) noteIdentityKept(cluster string) {
+	if client == nil {
+		return
+	}
+	client.identityMu.Lock()
+	client.identityChanges, client.identityFields = 0, nil
+	client.identityMu.Unlock()
+	problems().Clear(problemKey("", cluster, "identity_unstable"), "kubernetes: cluster %q identity stable again", cluster)
 }

@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -278,9 +279,12 @@ type Service struct {
 	// excluded holds the resources, by plural API name, configured never to
 	// be listed, and namespaces the namespaces configured to be read when the
 	// identity may read only inside some.
-	excluded               map[string]bool
-	namespaces             []string
-	observationClock       func() time.Time
+	excluded         map[string]bool
+	namespaces       []string
+	observationClock func() time.Time
+	// alertBaselineClock times how long the issue alert baseline has stayed
+	// open; nil reads the wall clock. Tests inject it.
+	alertBaselineClock     func() time.Time
 	inventoryRestore       *inventoryRestoreAuthority
 	recovery               *clusterRecovery
 	issueAlertSink         func(context.Context, IssueAlert) (Outcome, error)
@@ -351,10 +355,11 @@ func newService(parent context.Context, client *Client, scope Scope, discoveryTT
 	service.usageHistory = newUsageHistoryState()
 	if client != nil && client.credentials != nil {
 		initialization, stop := context.WithTimeout(parent, 10*time.Second)
-		if service.validateCredential(initialization) == nil {
+		if err := service.validateCredential(initialization); err == nil {
 			service.scope.CredentialID = service.captureCredentialID()
 		} else {
 			service.identity.mu.Lock()
+			service.identity.unreachable = errors.Is(err, ErrTokenEndpointUnavailable)
 			service.identity.retired = true
 			service.identity.cancel()
 			service.identity.mu.Unlock()
@@ -389,6 +394,7 @@ func (service *Service) Scoped(scope Scope) *Service {
 	scoped.inventoryRestore = service.inventoryRestore
 	scoped.persistentCredentialID = service.persistentCredentialID
 	scoped.observationClock = service.observationClock
+	scoped.alertBaselineClock = service.alertBaselineClock
 	scoped.recovery = service.recovery
 	scoped.issueAlertSink = service.issueAlertSink
 	scoped.usageHistory = service.usageHistory
@@ -437,6 +443,34 @@ type ServiceRegistry struct {
 	resolveLocks   sync.Map
 	usageHistory   *usageHistoryState
 	recoveries     map[string]*clusterRecovery
+	// lifetime bounds the resolves requests start in the background; Close
+	// cancels it, so no rebuild keeps dialing after the registry closed.
+	lifetime     context.Context
+	stopLifetime context.CancelFunc
+}
+
+func (registry *ServiceRegistry) isClosed() bool {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	return registry.closed
+}
+
+// resolveContext is the context a background resolve runs under: the
+// registry's lifetime, bounded by the resolve timeout.
+func (registry *ServiceRegistry) resolveContext() (context.Context, context.CancelFunc) {
+	if registry == nil {
+		return context.WithTimeout(context.Background(), 10*time.Second)
+	}
+	registry.mu.Lock()
+	if registry.lifetime == nil {
+		registry.lifetime, registry.stopLifetime = context.WithCancel(context.Background())
+		if registry.closed {
+			registry.stopLifetime()
+		}
+	}
+	lifetime := registry.lifetime
+	registry.mu.Unlock()
+	return context.WithTimeout(lifetime, 10*time.Second)
 }
 
 func NewServiceRegistry(base *Service) *ServiceRegistry {
@@ -483,7 +517,7 @@ func NewClusterRegistryWithScope(multiple bool, entries []ClusterEntry, scope te
 		if entry.Service != nil {
 			r := registry.recoveries[entry.Info.ID]
 			if r == nil {
-				r = &clusterRecovery{}
+				r = &clusterRecovery{cluster: entry.Info.ID}
 				registry.recoveries[entry.Info.ID] = r
 			}
 			entry.Service.recovery = r
@@ -563,13 +597,53 @@ func (registry *ServiceRegistry) LocalReportService(orgID, clusterID string) (*S
 	return nil, ErrClusterNotFound
 }
 
+// heldAttemptGrace is how long a request that starts a credential rebuild
+// waits for it before it is given the held answer. The rebuild carries on
+// under its own bound and installs its result for later requests.
+const heldAttemptGrace = time.Second
+
 func (registry *ServiceRegistry) ResolveCluster(orgID, clusterID string) (*Service, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return registry.resolveCluster(ctx, orgID, clusterID)
+	type resolved struct {
+		service *Service
+		err     error
+	}
+	held := make(chan error, 1)
+	done := make(chan resolved, 1)
+	ctx, cancel := registry.resolveContext()
+	go func() {
+		defer cancel()
+		service, err := registry.resolveCluster(ctx, orgID, clusterID, held)
+		if err != nil && errors.Is(err, context.Canceled) && registry.isClosed() {
+			// Close cancelled the resolve: the cluster is no longer served.
+			err = ErrClusterUnavailable
+		}
+		done <- resolved{service, err}
+	}()
+	select {
+	case result := <-done:
+		return result.service, result.err
+	case answer := <-held:
+		// This request started a credential rebuild. A quick one still
+		// serves it; one that waits on a host that does not answer leaves
+		// this request with the held answer instead.
+		timer := time.NewTimer(heldAttemptGrace)
+		defer timer.Stop()
+		select {
+		case result := <-done:
+			return result.service, result.err
+		case <-timer.C:
+			return nil, answer
+		}
+	}
 }
 
-func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clusterID string) (*Service, error) {
+// resolveCluster returns the cluster's service for orgID, rebuilding its
+// credential epoch when the current one was retired. held is set for a user
+// request: such a request never queues behind a rebuild in flight or a
+// closed gate; it gets the held answer at once, and when it starts a rebuild
+// itself the held answer is sent on held. The supervisor passes nil and
+// waits for the outcome.
+func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clusterID string, held chan<- error) (*Service, error) {
 	if registry == nil {
 		return nil, ErrClusterNotFound
 	}
@@ -590,9 +664,13 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		clusterID = registry.entries[0].Info.ID
 	}
 	found := false
+	var recovery *clusterRecovery
 	for _, entry := range registry.entries {
 		if entry.Info.ID == clusterID {
 			found = true
+			if entry.Service != nil {
+				recovery = entry.Service.recovery
+			}
 			break
 		}
 	}
@@ -603,12 +681,16 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 	registry.mu.Unlock()
 	value, _ := registry.resolveLocks.LoadOrStore(clusterID, make(chan struct{}, 1))
 	gate := value.(chan struct{})
-	select {
-	case gate <- struct{}{}:
-		defer func() { <-gate }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	if held == nil {
+		select {
+		case gate <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	} else if err := acquireForRequest(ctx, gate, recovery, orgID); err != nil {
+		return nil, err
 	}
+	defer func() { <-gate }()
 	registry.mu.Lock()
 	var previous *Service
 	var buildErr error
@@ -636,40 +718,85 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 	// material deliberately survives a transient provider failure, so a request must
 	// not become the probe that discovers recovery: only the supervised retry after
 	// the cooldown expires, or a committed publication, may clear it.
-	if previous.recovery.requestGate(orgID) {
+	if gated := previous.recovery.requestGateError(orgID); gated != nil {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, ErrCredentialUnavailable
+		return nil, gated
+	}
+	// With no token to send, validating may wait on the token host. The
+	// validation is marked as an attempt in flight first, so user requests
+	// that arrive meanwhile get the held answer at once instead of queueing
+	// on the resolve lock behind it.
+	if previous.client != nil {
+		if pending, ok := previous.client.credentials.(interface{ pendingError() error }); ok {
+			if err := pending.pendingError(); err != nil {
+				previous.recovery.beginAttempt(orgID, err)
+				defer previous.recovery.endAttempt()
+			}
+		}
 	}
 	fresh := previous
-	if err := previous.validateCredential(ctx); err != nil {
-		if ctx.Err() != nil {
+	validate := ctx
+	if held != nil {
+		// A user request does not wait out a token refresh in flight.
+		validate = withTokenWait(ctx, heldAttemptGrace)
+	}
+	err := previous.validateCredential(validate)
+	if err == nil && previous.endIfUpgradeReady() {
+		// The token was proven after start: this request runs on the
+		// successor epoch, under the proven identity's keys.
+		err = commitConflictError{cause: errEpochUpgraded}
+	}
+	if err != nil {
+		if abandonedAttempt(ctx, err) {
 			return nil, ctx.Err()
 		}
 		previous.identity.mu.Lock()
 		retired := previous.identity.retired
 		renewal := previous.identity.renewal
+		upgraded := previous.identity.upgraded
 		previous.identity.mu.Unlock()
 		if !retired {
 			return nil, err
 		}
-		if time.Now().Before(previous.recovery.deadline()) {
-			return nil, ErrCredentialUnavailable
+		if upgraded {
+			// The same token was proven: the successor needs no backoff and
+			// no probe of a token the cluster already accepted.
+			renewal = true
+		} else {
+			if time.Now().Before(previous.recovery.deadline()) {
+				return nil, previous.recovery.gatedError(orgID)
+			}
+			previous.recovery.reserveReplacement(renewal)
 		}
-		previous.recovery.reserveReplacement(renewal)
+		previous.recovery.beginAttempt(orgID, err)
+		defer previous.recovery.endAttempt()
+		if held != nil {
+			held <- previous.recovery.gatedError(orgID)
+		}
 		scope := previous.Scope()
 		// Replacements fence delayed responses even when a provider returns the same bearer.
 		previous.client.authGeneration.Add(1)
 		fresh = newService(ctx, previous.client, scope, previous.ttl)
 		fresh.observationClock = previous.observationClock
+		fresh.alertBaselineClock = previous.alertBaselineClock
 		fresh.evidenceHeartbeat = previous.evidenceHeartbeat
 		fresh.historySaveGrace = previous.historySaveGrace
 		fresh.cadenceDivisor = previous.cadenceDivisor
 		fresh.optionalStartWindow = previous.optionalStartWindow
 		fresh.recovery = previous.recovery
+		// The successor keeps the inventory logger, so a failure that lasts
+		// across a credential rotation is not warned about again.
+		fresh.inventoryLog = previous.inventoryLog
 		if err := fresh.validateCredential(ctx); err != nil {
 			fresh.identity.cancel()
+			// A caller that stopped waiting is no evidence about the
+			// credential: the gate state is left alone, and the supervisor
+			// records its own attempt's failure.
+			if abandonedAttempt(ctx, err) {
+				return nil, ctx.Err()
+			}
 			previous.recovery.failed(err, previous.client, orgID)
 			return nil, err
 		}
@@ -687,6 +814,9 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 			cancelProbe()
 			if probeErr != nil {
 				fresh.identity.cancel()
+				if abandonedAttempt(ctx, probeErr) {
+					return nil, ctx.Err()
+				}
 				previous.recovery.failed(probeErr, previous.client, orgID)
 				return nil, probeErr
 			}
@@ -727,6 +857,13 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		case <-ctx.Done():
 			fresh.identity.cancel()
 			return nil, ctx.Err()
+		}
+		if upgraded && fresh.inheritsInventoryFrom(previous) {
+			// The same token, now proven, or a renewed token proven for the
+			// same principal: once the old workers stopped, the successor
+			// takes the inventory they collected, so it shows it at once
+			// rather than starting a first sync.
+			fresh.inheritInventory(previous)
 		}
 		previous.client.metadataMu.Lock()
 		clear(previous.client.metadataDenied)
@@ -779,6 +916,34 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		service.StartCapture(captureContext)
 	}
 	return service, nil
+}
+
+// acquireForRequest takes the cluster's resolve lock for a user request.
+// While the gate is closed or a credential rebuild is in flight, the request
+// gets the held answer at once instead of queueing behind the rebuild.
+func acquireForRequest(ctx context.Context, gate chan struct{}, recovery *clusterRecovery, orgID string) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if gated := recovery.requestGateError(orgID); gated != nil {
+			return gated
+		}
+		select {
+		case gate <- struct{}{}:
+			return nil
+		default:
+		}
+		if recovery.attemptInFlight() {
+			return recovery.gatedError(orgID)
+		}
+		select {
+		case gate <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (registry *ServiceRegistry) Resolve(scope Scope) *Service {
@@ -1039,6 +1204,11 @@ func (service *Service) List(ctx context.Context, options ListOptions) (Resource
 }
 
 func (service *Service) listPage(ctx context.Context, options ListOptions) (ResourcePage, int, error) {
+	if err := service.validateCredential(ctx); err != nil {
+		return ResourcePage{}, 0, err
+	}
+	ctx, cancelIdentity := service.credentialContext(ctx)
+	defer cancelIdentity()
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
 	if len(options.Continue) > 4096 {
@@ -1523,6 +1693,11 @@ func clampDerivedSinceTime(value time.Time, now time.Time) time.Time {
 }
 
 func (service *Service) podLogs(ctx context.Context, namespace, pod, container string, previous bool, sinceSeconds, tailLines int, timestamps bool, bounds ...podLogBounds) (PodLogs, error) {
+	if err := service.validateCredential(ctx); err != nil {
+		return PodLogs{}, err
+	}
+	ctx, cancelIdentity := service.credentialContext(ctx)
+	defer cancelIdentity()
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
 	options := podLogBounds{}
@@ -2642,7 +2817,10 @@ func errorClass(err error) string {
 	}
 	var conflict commitConflictError
 	var indexed indexReadError
+	var proofFailure *proofError
 	switch {
+	case errors.As(err, &proofFailure):
+		return proofFailure.syncClass()
 	case errors.As(err, &conflict):
 		return "commit_conflict"
 	case errors.Is(err, ErrOperationBudget):
@@ -2772,4 +2950,31 @@ func conditionTrue(conditions []Condition, kind string) bool {
 		}
 	}
 	return false
+}
+
+// inheritsInventoryFrom reports whether the successor of a late-proven epoch
+// reads as the identity that collected the predecessor's inventory: it serves
+// the same token bytes, or it is proven for the principal the predecessor's
+// token was proven for. A successor on other bytes that is unproven or proven
+// for another principal starts its own inventory.
+func (service *Service) inheritsInventoryFrom(previous *Service) bool {
+	if service == nil || previous == nil || service.identity == nil || previous.identity == nil {
+		return false
+	}
+	previous.identity.mu.Lock()
+	fingerprint, principal := previous.identity.fingerprint, previous.identity.upgradePrincipal
+	if previous.identity.known {
+		principal = previous.identity.principal
+	}
+	upgraded := previous.identity.upgraded
+	previous.identity.mu.Unlock()
+	service.identity.mu.Lock()
+	defer service.identity.mu.Unlock()
+	if !upgraded || !service.identity.initialized {
+		return false
+	}
+	if subtle.ConstantTimeCompare(service.identity.fingerprint[:], fingerprint[:]) == 1 {
+		return true
+	}
+	return service.identity.known && subtle.ConstantTimeCompare(service.identity.principal[:], principal[:]) == 1
 }

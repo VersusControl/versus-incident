@@ -161,6 +161,47 @@ func (service *Service) startInventory(parent context.Context) {
 	go service.runInventory(ctx, cache)
 }
 
+// inheritInventory hands a successor epoch the committed inventory of the
+// epoch it replaces; the caller checks first that the successor reads as the
+// same identity (inheritsInventoryFrom). The successor shows what its
+// predecessor showed at once and goes on collecting from it, instead of
+// reporting a first sync. A history save the predecessor still
+// had pending belongs to that epoch's writer and is not carried.
+func (service *Service) inheritInventory(previous *Service) {
+	if service == nil || previous == nil || service.changes == nil || previous.changes == nil {
+		return
+	}
+	previous.changes.mu.Lock()
+	caches := map[kubeindex.Scope]*inventoryCache{}
+	for scope, cache := range previous.changes.inventories {
+		if cache != nil && scope.ClusterID == previous.scope.ClusterID && scope.CredentialID == previous.scope.CredentialID {
+			caches[scope] = cache
+		}
+	}
+	previous.changes.mu.Unlock()
+	for scope, cache := range caches {
+		cache.mu.RLock()
+		generation, failed := cache.generation, cache.failed
+		authorityFailure, questioned := cache.authorityFailure, cache.authorityQuestioned
+		cache.mu.RUnlock()
+		// Only a generation the predecessor would serve as healthy is handed
+		// over. A failed cycle, an unverified inventory authority or kinds
+		// held back for an authority proof stay with that epoch; the
+		// successor collects its own inventory instead of serving rows its
+		// predecessor withheld.
+		if len(generation.View.Kinds) == 0 || failed || authorityFailure != nil || !questioned.empty() {
+			continue
+		}
+		generation.EvidenceBatch, generation.EvidenceScope, generation.EvidenceFailure = nil, storage.EvidenceScope{}, ""
+		scope.CredentialID = service.scope.CredentialID
+		service.changes.mu.Lock()
+		if service.changes.inventories[scope] == nil {
+			service.changes.inventories[scope] = &inventoryCache{generation: generation}
+		}
+		service.changes.mu.Unlock()
+	}
+}
+
 func (service *Service) readInventory(ctx context.Context) (inventoryGeneration, error) {
 	if pinned, ok := ctx.Value(inventoryReadContextKey{}).(inventoryGeneration); ok {
 		if err := service.validateCredential(ctx); err != nil {
@@ -352,7 +393,7 @@ func inventoryCycleClass(class string) string {
 	switch class {
 	case "":
 		return "unavailable"
-	case "record_rejected", "record_limit", "incomplete_pages", "commit_conflict", "forbidden", "unauthorized", "timeout", "throttled", "unavailable", "budget_exhausted", "unsupported", "syncing", "namespace_scope":
+	case "record_rejected", "record_limit", "incomplete_pages", "commit_conflict", "forbidden", "unauthorized", "timeout", "throttled", "unavailable", "budget_exhausted", "unsupported", "syncing", "namespace_scope", "proof_unreachable", "proof_unavailable", "proof_host_not_allowed", "token_endpoint_unreachable":
 		return class
 	default:
 		return "unavailable"

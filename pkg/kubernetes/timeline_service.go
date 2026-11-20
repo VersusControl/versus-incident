@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
 	"math/rand"
 	"sort"
 	"strconv"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/google/uuid"
 )
@@ -369,7 +369,7 @@ func (service *Service) cleanupTimeline(retired []retiredTimeline) {
 			}
 		}
 		if err != nil {
-			log.Printf("kubernetes: obsolete timeline cleanup deferred")
+			logging.Debugf("kubernetes: obsolete timeline cleanup deferred")
 		}
 	}
 }

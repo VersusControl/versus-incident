@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,6 +27,7 @@ func newGKECredentialSource(credentialsFile string) (CredentialSource, error) {
 	if os.Getenv("GCE_METADATA_HOST") != "" {
 		return nil, errors.New("kubernetes: GKE application default credentials unavailable")
 	}
+	kind := gkeMetadataToken
 	if credentialsFile == "" {
 		source = &gkeMetadataTokenSource{client: fixedCredentialHTTPClient()}
 	} else {
@@ -40,8 +43,12 @@ func newGKECredentialSource(credentialsFile string) (CredentialSource, error) {
 			return nil, errors.New("kubernetes: invalid GKE credentials file")
 		}
 		source = &gkeFileTokenSource{path: credentialsFile, client: fixedCredentialHTTPClient(), endpoints: productionGoogleCredentialEndpoints}
+		kind = googleTokenKind(data)
 	}
-	return newGKESource(source, time.Now), nil
+	credentials := newGKESource(source, time.Now).(*gkeCredentialSource)
+	verifier := &googleTokenInfoVerifier{endpoint: googleTokenInfoURL, client: fixedCredentialHTTPClient(), kind: kind}
+	credentials.proof, credentials.host = verifier.principal, "oauth2.googleapis.com"
+	return credentials, nil
 }
 
 func validGoogleCredentialEndpoints(data []byte) (string, bool) {
@@ -130,6 +137,9 @@ type gkeTokenSource interface {
 func newGKESource(source gkeTokenSource, now func() time.Time) CredentialSource {
 	refresh := func(ctx context.Context) (string, time.Time, error) {
 		token, err := source.Token(ctx)
+		if errors.Is(err, ErrTokenEndpointUnavailable) {
+			return "", time.Time{}, fmt.Errorf("kubernetes: GKE credentials unavailable: %w", ErrTokenEndpointUnavailable)
+		}
 		if err != nil {
 			return "", time.Time{}, errors.New("kubernetes: GKE credentials unavailable")
 		}
@@ -138,5 +148,18 @@ func newGKESource(source gkeTokenSource, now func() time.Time) CredentialSource 
 		}
 		return token.AccessToken, token.Expiry, nil
 	}
-	return &expiringBearerSource{refresh: refresh, now: now, skew: 2 * time.Minute}
+	return &gkeCredentialSource{expiringBearerSource: &expiringBearerSource{refresh: refresh, now: now, skew: 2 * time.Minute}}
+}
+
+// postGoogleTokenInfo asks token-info about one token. It is the credential
+// proof's only write-shaped call: a read of Google's view of the token, sent
+// as a POST so the token travels in the body, never in the URL.
+func postGoogleTokenInfo(ctx context.Context, client *http.Client, endpoint, token string) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(url.Values{"access_token": {token}}.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Accept", "application/json")
+	return client.Do(request)
 }

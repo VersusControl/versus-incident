@@ -46,12 +46,16 @@ func (l *lockedLog) lines(pattern *regexp.Regexp) []string {
 	return found
 }
 
+// collectLog collects the log at debug level, where the capture detail lines
+// are written.
 func collectLog(t *testing.T) *lockedLog {
 	t.Helper()
 	collected := &lockedLog{}
 	previous := log.Writer()
 	log.SetOutput(collected)
 	t.Cleanup(func() { log.SetOutput(previous) })
+	setLogLevel(t, "debug")
+	isolateProblems(t, 0, nil)
 	return collected
 }
 
@@ -745,7 +749,7 @@ func TestCaptureRefusalIsLoggedOnlyWhenItChanges(t *testing.T) {
 	incomplete := "reason=incomplete_inventory class=incomplete_pages"
 	unverified := "reason=authority_unverified class=unavailable"
 	for _, refusal := range []string{"", "", incomplete, incomplete, incomplete, unverified, unverified, "", "", incomplete} {
-		noteCaptureRefusal(cache, refusal)
+		noteCaptureRefusal(Scope{ClusterID: "cluster"}, cache, refusal)
 	}
 	want := []string{
 		"kubernetes: history capture refused before saving " + incomplete,
@@ -764,11 +768,40 @@ func TestCaptureRefusalIsLoggedOnlyWhenItChanges(t *testing.T) {
 	}
 	// Before a scope has a cache, every refusal is logged and a prepared
 	// capture logs nothing.
-	noteCaptureRefusal(nil, "")
-	noteCaptureRefusal(nil, incomplete)
-	noteCaptureRefusal(nil, incomplete)
+	noteCaptureRefusal(Scope{ClusterID: "cluster"}, nil, "")
+	noteCaptureRefusal(Scope{ClusterID: "cluster"}, nil, incomplete)
+	noteCaptureRefusal(Scope{ClusterID: "cluster"}, nil, incomplete)
 	if extra := len(collected.lines(lines)) - len(want); extra != 2 {
 		t.Fatalf("without a cache, logged %d lines for two refusals", extra)
+	}
+	// The next capture usually clears these reasons, so they are debug detail.
+	for _, line := range collected.lines(lines) {
+		if !strings.Contains(line, "DEBUG kubernetes: ") {
+			t.Fatalf("a refusal the next capture clears was logged above debug: %q", line)
+		}
+	}
+}
+
+// A refusal that retrying cannot fix warns once per cluster, naming the
+// cluster and the reason, and the line that ends it is shown at info.
+func TestLastingCaptureRefusalWarnsWithTheCluster(t *testing.T) {
+	logs := captureLogLines(t, "info")
+	cache := &inventoryCache{}
+	isolateProblems(t, 10*time.Minute, newFakeClock().Now)
+	limit := "reason=over_save_limit class=storage_rejected"
+	scope := Scope{OrgID: "default", ClusterID: "prod"}
+	noteCaptureRefusal(scope, cache, limit)
+	noteCaptureRefusal(scope, cache, limit)
+	// The successor service a credential rotation builds starts with a fresh
+	// cache; the same lasting refusal does not warn again.
+	noteCaptureRefusal(scope, &inventoryCache{}, limit)
+	noteCaptureRefusal(scope, cache, "")
+	want := []string{
+		`WARN kubernetes: cluster "prod" history capture refused before saving reason=over_save_limit class=storage_rejected (capture cannot be saved); restarting does not help, so if it repeats on every capture report it with this line`,
+		`kubernetes: cluster "prod" history captures are prepared for saving again`,
+	}
+	if got := logs.all(); !slices.Equal(got, want) {
+		t.Fatalf("lines = %q\nwant %q", got, want)
 	}
 }
 

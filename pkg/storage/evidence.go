@@ -1541,7 +1541,14 @@ func (p *fileProvider) compareEvidenceBlob(key string, expected, replacement []b
 	if err != nil {
 		return false, err
 	}
-	target, guardPath := p.blobPath(key), p.blobPath(guard)
+	target, err := p.blobPath(key)
+	if err != nil {
+		return false, err
+	}
+	guardPath, err := p.blobPath(guard)
+	if err != nil {
+		return false, err
+	}
 	shard := func(path string) uint32 {
 		hash := fnv.New32a()
 		_, _ = hash.Write([]byte(path))

@@ -147,6 +147,36 @@ describe("Cluster sync health", () => {
     expect(syncHealth({}).state).toBe("ready");
   });
 
+  it("words an unreachable identity proof as a reachability fault, not a bad credential", () => {
+    const unreachable = kindFailureReason({ error: "proof_unreachable" });
+    expect(unreachable).toBe("can't reach the cloud identity service to confirm this cluster's credential; check outbound access to the provider's sign-in or token-info host");
+    expect(unreachable).not.toMatch(/rotat|rejected/i);
+    expect(kindFailureReason({ error: "proof_host_not_allowed" })).toBe("the cloud identity service host is not on the allowed list for this cloud");
+  });
+
+  it("words proof keys on a host outside the allowed list as a host setting, not outbound access", () => {
+    const notAllowed = kindFailureReason({ error: "proof_host_not_allowed" });
+    expect(notAllowed).toMatch(/allowed list/);
+    expect(notAllowed).not.toMatch(/outbound access|server clock|rotat|rejected/i);
+    expect(notAllowed).not.toBe(kindFailureReason({ error: "proof_unreachable" }));
+  });
+
+  it("words a proof the identity service refused as a clock or review problem, not a network one", () => {
+    const unavailable = kindFailureReason({ error: "proof_unavailable" });
+    expect(unavailable).toBe("the cloud identity service couldn't confirm this cluster's credential yet; check the server clock and the identity review permission");
+    expect(unavailable).toMatch(/server clock/);
+    expect(unavailable).not.toMatch(/outbound access|rotat|rejected/i);
+    expect(unavailable).not.toBe(kindFailureReason({ error: "proof_unreachable" }));
+  });
+
+  it("words an unreachable cloud token endpoint as a reachability fault, not a bad credential", () => {
+    const unreachable = kindFailureReason({ error: "token_endpoint_unreachable" });
+    expect(unreachable).toMatch(/token endpoint/);
+    expect(unreachable).toMatch(/keeps retrying/);
+    expect(unreachable).not.toMatch(/rotat|rejected/i);
+    expect(unreachable).not.toBe(kindFailureReason({ error: "unauthorized" }));
+  });
+
   it("words every failure class for an operator", () => {
     expect(kindFailureReason({ error: "record_rejected" })).toBe("some objects could not be indexed, everything else is current");
     expect(kindFailureReason({ error: "record_limit" })).toBe("too many objects for the safety limit");

@@ -1,8 +1,12 @@
 package storage_test
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -154,4 +158,59 @@ func (provider *prefixedProvider) ReadBlob(name string) ([]byte, error) {
 
 func (provider *prefixedProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
 	return provider.Provider.(storage.BlobCAS).CompareAndSwapBlob(provider.prefix+name, expected, replacement)
+}
+
+// File storage maps a blob name to a file under the data directory. A name
+// that would leave it (absolute, a ".." element, a NUL) is refused by every
+// blob operation and writes nothing anywhere; a nested name stays inside.
+func TestFileBlobNamesStayInsideTheDataDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "data")
+	provider, err := storage.NewFile(storage.FileOptions{DataDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	creator := provider.(storage.BlobCreator)
+	swapper := provider.(storage.BlobCAS)
+	for _, name := range []string{
+		"settings.alert-window.x/../../../ESCAPED/planted",
+		"settings.alert-window.x/../other",
+		"../outside",
+		"..",
+		"/absolute/name",
+		"nul\x00name",
+		"",
+	} {
+		if err := provider.WriteBlob(name, []byte(`{}`)); !errors.Is(err, storage.ErrInvalidBlobName) {
+			t.Errorf("WriteBlob(%q) = %v, want ErrInvalidBlobName", name, err)
+		}
+		if _, err := provider.ReadBlob(name); !errors.Is(err, storage.ErrInvalidBlobName) {
+			t.Errorf("ReadBlob(%q) = %v, want ErrInvalidBlobName", name, err)
+		}
+		if _, err := creator.CreateBlobIfAbsent(name, []byte(`{}`)); !errors.Is(err, storage.ErrInvalidBlobName) {
+			t.Errorf("CreateBlobIfAbsent(%q) = %v, want ErrInvalidBlobName", name, err)
+		}
+		if _, err := swapper.CompareAndSwapBlob(name, nil, []byte(`{}`)); !errors.Is(err, storage.ErrInvalidBlobName) {
+			t.Errorf("CompareAndSwapBlob(%q) = %v, want ErrInvalidBlobName", name, err)
+		}
+	}
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && !strings.HasPrefix(path, directory+string(filepath.Separator)) {
+			t.Errorf("a refused name wrote %s outside the data directory", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := provider.WriteBlob("kubernetes/inventory/nested", []byte(`{"ok":true}`)); err != nil {
+		t.Fatalf("nested blob name refused: %v", err)
+	}
+	if data, err := provider.ReadBlob("kubernetes/inventory/nested"); err != nil || string(data) != `{"ok":true}` {
+		t.Fatalf("nested blob read = %q, %v", data, err)
+	}
 }

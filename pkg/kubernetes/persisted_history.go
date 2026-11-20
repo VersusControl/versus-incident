@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -537,7 +537,7 @@ func (service *Service) denyHistoryAuthority(ctx context.Context, path string, u
 	}
 	scope.ReadOrgs = nil
 	if err := store.SetEvidenceAuthority(denialCtx, scope, principal, proofs); err != nil {
-		log.Printf("kubernetes: persisted history denial deferred")
+		logging.Debugf("kubernetes: persisted history denial deferred")
 	} else {
 		service.notifyEvidenceCommit()
 	}

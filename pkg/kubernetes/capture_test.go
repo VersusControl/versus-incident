@@ -1146,7 +1146,7 @@ func TestRegistrySlowCredentialRefreshDoesNotBlockOtherCluster(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := registry.resolveCluster(ctx, "org", "fast"); err != nil {
+	if _, err := registry.resolveCluster(ctx, "org", "fast", nil); err != nil {
 		t.Fatalf("slow refresh blocked other cluster: %v", err)
 	}
 	close(release)
@@ -1190,7 +1190,7 @@ func TestRegistryRebuildDrainIsolationAndCloseRace(t *testing.T) {
 			}
 			lookup, cancelLookup := context.WithTimeout(t.Context(), 200*time.Millisecond)
 			defer cancelLookup()
-			if _, err := registry.resolveCluster(lookup, "org", "fast"); err != nil {
+			if _, err := registry.resolveCluster(lookup, "org", "fast", nil); err != nil {
 				t.Fatalf("drain blocked other cluster: %v", err)
 			}
 			if closeRegistry {
@@ -1212,8 +1212,18 @@ func TestRegistryRebuildDrainIsolationAndCloseRace(t *testing.T) {
 				if current != slow {
 					t.Fatal("close/rebuild resurrected generation")
 				}
-			} else if err != nil {
-				t.Fatal(err)
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The rebuilt service keeps the cluster's inventory logger, so a
+				// failure that lasts across the rotation is not warned about again.
+				registry.mu.Lock()
+				current := registry.entries[0].Service
+				registry.mu.Unlock()
+				if current == slow || current.inventoryLog == nil || current.inventoryLog != slow.inventoryLog {
+					t.Fatal("the rebuilt service started a fresh inventory logger")
+				}
 			}
 		})
 	}

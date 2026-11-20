@@ -130,8 +130,30 @@ func (p *fileProvider) checkTablesSchema() error {
 // Blobs
 // ---------------------------------------------------------------------------
 
-func (p *fileProvider) blobPath(name string) string {
-	return filepath.Join(p.dir, name+".json")
+// ErrInvalidBlobName is returned for a blob name that would not map to a file
+// inside the data directory.
+var ErrInvalidBlobName = errors.New("storage: invalid blob name")
+
+// blobPath maps a blob name to its file under the data directory. Names may
+// nest with "/" (kubernetes/inventory/<key>), but a name that is empty,
+// absolute, holds a NUL or a ".." element, or otherwise resolves outside the
+// data directory is refused, so no name can reach a file the store does not
+// own.
+func (p *fileProvider) blobPath(name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, 0) || filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, `\`) || filepath.VolumeName(name) != "" {
+		return "", fmt.Errorf("%w: %q", ErrInvalidBlobName, name)
+	}
+	for _, part := range strings.FieldsFunc(name, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return "", fmt.Errorf("%w: %q", ErrInvalidBlobName, name)
+		}
+	}
+	target := filepath.Join(p.dir, name+".json")
+	rel, err := filepath.Rel(p.dir, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidBlobName, name)
+	}
+	return target, nil
 }
 
 func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
@@ -152,7 +174,11 @@ func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
 		}
 		return data, nil
 	}
-	data, err := os.ReadFile(p.blobPath(name))
+	path, err := p.blobPath(name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -168,7 +194,11 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 		if err != nil {
 			return err
 		}
-		lock := fileBlobLock(p.blobPath(name))
+		path, err := p.blobPath(name)
+		if err != nil {
+			return err
+		}
+		lock := fileBlobLock(path)
 		lock.Lock()
 		defer lock.Unlock()
 		_, err = index.swap(context.Background(), name, nil, data, true)
@@ -180,7 +210,10 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 		}
 		return nil
 	}
-	target := p.blobPath(name)
+	target, err := p.blobPath(name)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("storage: mkdir blob dir: %w", err)
 	}
@@ -235,7 +268,11 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 		if err != nil {
 			return false, err
 		}
-		lock := fileBlobLock(p.blobPath(name))
+		path, err := p.blobPath(name)
+		if err != nil {
+			return false, err
+		}
+		lock := fileBlobLock(path)
 		lock.Lock()
 		defer lock.Unlock()
 		return index.swap(context.Background(), name, nil, data, false)
@@ -250,7 +287,10 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 		}
 		return written, nil
 	}
-	target := p.blobPath(name)
+	target, err := p.blobPath(name)
+	if err != nil {
+		return false, err
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
 	}
@@ -290,7 +330,11 @@ func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []b
 		if err != nil {
 			return false, err
 		}
-		lock := fileBlobLock(p.blobPath(name))
+		path, err := p.blobPath(name)
+		if err != nil {
+			return false, err
+		}
+		lock := fileBlobLock(path)
 		lock.Lock()
 		defer lock.Unlock()
 		return index.swap(context.Background(), name, expected, replacement, false)
@@ -305,7 +349,10 @@ func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []b
 		}
 		return swapped, nil
 	}
-	target := p.blobPath(name)
+	target, err := p.blobPath(name)
+	if err != nil {
+		return false, err
+	}
 	lock := fileBlobLock(target)
 	lock.Lock()
 	defer lock.Unlock()
