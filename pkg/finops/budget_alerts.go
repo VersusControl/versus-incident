@@ -46,7 +46,7 @@ func (s *Service) SyncBudgetAlerts(ctx context.Context) ([]BudgetAlert, error) {
 	if s.store == nil {
 		return nil, ErrNoStore
 	}
-	sc, err := s.load(ctx, Query{})
+	sc, err := s.load(unscoped(ctx), Query{})
 	if err != nil || !sc.header.Enabled {
 		return nil, err
 	}

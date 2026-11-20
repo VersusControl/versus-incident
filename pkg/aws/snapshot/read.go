@@ -102,7 +102,7 @@ type cachedView struct {
 }
 
 // units returns the visible units for an account and region as of asOf,
-// each answered by the first read organization that holds it.
+// each answered by the organization the account view takes it from.
 func (store *Store) units(account, region, service string, asOf time.Time) ([]storage.AWSUnitStatus, error) {
 	if !store.ready() {
 		return nil, ErrNoStorage

@@ -500,10 +500,48 @@ func TestTablesParityReadOrganizationPrecedence(t *testing.T) {
 		record("enterprise health", must(inventory.AWSHealth(ctx, ent, AWSHealthQuery{})))
 		record("enterprise flags", must(inventory.AWSSecurityFlags(ctx, ent, AWSFlagQuery{})))
 		record("default resources", must(inventory.AWSResources(ctx, def, AWSResourceQuery{})))
-		// A unit the write organization only expects still answers for it.
+		// A unit the write organization only expects is answered by the
+		// default organization everywhere until the first licensed read:
+		// the unit list, the account view and every row query agree.
 		mustDo(t, inventory.UpdateAWSSync(ctx, ent, only, nil, func(state *AWSSyncState, _ bool) bool { state.State = "pending"; return true }))
-		record("enterprise resources after pending", must(inventory.AWSResources(ctx, ent, AWSResourceQuery{})))
-		record("enterprise units after pending", must(inventory.AWSUnits(ctx, ent, AWSUnitQuery{})))
+		pendingResources := must(inventory.AWSResources(ctx, ent, AWSResourceQuery{}))
+		pendingUnits := must(inventory.AWSUnits(ctx, ent, AWSUnitQuery{}))
+		pendingHealth := must(inventory.AWSHealth(ctx, ent, AWSHealthQuery{}))
+		pendingFlags := must(inventory.AWSSecurityFlags(ctx, ent, AWSFlagQuery{}))
+		view := must(inventory.AWSAccountView(ctx, ent, tablesAccount, time.Time{}))
+		answeredBy := map[string]string{}
+		for _, status := range pendingUnits {
+			answeredBy[status.Unit.Service] = status.Org
+			if status.Generation == nil {
+				t.Fatalf("unit %s has no generation after pending: %+v", status.Unit.Service, status)
+			}
+		}
+		if answeredBy["ec2"] != orgs.ent || answeredBy["rds"] != orgs.def {
+			t.Fatalf("units after pending answered by %v", answeredBy)
+		}
+		wantARNs := tablesARN("enterprise-shared") + "@," + tablesARN("default-only") + "@"
+		healthARNs := make([]string, 0, len(pendingHealth))
+		for _, row := range pendingHealth {
+			healthARNs = append(healthARNs, row.ARN+"@")
+		}
+		flagARNs := make([]string, 0, len(pendingFlags))
+		for _, row := range pendingFlags {
+			flagARNs = append(flagARNs, row.ARN+"@")
+		}
+		for label, got := range map[string]string{
+			"resources": strings.Join(arnsOf(pendingResources), ","), "view resources": strings.Join(arnsOf(view.Resources), ","),
+			"health": strings.Join(healthARNs, ","), "flags": strings.Join(flagARNs, ","),
+		} {
+			if got != wantARNs {
+				t.Fatalf("%s after pending = %s, want %s", label, got, wantARNs)
+			}
+		}
+		if canonicalJSON(t, view.Units) != canonicalJSON(t, pendingUnits) || canonicalJSON(t, view.Health) != canonicalJSON(t, pendingHealth) ||
+			canonicalJSON(t, view.Flags) != canonicalJSON(t, pendingFlags) {
+			t.Fatalf("account view and row queries disagree after pending:\nview %+v\nunits %+v", view, pendingUnits)
+		}
+		record("enterprise resources after pending", pendingResources)
+		record("enterprise units after pending", pendingUnits)
 
 		event := func(id, region string) AWSChange {
 			return AWSChange{EventID: id, Account: tablesAccount, Region: region, EventTime: tablesBase.Add(time.Minute)}
@@ -512,8 +550,10 @@ func TestTablesParityReadOrganizationPrecedence(t *testing.T) {
 		mustDo(t, inventory.AppendAWSChanges(ctx, def, tablesAccount, tablesRegion, []AWSChange{event("default-east", tablesRegion)}, window, nil))
 		mustDo(t, inventory.AppendAWSChanges(ctx, def, tablesAccount, "eu-west-1", []AWSChange{event("default-west", "eu-west-1")}, window, nil))
 		mustDo(t, inventory.AppendAWSChanges(ctx, ent, tablesAccount, tablesRegion, []AWSChange{event("enterprise-east", tablesRegion)}, window, nil))
+		// Coverage hides no change: each event either organization stored
+		// is listed once.
 		changes := must(inventory.AWSChanges(ctx, ent, AWSChangeQuery{}))
-		if len(changes) != 2 || changes[0].EventID != "default-west" || changes[1].EventID != "enterprise-east" {
+		if len(changes) != 3 || changes[0].EventID != "default-east" || changes[1].EventID != "default-west" || changes[2].EventID != "enterprise-east" {
 			t.Fatalf("enterprise changes = %+v", changes)
 		}
 		record("enterprise changes", changes)
@@ -558,6 +598,139 @@ func TestTablesParityReadOrganizationPrecedence(t *testing.T) {
 		mustDo(t, finops.PutFinOpsSavingDecision(ctx, def, FinOpsSavingDecision{SavingID: "s-2", State: "dismissed"}))
 		mustDo(t, finops.PutFinOpsSavingDecision(ctx, ent, FinOpsSavingDecision{SavingID: "s-1", State: "open"}))
 		record("enterprise decisions", must(finops.FinOpsSavingDecisions(ctx, ent)))
+	})
+}
+
+func changeFeedStore(t *testing.T, backend tablesBackend) AWSChangeFeedStore {
+	t.Helper()
+	store, ok := backend.inventory(t).(AWSChangeFeedStore)
+	if !ok {
+		t.Fatalf("%s provider has no change feed store", backend.name)
+	}
+	return store
+}
+
+func feedEventIDs(rows []AWSChange) string {
+	ids := make([]string, len(rows))
+	for index, row := range rows {
+		ids[index] = row.EventID
+	}
+	return strings.Join(ids, ",")
+}
+
+// Both organizations read the same stretch, the licensed one only part of
+// it. Each event is listed and counted once, each per-minute count is the
+// larger of the two, the poll counters are the larger of the two, and ties
+// between the organizations go to the first in read order on every backend.
+func TestTablesParityChangeFeedMergesOrganizationsOnce(t *testing.T) {
+	runTablesParity(t, func(t *testing.T, backend tablesBackend, orgs tablesOrgs, record tablesRecorder) {
+		ctx := context.Background()
+		store := changeFeedStore(t, backend)
+		def := tenancy.NewOrgScope(orgs.def)
+		ent := tenancy.NewOrgScope(orgs.ent, orgs.def)
+		event := func(id string, at time.Time, class, actor string) AWSChange {
+			return AWSChange{EventID: id, Account: tablesAccount, Region: tablesRegion, EventTime: at, Service: "ec2", EventName: "RunInstances", ActorClass: class, Actor: actor}
+		}
+		routine := func(name string, minute time.Time, events int64) AWSChangeCount {
+			return AWSChangeCount{Kind: AWSChangeCountRoutine, EventName: name, Minute: minute, Service: "ec2", EventSource: "ec2.amazonaws.com", ActorClass: "service", Events: events}
+		}
+		found := []AWSChange{event("e1", tablesBase.Add(time.Minute+20*time.Second), "person", "alice"), event("e2", tablesBase.Add(30*time.Minute), "pipeline", "deploy")}
+		polled := tablesBase.Add(time.Hour)
+		must(store.RecordAWSChangePoll(ctx, def, AWSChangePoll{Account: tablesAccount, Region: tablesRegion, At: polled, HistoryFrom: tablesBase, Changes: found,
+			Counts:  []AWSChangeCount{routine("DescribeInstances", tablesBase.Add(time.Minute), 5), routine("ListBuckets", tablesBase.Add(3*time.Minute), 2)},
+			Covered: []AWSInterval{{tablesBase, polled}}, Dropped: 3, NotChanges: 7, ClockSkew: time.Second,
+			Gaps: []AWSChangeGapReason{{From: tablesBase.Add(2 * time.Hour), To: tablesBase.Add(3 * time.Hour), Reason: "default-label"}}}, nil))
+		// The licensed poll stored the oldest, partial minute's event but
+		// claims coverage only from the next whole minute.
+		must(store.RecordAWSChangePoll(ctx, ent, AWSChangePoll{Account: tablesAccount, Region: tablesRegion, At: polled, HistoryFrom: tablesBase, Changes: found,
+			Counts:  []AWSChangeCount{routine("DescribeInstances", tablesBase.Add(time.Minute), 3), routine("ListBuckets", tablesBase.Add(3*time.Minute), 4)},
+			Covered: []AWSInterval{{tablesBase.Add(2 * time.Minute), polled}}, Dropped: 5, NotChanges: 2, ClockSkew: 2 * time.Second,
+			Gaps: []AWSChangeGapReason{{From: tablesBase.Add(2 * time.Hour), To: tablesBase.Add(3 * time.Hour), Reason: "licensed-label"}}}, nil))
+
+		feed := must(store.AWSChangeFeed(ctx, ent, AWSChangeFeedQuery{Since: tablesBase, Until: tablesBase.Add(4 * time.Hour), ServiceCounts: true}))
+		if got := feedEventIDs(feed.Rows); got != "e2,e1" {
+			t.Fatalf("rows = %s", got)
+		}
+		if feed.People != 1 || len(feed.Minutes) != 2 || feed.Minutes[0].Events != 1 || feed.Minutes[1].Events != 1 {
+			t.Fatalf("people = %d minutes = %+v", feed.People, feed.Minutes)
+		}
+		if len(feed.ServiceCounts) != 1 || feed.ServiceCounts[0].Events != 2 || len(feed.TopActors) != 2 || feed.TopActors[0].Events != 1 {
+			t.Fatalf("service counts = %+v top actors = %+v", feed.ServiceCounts, feed.TopActors)
+		}
+		if len(feed.Counts) != 2 || feed.Counts[0].EventName != "DescribeInstances" || feed.Counts[0].Events != 5 || feed.Counts[1].Events != 4 {
+			t.Fatalf("counts = %+v", feed.Counts)
+		}
+		if len(feed.Pairs) != 1 || feed.Pairs[0].Org != orgs.ent || feed.Pairs[0].Dropped != 5 || feed.Pairs[0].NotChanges != 7 || feed.Pairs[0].ClockSkew != 2*time.Second {
+			t.Fatalf("pairs = %+v", feed.Pairs)
+		}
+		if len(feed.Gaps) != 2 || feed.Gaps[0].Reason != "licensed-label" || feed.Gaps[1].Reason != "default-label" {
+			t.Fatalf("gaps = %+v", feed.Gaps)
+		}
+		record("feed", feed)
+		record("changes", must(backend.inventory(t).AWSChanges(ctx, ent, AWSChangeQuery{})))
+		record("changes by id", must(store.AWSChangesByID(ctx, ent, []string{"e1", "e2"})))
+		state, ok, err := store.AWSChangePairState(ctx, ent, tablesAccount, tablesRegion)
+		if err != nil || !ok || state.Dropped != 5 || state.NotChanges != 7 {
+			t.Fatalf("pair state = %+v %v %v", state, ok, err)
+		}
+		record("pair state", state)
+		// The default organization alone still sees its own counts.
+		defaultFeed := must(store.AWSChangeFeed(ctx, def, AWSChangeFeedQuery{Since: tablesBase, Until: tablesBase.Add(4 * time.Hour)}))
+		if len(defaultFeed.Counts) != 2 || defaultFeed.Counts[1].Events != 2 || defaultFeed.Pairs[0].Dropped != 3 {
+			t.Fatalf("default counts = %+v pairs = %+v", defaultFeed.Counts, defaultFeed.Pairs)
+		}
+		record("default feed", defaultFeed)
+	})
+}
+
+// A listing pinned before the licensed poll pages the same rows after that
+// poll stores coverage and copies over the stretch: nothing is skipped and
+// nothing repeats. A fresh listing then shows every event once.
+func TestTablesParityChangeFeedPagingSurvivesALaterCoverageWrite(t *testing.T) {
+	runTablesParity(t, func(t *testing.T, backend tablesBackend, orgs tablesOrgs, record tablesRecorder) {
+		ctx := context.Background()
+		store := changeFeedStore(t, backend)
+		def := tenancy.NewOrgScope(orgs.def)
+		ent := tenancy.NewOrgScope(orgs.ent, orgs.def)
+		event := func(id string, minutes int) AWSChange {
+			return AWSChange{EventID: id, Account: tablesAccount, Region: tablesRegion, EventTime: tablesBase.Add(time.Duration(minutes) * time.Minute), Service: "ec2",
+				EventName: "RunInstances", ActorClass: "person", Actor: "alice"}
+		}
+		must(store.RecordAWSChangePoll(ctx, def, AWSChangePoll{Account: tablesAccount, Region: tablesRegion, At: tablesBase.Add(time.Hour), HistoryFrom: tablesBase,
+			Changes: []AWSChange{event("e1", 10), event("e2", 20), event("e3", 30)}, Covered: []AWSInterval{{tablesBase, tablesBase.Add(time.Hour)}}}, nil))
+		pinned := AWSChangeFeedQuery{Since: tablesBase, Until: tablesBase.Add(3 * time.Hour), RecordedBefore: tablesBase.Add(90 * time.Minute)}
+		before := must(store.AWSChangeFeed(ctx, ent, pinned))
+		firstQuery := pinned
+		firstQuery.RowLimit = 2
+		first := must(store.AWSChangeFeed(ctx, ent, firstQuery))
+		if got := feedEventIDs(first.Rows); got != "e3,e2" || !first.Truncated {
+			t.Fatalf("page 1 = %s truncated=%v", got, first.Truncated)
+		}
+
+		must(store.RecordAWSChangePoll(ctx, ent, AWSChangePoll{Account: tablesAccount, Region: tablesRegion, At: tablesBase.Add(2 * time.Hour), HistoryFrom: tablesBase,
+			Changes: []AWSChange{event("e2", 20), event("e4", 40)}, Covered: []AWSInterval{{tablesBase, tablesBase.Add(2 * time.Hour)}}}, nil))
+
+		after := must(store.AWSChangeFeed(ctx, ent, pinned))
+		if canonicalJSON(t, after.Rows) != canonicalJSON(t, before.Rows) {
+			t.Fatalf("pinned rows changed after the licensed poll: %s, then %s", feedEventIDs(before.Rows), feedEventIDs(after.Rows))
+		}
+		last := first.Rows[len(first.Rows)-1]
+		var second []AWSChange
+		for _, row := range after.Rows {
+			if row.EventTime.Before(last.EventTime) || row.EventTime.Equal(last.EventTime) && row.EventID < last.EventID {
+				second = append(second, row)
+			}
+		}
+		if got := feedEventIDs(append(append([]AWSChange(nil), first.Rows...), second...)); got != "e3,e2,e1" {
+			t.Fatalf("pages = %s", got)
+		}
+		fresh := must(store.AWSChangeFeed(ctx, ent, AWSChangeFeedQuery{Since: tablesBase, Until: tablesBase.Add(3 * time.Hour)}))
+		if got := feedEventIDs(fresh.Rows); got != "e4,e3,e2,e1" {
+			t.Fatalf("fresh rows = %s", got)
+		}
+		record("pinned rows", after.Rows)
+		record("fresh rows", fresh.Rows)
+		record("fresh minutes", fresh.Minutes)
 	})
 }
 
@@ -2459,4 +2632,194 @@ func TestInsertRowsWideTableBatchesUnderParameterBudget(t *testing.T) {
 	if err := tables.insertRows(ctx, nil, "wide_insert", nil, [][]any{{}}, ""); err == nil {
 		t.Fatal("insert with no columns succeeded")
 	}
+}
+
+// The file-mode tables pool keeps every connection it opened: readers that
+// overlap fill the pool, and releasing them closes none, so no read pays
+// for reopening the database and its WAL index.
+func TestLocalTablesPoolKeepsConnectionsOpen(t *testing.T) {
+	tables := newSQLiteTables(t.TempDir() + "/pool.sqlite")
+	t.Cleanup(func() { _ = tables.closeTables() })
+	db, err := tables.tablesDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	var open []*sql.Tx
+	for range localTablesConnections {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var one int
+		if err := tx.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil {
+			t.Fatal(err)
+		}
+		open = append(open, tx)
+	}
+	for _, tx := range open {
+		_ = tx.Rollback()
+	}
+	if stats := db.Stats(); stats.OpenConnections != localTablesConnections || stats.Idle != localTablesConnections || stats.MaxIdleClosed != 0 {
+		t.Fatalf("pool after overlapping reads = %+v", stats)
+	}
+}
+
+// TestTablesParityAccountViewNeverFallsBackIntoAPrunedSpan: once the
+// licensed organization prunes its oldest generations, a time it no longer
+// covers has no generation. The default organization's older, never-closed
+// generation must not answer for it, or a deleted resource comes back and
+// history claims a span the store no longer holds.
+func TestTablesParityAccountViewNeverFallsBackIntoAPrunedSpan(t *testing.T) {
+	runTablesParity(t, func(t *testing.T, backend tablesBackend, orgs tablesOrgs, record tablesRecorder) {
+		ctx := context.Background()
+		store := backend.inventory(t)
+		history := store.(AWSUnitHistoryStore)
+		def := tenancy.NewOrgScope(orgs.def)
+		ent := tenancy.NewOrgScope(orgs.ent, orgs.def)
+		unit := AWSUnit{tablesAccount, tablesRegion, "ec2"}
+		r1 := AWSResource{ARN: tablesARN("i-1"), Type: "instance", Name: "one"}
+		r2 := AWSResource{ARN: tablesARN("i-2"), Type: "instance", Name: "two"}
+		r3 := AWSResource{ARN: tablesARN("i-3"), Type: "instance", Name: "three"}
+		t0 := tablesBase
+		t1, t2, t3 := t0.Add(time.Hour), t0.Add(2*time.Hour), t0.Add(3*time.Hour)
+		must(store.CommitAWSUnit(ctx, def, unit, AWSCandidate{At: t0, Digest: "a", Resources: []AWSResource{r1, r2}}, nil))
+		must(store.CommitAWSUnit(ctx, ent, unit, AWSCandidate{At: t1, Digest: "a", Resources: []AWSResource{r1, r2}}, nil))
+		must(store.CommitAWSUnit(ctx, ent, unit, AWSCandidate{At: t2, Digest: "b", Resources: []AWSResource{r1}}, nil))
+		must(store.CommitAWSUnit(ctx, ent, unit, AWSCandidate{At: t3, Digest: "c", Resources: []AWSResource{r1, r3}}, nil))
+		view := func(asOf time.Time) AWSSnapshotView {
+			t.Helper()
+			return must(store.AWSAccountView(ctx, ent, tablesAccount, asOf))
+		}
+		answer := func(label string, asOf time.Time, org string, seq uint64, arns string) {
+			t.Helper()
+			got := view(asOf)
+			if len(got.Units) != 1 {
+				t.Fatalf("%s: units %+v", label, got.Units)
+			}
+			status := got.Units[0]
+			switch {
+			case seq == 0 && status.Generation != nil:
+				t.Fatalf("%s: generation %+v from %s, want none", label, status.Generation, status.Org)
+			case seq != 0 && (status.Generation == nil || status.Generation.Seq != seq || status.Org != org):
+				t.Fatalf("%s: org %s generation %+v, want %s seq %d", label, status.Org, status.Generation, org, seq)
+			}
+			if arns != "" && strings.Join(arnsOf(got.Resources), ",") != arns {
+				t.Fatalf("%s: resources %v, want %s", label, arnsOf(got.Resources), arns)
+			}
+			units := must(store.AWSUnits(ctx, ent, AWSUnitQuery{Account: tablesAccount, AsOf: asOf}))
+			if len(units) != 1 || units[0].Org != status.Org || (units[0].Generation == nil) != (status.Generation == nil) {
+				t.Fatalf("%s: unit list %+v disagrees with the view %+v", label, units, status)
+			}
+			record(label, got)
+			record(label+" units", units)
+		}
+		answer("before the licensed start", t0.Add(30*time.Minute), orgs.def, 1, tablesARN("i-1")+"@,"+tablesARN("i-2")+"@")
+		answer("licensed span", t2.Add(30*time.Minute), orgs.ent, 2, tablesARN("i-1")+"@")
+		full := must(history.AWSUnitHistory(ctx, ent, AWSUnitQuery{Account: tablesAccount}))
+		if len(full) != 1 || !full[0].Oldest.Equal(t0) || full[0].Generations != 4 {
+			t.Fatalf("history before the prune = %+v", full)
+		}
+		record("history before the prune", full)
+
+		must(store.PruneAWSUnitHistory(ctx, ent, unit, 1))
+		answer("pruned span", t2.Add(30*time.Minute), "", 0, "")
+		if got := arnsOf(view(t2.Add(30 * time.Minute)).Resources); strings.Contains(strings.Join(got, ","), tablesARN("i-2")) {
+			t.Fatalf("a resource deleted at t2 came back: %v", got)
+		}
+		answer("before the licensed start after the prune", t0.Add(30*time.Minute), "", 0, "")
+		answer("kept generation", t3.Add(time.Minute), orgs.ent, 3, tablesARN("i-1")+"@,"+tablesARN("i-3")+"@")
+		answer("latest", time.Time{}, orgs.ent, 3, tablesARN("i-1")+"@,"+tablesARN("i-3")+"@")
+		pruned := must(history.AWSUnitHistory(ctx, ent, AWSUnitQuery{Account: tablesAccount}))
+		if len(pruned) != 1 || !pruned[0].Oldest.Equal(t3) || pruned[0].Generations != 1 {
+			t.Fatalf("history after the prune = %+v, want oldest %s and 1 generation", pruned, t3)
+		}
+		record("history after the prune", pruned)
+		single := must(history.AWSUnitHistory(ctx, def, AWSUnitQuery{Account: tablesAccount}))
+		if len(single) != 1 || !single[0].Oldest.Equal(t0) || single[0].Generations != 1 {
+			t.Fatalf("default history = %+v", single)
+		}
+	})
+}
+
+// TestTablesParityAccountViewTakesSyncAndDataFromOneOrganization: the
+// licensed organization's current generation answers even when the
+// default organization committed later, and the unit's sync state comes
+// from the same organization as its data. An unchanged re-check moves only
+// the verified time; it must still be the answer.
+func TestTablesParityAccountViewTakesSyncAndDataFromOneOrganization(t *testing.T) {
+	runTablesParity(t, func(t *testing.T, backend tablesBackend, orgs tablesOrgs, record tablesRecorder) {
+		ctx := context.Background()
+		store := backend.inventory(t)
+		history := store.(AWSUnitHistoryStore)
+		def := tenancy.NewOrgScope(orgs.def)
+		ent := tenancy.NewOrgScope(orgs.ent, orgs.def)
+		unit := AWSUnit{tablesAccount, tablesRegion, "ec2"}
+		pending := AWSUnit{tablesAccount, tablesRegion, "rds"}
+		r1 := AWSResource{ARN: tablesARN("i-1"), Type: "instance", Name: "one"}
+		r2 := AWSResource{ARN: tablesARN("i-2"), Type: "instance", Name: "two"}
+		r3 := AWSResource{ARN: tablesARN("i-3"), Type: "instance", Name: "three"}
+		db := AWSResource{ARN: tablesARN("db-1"), Type: "db", Name: "db"}
+		t0 := tablesBase
+		t1, t2, t3 := t0.Add(time.Hour), t0.Add(2*time.Hour), t0.Add(3*time.Hour)
+		must(store.CommitAWSUnit(ctx, def, unit, AWSCandidate{At: t0, Digest: "a", Resources: []AWSResource{r1}}, nil))
+		must(store.CommitAWSUnit(ctx, def, pending, AWSCandidate{At: t0, Digest: "db", Resources: []AWSResource{db}}, nil))
+		must(store.CommitAWSUnit(ctx, ent, unit, AWSCandidate{At: t1, Digest: "b", Resources: []AWSResource{r2}}, nil))
+		must(store.CommitAWSUnit(ctx, def, unit, AWSCandidate{At: t2, Digest: "c", Resources: []AWSResource{r3}}, nil))
+		// The licensed re-check finds nothing new: only the verified time moves.
+		must(store.CommitAWSUnit(ctx, ent, unit, AWSCandidate{At: t3, Digest: "b", Resources: []AWSResource{r2}}, nil))
+		mustDo(t, store.RegisterAWSPending(ctx, ent, []AWSUnit{pending}, nil))
+
+		check := func(label string, asOf time.Time, wantOrg string, wantARNs string) AWSSnapshotView {
+			t.Helper()
+			got := must(store.AWSAccountView(ctx, ent, tablesAccount, asOf))
+			units := must(store.AWSUnits(ctx, ent, AWSUnitQuery{Account: tablesAccount, AsOf: asOf}))
+			if len(got.Units) != 2 || len(units) != 2 {
+				t.Fatalf("%s: view units %+v, unit list %+v", label, got.Units, units)
+			}
+			status := got.Units[0]
+			if status.Unit != unit || status.Org != wantOrg || status.Generation == nil {
+				t.Fatalf("%s: unit answered by %s with %+v, want %s", label, status.Org, status.Generation, wantOrg)
+			}
+			if asOf.IsZero() && status.Sync.Generation != status.Generation.Seq {
+				t.Fatalf("%s: sync state of generation %d paired with generation %d", label, status.Sync.Generation, status.Generation.Seq)
+			}
+			for index := range units {
+				if units[index].Org != got.Units[index].Org || units[index].Sync.State != got.Units[index].Sync.State {
+					t.Fatalf("%s: unit list %+v disagrees with the view %+v", label, units[index], got.Units[index])
+				}
+			}
+			if wantARNs != "" {
+				var ec2 []AWSResource
+				for _, row := range got.Resources {
+					if row.Service == "ec2" {
+						ec2 = append(ec2, row)
+					}
+				}
+				if strings.Join(arnsOf(ec2), ",") != wantARNs {
+					t.Fatalf("%s: resources %v, want %s", label, arnsOf(ec2), wantARNs)
+				}
+			}
+			record(label, got)
+			record(label+" units", units)
+			return got
+		}
+		latest := check("latest", time.Time{}, orgs.ent, tablesARN("i-2")+"@")
+		if !latest.Units[0].Sync.VerifiedAt.Equal(t3) || !latest.Units[0].Generation.VerifiedAt.Equal(t3) {
+			t.Fatalf("latest verified %s / %s, want %s", latest.Units[0].Sync.VerifiedAt, latest.Units[0].Generation.VerifiedAt, t3)
+		}
+		// The licensed unit still waiting for its first read is answered,
+		// state and data, by the default organization.
+		waiting := latest.Units[1]
+		if waiting.Unit != pending || waiting.Org != orgs.def || waiting.Generation == nil || waiting.Sync.State != AWSSyncOK {
+			t.Fatalf("pending licensed unit = %+v", waiting)
+		}
+		check("after the default commit", t2.Add(30*time.Minute), orgs.ent, tablesARN("i-2")+"@")
+		check("before the licensed start", t0.Add(30*time.Minute), orgs.def, tablesARN("i-1")+"@")
+		merged := must(history.AWSUnitHistory(ctx, ent, AWSUnitQuery{Account: tablesAccount, Service: "ec2"}))
+		if len(merged) != 1 || !merged[0].Oldest.Equal(t0) || merged[0].Generations != 2 {
+			t.Fatalf("history = %+v, want oldest %s and 2 generations", merged, t0)
+		}
+		record("history", merged)
+	})
 }

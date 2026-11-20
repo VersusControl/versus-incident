@@ -36,6 +36,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import { useDeploymentOrg } from "@/lib/useDeploymentOrg";
+import { pathArea, retryUnlessForbidden, useAccess, type Area } from "@/lib/access";
 
 const COLLAPSE_KEY = "versus.sidebar.collapsed";
 
@@ -104,6 +105,21 @@ interface SideZone {
   items: SideItem[];
 }
 
+// Only the destinations the caller's role can open. A disclosure row keeps the
+// children that stay, and goes when none does; a zone with nothing left goes.
+function allowedItems(items: SideItem[], can: (area: Area) => boolean): SideItem[] {
+  const out: SideItem[] = [];
+  for (const item of items) {
+    if (item.children?.length) {
+      const children = allowedItems(item.children, can);
+      if (children.length > 0) out.push({ ...item, children });
+    } else if (!item.to || can(pathArea(item.to))) {
+      out.push(item);
+    }
+  }
+  return out;
+}
+
 function partitionAgentItems(items: AgentSideItem[], isOSS: boolean) {
   const visible = (zone: AgentSideItem["zone"]) =>
     items.filter(
@@ -131,11 +147,16 @@ export function SidebarContent({
   // Agent config drives whether the Agent zone is usable. Shares the
   // ["agent-config"] cache key with TopBar/NowPage — one fetch, zero extra
   // load. enable===false means the agent is deliberately off.
+  // A role that cannot read incidents is never sent the agent reads, so the
+  // rail logs no refused request; its pages are hidden below anyway.
+  const access = useAccess();
+  const readsIncidents = access.mayRead("incidents");
   const configQ = useQuery({
     queryKey: ["agent-config"],
     queryFn: api.getAgentConfig,
     staleTime: 60_000,
-    retry: 1,
+    retry: retryUnlessForbidden,
+    enabled: readsIncidents,
   });
   const agentOff = configQ.data?.enable === false;
 
@@ -151,7 +172,7 @@ export function SidebarContent({
   // binary, where the route does not exist.
   const baselinesProbe = useQuery({
     queryKey: ["baselines-probe"],
-    enabled: !deploymentOrg.isPending && !isOSS,
+    enabled: !deploymentOrg.isPending && !isOSS && readsIncidents,
     queryFn: async () => {
       try {
         await api.listBaselines({ type: "metric" });
@@ -304,6 +325,10 @@ export function SidebarContent({
     { title: "Manage", icon: ShieldCheck, items: manage },
   ];
 
+  const shown = zones
+    .map((zone) => ({ ...zone, items: allowedItems(zone.items, access.can) }))
+    .filter((zone) => zone.items.length > 0);
+
   return (
     // force-dark: the rail keeps its dark identity in BOTH themes — the
     // CSS variables are re-pinned on this subtree (see index.css).
@@ -314,7 +339,7 @@ export function SidebarContent({
         aria-label="Primary"
         className="dark-scroll flex-1 overflow-y-auto px-2 py-2"
       >
-        {zones.map((zone) =>
+        {shown.map((zone) =>
           collapsed ? (
             <CollapsedZone key={zone.title} {...zone} onNavigate={onNavigate} />
           ) : (

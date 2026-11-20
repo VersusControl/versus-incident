@@ -61,7 +61,7 @@ func (s *Service) summaryBody(ctx context.Context, sc *scope) (SummaryBody, erro
 			return body, err
 		}
 		for _, bg := range budgets {
-			if bg.Scope == ScopeDeployment {
+			if bg.WholeBill() && sc.budgetVisible(bg) {
 				bl := s.budgetLine(sc, bg)
 				body.Budget = &bl
 				break
@@ -572,7 +572,7 @@ func (s *Service) Trend(ctx context.Context, q Query) (TrendView, error) {
 			return v, err
 		}
 		for _, bg := range budgets {
-			if bg.Scope != ScopeDeployment {
+			if !bg.WholeBill() || !sc.budgetVisible(bg) {
 				continue
 			}
 			n := int64(sc.period.Calendar.Days())

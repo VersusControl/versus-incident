@@ -7,6 +7,8 @@ import { TopBar } from "@/components/TopBar";
 import { Breadcrumb } from "@/components/Breadcrumb";
 import { Dropdown } from "@/components/Dropdown";
 import { RetryableError } from "@/components/RetryableError";
+import { AccessNotice } from "@/components/AccessDenied";
+import { isForbidden, useRetryUnlessForbidden } from "@/lib/access";
 import { SkCard } from "@/components/Skeleton";
 import { useToast } from "@/components/toastContext";
 import { copyText } from "@/lib/clipboard";
@@ -217,7 +219,9 @@ export function AwsFinOpsPage({ handlers: handlersOverride }: { handlers?: FinOp
   });
   const canAdmin = gate !== "loading" && gate !== "sign-in" && gate !== "read-only";
 
-  const summary = useQuery({ queryKey: ["finops", "summary", q], queryFn: () => api.finopsSummary(q) });
+  // A refusal is the role's final answer: not retried, shown as a denial.
+  const retry = useRetryUnlessForbidden();
+  const summary = useQuery({ queryKey: ["finops", "summary", q], queryFn: () => api.finopsSummary(q), retry });
   const s = summary.data;
   const on = Boolean(s?.enabled) && !hasNoCostData(s);
   const bridge = useQuery({ queryKey: ["finops", "bridge", q], queryFn: () => api.finopsBridge(q), enabled: on });
@@ -434,6 +438,8 @@ export function AwsFinOpsPage({ handlers: handlersOverride }: { handlers?: FinOp
   let body: React.ReactNode;
   if (summary.isPending) {
     body = <SkCard lines={6} />;
+  } else if (isForbidden(summary.error)) {
+    body = <AccessNotice title="You don't have access to AWS FinOps">Your role doesn't include cost data. Ask an owner or admin for access.</AccessNotice>;
   } else if (summary.isError) {
     body = (
       <RetryableError error={summary.error} onRetry={() => void summary.refetch()} retrying={summary.isFetching} context="Couldn't load FinOps" />

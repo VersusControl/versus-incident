@@ -103,7 +103,8 @@ func (s *Source) Status(ctx context.Context) (finops.SourceStatus, error) {
 	var currencies []string
 	withData, failedCodes := 0, []string{}
 	seen := map[string]bool{}
-	for _, p := range s.payers() {
+	payers := s.payers()
+	for _, p := range payers {
 		ps := st.Payers[p.AccountID]
 		if ps == nil {
 			ps = &payerState{}
@@ -131,8 +132,6 @@ func (s *Source) Status(ctx context.Context) (finops.SourceStatus, error) {
 			tagKnown = true
 			tagActive = tagActive && *ps.TagActive
 		}
-		out.Budgets = append(out.Budgets, ps.Budgets...)
-		out.SkippedBudgets = append(out.SkippedBudgets, ps.SkippedBudgets...)
 		ids := []string{p.AccountID}
 		for id := range ps.Accounts {
 			if id != p.AccountID {
@@ -140,6 +139,21 @@ func (s *Source) Status(ctx context.Context) (finops.SourceStatus, error) {
 			}
 		}
 		sort.Strings(ids[1:])
+		for _, b := range ps.Budgets {
+			// A billing account's budget measures its own bill. With one
+			// billing account that is the whole deployment.
+			b.ID = providerBudgetID(p.AccountID, b)
+			if len(payers) > 1 {
+				b.Accounts = append([]string(nil), ids...)
+			}
+			out.Budgets = append(out.Budgets, b)
+		}
+		for _, sk := range ps.SkippedBudgets {
+			if len(payers) > 1 {
+				sk.Accounts = append([]string(nil), ids...)
+			}
+			out.SkippedBudgets = append(out.SkippedBudgets, sk)
+		}
 		for _, id := range ids {
 			if seen[id] {
 				continue
@@ -173,6 +187,13 @@ func (s *Source) Status(ctx context.Context) (finops.SourceStatus, error) {
 		return out, nil
 	}
 	out.Forecast = sumForecasts(forecasts, currencies)
+	// Months stored past the read horizon (a retention the license no
+	// longer shows) stay stored and out of every read.
+	if o := s.options(); o.visibleMonths() < o.retentionMonths() && !out.HistoryStart.IsZero() {
+		if first := retentionStart(o.today(), o.visibleMonths()); out.HistoryStart.Before(first) {
+			out.HistoryStart = first
+		}
+	}
 	return out, nil
 }
 

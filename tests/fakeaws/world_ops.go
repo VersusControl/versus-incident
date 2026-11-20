@@ -820,6 +820,7 @@ const (
 
 func (w world) trail() []trailEvent {
 	if events, ok := w.changeScenarioTrail(); ok {
+		events = append(events, w.serviceMix(false)...)
 		events = append(events, w.extra...)
 		sort.Slice(events, func(left, right int) bool { return events[left].at.After(events[right].at) })
 		return events
@@ -868,6 +869,7 @@ func (w world) trail() []trailEvent {
 				}},
 		)
 	}
+	events = append(events, w.serviceMix(true)...)
 	events = append(events, w.extra...)
 	sort.Slice(events, func(left, right int) bool { return events[left].at.After(events[right].at) })
 	return events

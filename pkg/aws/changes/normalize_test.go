@@ -370,3 +370,38 @@ func TestGenericSummarySplitsUnderscores(t *testing.T) {
 		t.Fatalf("GenericSummary = %q", got)
 	}
 }
+
+// TestTagKeysShapedLikeAnEmailOrAccessKeyAreMasked: a tag key is stored as
+// part of a field name, so an email address or access key ID used as a key is
+// masked like any kept value, in the fields and in the summary.
+func TestTagKeysShapedLikeAnEmailOrAccessKeyAreMasked(t *testing.T) {
+	const email = "jane.doe@example.com"
+	const accessKey = "AKIAVERSUSHIDDEN0007"
+	for _, tc := range []struct {
+		name, source, event string
+		request             map[string]any
+	}{
+		{name: "tag list", source: "ec2.amazonaws.com", event: "CreateTags",
+			request: map[string]any{"resourcesSet": map[string]any{"items": []any{map[string]any{"resourceId": "i-0abc"}}},
+				"tagSet": map[string]any{"items": []any{map[string]any{"key": email, "value": "x"}, map[string]any{"key": accessKey, "value": "y"}, map[string]any{"key": "team", "value": "z"}}}}},
+		{name: "tag map", source: "lambda.amazonaws.com", event: "TagResource20170331v2",
+			request: map[string]any{"resource": "arn:aws:lambda:us-east-1:111122223333:function:api", "tags": map[string]any{email: "x", accessKey: "y", "team": "z"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			change, ok := Normalize("111122223333", "us-east-1", Event{ID: "e", Name: tc.event, Source: tc.source,
+				Raw: raw(t, map[string]any{"requestParameters": tc.request})})
+			if !ok || change.Template == GenericTemplateID {
+				t.Fatalf("no template: %+v", change)
+			}
+			encoded, _ := json.Marshal(change)
+			if strings.Contains(string(encoded), email) || strings.Contains(string(encoded), accessKey) || strings.Contains(change.Summary, email) || strings.Contains(change.Summary, accessKey) {
+				t.Fatalf("an email or access key ID tag key was kept: %s", encoded)
+			}
+			for _, name := range []string{TagFieldPrefix + MaskedEmail, TagFieldPrefix + HiddenAccessKey, TagFieldPrefix + "team"} {
+				if change.Fields[name] != model.RedactedValue {
+					t.Fatalf("field %q = %q, want hidden (fields %v)", name, change.Fields[name], change.Fields)
+				}
+			}
+		})
+	}
+}

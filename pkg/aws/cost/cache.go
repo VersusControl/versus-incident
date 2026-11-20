@@ -103,16 +103,13 @@ func (c cache) list(kind string) (map[string][]byte, error) {
 }
 
 // pruneLines deletes cost lines older than the retention: the first day
-// kept is the start of the month linesRetentionMonths before this one.
-func (c cache) pruneLines(ctx context.Context, today finops.Date) error {
+// kept is the start of the month months before this one.
+func (c cache) pruneLines(ctx context.Context, today finops.Date, months int) error {
 	store, err := c.tables()
 	if err != nil {
 		return err
 	}
-	first := today.MonthStart()
-	for i := 0; i < linesRetentionMonths; i++ {
-		first = first.AddDays(-1).MonthStart()
-	}
+	first := retentionStart(today, months)
 	_, err = store.PruneFinOpsCostLines(ctx, c.scope, first.String())
 	return err
 }

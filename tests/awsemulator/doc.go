@@ -5,7 +5,7 @@
 //
 // The tests build only with the awsemulator tag, and every test skips unless
 // the test-build AWS endpoint redirect (the endpoint URL and CA bundle
-// variables in cmd/harness_awsendpoint.go) names a running emulator, so plain
+// variables in pkg/aws/harnessendpoint/endpoint.go) names a running emulator, so plain
 // `go test ./...` never needs it. This file carries no build tag so the
 // package always exists; it must not name those variables, because the
 // release-build guard in cmd scans every untagged file for them.

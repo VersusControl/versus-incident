@@ -706,6 +706,15 @@ export function bridgeGeometry(b: Pick<FinOpsBridgeBody, "base_micros" | "total_
   return { bars, lo, hi, ticks, broken: lo > 0, end: run };
 }
 
+/** At most this many axis labels, so they never print over each other in the bar column. */
+const MAX_AXIS_LABELS = 4;
+
+/** The ticks to label: every n-th, so no more than `MAX_AXIS_LABELS` remain. */
+export function axisLabels(ticks: number[]): number[] {
+  const every = Math.max(1, Math.ceil(ticks.length / MAX_AXIS_LABELS));
+  return ticks.filter((_, i) => i % every === 0);
+}
+
 /** Round ticks from zero to at least max: 0, 50, 100, 150 ($ in micros). */
 export function niceTicks(max: number): number[] {
   const step = niceStep(Math.max(max, MICROS));

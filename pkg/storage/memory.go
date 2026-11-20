@@ -1052,6 +1052,21 @@ func (m *memoryProvider) AWSAccountView(_ context.Context, scope tenancy.OrgScop
 	asOf = tableTime(asOf)
 	m.memoryTables.mu.RLock()
 	defer m.memoryTables.mu.RUnlock()
+	views := make([]AWSSnapshotView, 0, len(scope.Read))
+	bounds := make([]map[AWSUnit]awsGenerationBounds, 0, len(scope.Read))
+	for _, orgScope := range singleOrgScopes(scope) {
+		views = append(views, m.accountViewLocked(orgScope, account, asOf))
+		bounds = append(bounds, m.generationBoundsLocked(orgScope.Write, func(unit AWSUnit) bool { return unit.Account == account }))
+	}
+	if len(views) == 1 {
+		return views[0], nil
+	}
+	return mergeAccountViews(scope.Read, views, bounds, asOf), nil
+}
+
+// accountViewLocked reads one account's units and rows for one
+// organization; the caller holds the read lock.
+func (m *memoryProvider) accountViewLocked(scope tenancy.OrgScope, account string, asOf time.Time) AWSSnapshotView {
 	view := AWSSnapshotView{Units: make([]AWSUnitStatus, 0), Resources: make([]AWSResource, 0), Health: make([]AWSHealth, 0), Flags: make([]AWSSecurityFlag, 0)}
 	for _, key := range m.visibleUnits(scope) {
 		if key.unit.Account != account {
@@ -1118,5 +1133,5 @@ func (m *memoryProvider) AWSAccountView(_ context.Context, scope tenancy.OrgScop
 		}
 		return false
 	})
-	return view, nil
+	return view
 }

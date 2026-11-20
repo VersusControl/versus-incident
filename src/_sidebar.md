@@ -12,7 +12,6 @@
 - AWS
   - [Quickstart](/agent/aws/quickstart)
   - [Configuration](/agent/aws/configuration)
-  - [Changes](/agent/aws/changes)
 
 - SRE Agent
   - [Introduction](/agent/agent-introduction)
@@ -127,3 +126,4 @@
 - In Development
   - [AWS Harness](/in-development/aws-harness)
   - [AWS FinOps Agent](/in-development/aws-finops-agent)
+  - [AWS Changes](/in-development/aws-changes)

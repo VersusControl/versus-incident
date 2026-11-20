@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ListFilter, X } from "lucide-react";
 import clsx from "clsx";
@@ -7,18 +7,28 @@ import type { FacetChip, FacetView } from "@/lib/listFilters";
 const SEARCHABLE_OPTION_COUNT = 8;
 
 // FilterPanel is the "Filters" button plus its popover of facet checkboxes.
+// `label` names the button and its popover for a page with a single facet,
+// e.g. "Services"; `alwaysSearchable` shows the value search however short
+// the list is; `pinSelected` lists the values checked when the panel opens
+// first, so a checked value is never out of sight below unchecked ones.
 export function FilterPanel({
   facets,
   activeCount,
   onToggle,
   onClear,
   controls,
+  label = "Filters",
+  alwaysSearchable = false,
+  pinSelected = false,
 }: {
   facets: FacetView[];
   activeCount: number;
   onToggle: (facetId: string, value: string) => void;
   onClear: () => void;
   controls?: ReactNode;
+  label?: string;
+  alwaysSearchable?: boolean;
+  pinSelected?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [panelTop, setPanelTop] = useState(0);
@@ -72,7 +82,7 @@ export function FilterPanel({
         onClick={() => setOpen((o) => !o)}
       >
         <ListFilter size={12} aria-hidden />
-        Filters
+        {label}
         {activeCount > 0 && (
           <span className="rounded-full bg-accent px-1.5 text-2xs tabular-nums text-white">
             {activeCount}
@@ -84,14 +94,20 @@ export function FilterPanel({
         <div
           id={panelId}
           role="dialog"
-          aria-label="Filters"
+          aria-label={label}
           className="fixed right-4 z-overlay w-[min(20rem,calc(100vw-2rem))] rounded-card border border-ink-500 bg-surface-raised shadow-overlay"
           style={{ top: panelTop }}
         >
           <div className="max-h-[60vh] space-y-3 overflow-auto p-3">
             {controls}
             {facets.map((f) => (
-              <FacetSection key={f.id} facet={f} onToggle={onToggle} />
+              <FacetSection
+                key={f.id}
+                facet={f}
+                onToggle={onToggle}
+                alwaysSearchable={alwaysSearchable}
+                pinSelected={pinSelected}
+              />
             ))}
           </div>
           <div className="flex items-center justify-between border-t border-ink-500/50 px-3 py-2">
@@ -116,9 +132,13 @@ export function FilterPanel({
 function FacetSection({
   facet,
   onToggle,
+  alwaysSearchable,
+  pinSelected,
 }: {
   facet: FacetView;
   onToggle: (facetId: string, value: string) => void;
+  alwaysSearchable: boolean;
+  pinSelected: boolean;
 }) {
   const [q, setQ] = useState("");
   // Router navigations run in a transition, so hold the clicked state until
@@ -126,11 +146,34 @@ function FacetSection({
   const [pending, setPending] = useState<Record<string, boolean>>({});
   const selectedKey = facet.selected.join("\u0000");
   useEffect(() => setPending({}), [selectedKey]);
-  const searchable = facet.options.length > SEARCHABLE_OPTION_COUNT;
+  const searchable = alwaysSearchable || facet.options.length > SEARCHABLE_OPTION_COUNT;
   const needle = q.trim().toLowerCase();
-  const options = needle
-    ? facet.options.filter((o) => o.label.toLowerCase().includes(needle))
-    : facet.options;
+  // The section mounts when the panel opens; pinning what was checked then
+  // keeps rows from jumping under the pointer while the user ticks boxes.
+  const [pinned] = useState(() => new Set(pinSelected ? facet.selected : []));
+  const ordered =
+    pinned.size > 0
+      ? [...facet.options.filter((o) => pinned.has(o.value)), ...facet.options.filter((o) => !pinned.has(o.value))]
+      : facet.options;
+  const options = needle ? ordered.filter((o) => o.label.toLowerCase().includes(needle)) : ordered;
+
+  // A fade at the bottom says more rows sit below; overlay scroll bars
+  // (macOS) show nothing until the user scrolls.
+  const listRef = useRef<HTMLUListElement>(null);
+  const [moreBelow, setMoreBelow] = useState(false);
+  const hasList = options.length > 0;
+  const measure = useCallback(() => {
+    const el = listRef.current;
+    setMoreBelow(!!el && el.scrollTop + el.clientHeight < el.scrollHeight - 1);
+  }, []);
+  useLayoutEffect(measure, [measure, options.length]);
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [measure, hasList]);
 
   return (
     <fieldset className="min-w-0">
@@ -157,31 +200,40 @@ function FacetSection({
       ) : options.length === 0 ? (
         <p className="text-2xs text-ink-400">No matching values</p>
       ) : (
-        <ul className="max-h-40 space-y-0.5 overflow-auto">
-          {options.map((o) => {
-            const checked = pending[o.value] ?? facet.selected.includes(o.value);
-            return (
-              <li key={o.value}>
-                <label className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-xs text-ink-200 hover:bg-ink-600/40">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => {
-                      setPending((p) => ({ ...p, [o.value]: !checked }));
-                      onToggle(facet.id, o.value);
-                    }}
-                  />
-                  <span className="min-w-0 flex-1 truncate" title={o.label}>
-                    {o.label}
-                  </span>
-                  <span className="text-2xs tabular-nums text-ink-400">
-                    {o.count}
-                  </span>
-                </label>
-              </li>
-            );
-          })}
-        </ul>
+        <div className="relative">
+          <ul ref={listRef} className="scroll-visible max-h-60 space-y-0.5 overflow-y-auto" onScroll={measure}>
+            {options.map((o) => {
+              const checked = pending[o.value] ?? facet.selected.includes(o.value);
+              return (
+                <li key={o.value}>
+                  <label className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-xs text-ink-200 hover:bg-ink-600/40">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        setPending((p) => ({ ...p, [o.value]: !checked }));
+                        onToggle(facet.id, o.value);
+                      }}
+                    />
+                    <span className="min-w-0 flex-1 truncate" title={o.label}>
+                      {o.label}
+                    </span>
+                    <span className="text-2xs tabular-nums text-ink-400">
+                      {o.count.toLocaleString("en-US")}
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+          {moreBelow && (
+            <div
+              aria-hidden
+              data-more-below
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-surface-raised to-transparent"
+            />
+          )}
+        </div>
       )}
     </fieldset>
   );

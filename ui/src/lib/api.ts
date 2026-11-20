@@ -11,6 +11,7 @@ import {
   groupQueryString,
   type ChangesGroupPage,
   type ChangesQuery,
+  type ChangesPreferences,
   type ChangesView,
   type CompareQuery,
   type CompareView,
@@ -1637,6 +1638,11 @@ export interface SSOSession {
   // admin/owner may manage; everyone else is read-only. "" / absent when the
   // server could not resolve a role (treated as least-privileged).
   role?: string;
+  // roles lists every role the caller's grants carry, most privileged first,
+  // and permissions what they add up to. The shell hides the pages a role
+  // cannot open from them. Absent on older servers.
+  roles?: string[];
+  permissions?: string[];
   issued_at: string;
   expires_at: string;
 }
@@ -4517,7 +4523,8 @@ export interface FinOpsReportView extends FinOpsHeader {
 export interface FinOpsReportRef {
   month: string;
   frozen: FinOpsFrozen;
-  total_micros: number;
+  /** Left out for a caller limited to some accounts. */
+  total_micros?: number;
 }
 
 /** Tables the CSV export can write. */
@@ -4698,6 +4705,26 @@ const awsChangesApi = {
     request<ChangesGroupPage>(`${AWS_CHANGES}/groups/${encodeURIComponent(id)}${groupQueryString(cursor, limit)}`),
   awsChangesCompare: (q: CompareQuery) =>
     request<CompareView>(`${AWS_CHANGES}/compare${compareQueryString(q)}`),
+  /** The signed-in user's service filter; the server answers `["rds","iam"]` when none is saved. */
+  awsChangesPreferences: () => request<ChangesPreferences>(`${AWS_CHANGES}/preferences`),
+  saveAwsChangesPreferences: (prefs: ChangesPreferences) =>
+    request<ChangesPreferences>(`${AWS_CHANGES}/preferences`, { method: "PUT", body: JSON.stringify({ services: prefs.services }) }),
+  /**
+   * The same save, sent while the page reloads or closes. `keepalive` lets
+   * the request outlive the page (sendBeacon can only POST); the headers and
+   * cookie handling match `request`.
+   */
+  saveAwsChangesPreferencesOnUnload: async (prefs: ChangesPreferences): Promise<void> => {
+    const res = await fetch(`${API_BASE}${AWS_CHANGES}/preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ services: prefs.services }),
+      credentials: "same-origin",
+      cache: "no-store",
+      keepalive: true,
+    });
+    if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+  },
 };
 
 export const api = {

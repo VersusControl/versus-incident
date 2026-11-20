@@ -515,3 +515,28 @@ body {
   background-color: rgb(29 78 216);
   border-color: rgb(29 78 216);
 }
+
+/* A scroll area whose bar stays visible: macOS overlay bars hide until the
+   user scrolls, so a short list's hidden rows would give no sign. */
+.scroll-visible {
+  scrollbar-gutter: stable;
+}
+.scroll-visible::-webkit-scrollbar {
+  width: 8px;
+}
+.scroll-visible::-webkit-scrollbar-track {
+  background: rgb(var(--ink-600) / 0.35);
+  border-radius: 6px;
+}
+.scroll-visible::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink-400));
+  background-clip: content-box;
+  border: 2px solid transparent;
+  border-radius: 6px;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .scroll-visible {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--ink-400)) rgb(var(--ink-600) / 0.35);
+  }
+}

@@ -9,6 +9,8 @@ import { PeekPanel } from "@/components/PeekPanel";
 import { AdminAccessNotice } from "@/components/AdminAccessNotice";
 import { CopyField } from "@/components/CopyField";
 import { RetryableError } from "@/components/RetryableError";
+import { AccessNotice } from "@/components/AccessDenied";
+import { isForbidden } from "@/lib/access";
 import { SkCard } from "@/components/Skeleton";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
 import { adminGateState } from "@/lib/role";
@@ -88,8 +90,9 @@ export function AwsSettingsPage() {
     queryFn: api.awsSettings,
     // Every second while a first sync fills in, so services appear as they
     // land; every 15 s otherwise.
-    refetchInterval: (query) => settingsPollMs(query.state.data),
-    retry: 1,
+    // A refusal is final: no retry and no poll.
+    refetchInterval: (query) => (isForbidden(query.state.error) ? false : settingsPollMs(query.state.data)),
+    retry: (count, error) => !isForbidden(error) && count < 1,
   });
   const wide = useMinWidth("(min-width: 1280px)");
   const [connect, setConnect] = useState<ConnectState | null>(null);
@@ -349,19 +352,11 @@ function SettingsError({
       </section>
     );
   }
-  if (error instanceof ApiError && error.status === 403) {
+  if (isForbidden(error)) {
     return (
-      <section className="card" aria-labelledby="aws-denied-title">
-        <div className="card-header">
-          <h2 id="aws-denied-title" className="card-title">
-            AWS settings are restricted
-          </h2>
-        </div>
-        <div className="card-body text-xs text-ink-200">
-          Your role cannot view the AWS connector. An owner or admin can grant
-          access.
-        </div>
-      </section>
+      <AccessNotice title="You don't have access to AWS Settings">
+        Your role can't view the AWS connector. Ask an owner or admin for access.
+      </AccessNotice>
     );
   }
   return (

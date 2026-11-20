@@ -82,8 +82,8 @@ func (a arguments) query() core_finops.Query {
 // Invoke answers from the cache through the one service method behind the
 // matching admin route.
 func (t *tool) Invoke(ctx context.Context, raw json.RawMessage) (*core.ToolResult, error) {
-	if !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
-		return core.UnavailableToolResult(t.name, "infrastructure:view permission is required"), nil
+	if !core.CallerAuthorized(ctx, core.PermissionFinOpsView) && !core.CallerAuthorized(ctx, core.PermissionInfrastructureView) {
+		return core.UnavailableToolResult(t.name, "finops:view or infrastructure:view permission is required"), nil
 	}
 	var args arguments
 	if len(raw) != 0 && string(raw) != "null" {

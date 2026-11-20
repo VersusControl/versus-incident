@@ -28,6 +28,8 @@ export function roleLabel(role: string | null | undefined): string {
       return "Admin";
     case "responder":
       return "Responder";
+    case "finance":
+      return "Finance";
     default:
       return "Viewer";
   }

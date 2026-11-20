@@ -5,7 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { ToastProvider } from "@/components/Toast";
-import { api, type FinOpsQuery } from "@/lib/api";
+import { api, ApiError, type FinOpsQuery } from "@/lib/api";
+import { axisLabels } from "@/lib/finops";
 import { AwsFinOpsPage } from "./AwsFinOpsPage";
 import { finopsReportFixture, finopsStates, type FinOpsStateFixture } from "../../../../../tests/ui/finops/fixtures";
 import { IncreaseDetailPage } from "./IncreaseDetail";
@@ -1156,5 +1157,51 @@ describe("real account shapes", () => {
       expect(chart.getAttribute("class")).not.toContain("h-64");
       expect(chart.querySelector("text")?.getAttribute("class")).toContain("text-[11px]");
     });
+  });
+});
+
+describe("role refusals and the Details layout", () => {
+  it("a 403 permission_required is a plain denial: no Retry, no alert, no raw permission key", async () => {
+    const f = fixtures.get("09-finops")!;
+    serveFixture(f);
+    vi.mocked(api.finopsSummary).mockRejectedValue(
+      new ApiError(403, "infrastructure:view permission is required", { error: "forbidden", code: "permission_required", permission: "finops:view" }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <ToastProvider>
+          <MemoryRouter initialEntries={["/aws/finops"]}>
+            <Routes>
+              <Route path="/aws/finops" element={<AwsFinOpsPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("You don't have access to AWS FinOps")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.body.textContent).not.toContain("permission is required");
+    expect(api.finopsSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("the bridge table wraps its text columns and keeps a floor under the bars, so nothing clips at desktop widths", async () => {
+    renderState("09-finops", "/aws/finops?depth=details");
+    await settle();
+    const table = document.querySelector("[data-bridge-table]") as HTMLElement;
+    expect(table).toBeTruthy();
+    // The whole table no longer refuses to wrap; only short cells do.
+    expect(table.className).not.toContain("whitespace-nowrap");
+    const bars = table.querySelectorAll("[data-bar-cell]");
+    expect(bars.length).toBeGreaterThan(0);
+    bars.forEach((b) => expect(b.className).toContain("min-w-[10rem]"));
+    table.querySelectorAll("[data-status-cell]").forEach((c) => expect(c.className).toContain("whitespace-nowrap"));
+  });
+
+  it("labels at most four axis ticks, so they never print over each other", () => {
+    expect(axisLabels([0, 1, 2, 3, 4, 5, 6, 7])).toEqual([0, 2, 4, 6]);
+    expect(axisLabels([0, 5, 10])).toEqual([0, 5, 10]);
+    expect(axisLabels([])).toEqual([]);
   });
 });

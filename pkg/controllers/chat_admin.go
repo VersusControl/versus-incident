@@ -429,6 +429,10 @@ func (controller *ChatAdminController) message(c *fiber.Ctx) error {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditMessageSent, Target: target, Result: middleware.ChatAuditDenied})
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid request"})
 	}
+	if err := refuseRestrictedChatAttachment(c, request.Attachment); err != nil || c.Response().StatusCode() >= fiber.StatusBadRequest {
+		auditor(middleware.ChatAuditEvent{Action: chatAuditMessageSent, Target: target, Result: middleware.ChatAuditDenied})
+		return err
+	}
 	if err := hydrateIncidentAttachment(c, request.Attachment); err != nil || c.Response().StatusCode() >= fiber.StatusBadRequest {
 		auditor(middleware.ChatAuditEvent{Action: chatAuditMessageSent, Target: target, Result: middleware.ChatAuditDenied})
 		return err
@@ -675,6 +679,25 @@ func writeSSE(writer *bufio.Writer, event string, data []byte) error {
 	return err
 }
 
+// refuseRestrictedChatAttachment answers 403 when the caller's tool
+// restriction does not cover the data an attachment would put into the turn:
+// an incident attachment needs the incidents group and a Kubernetes resource
+// attachment needs the kubernetes group. It runs before the attachment is
+// looked up, so a refused caller learns nothing about the incident or resource.
+func refuseRestrictedChatAttachment(c *fiber.Ctx, attachment *core.ChatAttachment) error {
+	if attachment == nil {
+		return nil
+	}
+	ctx := callerContext(c, context.Background())
+	if attachment.Incident != nil && !core.CallerToolGroupAllowed(ctx, core.ToolGroupIncidents) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "incident attachments are not available to the current user"})
+	}
+	if attachment.Resource != nil && !core.CallerToolGroupAllowed(ctx, core.ToolGroupKubernetes) {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "Kubernetes attachments are not available to the current user"})
+	}
+	return nil
+}
+
 func hydrateIncidentAttachment(c *fiber.Ctx, attachment *core.ChatAttachment) error {
 	if attachment == nil || attachment.Incident == nil || attachment.Incident.ID == "" {
 		return nil
@@ -800,8 +823,10 @@ func apiTurnResult(result *core.ChatTurnResult) agentapi.TurnResult {
 	return mapped
 }
 
+// isAgentAPIv1 reads the matched route pattern, not the request path, so a
+// mixed-case request on a case-insensitive app keeps the versioned wire format.
 func isAgentAPIv1(c *fiber.Ctx) bool {
-	return strings.Contains(c.Path(), "/v1/agent/")
+	return strings.Contains(c.Route().Path, "/v1/agent/")
 }
 
 func apiEvent(event core.ChatEvent) agentapi.Event {

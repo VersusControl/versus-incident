@@ -23,7 +23,13 @@ type feedCursor struct {
 	// Since and Until are the listing's window; later pages answer it.
 	Since time.Time `json:"s,omitzero"`
 	Until time.Time `json:"u,omitzero"`
+	// Services is the listing's service filter; later pages answer it.
+	Services []string `json:"sv,omitempty"`
 }
+
+// maxCursorBytes bounds a decoded cursor: the window, the anchor and a
+// full service filter fit well within it.
+const maxCursorBytes = 8192
 
 func encodeCursor(cursor feedCursor) string {
 	cursor.Version = 1
@@ -34,7 +40,7 @@ func encodeCursor(cursor feedCursor) string {
 func decodeCursor(text string) (feedCursor, error) {
 	var cursor feedCursor
 	data, err := base64.RawURLEncoding.DecodeString(text)
-	if err != nil || len(data) > 1024 || json.Unmarshal(data, &cursor) != nil || cursor.Version != 1 || cursor.RecordedBefore.IsZero() {
+	if err != nil || len(data) > maxCursorBytes || json.Unmarshal(data, &cursor) != nil || cursor.Version != 1 || cursor.RecordedBefore.IsZero() {
 		return feedCursor{}, ErrBadFeedQuery
 	}
 	return cursor, nil
@@ -450,6 +456,6 @@ func page(items []FeedItem, cursor feedCursor, hasCursor bool, limit int) ([]Fee
 		return out, nil
 	}
 	last := out[len(out)-1]
-	next := encodeCursor(feedCursor{RecordedBefore: cursor.RecordedBefore, Anchor: last.anchor, ID: last.ID, Since: cursor.Since, Until: cursor.Until})
+	next := encodeCursor(feedCursor{RecordedBefore: cursor.RecordedBefore, Anchor: last.anchor, ID: last.ID, Since: cursor.Since, Until: cursor.Until, Services: cursor.Services})
 	return out, &next
 }

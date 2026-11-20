@@ -10,6 +10,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/aws/changes"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
 
 const serviceARN = "arn:aws:ecs:us-east-1:111122223333:service/main/web"
@@ -267,4 +268,124 @@ func TestGenerationCapPerKind(t *testing.T) {
 	})
 }
 
+// After a key is added, the default organization's snapshots stay part of
+// the history: a compare from before the upgrade to after it reads each
+// unit's newest generation at each time from either organization, so the
+// same resources read under both compare as unchanged, and a real change
+// across the boundary is still reported.
+func TestCompareAcrossLicenseUpgradeReadsBothOrganizations(t *testing.T) {
+	eachBackend(t, func(t *testing.T) {
+		fixture := newFeedFixture(t, scopeOf(region))
+		start := fixture.clock.Now()
+		ec2 := model.Unit{Account: account, Region: region, Service: "ec2"}
+		ecs := model.Unit{Account: account, Region: region, Service: "ecs"}
+		for _, commit := range []struct {
+			unit      model.Unit
+			candidate Candidate
+		}{{ec2, candidate("i-1", "i-2")}, {ecs, Candidate{Resources: []model.Resource{ecsService("2", nil)}}}} {
+			if _, err := fixture.store.Commit(commit.unit, commit.candidate); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fixture.clock.Advance(30 * time.Minute)
+		beforeUpgrade := fixture.clock.Now()
+		fixture.clock.Advance(30 * time.Minute)
+
+		upgraded := tenancy.NewOrgScope("acme", tenancy.DefaultOrgID)
+		licensed := New(fixture.provider, upgraded, WithClock(fixture.clock.Now))
+		if _, err := licensed.Commit(ec2, candidate("i-1", "i-2")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := licensed.Commit(ecs, Candidate{Resources: []model.Resource{ecsService("2", nil)}}); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.Advance(time.Hour)
+		afterUpgrade := fixture.clock.Now()
+		fixture.clock.Advance(30 * time.Minute)
+
+		week := 7 * 24 * time.Hour
+		feed := NewChangeFeed(licensed, WithFeedClock(fixture.clock.Now), WithScope(func(context.Context) ([]ScopeAccount, bool, error) { return fixture.scope, true, nil }),
+			WithChangesLimits(func() ChangesLimits { return ChangesLimits{MaxWindow: week, MaxCompareAge: week} }))
+		compare := func(request CompareRequest) CompareAnswer {
+			t.Helper()
+			answer, err := feed.Compare(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return answer
+		}
+		for name, request := range map[string]CompareRequest{
+			"across":           {From: beforeUpgrade},
+			"across to a time": {From: beforeUpgrade, To: afterUpgrade},
+			"before only":      {From: start.Add(time.Minute), To: beforeUpgrade},
+			"after only":       {From: afterUpgrade},
+		} {
+			answer := compare(request)
+			if answer.Status != CompareOK || len(answer.Added) != 0 || len(answer.Removed) != 0 || len(answer.Changed) != 0 {
+				t.Fatalf("%s: added %v removed %v changed %v status %s", name, answer.Added, answer.Removed, answer.Changed, answer.Status)
+			}
+			for _, partial := range answer.Partial {
+				if partial.Region == region && partial.Service != "" {
+					t.Fatalf("%s: unit with history named partial: %+v", name, partial)
+				}
+			}
+		}
+		across := compare(CompareRequest{From: beforeUpgrade})
+		if across.HistoryStarts == nil || !across.HistoryStarts.Equal(start) || across.Snapshots.Oldest == nil || !across.Snapshots.Oldest.Equal(start) || across.Snapshots.Count != 2 {
+			t.Fatalf("history starts %v snapshots %+v", across.HistoryStarts, across.Snapshots)
+		}
+
+		if _, err := licensed.Commit(ec2, candidate("i-1", "i-3")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := licensed.Commit(ecs, Candidate{Resources: []model.Resource{ecsService("3", nil)}}); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.Advance(time.Minute)
+		changed := compare(CompareRequest{From: beforeUpgrade})
+		if len(changed.Added) != 1 || changed.Added[0].Name != "i-3" || len(changed.Removed) != 1 || changed.Removed[0].Name != "i-2" ||
+			len(changed.Changed) != 1 || changed.Changed[0].ResourceARN != serviceARN {
+			t.Fatalf("real change across the upgrade: added %v removed %v changed %v", changed.Added, changed.Removed, changed.Changed)
+		}
+	})
+}
+
 var _ = storage.AWSUnitHistory{}
+
+// TestSyncAgreesWithInventoryWhileALicensedUnitIsPending: after a key is
+// added, a unit the licensed organization has not read yet is answered by
+// the default organization in both the sync list and the inventory, so
+// Settings does not say "not checked" beside resources the page lists.
+func TestSyncAgreesWithInventoryWhileALicensedUnitIsPending(t *testing.T) {
+	eachBackend(t, func(t *testing.T) {
+		fixture := newFeedFixture(t, scopeOf(region))
+		ec2 := model.Unit{Account: account, Region: region, Service: "ec2"}
+		if _, err := fixture.store.Commit(ec2, candidate("i-1", "i-2")); err != nil {
+			t.Fatal(err)
+		}
+		fixture.clock.Advance(time.Hour)
+		upgraded := tenancy.NewOrgScope("acme", tenancy.DefaultOrgID)
+		inventory, ok := storage.AWSInventory(fixture.provider)
+		if !ok {
+			t.Fatal("no inventory store")
+		}
+		if err := inventory.RegisterAWSPending(context.Background(), upgraded, []storage.AWSUnit{{Account: account, Region: region, Service: "ec2"}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		licensed := New(fixture.provider, upgraded, WithClock(fixture.clock.Now))
+		sync, err := licensed.Sync(context.Background(), Query{Account: account, Service: "ec2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resources, err := licensed.Resources(context.Background(), Query{Account: account, Service: "ec2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sync) != 1 || !sync[0].HasData || sync[0].Sync.State != model.SyncOK {
+			t.Fatalf("sync = %+v", sync)
+		}
+		if len(resources.Units) != 1 || resources.Units[0].Sync.State != sync[0].Sync.State || len(resources.Resources) != 2 {
+			t.Fatalf("inventory units %+v resources %d, sync %+v", resources.Units, len(resources.Resources), sync)
+		}
+	})
+}

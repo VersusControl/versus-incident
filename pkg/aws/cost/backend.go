@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/VersusControl/versus-incident/pkg/config"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/finops"
 )
 
@@ -26,11 +27,24 @@ func NewBackend(adapter *Adapter, store finops.Store, config func() config.AWSCo
 // Service is the FinOps service over the cache; it never calls AWS. With
 // the inventory wired, increases name the change that likely started them.
 func (b *Backend) Service() *finops.Service {
-	svc := finops.NewService(b.adapter.Source(), b.store, FinOpsConfig(b.config()))
+	cfg := FinOpsConfig(b.config())
+	cfg.AccountScope = CallerAccounts
+	svc := finops.NewService(b.adapter.Source(), b.store, cfg)
 	if inv := b.adapter.options().Inventory; inv != nil {
 		svc = svc.WithSuspectFinder(NewSuspectFinder(inv).WithResourceLines(b.adapter.Source()))
 	}
 	return svc
+}
+
+// CallerAccounts is the request caller's account scope, for
+// finops.Config.AccountScope: the FinOps page and tools read only the
+// accounts it lists. No scope reads every account.
+func CallerAccounts(ctx context.Context) ([]string, bool) {
+	scope := core.CallerAccountScope(ctx)
+	if scope == nil {
+		return nil, false
+	}
+	return scope.IDs, true
 }
 
 // OpenIncreaseServices are the provider service names with an open

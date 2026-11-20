@@ -50,8 +50,9 @@ func (feed awsChangeFeed) Changes(ctx context.Context, since time.Time) ([]commo
 	if window <= 0 {
 		return records, nil
 	}
-	// The open-source change list serves at most 24 hours.
-	window = min(window, snapshot.MaxFeedWindow)
+	// The change list serves at most its edition's window: 24 hours in the
+	// open-source build.
+	window = min(window, awstools.LimitsOf(answerer).MaxWindow)
 	from, until := feed.now().Add(-window), feed.now()
 	// unknown marks the whole window: a failed or cut-short read must never
 	// read as "no AWS changes", even when another source answered.

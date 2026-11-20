@@ -3,7 +3,9 @@ package cost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -293,5 +295,250 @@ func TestLeaseCheckKeepsTheCallersCancellation(t *testing.T) {
 				t.Fatalf("lease check = %v, want %v (lost %v)", err, c.want, c.lost)
 			}
 		})
+	}
+}
+
+// retentionAdapter is an adapter on 2026-11-09 with one payer and the given
+// storage retention and read horizon (nil is the open-source 13).
+func retentionAdapter(t *testing.T, provider storage.Provider, stored, visible func() int) *Adapter {
+	t.Helper()
+	a, err := New(provider, tenancy.DefaultOrgScope(), Options{
+		Payers: []Payer{{AccountID: "111111111111", Credentials: testCreds}}, TagAllowlisted: true,
+		Now:             func() time.Time { return at("2026-11-09", 10) },
+		RetentionMonths: stored, VisibleMonths: visible,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// seedMonthlyLines stores one 5.00 line on the 15th of every month from
+// 2024-09 to 2026-10, and the payer state that read them.
+func seedMonthlyLines(t *testing.T, a *Adapter) storage.FinOpsStore {
+	t.Helper()
+	tables, ok := storage.FinOps(a.cache.provider)
+	if !ok {
+		t.Fatal("the provider has no cost tables")
+	}
+	const payer = "111111111111"
+	var days []string
+	var rows []storage.FinOpsCostLine
+	for d := finops.MustDate("2024-09-15"); d.Before(finops.MustDate("2026-11-01")); d = d.MonthEnd().AddDays(15) {
+		days = append(days, d.String())
+		rows = append(rows, storage.FinOpsCostLine{Payer: payer, Day: d.String(), Account: payer, Service: "compute",
+			RecordType: finops.RecordUsage, Currency: "USD", NetAmortizedMicros: 5_000_000})
+	}
+	if err := tables.ReplaceFinOpsCostDays(ctx, a.cache.scope, payer, days, rows); err != nil {
+		t.Fatal(err)
+	}
+	st, err := a.cache.status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Payers[payer] = &payerState{HistoryStart: finops.MustDate("2024-09-15"), LastCompleteDay: finops.MustDate("2026-11-08"), Currency: "USD"}
+	if err := a.cache.putStatus(st); err != nil {
+		t.Fatal(err)
+	}
+	return tables
+}
+
+// storedMonths lists the months that still hold cost lines.
+func storedMonths(t *testing.T, a *Adapter, tables storage.FinOpsStore) []string {
+	t.Helper()
+	lines, err := tables.FinOpsCostLines(ctx, a.cache.scope, storage.FinOpsCostQuery{From: "2000-01-01", Through: "2099-12-31"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, l := range lines {
+		out = append(out, l.Day[:7])
+	}
+	return out
+}
+
+func prune(t *testing.T, a *Adapter) {
+	t.Helper()
+	if err := a.cache.pruneLines(ctx, a.options().today(), a.options().retentionMonths()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPruneFollowsTheStorageRetention: with 24 months of storage the prune
+// keeps the months 14 to 24 back that the open-source 13 deletes.
+func TestPruneFollowsTheStorageRetention(t *testing.T) {
+	long := retentionAdapter(t, storagefix.Provider(t), func() int { return 24 }, nil)
+	tables := seedMonthlyLines(t, long)
+	prune(t, long)
+	if got := storedMonths(t, long, tables); len(got) != 24 || got[0] != "2024-11" || got[23] != "2026-10" {
+		t.Fatalf("24 months stored kept %v", got)
+	}
+
+	oss := retentionAdapter(t, storagefix.Provider(t), nil, nil)
+	tables = seedMonthlyLines(t, oss)
+	prune(t, oss)
+	if got := storedMonths(t, oss, tables); len(got) != 13 || got[0] != "2025-10" {
+		t.Fatalf("the open-source retention kept %v", got)
+	}
+}
+
+// TestLicenseLapseDeletesNothing: storage stays at 24 months while the read
+// horizon falls back to 13. The prune deletes nothing more, reads stop at 13
+// months, and the older months show again when the horizon returns.
+func TestLicenseLapseDeletesNothing(t *testing.T) {
+	visible := 24
+	a := retentionAdapter(t, storagefix.Provider(t), func() int { return 24 }, func() int { return visible })
+	tables := seedMonthlyLines(t, a)
+	prune(t, a)
+	before := storedMonths(t, a, tables)
+	status, err := a.Source().Status(ctx)
+	if err != nil || status.HistoryStart != finops.MustDate("2024-09-15") {
+		t.Fatalf("licensed history start %v %v", status.HistoryStart, err)
+	}
+
+	visible = 13
+	prune(t, a)
+	if after := storedMonths(t, a, tables); len(after) != len(before) {
+		t.Fatalf("a lapse deleted months: %v, was %v", after, before)
+	}
+	st, _ := a.cache.status()
+	ps := st.Payers["111111111111"]
+	for _, m := range []string{"2024-11", "2024-12", "2025-01", "2025-02", "2025-03", "2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09", "2025-10", "2025-11", "2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09", "2026-10"} {
+		ps.closeMonth(m, a.options().retentionMonths())
+	}
+	if len(ps.ClosedMonths) != 24 || ps.ClosedMonths[0] != "2024-11" {
+		t.Fatalf("closed-month marks under a lapse %v", ps.ClosedMonths)
+	}
+	status, err = a.Source().Status(ctx)
+	if err != nil || status.HistoryStart != finops.MustDate("2025-10-01") {
+		t.Fatalf("lapsed history start %v %v, want 2025-10-01", status.HistoryStart, err)
+	}
+
+	visible = 24
+	if status, _ = a.Source().Status(ctx); status.HistoryStart != finops.MustDate("2024-09-15") {
+		t.Fatalf("renewed history start %v", status.HistoryStart)
+	}
+}
+
+// TestReconcileAfterTheRetentionPrune: the month totals the rollups answer
+// after a prune and a reconcile are the kept lines' own.
+func TestReconcileAfterTheRetentionPrune(t *testing.T) {
+	for name, stored := range map[string]func() int{"open-source": nil, "24 months": func() int { return 24 }} {
+		t.Run(name, func(t *testing.T) {
+			a := retentionAdapter(t, storagefix.Provider(t), stored, nil)
+			tables := seedMonthlyLines(t, a)
+			if got, err := a.ReconcileRollups(ctx); err != nil || !got.Done {
+				t.Fatalf("first reconcile %+v %v", got, err)
+			}
+			prune(t, a)
+			if got, err := a.reconcileAfterRefresh(ctx); err != nil || !got.Done {
+				t.Fatalf("reconcile after the prune %+v %v", got, err)
+			}
+			kept := storedMonths(t, a, tables)
+			noResource := ""
+			totals, err := tables.FinOpsCostTotals(ctx, a.cache.scope, storage.FinOpsCostQuery{From: "2000-01-01", Through: "2099-12-31", ResourceID: &noResource}, storage.FinOpsByMonth)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(totals) != len(kept) || len(kept) != a.options().retentionMonths() {
+				t.Fatalf("month totals %d, kept months %d, retention %d", len(totals), len(kept), a.options().retentionMonths())
+			}
+			for _, total := range totals {
+				if total.Month < kept[0] || total.NetAmortizedMicros != 5_000_000 {
+					t.Fatalf("month total %+v after keeping from %s", total, kept[0])
+				}
+			}
+		})
+	}
+}
+
+// TestRetentionDefaultsStayOpenSource: unset, short or reversed seams keep
+// the open-source 13 months, and the read horizon never passes storage.
+func TestRetentionDefaultsStayOpenSource(t *testing.T) {
+	for _, tc := range []struct {
+		stored, visible func() int
+		wantStored      int
+		wantVisible     int
+	}{
+		{nil, nil, 13, 13},
+		{func() int { return 0 }, func() int { return -1 }, 13, 13},
+		{func() int { return 6 }, func() int { return 12 }, 13, 13},
+		{func() int { return 24 }, nil, 24, 13},
+		{func() int { return 24 }, func() int { return 36 }, 24, 24},
+		{nil, func() int { return 36 }, 13, 13},
+	} {
+		o := Options{RetentionMonths: tc.stored, VisibleMonths: tc.visible}
+		if o.retentionMonths() != tc.wantStored || o.visibleMonths() != tc.wantVisible {
+			t.Fatalf("retention %d visible %d, want %d %d", o.retentionMonths(), o.visibleMonths(), tc.wantStored, tc.wantVisible)
+		}
+	}
+	p := &payerState{}
+	for m := 1; m <= 12; m++ {
+		p.closeMonth(fmt.Sprintf("2025-%02d", m), Options{}.retentionMonths())
+	}
+	for m := 1; m <= 10; m++ {
+		p.closeMonth(fmt.Sprintf("2026-%02d", m), Options{}.retentionMonths())
+	}
+	if len(p.ClosedMonths) != 14 || p.ClosedMonths[0] != "2025-09" {
+		t.Fatalf("open-source closed-month marks %v", p.ClosedMonths)
+	}
+}
+
+// TestMonthCloseRefreshKeepsStoredMonthsUnderALapse: the prune a month-close
+// refresh runs follows the storage retention, not the shown horizon. With 24
+// months stored and 13 shown (a lapsed license), the scheduled refresh that
+// closes October keeps the lines 14 to 24 months back and their closed-month
+// marks.
+func TestMonthCloseRefreshKeepsStoredMonthsUnderALapse(t *testing.T) {
+	sc := loadScenario(t, "single-account")
+	h := newHarness(t, sc, func(o *Options) {
+		o.RetentionMonths = func() int { return 24 }
+		o.VisibleMonths = func() int { return 13 }
+	})
+	h.clock.set(at("2026-11-04", 10))
+	sc.PartialFrom = finops.MustDate("2026-11-01")
+	if _, err := h.adapter.Refresh(ctx, KindScheduled); err != nil {
+		t.Fatal(err)
+	}
+	tables, ok := storage.FinOps(h.provider)
+	if !ok {
+		t.Fatal("the provider has no cost tables")
+	}
+	const payer = "111111111111"
+	var days []string
+	var rows []storage.FinOpsCostLine
+	for d := finops.MustDate("2024-11-15"); d.Before(finops.MustDate("2025-10-01")); d = d.MonthEnd().AddDays(15) {
+		days = append(days, d.String())
+		rows = append(rows, storage.FinOpsCostLine{Payer: payer, Day: d.String(), Account: payer, Service: "compute",
+			RecordType: finops.RecordUsage, Currency: "USD", NetAmortizedMicros: 5_000_000})
+	}
+	if err := tables.ReplaceFinOpsCostDays(ctx, h.adapter.cache.scope, payer, days, rows); err != nil {
+		t.Fatal(err)
+	}
+	// Every month before October was closed when it was read; the marks keep
+	// closed months from being rewritten.
+	st := mustStatus(t, h)
+	for m := finops.MustDate("2024-11-01"); m.Before(finops.MustDate("2026-10-01")); m = m.MonthEnd().AddDays(1) {
+		st.Payers[payer].closeMonth(m.MonthKey(), h.adapter.options().retentionMonths())
+	}
+	if err := h.adapter.cache.putStatus(st); err != nil {
+		t.Fatal(err)
+	}
+
+	h.clock.set(at("2026-11-05", 10))
+	sc.PartialFrom = finops.MustDate("2026-11-01")
+	res, err := h.adapter.Refresh(ctx, KindScheduled)
+	if err != nil || !slices.Contains(res.Committed, payer+"|close") {
+		t.Fatalf("month close %+v %v", res.Committed, err)
+	}
+	old, err := tables.FinOpsCostLines(ctx, h.adapter.cache.scope, storage.FinOpsCostQuery{From: "2024-11-01", Through: "2025-09-30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(old) != len(rows) {
+		t.Fatalf("the month-close prune kept %d of %d stored lines older than the shown 13 months", len(old), len(rows))
+	}
+	if ps := mustStatus(t, h).Payers[payer]; len(ps.ClosedMonths) != 24 || !ps.closed("2024-11") || !ps.closed("2026-10") {
+		t.Fatalf("closed-month marks after the close %v, want the 24 months 2024-11 through 2026-10", ps.ClosedMonths)
 	}
 }

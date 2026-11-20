@@ -100,17 +100,22 @@ func (c *AWSFinOpsController) Register(router fiber.Router) {
 	g.Post("/drilldown", auditFinOps("aws.finops.drilled_down"), requireFinOpsWrite, c.drillDown)
 }
 
+// requireFinOpsView admits a caller with the FinOps view or the wider
+// infrastructure view, and carries the caller's decision, with its account
+// scope, into the request context the FinOps service reads.
 func requireFinOpsView(ctx *fiber.Ctx) error {
-	if !callerCanViewInfrastructure(ctx) {
+	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionFinOpsView))
+	if !(explicit && allowed) && !callerCanViewInfrastructure(ctx) {
 		return refuseCallerInfrastructureView(ctx)
 	}
+	ctx.SetUserContext(callerContext(ctx, ctx.UserContext()))
 	return ctx.Next()
 }
 
 func requireFinOpsWrite(ctx *fiber.Ctx) error {
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureSettingsWrite))
 	if !explicit || !allowed {
-		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:settings:write permission is required"})
+		return refusePermission(ctx, core.PermissionInfrastructureSettingsWrite)
 	}
 	return ctx.Next()
 }
@@ -244,6 +249,9 @@ func writeFinOps(ctx *fiber.Ctx, v any, err error) error {
 		if errors.As(err, &coded) {
 			status, code = fiber.StatusBadGateway, coded.Code
 		}
+	}
+	if status == fiber.StatusInternalServerError {
+		logInternalError("finops", ctx, err)
 	}
 	return ctx.Status(status).JSON(fiber.Map{"error": code})
 }

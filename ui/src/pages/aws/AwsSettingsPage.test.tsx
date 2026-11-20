@@ -417,7 +417,7 @@ describe("AWS settings failure states", () => {
     const { ApiError } = await import("@/lib/api");
     vi.mocked(api.awsSettings).mockRejectedValue(new ApiError(403, "forbidden"));
     renderPage();
-    expect(await screen.findByText("AWS settings are restricted")).toBeTruthy();
+    expect(await screen.findByText("You don't have access to AWS Settings")).toBeTruthy();
   });
 
   it("tells an older build apart from a network failure", async () => {

@@ -33,7 +33,7 @@ wizard walks you through creating a read-only role; see
 written in the config file show **From config** in Settings, and you change
 them only in the file.
 
-## How AWS reads work
+## How it works
 
 Versus only reads. It never creates, changes or deletes anything in your
 accounts.
@@ -42,7 +42,7 @@ accounts.
 | --- | --- | --- |
 | Inventory: VPCs, Lambda, EKS, DynamoDB, ElastiCache, SQS, SNS, EventBridge, Step Functions, Kinesis, API Gateway, Auto Scaling, S3, CloudFront, Route 53, IAM roles, tags | `Describe*`, `List*` and `Get*` metadata calls | 15 minutes (`collect.intervals.inventory`) |
 | Health: CloudWatch alarms, EC2, ECS, load balancers, RDS, CloudFormation stacks, AWS Health events | Status calls | 2 minutes (`collect.intervals.health`) |
-| Changes, shown on [AWS > Changes](/agent/aws/changes) | CloudTrail `LookupEvents`, in each selected region | 5 minutes (`collect.intervals.changes`) |
+| Changes | CloudTrail `LookupEvents`, in each selected region | 5 minutes (`collect.intervals.changes`) |
 | Cost, forecast, savings and budgets | Cost Explorer and the cost APIs, only when you turn FinOps on | Once a day (`finops.refresh_time`) |
 | Account access | Who Versus signs in as, plus one probe per service | Identity every 5 minutes (`health_check_interval`); services every 6 hours |
 
@@ -368,20 +368,104 @@ then restart Versus.
   console, or remove it from the list.
 - **Opt-in status not read:** when Versus could not re-read a region's opt-in
   status recently, the account's Regions cell shows a line such as
-  `af-south-1: opt-in status not read since 14:32`. Until the status is read
-  again, [AWS Changes](/agent/aws/changes#gaps-and-their-reasons) treats that
-  region as a real gap, not as **Not enabled in AWS**.
+  `af-south-1: opt-in status not read since 14:32`.
 - **Global services:** S3, CloudFront, Route 53, IAM and AWS Health are read
   once per account through `us-east-1`, whatever regions you list. Cost
   Explorer is global too.
 - **Changes to global services:** CloudTrail records them in `us-east-1`.
-  Versus reads them from there whatever regions you list. See
-  [AWS Changes](/agent/aws/changes#iam-permissions).
+  Versus reads them from there whatever regions you list.
 - **Sign-in region:** Versus checks the identity and assumes roles in the
   first listed region, or `us-east-1` with `auto`. Put an enabled region first.
 
 Region names from the commercial, AWS GovCloud (US) and China partitions are
 accepted. The role ARN's partition must match the regions.
+
+## Changes setup
+
+The [AWS Changes](/in-development/aws-changes) page shows who changed what in your
+accounts, and which change most likely started an alarm. It reads CloudTrail
+and only reads.
+
+### What Changes needs
+
+| Need | Detail |
+| --- | --- |
+| CloudTrail event history | On by default in every AWS account. No trail is required. |
+| `cloudtrail:LookupEvents` | On the reader role of each account. |
+| Regions | Versus reads each Region you select, plus the global stream (IAM, Route 53, CloudFront, …) from `us-east-1`, even when `us-east-1` is not in your list. |
+
+### Minimal config
+
+The smallest config that reads changes for one account and one Region.
+Changes needs no key of its own: the CloudTrail reader runs whenever the
+connector is on and `collect.enable` keeps its default `true`. Every
+`collect.changes` key has a default; see
+[Connector options](#connector-options).
+
+```yaml
+connectors:
+  aws:
+    enable: true
+    accounts:
+      - account_id: "111122223333"
+        regions: [eu-west-1]
+        auth:
+          mode: default_chain
+```
+
+### 1. Grant the CloudTrail read
+
+`cloudtrail:LookupEvents` is already in the `MetadataReads` statement of the
+read-only policy and in `versus-reader` (see [Permissions](#permissions)). If
+you use either, there is nothing to add. Otherwise add the action to each
+reader role.
+
+### 2. Select Regions
+
+List the Regions where you run workloads in `regions`, or use `auto`. See
+[Regions](#regions).
+
+### 3. Open AWS > Changes
+
+While Versus reads an account for the first time, the summary card says
+**Reading the last 24 h…**.
+
+### 4. Wait for the first read
+
+The first read covers the last 24 h. On a busy account it takes about
+5 minutes. After that, Versus reads CloudTrail every 5 minutes.
+
+### Check that it works
+
+- **AWS > Settings** shows **CloudTrail** as **Readable** for the account.
+- The Changes summary card shows no **Data not complete** warning line.
+
+### Settings worth knowing
+
+The defaults suit most accounts. The keys live under
+`connectors.aws.collect`:
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `intervals.changes` | `5m` | How often CloudTrail is read |
+| `changes.lookback` | `24h` | How far back the first read goes |
+| `changes.page_budget` | `0` (sized automatically) | CloudTrail pages read per poll |
+| `changes.routine_events` | 5 agent events | Events counted but not listed |
+
+### How far back you can see
+
+| Tier | Window on the Changes page |
+| --- | --- |
+| OSS | 1 h and 24 h |
+| Enterprise (licensed) | Adds 7 d |
+
+### Common setup problems
+
+| Problem | What you see | Fix |
+| --- | --- | --- |
+| Permission missing | **CloudTrail not readable** on the Changes page; **is missing CloudTrail access** in Settings | Add `cloudtrail:LookupEvents` to the reader role. **Copy fix** gives the IAM statement. |
+| Region not enabled | **Region not enabled in AWS** | Opt in to the Region in the AWS console, or remove it from `regions`. |
+| Throttling | **CloudTrail throttled the collector** | Usually nothing: later reads fill the gap. If it persists, find the other caller of `LookupEvents` in that account. |
 
 ## FinOps setup
 
@@ -617,11 +701,18 @@ All keys sit under `connectors.aws`.
 | `collect.enable` | `true` | Runs the background readers. |
 | `collect.intervals.inventory` | `15m` | Inventory refresh, 30s to 24h. |
 | `collect.intervals.health` | `2m` | Health and alarm refresh, 30s to 24h. |
-| `collect.intervals.changes` | `5m` | CloudTrail polling, 30s to 24h. |
+| `collect.intervals.changes` | `5m` | CloudTrail polling, 30s to 24h. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_INTERVAL`. |
 | `collect.history.max_generations` | `48` | Snapshots kept per service and region, 1 to 10000. |
 | `collect.history.max_age` | `168h` | How long older snapshots are kept, 1h to 8784h. |
 | `collect.history.change_retention` | `336h` | How long CloudTrail changes are kept, 1h to 8784h. |
-| `collect.changes.*` | see [Changes settings](/agent/aws/changes#settings) | The CloudTrail reader: lookback, overlap, page budget, routine events, bursts and read cap. |
+| `collect.changes.lookback` | `24h` | How far back the first read of a region goes, 1h to 336h. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_LOOKBACK`. |
+| `collect.changes.overlap` | `15m` | Newest stretch re-read on every poll, because CloudTrail delivers events late, 5m to 2h. Raise it when Settings shows late arrivals. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_OVERLAP`. |
+| `collect.changes.page_budget` | `0` | CloudTrail pages read per poll, 0 to 1000. `0` sizes it from the CloudTrail limit of 2 requests a second and `collect.intervals.changes`: 300 pages at `5m`, never fewer than 20 or more than 480. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_PAGE_BUDGET`. |
+| `collect.changes.routine_events` | `[ssm:UpdateInstanceInformation, ecs:SubmitTaskStateChange, ecs:SubmitContainerStateChange, logs:CreateLogStream, config:PutEvaluations]` | Agent and scheduler events counted per minute, not listed one row each. Entries are `service:Action`, up to 32. An empty list counts nothing. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_ROUTINE_EVENTS`, comma-separated. |
+| `collect.changes.burst_window` | `10m` | Failed attempts with the same principal, error code and service within this gap of each other join one burst row, 1m to 1h. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_BURST_WINDOW`. |
+| `collect.changes.burst_min` | `5` | Fewest failed attempts that form a burst row, 2 to 1000. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_BURST_MIN`. |
+| `collect.changes.failure_keep` | `20` | Failed attempts per principal, error code, action and hour kept as rows; the rest are counted. 5 to 1000. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_FAILURE_KEEP`. |
+| `collect.changes.read_cap` | `20000` | Most change rows one Changes page answer reads, 1000 to 200000. Env: `VERSUS_CONNECTORS_AWS_COLLECT_CHANGES_READ_CAP`. |
 | `applications.sources` | `[appregistry, cloudformation, tags]` | Where Versus looks for a resource's application, in order. |
 | `applications.tag_keys` | `[app, service]` | Tag keys read for the application, up to 16. Only allowlisted keys are used. |
 | `finops.team_tag_key` | `team` | The one tag key for team ownership. |
@@ -726,7 +817,7 @@ With `--set`, quote arguments that contain square brackets:
   proxy settings for AWS calls, and it refuses `AWS_ENDPOINT_URL*` and
   `AWS_EC2_METADATA_SERVICE_ENDPOINT` overrides.
 
-## Troubleshooting
+## `Troubleshooting`
 
 Messages appear on **AWS > Settings** or on the FinOps page. Configuration
 errors stop Versus at startup and appear in its log.
@@ -739,7 +830,7 @@ errors stop Versus at startup and appear in its log.
 | **The role trust policy refused Versus** | The trust policy does not name the Versus role ARN | Put the exact Versus principal ARN in the trust policy, and allow `sts:AssumeRole` on the Versus identity. |
 | **Trust policy does not allow this ExternalId** | The external ID in the environment differs from the trust condition | Set the same value in both places. |
 | *Account* **is missing** *service* **access**; the row shows *service*`: Denied` | The role lacks that service's read | Add the actions Settings names, for example `Add elasticache:Describe* to versus-reader`. |
-| *Account* **is missing CloudTrail access** | `cloudtrail:LookupEvents` is not allowed, so changes are not read | Add `cloudtrail:LookupEvents` to the reader role. For other gaps on the Changes page, see [Changes troubleshooting](/agent/aws/changes#troubleshooting). |
+| *Account* **is missing CloudTrail access** | `cloudtrail:LookupEvents` is not allowed, so changes are not read | Add `cloudtrail:LookupEvents` to the reader role of that account. The `MetadataReads` statement of the read-only policy and `versus-reader` already include it. No trail is needed: Versus reads CloudTrail event history, which is on in every account. After the next read, Settings shows **CloudTrail** as **Readable**. For other gaps on the Changes page, see [Common setup problems](#common-setup-problems). |
 | A service shows **Not on plan** | The service needs a higher AWS Support plan, for example AWS Health | Expected. It is not counted as denied. |
 | **Region not enabled for this account**, or *account* **has 1 region not enabled** | A listed region is not opted in | Opt in to the region, or remove it from `regions`. |
 | **AWS throttled the request**, or a service shows **AWS throttled, retrying** | AWS asked Versus to slow down | Nothing to do; Versus backs off and retries. If it persists, lower `budgets.max_requests_per_second` or read fewer regions. |

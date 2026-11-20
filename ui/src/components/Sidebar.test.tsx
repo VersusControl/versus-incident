@@ -52,6 +52,7 @@ const apiMocks = vi.hoisted(() => ({
   getAgentConfig: vi.fn().mockResolvedValue({ enable: true }),
   getSSODeployment: vi.fn(),
   listBaselines: vi.fn(),
+  getSsoSession: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importActual) => {
@@ -64,6 +65,7 @@ vi.mock("@/lib/api", async (importActual) => {
       getSSODeployment: apiMocks.getSSODeployment,
       listBaselines: apiMocks.listBaselines,
     },
+    getSsoSession: apiMocks.getSsoSession,
   };
 });
 
@@ -75,6 +77,7 @@ beforeEach(() => {
   apiMocks.listBaselines
     .mockReset()
     .mockRejectedValue(new ApiError(403, "forbidden"));
+  apiMocks.getSsoSession.mockReset().mockRejectedValue(new ApiError(401, "no session"));
 });
 
 afterEach(cleanup);
@@ -517,5 +520,52 @@ describe("Sidebar — AWS connector submenu", () => {
     );
     const link = screen.getByRole("link", { name: /Accounts/ });
     expect(link.textContent).toBe("Accounts3");
+  });
+});
+
+// The Enterprise whoami for a finance-only user, as the server sends it.
+const FINANCE_SESSION = {
+  org: "acme",
+  email: "fin@example.com",
+  subject: "fin",
+  mfa: false,
+  role: "finance",
+  roles: ["finance"],
+  permissions: ["finops:view"],
+  issued_at: "2026-11-20T00:00:00Z",
+  expires_at: "2026-11-21T00:00:00Z",
+};
+
+describe("Sidebar — role-aware navigation", () => {
+  it("shows a finance-only user FinOps and Chat, and sends no incident or agent read", async () => {
+    apiMocks.getSSODeployment.mockResolvedValue({ org: "acme" });
+    apiMocks.getSsoSession.mockResolvedValue(FINANCE_SESSION);
+    renderSidebar();
+    await waitFor(() => expect(navSections()).toEqual({ Respond: ["/agent/chat"], Connectors: [] }));
+    fireEvent.click(screen.getByRole("button", { name: "AWS" }));
+    expect(navSections()).toEqual({ Respond: ["/agent/chat"], Connectors: ["/aws/finops"] });
+    expect(apiMocks.getAgentConfig).not.toHaveBeenCalled();
+    expect(apiMocks.listBaselines).not.toHaveBeenCalled();
+    // Licensed features are hidden for the role, never shown with the OSS lock.
+    expect(screen.queryAllByLabelText("Enterprise")).toHaveLength(0);
+  });
+
+  it("hides the AWS pages from a viewer, whose role cannot read infrastructure", async () => {
+    apiMocks.getSSODeployment.mockResolvedValue({ org: "acme" });
+    apiMocks.listBaselines.mockResolvedValue({ baselines: [] });
+    apiMocks.getSsoSession.mockResolvedValue({ ...FINANCE_SESSION, role: "viewer", roles: ["viewer"], permissions: ["incidents:view"] });
+    renderSidebar();
+    await waitFor(() => expect(navSections().Connectors).toBeUndefined());
+    expect(navSections().Respond).toEqual(["/now", "/incidents", "/agent/chat"]);
+    expect(screen.queryByRole("button", { name: "AWS" })).toBeNull();
+  });
+
+  it("hides nothing when the session lists no permissions (an older server)", async () => {
+    apiMocks.getSSODeployment.mockResolvedValue({ org: "acme" });
+    apiMocks.getSsoSession.mockResolvedValue({ ...FINANCE_SESSION, role: "viewer", roles: undefined, permissions: undefined });
+    renderSidebar();
+    await waitFor(() => expect(apiMocks.getAgentConfig).toHaveBeenCalled());
+    expect(navSections().Respond).toEqual(["/now", "/incidents", "/agent/chat"]);
+    expect(navSections().Manage).toEqual(["/people", "/admin", "/settings"]);
   });
 });

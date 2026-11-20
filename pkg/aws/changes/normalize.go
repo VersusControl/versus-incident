@@ -201,13 +201,18 @@ var (
 // HiddenAccessKey replaces an access key ID in a kept value.
 const HiddenAccessKey = "(access key hidden)"
 
-// maskPersonal masks email-shaped names in the summary, the fields and the
-// resource references, the same way the actor is masked, and drops access
-// key IDs: none of them is ever stored. Every template's values pass here.
+// maskPersonal masks email-shaped names in the summary, the field names and
+// values and the resource references, the same way the actor is masked, and
+// drops access key IDs: none of them is ever stored. Every template's values pass here.
 func maskPersonal(change *model.Change) {
 	change.Summary = maskText(change.Summary)
-	for name, value := range change.Fields {
-		change.Fields[name] = maskText(value)
+	if len(change.Fields) > 0 {
+		// Field names are masked too: a tag key is stored as part of one.
+		fields := make(map[string]string, len(change.Fields))
+		for name, value := range change.Fields {
+			fields[maskText(name)] = maskText(value)
+		}
+		change.Fields = fields
 	}
 	// A masked ARN no longer names one resource (two people would share
 	// it), so it is kept as unresolved and never matched.
@@ -339,7 +344,9 @@ func present(value any) bool {
 func tagKeys(value any) []string {
 	var keys []string
 	add := func(key string) {
-		if key = safeIdentifier(key); key != "" && len(keys) < maxTagFields && !contains(keys, key) {
+		// A tag key becomes part of a field name, so an email or access key
+		// ID in it is masked like any kept value.
+		if key = maskText(safeIdentifier(key)); key != "" && len(keys) < maxTagFields && !contains(keys, key) {
 			keys = append(keys, key)
 		}
 	}

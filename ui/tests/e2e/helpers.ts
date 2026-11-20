@@ -1,4 +1,5 @@
 import { expect, type Locator, type Page } from "@playwright/test";
+import * as fs from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Shared helpers for the versus-incident SPA browser e2e. Everything
@@ -7,18 +8,34 @@ import { expect, type Locator, type Page } from "@playwright/test";
 // hardcoded here.
 //
 // Auth model: OSS exchanges `X-Gateway-Secret` once for an HttpOnly session
-// cookie; a licensed Enterprise build shows the local-admin login form instead.
+// cookie; a licensed Enterprise build shows the local-admin login form instead,
+// filled from E2E_ADMIN_* or the HARNESS_ADMIN_ENV admin file.
 // Reloads in the same browser context reuse the session cookie.
 // ---------------------------------------------------------------------------
+
+// adminFromFile reads the built-in admin from the file HARNESS_ADMIN_ENV names
+// (`user=` and `pass=` lines, mode 600, e.g. the admin a licensed aws-changes
+// browser stack kept from its boot banner), so the password never travels in
+// the environment or on a command line. Empty when the variable is unset.
+function adminFromFile(): { user: string; pass: string } {
+  const file = process.env.HARNESS_ADMIN_ENV ?? "";
+  if (!file) return { user: "", pass: "" };
+  const text = fs.readFileSync(file, "utf8");
+  const value = (key: string) =>
+    text.split("\n").filter((line) => line.startsWith(`${key}=`)).map((line) => line.slice(key.length + 1).trim()).pop() ?? "";
+  return { user: value("user"), pass: value("pass") };
+}
+const fileAdmin = adminFromFile();
 
 export const env = {
   baseURL: process.env.E2E_BASE_URL ?? "http://localhost:8080",
   // The OSS single-admin gateway secret (== the server's GATEWAY_SECRET).
   gatewaySecret: process.env.E2E_GATEWAY_SECRET ?? "",
-  // Enterprise built-in admin, captured by harness-run from the boot banner.
-  adminUsername: process.env.E2E_ADMIN_USERNAME ?? "admin",
-  adminPassword: process.env.E2E_ADMIN_PASSWORD ?? "",
-  licensed: process.env.E2E_LICENSED === "1",
+  // Enterprise built-in admin, captured by harness-run from the boot banner:
+  // E2E_ADMIN_* from `harness.sh e2e ui`, or the HARNESS_ADMIN_ENV file.
+  adminUsername: process.env.E2E_ADMIN_USERNAME || fileAdmin.user || "admin",
+  adminPassword: process.env.E2E_ADMIN_PASSWORD || fileAdmin.pass,
+  licensed: process.env.E2E_LICENSED === "1" || fileAdmin.pass !== "",
 };
 
 export async function signInWithGatewaySecret(page: Page): Promise<void> {
@@ -33,7 +50,7 @@ export async function signInWithGatewaySecret(page: Page): Promise<void> {
   if (surface === "local") {
     if (!env.adminPassword) {
       throw new Error(
-        "E2E_ADMIN_PASSWORD is required for an Enterprise build — run the suite " +
+        "E2E_ADMIN_PASSWORD or HARNESS_ADMIN_ENV is required for an Enterprise build — run the suite " +
           "through `plans/harness-run/harness.sh e2e ui`, which sets it from the boot banner.",
       );
     }

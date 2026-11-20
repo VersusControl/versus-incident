@@ -1,19 +1,24 @@
 package controllers
 
 import (
+	"encoding/json"
 	"errors"
+	"log"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
+	"github.com/VersusControl/versus-incident/pkg/middleware"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 // AWSChangesController serves the read-only Changes page.
 type AWSChangesController struct {
-	feed *snapshot.ChangeFeed
+	feed        *snapshot.ChangeFeed
+	preferences *snapshot.ChangePreferenceStore
 }
 
 // NewAWSChangesController builds the controller. A nil feed (the AWS
@@ -22,23 +27,93 @@ func NewAWSChangesController(feed *snapshot.ChangeFeed) *AWSChangesController {
 	return &AWSChangesController{feed: feed}
 }
 
+// WithPreferences keeps each signed-in user's Changes page choices in
+// store. Without it the preferences route answers the defaults and cannot
+// save.
+func (c *AWSChangesController) WithPreferences(store *snapshot.ChangePreferenceStore) *AWSChangesController {
+	c.preferences = store
+	return c
+}
+
 // Register mounts the Changes routes behind the same admin chain as the
 // other AWS pages: the gateway guard and the infrastructure view.
 func (c *AWSChangesController) Register(router fiber.Router) {
-	g := router.Group("/admin/aws/changes", adminGatewayGuard, requireFinOpsView)
+	g := router.Group("/admin/aws/changes", adminGatewayGuard, requireChangesView)
 	g.Get("/", c.changes)
 	g.Get("/groups/:id", c.group)
 	g.Get("/compare", c.compare)
+	// Any caller who may view the page may save their own choices.
+	g.Get("/preferences", c.getPreferences)
+	g.Put("/preferences", c.putPreferences)
+}
+
+// requireChangesView admits only a caller with the infrastructure view: the
+// change history names resources and actors across the deployment, which
+// the FinOps view alone does not cover. The caller's decision is carried
+// into the request context the change feed reads.
+func requireChangesView(ctx *fiber.Ctx) error {
+	if !callerCanViewInfrastructure(ctx) {
+		return refuseCallerInfrastructureView(ctx)
+	}
+	ctx.SetUserContext(callerContext(ctx, ctx.UserContext()))
+	return ctx.Next()
+}
+
+// serviceQuery reads the comma-separated service filter.
+func serviceQuery(ctx *fiber.Ctx) ([]string, error) {
+	services, err := snapshot.ParseServices(strings.Clone(ctx.Query("service")))
+	if err != nil {
+		return nil, errors.New("service must be a comma-separated list of service names")
+	}
+	return services, nil
+}
+
+func (c *AWSChangesController) getPreferences(ctx *fiber.Ctx) error {
+	preferences, err := c.preferences.Get(strings.Clone(middleware.RequestActor(ctx)))
+	if err != nil {
+		return preferencesError(ctx, err)
+	}
+	return ctx.JSON(preferences)
+}
+
+func (c *AWSChangesController) putPreferences(ctx *fiber.Ctx) error {
+	var body struct {
+		Services *[]string `json:"services"`
+	}
+	if err := json.Unmarshal(ctx.Body(), &body); err != nil || body.Services == nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "body must be {\"services\": [...]}"})
+	}
+	saved, err := c.preferences.Save(strings.Clone(middleware.RequestActor(ctx)), snapshot.ChangePreferences{Services: *body.Services})
+	if err != nil {
+		return preferencesError(ctx, err)
+	}
+	return ctx.JSON(saved)
+}
+
+func preferencesError(ctx *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, snapshot.ErrNoUser):
+		return ctx.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "a signed-in user is required"})
+	case errors.Is(err, snapshot.ErrBadFeedQuery):
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "services must be at most 64 service names"})
+	case errors.Is(err, snapshot.ErrNoStorage):
+		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "preference storage not ready"})
+	}
+	return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "preferences could not be read or saved"})
 }
 
 func (c *AWSChangesController) compare(ctx *fiber.Ctx) error {
 	if c.feed == nil {
 		return ctx.JSON(fiber.Map{"enabled": false})
 	}
+	services, err := serviceQuery(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	request := snapshot.CompareRequest{
-		Account: strings.Clone(ctx.Query("account")),
-		Region:  strings.Clone(ctx.Query("region")),
-		Service: strings.Clone(ctx.Query("service")),
+		Account:  strings.Clone(ctx.Query("account")),
+		Region:   strings.Clone(ctx.Query("region")),
+		Services: services,
 	}
 	from, err := time.Parse(time.RFC3339, ctx.Query("from"))
 	if err != nil {
@@ -54,33 +129,17 @@ func (c *AWSChangesController) compare(ctx *fiber.Ctx) error {
 	}
 	answer, err := c.feed.Compare(ctx.UserContext(), request)
 	if err != nil {
-		return changesError(ctx, err)
+		return c.changesError(ctx, err)
 	}
 	return ctx.JSON(answer)
 }
 
-// changesWindowLocked is the OSS answer for a window longer than 24 h.
-func changesWindowLocked(ctx *fiber.Ctx) error {
-	return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "window_locked", "tier": "enterprise", "max_window": "24h"})
-}
-
-func parseChangesWindow(value string) (time.Duration, bool, error) {
-	switch strings.TrimSpace(value) {
-	case "", "24h":
-		return snapshot.FeedWindowDay, false, nil
-	case "1h":
-		return snapshot.FeedWindowHour, false, nil
-	}
-	parsed, err := time.ParseDuration(value)
-	if err == nil && parsed > snapshot.MaxFeedWindow {
-		return 0, true, nil
-	}
-	if strings.HasSuffix(value, "d") {
-		if days, err := strconv.Atoi(strings.TrimSuffix(value, "d")); err == nil && days >= 1 {
-			return 0, true, nil
-		}
-	}
-	return 0, false, errors.New("window must be 1h or 24h")
+// changesWindowLocked answers a window or compare start beyond the
+// edition's limits; max_window names the longest window it serves (24h in
+// the open-source build).
+func (c *AWSChangesController) changesWindowLocked(ctx *fiber.Ctx) error {
+	return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "window_locked", "tier": "enterprise",
+		"max_window": snapshot.FormatWindow(c.feed.Limits().MaxWindow)})
 }
 
 func (c *AWSChangesController) changes(ctx *fiber.Ctx) error {
@@ -97,25 +156,30 @@ func (c *AWSChangesController) changes(ctx *fiber.Ctx) error {
 		}
 		since = parsed
 	} else {
-		parsed, locked, err := parseChangesWindow(ctx.Query("window"))
+		parsed, locked, err := snapshot.ParseWindow(ctx.Query("window"), c.feed.Limits())
 		if locked {
-			return changesWindowLocked(ctx)
+			return c.changesWindowLocked(ctx)
 		}
 		if err != nil {
 			return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 		window = parsed
 	}
+	services, err := serviceQuery(ctx)
+	if err != nil {
+		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 	request := snapshot.FeedRequest{
-		Window:     window,
-		Since:      since,
-		Account:    strings.Clone(ctx.Query("account")),
-		Region:     strings.Clone(ctx.Query("region")),
-		ActorClass: strings.Clone(ctx.Query("actor_class")),
-		Service:    strings.Clone(ctx.Query("service")),
-		Resource:   strings.Clone(ctx.Query("resource")),
-		Text:       strings.Clone(ctx.Query("q")),
-		Cursor:     strings.Clone(ctx.Query("cursor")),
+		Window:       window,
+		Since:        since,
+		Account:      strings.Clone(ctx.Query("account")),
+		Region:       strings.Clone(ctx.Query("region")),
+		ActorClass:   strings.Clone(ctx.Query("actor_class")),
+		Services:     services,
+		ServiceFacet: true,
+		Resource:     strings.Clone(ctx.Query("resource")),
+		Text:         strings.Clone(ctx.Query("q")),
+		Cursor:       strings.Clone(ctx.Query("cursor")),
 	}
 	if value := ctx.Query("until"); value != "" {
 		until, err := time.Parse(time.RFC3339, value)
@@ -140,7 +204,7 @@ func (c *AWSChangesController) changes(ctx *fiber.Ctx) error {
 	}
 	answer, err := c.feed.Answer(ctx.UserContext(), request)
 	if err != nil {
-		return changesError(ctx, err)
+		return c.changesError(ctx, err)
 	}
 	return ctx.JSON(answer)
 }
@@ -159,15 +223,15 @@ func (c *AWSChangesController) group(ctx *fiber.Ctx) error {
 	}
 	answer, err := c.feed.Group(ctx.UserContext(), strings.Clone(ctx.Params("id")), strings.Clone(ctx.Query("cursor")), limit)
 	if err != nil {
-		return changesError(ctx, err)
+		return c.changesError(ctx, err)
 	}
 	return ctx.JSON(answer)
 }
 
-func changesError(ctx *fiber.Ctx, err error) error {
+func (c *AWSChangesController) changesError(ctx *fiber.Ctx, err error) error {
 	switch {
 	case errors.Is(err, snapshot.ErrWindowLocked):
-		return changesWindowLocked(ctx)
+		return c.changesWindowLocked(ctx)
 	case errors.Is(err, snapshot.ErrCursorExpired):
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "cursor_expired"})
 	case errors.Is(err, snapshot.ErrBadFeedQuery):
@@ -177,5 +241,14 @@ func changesError(ctx *fiber.Ctx, err error) error {
 	case errors.Is(err, snapshot.ErrNoStorage):
 		return ctx.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{"error": "change storage not ready"})
 	}
+	logInternalError("aws changes", ctx, err)
 	return ctx.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "changes could not be read"})
+}
+
+// logInternalError logs once why a request answered 500: the route and the
+// wrapped storage error, secrets redacted, never the request or answer
+// body. The client still sees only the generic error.
+func logInternalError(feature string, ctx *fiber.Ctx, err error) {
+	log.Printf("ERROR %s: %s %s failed (storage error: %s); check the server's storage (data folder or database) is reachable and not locked",
+		feature, ctx.Method(), ctx.Path(), utils.RedactSecrets(err.Error()))
 }

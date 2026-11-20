@@ -281,6 +281,7 @@ export function ChangeList({
   onToggleRoutine,
   shownId = null,
   onCursorExpired = noop,
+  stale = false,
 }: {
   view: ChangesView;
   items: ChangeItem[];
@@ -293,6 +294,8 @@ export function ChangeList({
   shownId?: string | null;
   /** A list or group cursor expired; the page reloads its first page. */
   onCursorExpired?: () => void;
+  /** `items` answer another filter or span and stand in while this one loads. */
+  stale?: boolean;
 }) {
   const multiAccount = view.accounts.length > 1;
   const showRegion = multiRegion(view);
@@ -314,8 +317,8 @@ export function ChangeList({
           </button>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto border-t border-ink-500/30" data-list-scroll>
-        <ul className="divide-y divide-ink-500/30" aria-label="Change list">
+      <div className="min-h-0 flex-1 overflow-y-auto border-t border-ink-500/30" data-list-scroll aria-busy={stale || undefined}>
+        <ul className={clsx("divide-y divide-ink-500/30", stale && "opacity-50")} aria-label="Change list">
           {listed.map((item) => (
             <Row
               key={item.id}
@@ -330,7 +333,12 @@ export function ChangeList({
             />
           ))}
         </ul>
-        {!view.sync.first_read_pending && listed.length === 0 && (
+        {stale && listed.length === 0 && (
+          <p className="px-4 py-6 text-center text-xs text-ink-300" data-list-loading>
+            Loading…
+          </p>
+        )}
+        {!stale && !view.sync.first_read_pending && listed.length === 0 && (
           <p className="px-4 py-6 text-center text-xs text-ink-300" data-empty={view.complete ? "complete" : "incomplete"}>
             Nothing to list.
           </p>

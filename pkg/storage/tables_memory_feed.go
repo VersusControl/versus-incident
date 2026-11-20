@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -195,15 +196,49 @@ func (op *memoryChangePoll) upsertPair(poll AWSChangePoll, late, dropped int64) 
 	return nil
 }
 
-// visiblePair reports whether org answers for the pair under the scope's
-// read order.
-func (m *memoryTables) visiblePair(scope tenancy.OrgScope, org, account, region string) bool {
-	return scope.Contains(org) && firstHolder(scope.Read, org, m.coverageHolder(account, region))
+// firstChangeCopiesLocked lists one copy of each change event across the
+// read organizations: the copy of the first organization, in read order,
+// that stored it. recordedBefore, when set, counts only copies stored by
+// then. It is the memory form of the SQL firstChangeCopy.
+func (m *memoryTables) firstChangeCopiesLocked(scope tenancy.OrgScope, recordedBefore time.Time) []AWSChange {
+	pin := tableTime(recordedBefore)
+	seen := map[string]bool{}
+	var out []AWSChange
+	for _, org := range scope.Read {
+		for id, change := range m.changes[org] {
+			if seen[id] || !pin.IsZero() && !change.RecordedAt.IsZero() && change.RecordedAt.After(pin) {
+				continue
+			}
+			seen[id] = true
+			out = append(out, change)
+		}
+	}
+	return out
+}
+
+// largestCountsLocked keeps, for each minute and count key, the count of
+// the organization that counted the most events, the first in read order
+// on a tie. It is the memory form of the SQL largestCount.
+func (m *memoryTables) largestCountsLocked(scope tenancy.OrgScope) []AWSChangeCount {
+	best := map[string]AWSChangeCount{}
+	for _, org := range scope.Read {
+		for key, count := range m.counts[org] {
+			if existing, ok := best[key]; ok && existing.Events >= count.Events {
+				continue
+			}
+			best[key] = count
+		}
+	}
+	out := make([]AWSChangeCount, 0, len(best))
+	for _, count := range best {
+		out = append(out, count)
+	}
+	return out
 }
 
 func feedMatches(query AWSChangeFeedQuery, account, region, service, actorClass string) bool {
 	return (query.Account == "" || account == query.Account) && (query.Region == "" || region == query.Region) &&
-		(query.Service == "" || service == query.Service) && (query.ActorClass == "" || actorClass == query.ActorClass)
+		serviceMatches(query, service) && (query.ActorClass == "" || actorClass == query.ActorClass)
 }
 
 func (m *memoryTables) rowMatches(query AWSChangeFeedQuery, change AWSChange) bool {
@@ -235,8 +270,9 @@ func (m *memoryTables) AWSChangeFeed(_ context.Context, scope tenancy.OrgScope, 
 	defer m.mu.RUnlock()
 	feed := AWSChangeFeed{Coverage: m.changeCoverageLocked(scope, query.Account, query.Region), Gaps: []AWSChangeGapReason{}, Pairs: []AWSChangePairState{}, Minutes: []AWSChangeMinute{}, Counts: []AWSChangeCount{}, Rows: []AWSChange{}}
 	since, until := tableTime(query.Since), tableTime(query.Until)
+	var ranks []int
 	for key, labels := range m.gapLabels {
-		if !m.visiblePair(scope, key.org, key.account, key.region) || !feedMatches(AWSChangeFeedQuery{Account: query.Account, Region: query.Region}, key.account, key.region, "", "") {
+		if !scope.Contains(key.org) || !feedMatches(AWSChangeFeedQuery{Account: query.Account, Region: query.Region}, key.account, key.region, "", "") {
 			continue
 		}
 		for _, label := range labels {
@@ -245,72 +281,77 @@ func (m *memoryTables) AWSChangeFeed(_ context.Context, scope tenancy.OrgScope, 
 			}
 			label.Account, label.Region = key.account, key.region
 			feed.Gaps = append(feed.Gaps, label)
+			ranks = append(ranks, slices.Index(scope.Read, key.org))
 		}
 	}
-	sort.Slice(feed.Gaps, func(left, right int) bool {
-		a, b := feed.Gaps[left], feed.Gaps[right]
+	// Labels of both organizations starting together keep read order, as
+	// the SQL read orders them.
+	order := make([]int, len(feed.Gaps))
+	for index := range order {
+		order[index] = index
+	}
+	sort.SliceStable(order, func(left, right int) bool {
+		a, b := feed.Gaps[order[left]], feed.Gaps[order[right]]
 		if a.Account != b.Account {
 			return a.Account < b.Account
 		}
 		if a.Region != b.Region {
 			return a.Region < b.Region
 		}
-		return a.From.Before(b.From)
-	})
-	for key, state := range m.pairState {
-		if m.visiblePair(scope, key.org, key.account, key.region) && feedMatches(AWSChangeFeedQuery{Account: query.Account, Region: query.Region}, key.account, key.region, "", "") {
-			feed.Pairs = append(feed.Pairs, state)
+		if !a.From.Equal(b.From) {
+			return a.From.Before(b.From)
 		}
+		return ranks[order[left]] < ranks[order[right]]
+	})
+	gaps := make([]AWSChangeGapReason, 0, len(order))
+	for _, index := range order {
+		gaps = append(gaps, feed.Gaps[index])
 	}
-	sort.Slice(feed.Pairs, func(left, right int) bool {
-		if feed.Pairs[left].Account != feed.Pairs[right].Account {
-			return feed.Pairs[left].Account < feed.Pairs[right].Account
-		}
-		return feed.Pairs[left].Region < feed.Pairs[right].Region
-	})
+	feed.Gaps = gaps
+	feed.Pairs = m.pairStatesLocked(scope, query.Account, query.Region)
 
 	minutes := map[AWSChangeMinute]int64{}
 	people := map[string]bool{}
 	actors := map[AWSChangeActorCount]int64{}
+	services := map[string]int64{}
+	serviceQuery := serviceCountQuery(query)
 	var rows []AWSChange
 	before := query
 	before.Since, before.Until = time.Time{}, query.Since
-	for _, org := range scope.Read {
-		for _, change := range m.changes[org] {
-			if !m.visiblePair(scope, org, change.Account, change.Region) {
-				continue
-			}
-			if !query.Since.IsZero() && change.ErrorCode == "" && m.rowMatches(before, change) && change.EventTime.After(feed.LastBefore) {
-				feed.LastBefore = change.EventTime
-			}
-			if !m.rowMatches(query, change) {
-				continue
-			}
-			if change.ErrorCode == "" {
-				minutes[AWSChangeMinute{Minute: change.EventTime.Truncate(time.Minute), ActorClass: change.ActorClass}]++
-				actors[AWSChangeActorCount{Actor: change.Actor, ActorClass: change.ActorClass, SessionClass: change.SessionClass}]++
-				if change.ActorClass == "person" {
-					people[change.Actor] = true
-				}
-			}
-			change.Fields = cloneTableMap(change.Fields)
-			if query.IncludeDetail {
-				change.Detail = cloneTableJSON(change.Detail)
-			} else {
-				change.Detail = nil
-			}
-			rows = append(rows, change)
+	for _, change := range m.firstChangeCopiesLocked(scope, query.RecordedBefore) {
+		if !query.Since.IsZero() && change.ErrorCode == "" && m.rowMatches(before, change) && change.EventTime.After(feed.LastBefore) {
+			feed.LastBefore = change.EventTime
 		}
-		if query.ResourceARN == "" {
-			for _, count := range m.counts[org] {
-				if !m.visiblePair(scope, org, count.Account, count.Region) || !feedMatches(query, count.Account, count.Region, count.Service, count.ActorClass) ||
-					!since.IsZero() && count.Minute.Before(since) || !until.IsZero() && !count.Minute.Before(until) ||
-					query.Text != "" && !strings.Contains(asciiLower(count.EventName), asciiLower(query.Text)) &&
-						!strings.Contains(asciiLower(apiName(count.EventSource, count.EventName)), asciiLower(query.Text)) {
-					continue
-				}
-				feed.Counts = append(feed.Counts, count)
+		if query.ServiceCounts && change.ErrorCode == "" && m.rowMatches(serviceQuery, change) {
+			services[change.Service]++
+		}
+		if !m.rowMatches(query, change) {
+			continue
+		}
+		if change.ErrorCode == "" {
+			minutes[AWSChangeMinute{Minute: change.EventTime.Truncate(time.Minute), ActorClass: change.ActorClass}]++
+			actors[AWSChangeActorCount{Actor: change.Actor, ActorClass: change.ActorClass, SessionClass: change.SessionClass}]++
+			if change.ActorClass == "person" {
+				people[change.Actor] = true
 			}
+		}
+		change.Fields = cloneTableMap(change.Fields)
+		if query.IncludeDetail {
+			change.Detail = cloneTableJSON(change.Detail)
+		} else {
+			change.Detail = nil
+		}
+		rows = append(rows, change)
+	}
+	if query.ResourceARN == "" {
+		for _, count := range m.largestCountsLocked(scope) {
+			if !feedMatches(query, count.Account, count.Region, count.Service, count.ActorClass) ||
+				!since.IsZero() && count.Minute.Before(since) || !until.IsZero() && !count.Minute.Before(until) ||
+				query.Text != "" && !strings.Contains(asciiLower(count.EventName), asciiLower(query.Text)) &&
+					!strings.Contains(asciiLower(apiName(count.EventSource, count.EventName)), asciiLower(query.Text)) {
+				continue
+			}
+			feed.Counts = append(feed.Counts, count)
 		}
 	}
 	for item, events := range minutes {
@@ -330,6 +371,13 @@ func (m *memoryTables) AWSChangeFeed(_ context.Context, scope tenancy.OrgScope, 
 		return feed.Counts[left].key() < feed.Counts[right].key()
 	})
 	feed.People = len(people)
+	if query.ServiceCounts {
+		feed.ServiceCounts = make([]AWSChangeServiceCount, 0, len(services))
+		for service, events := range services {
+			feed.ServiceCounts = append(feed.ServiceCounts, AWSChangeServiceCount{Service: service, Events: events})
+		}
+		sortServiceCounts(feed.ServiceCounts)
+	}
 	for item, events := range actors {
 		item.Events = events
 		feed.TopActors = append(feed.TopActors, item)
@@ -409,8 +457,31 @@ func (m *memoryTables) AWSChangePairState(_ context.Context, scope tenancy.OrgSc
 	scope = inventoryScope(scope)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	state, ok := m.pairState[memoryPairKey{scope.Write, account, region}]
-	return state, ok, nil
+	pairs := m.pairStatesLocked(scope, account, region)
+	if len(pairs) == 0 {
+		return AWSChangePairState{}, false, nil
+	}
+	return pairs[0], true, nil
+}
+
+// pairStatesLocked is every read organization's pair state matching the
+// account and Region (empty matches all), merged per pair and sorted.
+func (m *memoryTables) pairStatesLocked(scope tenancy.OrgScope, account, region string) []AWSChangePairState {
+	var states []AWSChangePairState
+	for _, org := range scope.Read {
+		for key, state := range m.pairState {
+			if key.org == org && feedMatches(AWSChangeFeedQuery{Account: account, Region: region}, key.account, key.region, "", "") {
+				states = append(states, state)
+			}
+		}
+	}
+	sort.SliceStable(states, func(left, right int) bool {
+		if states[left].Account != states[right].Account {
+			return states[left].Account < states[right].Account
+		}
+		return states[left].Region < states[right].Region
+	})
+	return mergeChangePairs(scope.Write, states)
 }
 
 // sortFeedRows orders rows newest first, then by event ID descending, as
@@ -432,7 +503,7 @@ func (m *memoryTables) AWSChangesByID(_ context.Context, scope tenancy.OrgScope,
 	for _, id := range ids {
 		for _, org := range scope.Read {
 			change, ok := m.changes[org][id]
-			if !ok || !m.visiblePair(scope, org, change.Account, change.Region) {
+			if !ok {
 				continue
 			}
 			change.Fields, change.Detail = cloneTableMap(change.Fields), cloneTableJSON(change.Detail)

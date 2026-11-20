@@ -7,6 +7,7 @@ import {
 } from "./lib/systemPromptNav";
 import { AppShell } from "./components/AppShell";
 import { AgentRequiredRoute } from "./components/AgentRequiredRoute";
+import { LandingRedirect } from "./components/AccessDenied";
 import { SkCard } from "./components/Skeleton";
 import { loadLazyModule } from "./lib/lazyModule";
 // Hot paths (the 3am set) stay in the main chunk:
@@ -130,7 +131,7 @@ export default function App() {
         {/* Print layout: no app shell, light only. */}
         <Route path="/aws/finops/report" element={<FinOpsReportPage />} />
         <Route element={<AppShell />}>
-          <Route index element={<Navigate to="/now" replace />} />
+          <Route index element={<LandingRedirect />} />
 
           {/* Respond */}
           <Route path="/now" element={<NowPage />} />
@@ -250,7 +251,7 @@ export default function App() {
             element={<IncidentAnalysesRedirect />}
           />
 
-          <Route path="*" element={<Navigate to="/now" replace />} />
+          <Route path="*" element={<LandingRedirect />} />
         </Route>
       </Routes>
     </AuthGate>

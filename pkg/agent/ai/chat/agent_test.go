@@ -355,3 +355,115 @@ func TestTakePendingCallCorrelatesRepeatedToolsOutOfOrder(t *testing.T) {
 		t.Fatalf("first result matched %+v, ok=%t, remaining=%d", first, ok, len(pending["query_metrics"]))
 	}
 }
+
+type recordingNamedTool struct {
+	name  string
+	calls *int
+}
+
+func (tool recordingNamedTool) Name() string               { return tool.name }
+func (tool recordingNamedTool) Description() string        { return tool.name }
+func (tool recordingNamedTool) ArgsSchema() map[string]any { return map[string]any{"type": "object"} }
+func (tool recordingNamedTool) Invoke(context.Context, json.RawMessage) (*core.ToolResult, error) {
+	*tool.calls++
+	return &core.ToolResult{Tool: tool.name, Found: true, Data: map[string]any{"title": "incident title"}}, nil
+}
+
+var callerRestrictionNonCostTools = []string{
+	"get_incident", "search_incidents", "list_analyses", "list_services", "get_service",
+	"list_patterns", "get_pattern", "get_system_overview", "get_alert_decision",
+	"get_related_logs", "find_runbook", "recent_changes", "list_capabilities",
+	"get_detection_health", "describe_dependencies", "get_aws_changes", "get_aws_connection",
+}
+
+func financeOnlyContext(groups []string) context.Context {
+	return core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{
+		Authenticated: true,
+		Permissions:   map[core.Permission]bool{core.PermissionFinOpsView: true},
+		ToolGroups:    groups,
+	})
+}
+
+func TestRestrictedCallerIsOfferedOnlyToolsInAllowedGroups(t *testing.T) {
+	tools := make([]core.Tool, 0)
+	for _, name := range callerRestrictionNonCostTools {
+		tools = append(tools, namedTool{name: name})
+	}
+	tools = append(tools, namedTool{name: "cost_breakdown"}, namedTool{name: "budget_status"}, namedTool{name: "unknown_extension_tool"})
+	agent := &Agent{tools: tools}
+
+	available, err := agent.availableTools(financeOnlyContext([]string{core.ToolGroupFinOps}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(available))
+	for _, tool := range available {
+		got = append(got, tool.Name())
+	}
+	if strings.Join(got, ",") != "cost_breakdown,budget_status" {
+		t.Fatalf("finance-only caller tools = %v, want only cost tools", got)
+	}
+
+	available, err = agent.availableTools(financeOnlyContext([]string{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(available) != 0 {
+		t.Fatalf("caller with an empty tool restriction was offered %d tools", len(available))
+	}
+
+	unrestricted := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{
+		Authenticated: true,
+		Permissions:   map[core.Permission]bool{core.PermissionInfrastructureView: true},
+	})
+	available, err = agent.availableTools(unrestricted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(available) != len(tools) {
+		t.Fatalf("unrestricted caller tools = %d, want all %d", len(available), len(tools))
+	}
+}
+
+func TestRestrictedCallerToolInvokeIsRefusedBeforeTheToolRuns(t *testing.T) {
+	restricted := context.WithValue(financeOnlyContext([]string{core.ToolGroupFinOps}), turnGuardContextKey{}, newTurnGuard())
+	for _, name := range callerRestrictionNonCostTools {
+		calls := 0
+		result, err := guardedTool{Tool: recordingNamedTool{name: name, calls: &calls}}.Invoke(restricted, json.RawMessage(`{"id":"inc-1"}`))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if calls != 0 || result == nil || result.IsAvailable() || result.Found || result.Data != nil {
+			t.Fatalf("%s: calls=%d result=%+v, want a denied result without running the tool", name, calls, result)
+		}
+	}
+	calls := 0
+	result, err := guardedTool{Tool: recordingNamedTool{name: "cost_breakdown", calls: &calls}}.Invoke(restricted, json.RawMessage(`{}`))
+	if err != nil || calls != 1 || !result.Found {
+		t.Fatalf("allowed cost tool: calls=%d result=%+v err=%v", calls, result, err)
+	}
+
+	unrestricted := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true})
+	calls = 0
+	result, err = guardedTool{Tool: recordingNamedTool{name: "get_incident", calls: &calls}}.Invoke(unrestricted, json.RawMessage(`{"id":"inc-1"}`))
+	if err != nil || calls != 1 || !result.Found {
+		t.Fatalf("unrestricted get_incident: calls=%d result=%+v err=%v", calls, result, err)
+	}
+}
+
+func TestRestrictedCallerSessionSeedDoesNotReadIncidentHistory(t *testing.T) {
+	calls := 0
+	agent := &Agent{toolTimeout: time.Second, tools: []core.Tool{
+		recordingNamedTool{name: "get_system_overview", calls: &calls},
+		recordingNamedTool{name: "list_services", calls: &calls},
+	}}
+	traces := agent.Seed(financeOnlyContext([]string{core.ToolGroupFinOps}))
+	if calls != 0 || len(traces) != 0 {
+		t.Fatalf("seed ran %d discovery tools for a finance-only caller: %+v", calls, traces)
+	}
+	for _, trace := range traces {
+		if strings.Contains(trace.Output, "incident title") {
+			t.Fatalf("seed trace leaked tool output: %+v", trace)
+		}
+	}
+}

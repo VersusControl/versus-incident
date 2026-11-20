@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useContext, useEffect, useState } from "react";
+import { QueryClientContext, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Eye, EyeOff, Loader2 } from "lucide-react";
 import { ssoLoginWithReturn } from "@/lib/ssoReturn";
 import {
@@ -38,20 +38,31 @@ interface Props {
 export function AuthGate({ children }: Props) {
   const [ready, setReady] = useState<"checking" | InitialAuthState>("checking");
   const [attempt, setAttempt] = useState(0);
+  // The deployment and session answers read here seed the shell's cache, so
+  // the role-aware nav and polls know the caller's permissions on first paint.
+  const queryClient = useContext(QueryClientContext);
 
   useEffect(() => {
     let alive = true;
     resolveInitialAuth({
       probeGatewaySession: () => api.getAgentConfig(),
-      deploymentOrg: () => api.getSSODeployment().then((d) => d.org),
-      probeSession: (org) => getSsoSession(org),
+      deploymentOrg: () =>
+        api.getSSODeployment().then((d) => {
+          queryClient?.setQueryData(["sso-deployment"], d);
+          return d.org;
+        }),
+      probeSession: (org) =>
+        getSsoSession(org).then((s) => {
+          queryClient?.setQueryData(["sso-session-role", org], s);
+          return s;
+        }),
     }).then((state) => {
       if (alive) setReady(state);
     });
     return () => {
       alive = false;
     };
-  }, [attempt]);
+  }, [attempt, queryClient]);
 
   if (ready === "checking") {
     return (

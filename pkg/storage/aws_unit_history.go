@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"sort"
 	"time"
 
@@ -16,9 +17,10 @@ type AWSUnitHistory struct {
 	Generations int       `json:"generations"`
 }
 
-// AWSUnitHistoryStore answers how deep each unit's history is. Compare,
-// before values and the alarm line check the actual oldest generation of
-// each unit, never an assumed number of days. It is optional beside
+// AWSUnitHistoryStore answers how deep each unit's history is, across
+// every organization in the read scope. Compare, before values and the
+// alarm line check the actual oldest generation of each unit, never an
+// assumed number of days. It is optional beside
 // AWSInventoryStore and every backend with the inventory tables has it.
 type AWSUnitHistoryStore interface {
 	AWSUnitHistory(ctx context.Context, scope tenancy.OrgScope, query AWSUnitQuery) ([]AWSUnitHistory, error)
@@ -39,13 +41,63 @@ func (t *sqlTables) AWSUnitHistory(ctx context.Context, scope tenancy.OrgScope, 
 		return nil, err
 	}
 	scope = inventoryScope(scope)
+	if len(scope.Read) == 1 {
+		return t.awsUnitHistory(ctx, db, scope.Read[0], nil, query)
+	}
+	// Each organization's generations count only for the times the account
+	// view lets it answer, so history reaches exactly as far as the views.
+	byUnit := map[AWSUnit]*AWSUnitHistory{}
+	err = t.readSnapshot(ctx, db, func(tx *sql.Tx) error {
+		for position, org := range scope.Read {
+			own, err := t.awsUnitHistory(ctx, tx, org, scope.Read[:position], query)
+			if err != nil {
+				return err
+			}
+			for _, item := range own {
+				merged := byUnit[item.Unit]
+				if merged == nil {
+					copied := item
+					byUnit[item.Unit] = &copied
+					continue
+				}
+				merged.Generations += item.Generations
+				if item.Oldest.Before(merged.Oldest) {
+					merged.Oldest = item.Oldest
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AWSUnitHistory, 0, len(byUnit))
+	for _, item := range byUnit {
+		out = append(out, *item)
+	}
+	sortUnitHistory(out)
+	return out, nil
+}
+
+// awsUnitHistory counts one organization's generations per unit. With
+// earlier organizations in read order, a generation counts only when it
+// starts before each earlier organization's first generation of the unit
+// and that first generation is still kept: once an earlier organization
+// has pruned, its start is unknown and older organizations answer for
+// nothing.
+func (t *sqlTables) awsUnitHistory(ctx context.Context, q tablesQuerier, org string, earlier []string, query AWSUnitQuery) ([]AWSUnitHistory, error) {
 	var where sqlWhere
-	condition, args := visible(scope.Read, "g", "aws_sync_units", "account", "region", "service")
-	where.add(condition, args...)
+	where.add("g.org_id = ?", org)
 	where.equal("g.account", query.Account)
 	where.equal("g.region", query.Region)
 	where.equal("g.service", query.Service)
-	rows, err := db.QueryContext(ctx, t.q(`SELECT g.account, g.region, g.service, MIN(g.valid_from), COUNT(*) FROM aws_unit_generations g
+	if len(earlier) > 0 {
+		where.add(`NOT EXISTS (SELECT 1 FROM aws_unit_generations h WHERE h.org_id IN (`+placeholders(len(earlier))+`)
+ AND h.account = g.account AND h.region = g.region AND h.service = g.service
+ AND (h.valid_from <= g.valid_from OR NOT EXISTS (SELECT 1 FROM aws_unit_generations f
+ WHERE f.org_id = h.org_id AND f.account = h.account AND f.region = h.region AND f.service = h.service AND f.seq = 1)))`, stringArgs(earlier)...)
+	}
+	rows, err := q.QueryContext(ctx, t.q(`SELECT g.account, g.region, g.service, MIN(g.valid_from), COUNT(*) FROM aws_unit_generations g
  WHERE `+where.String()+` GROUP BY g.account, g.region, g.service ORDER BY g.account, g.region, g.service`), where.args...)
 	if err != nil {
 		return nil, err
@@ -68,25 +120,23 @@ func (m *memoryTables) AWSUnitHistory(_ context.Context, scope tenancy.OrgScope,
 	scope = inventoryScope(scope)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]AWSUnitHistory, 0)
-	for _, key := range m.visibleUnits(scope) {
-		if !matchAWSUnit(key.unit, query.Account, query.Region, query.Service) {
-			continue
-		}
-		entry := m.units[key]
-		if entry == nil || len(entry.generations) == 0 {
-			continue
-		}
-		item := AWSUnitHistory{Unit: key.unit, Generations: len(entry.generations)}
-		for _, version := range entry.generations {
-			if item.Oldest.IsZero() || version.from.Before(item.Oldest) {
-				item.Oldest = version.from
+	match := func(unit AWSUnit) bool { return matchAWSUnit(unit, query.Account, query.Region, query.Service) }
+	generations := make([]map[AWSUnit][]time.Time, 0, len(scope.Read))
+	bounds := make([]map[AWSUnit]awsGenerationBounds, 0, len(scope.Read))
+	for _, org := range scope.Read {
+		starts := map[AWSUnit][]time.Time{}
+		for key, entry := range m.units {
+			if key.org != org || entry == nil || !match(key.unit) {
+				continue
+			}
+			for _, version := range entry.generations {
+				starts[key.unit] = append(starts[key.unit], version.from)
 			}
 		}
-		out = append(out, item)
+		generations = append(generations, starts)
+		bounds = append(bounds, m.generationBoundsLocked(org, match))
 	}
-	sortUnitHistory(out)
-	return out, nil
+	return mergeAWSUnitHistory(generations, bounds), nil
 }
 
 func (p *postgresProvider) AWSUnitHistory(ctx context.Context, scope tenancy.OrgScope, query AWSUnitQuery) ([]AWSUnitHistory, error) {

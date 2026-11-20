@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -70,5 +71,102 @@ func TestFinOpsWriteRefusedAtTheGatewayIsAudited(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Action != "rbac.denied" || events[0].Result != middleware.AdminAuditDenied {
 		t.Fatalf("audit = %+v", events)
+	}
+}
+
+// TestAWSSettingsAuditIgnoresPathCase: the app routes paths case-insensitively,
+// so a mixed-case write or external-id reveal reaches the same handler as the
+// lowercase path and must leave the same single audit record.
+func TestAWSSettingsAuditIgnoresPathCase(t *testing.T) {
+	admin := map[string]bool{
+		string(core.PermissionInfrastructureView):          true,
+		string(core.PermissionInfrastructureSettingsWrite): true,
+	}
+	for _, prefix := range []string{"/api/admin/aws", "/api/Admin/AWS", "/API/ADMIN/AWS"} {
+		t.Run(prefix, func(t *testing.T) {
+			app, events := awsTestApp(t, awsTestService(t, "new-account-connect", true), admin)
+			response, body := awsTestRequest(t, app, http.MethodPost, prefix+"/Connect/Drafts", `{"method":"cloudformation"}`)
+			if response.StatusCode != fiber.StatusCreated {
+				t.Fatalf("draft = %d %s", response.StatusCode, body)
+			}
+			if len(*events) != 1 || (*events)[0].Action != "aws.settings.changed" {
+				t.Fatalf("draft write audit = %+v", *events)
+			}
+			var start struct {
+				DraftID string `json:"draft_id"`
+			}
+			if err := json.Unmarshal(body, &start); err != nil || start.DraftID == "" {
+				t.Fatalf("draft body %s: %v", body, err)
+			}
+			*events = (*events)[:0]
+			if response, body := awsTestRequest(t, app, http.MethodGet, prefix+"/connect/drafts/"+start.DraftID+"/External-ID", ""); response.StatusCode != fiber.StatusOK {
+				t.Fatalf("reveal = %d %s", response.StatusCode, body)
+			}
+			if len(*events) != 1 || (*events)[0].Action != "aws.external-id.revealed" || (*events)[0].Result != middleware.AdminAuditSuccess {
+				t.Fatalf("reveal audit = %+v", *events)
+			}
+			*events = (*events)[:0]
+			awsTestRequest(t, app, http.MethodPut, prefix+"/Settings/Privacy", `{}`)
+			if len(*events) != 1 || (*events)[0].Action != "aws.settings.changed" {
+				t.Fatalf("privacy write audit = %+v", *events)
+			}
+		})
+	}
+	for _, suffix := range []string{"//", "///"} {
+		t.Run("reveal with trailing "+suffix, func(t *testing.T) {
+			app, events := awsTestApp(t, awsTestService(t, "new-account-connect", true), admin)
+			response, body := awsTestRequest(t, app, http.MethodPost, "/api/admin/aws/connect/drafts", `{"method":"cloudformation"}`)
+			var start struct {
+				DraftID string `json:"draft_id"`
+			}
+			if response.StatusCode != fiber.StatusCreated || json.Unmarshal(body, &start) != nil || start.DraftID == "" {
+				t.Fatalf("draft = %d %s", response.StatusCode, body)
+			}
+			*events = (*events)[:0]
+			if response, body := awsTestRequest(t, app, http.MethodGet, "/api/admin/aws/connect/drafts/"+start.DraftID+"/external-id"+suffix, ""); response.StatusCode != fiber.StatusOK {
+				t.Fatalf("reveal = %d %s", response.StatusCode, body)
+			}
+			if len(*events) != 1 || (*events)[0].Action != "aws.external-id.revealed" || (*events)[0].Result != middleware.AdminAuditSuccess {
+				t.Fatalf("reveal audit = %+v", *events)
+			}
+		})
+	}
+	t.Run("refused mixed-case reveal", func(t *testing.T) {
+		app, events := awsTestApp(t, awsTestService(t, "new-account-connect", true), map[string]bool{string(core.PermissionInfrastructureView): true})
+		if response, _ := awsTestRequest(t, app, http.MethodGet, "/api/Admin/AWS/connect/drafts/any/External-Id", ""); response.StatusCode != fiber.StatusForbidden {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+		if len(*events) != 1 || (*events)[0].Action != "rbac.denied" {
+			t.Fatalf("refused reveal audit = %+v", *events)
+		}
+	})
+}
+
+// TestFinOpsMixedCaseWriteIsAuditedOnce: a mixed-case FinOps write takes the
+// FinOps branch of the shared AWS audit wrapper, so it gets the FinOps route's
+// own record and no extra settings-changed record.
+func TestFinOpsMixedCaseWriteIsAuditedOnce(t *testing.T) {
+	for _, path := range []string{"/api/admin/aws/finops/refresh", "/api/admin/aws/FinOps/Refresh", "/API/ADMIN/AWS/FINOPS/REFRESH/"} {
+		t.Run(path, func(t *testing.T) {
+			app, events := finopsApp(t, finopsBackend(t), finopsAdmin, true)
+			awsTestRequest(t, app, http.MethodPost, path, `{}`)
+			if len(*events) != 1 || auditCount(*events, "aws.settings.changed", "") != 0 {
+				t.Fatalf("audit = %+v", *events)
+			}
+			viewer, viewerEvents := finopsApp(t, finopsBackend(t), finopsViewer, true)
+			if response, _ := awsTestRequest(t, viewer, http.MethodPost, path, `{}`); response.StatusCode != fiber.StatusForbidden {
+				t.Fatalf("viewer status = %d", response.StatusCode)
+			}
+			if len(*viewerEvents) != 1 || (*viewerEvents)[0].Action != "rbac.denied" {
+				t.Fatalf("viewer audit = %+v", *viewerEvents)
+			}
+			refused, refusedEvents := finopsApp(t, finopsBackend(t), map[string]bool{string(core.PermissionInfrastructureView): false}, true)
+			if response, _ := awsTestRequest(t, refused, http.MethodPost, path, `{}`); response.StatusCode != fiber.StatusForbidden {
+				t.Fatalf("no-view status = %d", response.StatusCode)
+			}
+			if len(*refusedEvents) != 1 || (*refusedEvents)[0].Action != "rbac.denied" {
+				t.Fatalf("no-view audit = %+v", *refusedEvents)
+			}
+		})
 	}
 }
