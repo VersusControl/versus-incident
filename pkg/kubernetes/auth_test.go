@@ -496,7 +496,9 @@ func authorizeRenewed(t *testing.T, source CredentialSource) (string, error) {
 // settleRefresh waits until source has no refresh in flight.
 func settleRefresh(t *testing.T, source *expiringBearerSource) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// A refresh against a failing provider runs the SDK's jittered retries,
+	// which can take several seconds; the refresh timeout is its upper bound.
+	deadline := time.Now().Add(tokenRefreshTimeout + 5*time.Second)
 	for time.Now().Before(deadline) {
 		source.mu.Lock()
 		idle := source.inflight == nil
