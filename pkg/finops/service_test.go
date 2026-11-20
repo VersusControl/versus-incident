@@ -926,3 +926,252 @@ func TestReturningSavingInheritsDismissalOnlyForTheSameSubject(t *testing.T) {
 		t.Fatal("lb-A's decision stays orphaned while lb-B is listed")
 	}
 }
+
+type accountScopeKey struct{}
+
+// withAccounts limits a request to the given accounts, the way an auth
+// adapter's scope reaches Config.AccountScope.
+func withAccounts(ctx context.Context, ids ...string) context.Context {
+	return context.WithValue(ctx, accountScopeKey{}, append([]string{}, ids...))
+}
+
+func scopeFromContext(ctx context.Context) ([]string, bool) {
+	ids, ok := ctx.Value(accountScopeKey{}).([]string)
+	return ids, ok
+}
+
+// scopedStory is the synced story whose service reads the caller's scope.
+func scopedStory(t *testing.T) (*Service, *memStore) {
+	t.Helper()
+	src, cfg := natStory()
+	cfg.AccountScope = scopeFromContext
+	st := newMemStore()
+	svc := NewService(src, st, cfg).WithSuspectFinder(storySuspects())
+	if _, err := svc.SyncIncreases(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	return svc, st
+}
+
+// TestAccountScopeNarrowsEveryView: a caller limited to one account reads
+// the same numbers as an account filter on that account, sees only that
+// account in the scope bar and the missing-account list, and cannot open an
+// increase in another account.
+func TestAccountScopeNarrowsEveryView(t *testing.T) {
+	svc, _ := scopedStory(t)
+	ctx := t.Context()
+	prodOnly := withAccounts(ctx, acctProd)
+
+	scoped, err := svc.Summary(prodOnly, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filtered, err := svc.Summary(ctx, Query{Period: "2026-10", Accounts: []string{acctProd}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := svc.Summary(ctx, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scoped.Total != filtered.Total || scoped.Total >= all.Total {
+		t.Fatalf("scoped total %d, filtered %d, all %d", scoped.Total, filtered.Total, all.Total)
+	}
+	if len(scoped.ScopeOptions.Accounts) != 1 || scoped.ScopeOptions.Accounts[0].ID != acctProd {
+		t.Fatalf("scope options %+v", scoped.ScopeOptions.Accounts)
+	}
+	if len(all.ScopeOptions.Accounts) != 3 || len(all.Sync.MissingAccounts) != 1 || all.Sync.MissingAccounts[0].ID != acctSandbox {
+		t.Fatalf("unscoped header changed: %+v %+v", all.ScopeOptions.Accounts, all.Sync.MissingAccounts)
+	}
+	if len(scoped.Sync.MissingAccounts) != 0 || scoped.Sync.AccountsTotal != 1 {
+		t.Fatalf("scoped sync %+v", scoped.Sync)
+	}
+	sandbox, err := svc.Summary(withAccounts(ctx, acctSandbox), october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sandbox.Sync.MissingAccounts) != 1 || sandbox.Sync.MissingAccounts[0].ID != acctSandbox || sandbox.Sync.AccountsTotal != 1 {
+		t.Fatalf("sandbox scope missing accounts %+v", sandbox.Sync)
+	}
+
+	bd, err := svc.Breakdown(prodOnly, Query{Period: "2026-10", GroupBy: GroupAccount})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bd.Rows) != 1 || bd.Rows[0].Key != acctProd || bd.Total != scoped.Total {
+		t.Fatalf("breakdown %+v total %d", bd.Rows, bd.Total)
+	}
+	accounts, err := svc.Accounts(prodOnly, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts.Accounts) != 1 || accounts.Accounts[0].ID != acctProd {
+		t.Fatalf("accounts %+v", accounts.Accounts)
+	}
+	// A filter outside the scope reads nothing, not everything.
+	outside, err := svc.Accounts(prodOnly, Query{Period: "2026-10", Accounts: []string{acctData}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outside.Accounts) != 0 || outside.Total != 0 {
+		t.Fatalf("a filter outside the scope read %+v", outside.Accounts)
+	}
+	none, err := svc.Summary(withAccounts(ctx), october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none.Total != 0 || len(none.ScopeOptions.Accounts) != 0 || none.Sync.AccountsTotal != 0 {
+		t.Fatalf("an empty scope read %d over %+v", none.Total, none.ScopeOptions.Accounts)
+	}
+
+	allIncs, err := svc.Increases(ctx, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incs, err := svc.Increases(prodOnly, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var other string
+	for _, in := range allIncs.Items {
+		if in.Account != acctProd {
+			other = in.ID
+		}
+	}
+	if other == "" || len(incs.Items) == 0 || len(incs.Items) >= len(allIncs.Items) {
+		t.Fatalf("increases scoped %d of %d", len(incs.Items), len(allIncs.Items))
+	}
+	for _, in := range incs.Items {
+		if in.Account != acctProd {
+			t.Fatalf("an increase outside the scope was listed: %+v", in)
+		}
+		if _, err := svc.Increase(prodOnly, october, in.ID); err != nil {
+			t.Fatalf("in-scope increase: %v", err)
+		}
+	}
+	if _, err := svc.Increase(prodOnly, october, other); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an out-of-scope increase = %v, want ErrNotFound", err)
+	}
+	if _, err := svc.Increase(ctx, october, other); err != nil {
+		t.Fatalf("the unscoped caller lost the increase: %v", err)
+	}
+	if _, err := svc.SetIncreaseStatus(prodOnly, other, StatusChange{Status: "open"}, "finance"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an out-of-scope status change = %v, want ErrNotFound", err)
+	}
+
+	sv, err := svc.Savings(prodOnly, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range sv.Items {
+		if it.Account != acctProd {
+			t.Fatalf("a saving outside the scope was listed: %+v", it.Saving)
+		}
+	}
+}
+
+// TestAccountScopeHidesOtherAccountBudgets: a scoped caller sees only the
+// budgets on its own account; a budget on another account, and a deployment
+// or team budget over every account, are not listed.
+func TestAccountScopeHidesOtherAccountBudgets(t *testing.T) {
+	svc, _ := scopedStory(t)
+	ctx := t.Context()
+	if _, err := svc.PutBudgets(ctx, []Budget{{Name: "Data", Scope: ScopeAccount, Value: acctData, Monthly: usd(100)}}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := svc.Budget(ctx, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := svc.Budget(withAccounts(ctx, acctProd), october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scoped.Budgets) >= len(all.Budgets) {
+		t.Fatalf("budgets scoped %d of %d", len(scoped.Budgets), len(all.Budgets))
+	}
+	for _, b := range scoped.Budgets {
+		if b.Scope != ScopeAccount || b.Value != acctProd {
+			t.Fatalf("a budget outside the scope was listed: %+v", b.Budget)
+		}
+	}
+}
+
+// TestAccountScopeLeavesDeploymentWritesWhole: a scoped caller who triggers
+// a sync writes the same deployment-wide increases as the scheduler.
+func TestAccountScopeLeavesDeploymentWritesWhole(t *testing.T) {
+	svc, st := scopedStory(t)
+	want := len(st.increases)
+	st.increases = map[string]IncreaseRecord{}
+	if _, err := svc.SyncIncreases(withAccounts(t.Context(), acctProd)); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.increases) != want || want < 2 {
+		t.Fatalf("a scoped sync stored %d increases, want %d", len(st.increases), want)
+	}
+}
+
+// TestAccountScopeHidesFrozenReportTotals: a frozen report covers the whole
+// bill, so a caller limited to some accounts lists frozen months without
+// their total and gets its own live report back from a freeze, while a
+// caller the seam does not limit keeps the whole-bill total.
+func TestAccountScopeHidesFrozenReportTotals(t *testing.T) {
+	svc, _ := scopedStory(t)
+	whole, err := svc.FreezeReport(t.Context(), "2026-10", "admin")
+	if err != nil || whole.Frozen == nil {
+		t.Fatalf("unscoped freeze: %+v %v", whole.Frozen, err)
+	}
+	refs, err := svc.Reports(t.Context())
+	if err != nil || len(refs) != 1 || refs[0].Total == nil || *refs[0].Total != whole.Summary.Total {
+		t.Fatalf("an unscoped caller keeps the whole-bill total: %+v %v", refs, err)
+	}
+	scoped := withAccounts(t.Context(), acctProd)
+	refs, err = svc.Reports(scoped)
+	if err != nil || len(refs) != 1 || refs[0].Month != "2026-10" || refs[0].Total != nil {
+		t.Fatalf("a scoped caller sees no whole-bill total: %+v %v", refs, err)
+	}
+	if body, _ := json.Marshal(refs); bytes.Contains(body, []byte("total_micros")) {
+		t.Fatalf("scoped list carries a total: %s", body)
+	}
+	live, err := svc.Report(scoped, october)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := svc.FreezeReport(scoped, "2026-10", "admin")
+	if !errors.Is(err, ErrAlreadyFrozen) {
+		t.Fatalf("scoped repeat freeze: %v", err)
+	}
+	if again.Frozen != nil || again.Summary.Total != live.Summary.Total || again.Summary.Total == whole.Summary.Total {
+		t.Fatalf("a scoped freeze answers the scoped live report: got %d, live %d, whole %d", again.Summary.Total, live.Summary.Total, whole.Summary.Total)
+	}
+}
+
+// TestNoAccountScopeKeepsEveryView: a service without the seam, or a caller
+// the seam does not limit, reads exactly what it read before.
+func TestNoAccountScopeKeepsEveryView(t *testing.T) {
+	plain, _, _ := syncedStory(t)
+	scopedSvc, _ := scopedStory(t)
+	ctx := t.Context()
+	for name, read := range map[string]func(*Service) (any, error){
+		"summary":   func(s *Service) (any, error) { return s.Summary(ctx, october) },
+		"increases": func(s *Service) (any, error) { return s.Increases(ctx, october) },
+		"accounts":  func(s *Service) (any, error) { return s.Accounts(ctx, october) },
+		"budgets":   func(s *Service) (any, error) { return s.Budget(ctx, october) },
+		"savings":   func(s *Service) (any, error) { return s.Savings(ctx, october) },
+		"breakdown": func(s *Service) (any, error) { return s.Breakdown(ctx, october) },
+	} {
+		a, err := read(plain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := read(scopedSvc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ja, _ := json.Marshal(a)
+		jb, _ := json.Marshal(b)
+		if !bytes.Equal(ja, jb) {
+			t.Fatalf("%s differs with the seam set and no caller scope", name)
+		}
+	}
+}

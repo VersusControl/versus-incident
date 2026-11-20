@@ -92,16 +92,17 @@ func (t *changesTool) Invoke(ctx context.Context, raw json.RawMessage) (*core.To
 			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "invalid AWS changes arguments", err)
 		}
 	}
-	request, locked, err := args.request()
+	var feed ChangeAnswerer
+	if t.feed != nil {
+		feed = t.feed()
+	}
+	limits := LimitsOf(feed)
+	request, locked, err := args.request(limits)
 	if err != nil {
 		return nil, core.NewToolError(core.ToolErrorInvalidArguments, "invalid AWS changes arguments", err)
 	}
 	if locked {
-		return windowLocked(), nil
-	}
-	var feed ChangeAnswerer
-	if t.feed != nil {
-		feed = t.feed()
+		return windowLocked(limits), nil
 	}
 	if feed == nil {
 		return core.UnavailableToolResult(ChangesToolName, "the AWS change history is not set up"), nil
@@ -113,7 +114,7 @@ func (t *changesTool) Invoke(ctx context.Context, raw json.RawMessage) (*core.To
 		answer, err = feed.Answer(ctx, request)
 		switch {
 		case errors.Is(err, snapshot.ErrWindowLocked):
-			return windowLocked(), nil
+			return windowLocked(limits), nil
 		case errors.Is(err, snapshot.ErrCursorExpired):
 			return nil, core.NewToolError(core.ToolErrorInvalidArguments, "the cursor has expired; call again without it to read the first page", err)
 		case errors.Is(err, snapshot.ErrBadFeedQuery):
@@ -130,23 +131,23 @@ func (t *changesTool) Invoke(ctx context.Context, raw json.RawMessage) (*core.To
 	return &core.ToolResult{Tool: ChangesToolName, Found: found, Data: data}, nil
 }
 
-func (args changesArguments) request() (snapshot.FeedRequest, bool, error) {
+// LimitsOf reads the change list's window limits; a list that does not
+// report them is held to the open-source ones.
+func LimitsOf(feed ChangeAnswerer) snapshot.ChangesLimits {
+	if limited, ok := feed.(interface{ Limits() snapshot.ChangesLimits }); ok && limited != nil {
+		return limited.Limits()
+	}
+	return snapshot.DefaultChangesLimits()
+}
+
+func (args changesArguments) request(limits snapshot.ChangesLimits) (snapshot.FeedRequest, bool, error) {
 	request := snapshot.FeedRequest{Account: args.AccountID, Region: args.Region, ActorClass: args.ActorClass, Service: args.Service,
 		Resource: args.Resource, Text: args.Text, ShowRoutine: args.ShowRoutine, Cursor: args.Cursor, Limit: args.Limit}
-	switch args.Window {
-	case "", "24h":
-		request.Window = snapshot.FeedWindowDay
-	case "1h":
-		request.Window = time.Hour
-	default:
-		if parsed, err := time.ParseDuration(args.Window); err == nil && parsed > snapshot.MaxFeedWindow {
-			return request, true, nil
-		}
-		if strings.HasSuffix(args.Window, "d") {
-			return request, true, nil
-		}
-		return request, false, errors.New("window must be 1h or 24h")
+	window, locked, err := snapshot.ParseWindow(args.Window, limits)
+	if locked || err != nil {
+		return request, locked, err
 	}
+	request.Window = window
 	if args.Until != "" {
 		until, err := time.Parse(time.RFC3339, args.Until)
 		if err != nil {
@@ -178,10 +179,14 @@ func shrinkingLimits(limit int) []int {
 	return out
 }
 
-func windowLocked() *core.ToolResult {
+func windowLocked(limits snapshot.ChangesLimits) *core.ToolResult {
+	maxWindow := snapshot.FormatWindow(limits.MaxWindow)
+	answer := "Windows longer than 24 hours are an Enterprise feature; ask for 1h or 24h."
+	if limits.MaxWindow > snapshot.MaxFeedWindow {
+		answer = "Windows longer than " + maxWindow + " are not served; ask for " + maxWindow + " or less."
+	}
 	return &core.ToolResult{Tool: ChangesToolName, Found: false, Reason: "window_locked",
-		Data: map[string]any{"error": "window_locked", "tier": "enterprise", "max_window": "24h",
-			"answer": "Windows longer than 24 hours are an Enterprise feature; ask for 1h or 24h."}}
+		Data: map[string]any{"error": "window_locked", "tier": "enterprise", "max_window": maxWindow, "answer": answer}}
 }
 
 // ChangesView is the answer as the model sees it: the API shape with every

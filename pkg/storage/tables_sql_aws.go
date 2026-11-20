@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -737,7 +738,79 @@ func (t *sqlTables) AWSUnits(ctx context.Context, scope tenancy.OrgScope, query 
 	if err != nil {
 		return nil, err
 	}
-	return t.awsUnits(ctx, db, scope, query)
+	scope = inventoryScope(scope)
+	if len(scope.Read) == 1 {
+		return t.awsUnits(ctx, db, scope, query)
+	}
+	// Each organization is read on its own in one transaction, then each
+	// unit is answered by one organization, as the account view does.
+	var out []AWSUnitStatus
+	err = t.readSnapshot(ctx, db, func(tx *sql.Tx) error {
+		units := make([][]AWSUnitStatus, 0, len(scope.Read))
+		bounds := make([]map[AWSUnit]awsGenerationBounds, 0, len(scope.Read))
+		for _, orgScope := range singleOrgScopes(scope) {
+			statuses, err := t.awsUnits(ctx, tx, orgScope, query)
+			if err != nil {
+				return err
+			}
+			own, err := t.generationBounds(ctx, tx, orgScope.Write, query)
+			if err != nil {
+				return err
+			}
+			units, bounds = append(units, statuses), append(bounds, own)
+		}
+		out = mergeAWSUnits(scope.Read, units, bounds, tableTime(query.AsOf))
+		return nil
+	})
+	return out, err
+}
+
+// readSnapshot runs read inside one read-only transaction, so every
+// statement sees the same committed state.
+func (t *sqlTables) readSnapshot(ctx context.Context, db *sql.DB, read func(*sql.Tx) error) error {
+	options := &sql.TxOptions{}
+	if t.postgres {
+		// Repeatable read keeps every statement on one snapshot even if a
+		// commit lands between them; the transaction writes nothing.
+		options.Isolation = sql.LevelRepeatableRead
+		options.ReadOnly = true
+	}
+	tx, err := db.BeginTx(ctx, options)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := read(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// generationBounds is the start of one organization's kept history of
+// every unit the query matches.
+func (t *sqlTables) generationBounds(ctx context.Context, q tablesQuerier, org string, query AWSUnitQuery) (map[AWSUnit]awsGenerationBounds, error) {
+	var where sqlWhere
+	where.add("g.org_id = ?", org)
+	where.equal("g.account", query.Account)
+	where.equal("g.region", query.Region)
+	where.equal("g.service", query.Service)
+	rows, err := q.QueryContext(ctx, t.q(`SELECT g.account, g.region, g.service, MIN(g.seq), MIN(g.valid_from) FROM aws_unit_generations g
+ WHERE `+where.String()+` GROUP BY g.account, g.region, g.service`), where.args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[AWSUnit]awsGenerationBounds{}
+	for rows.Next() {
+		var unit AWSUnit
+		var seq int64
+		var first tableTimeValue
+		if err := rows.Scan(&unit.Account, &unit.Region, &unit.Service, &seq, &first); err != nil {
+			return nil, err
+		}
+		out[unit] = awsGenerationBounds{firstSeq: uint64(seq), firstFrom: first.Time}
+	}
+	return out, rows.Err()
 }
 
 func (t *sqlTables) awsUnits(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSUnitQuery) ([]AWSUnitStatus, error) {
@@ -789,32 +862,51 @@ func (t *sqlTables) AWSAccountView(ctx context.Context, scope tenancy.OrgScope, 
 	if err != nil {
 		return AWSSnapshotView{}, err
 	}
-	options := &sql.TxOptions{}
-	if t.postgres {
-		// Repeatable read keeps every statement on one snapshot even if a
-		// commit lands between them; the transaction writes nothing.
-		options.Isolation = sql.LevelRepeatableRead
-		options.ReadOnly = true
-	}
-	tx, err := db.BeginTx(ctx, options)
+	scope = inventoryScope(scope)
+	// Every organization is read in the same transaction, then merged.
+	views := make([]AWSSnapshotView, 0, len(scope.Read))
+	bounds := make([]map[AWSUnit]awsGenerationBounds, 0, len(scope.Read))
+	err = t.readSnapshot(ctx, db, func(tx *sql.Tx) error {
+		for _, orgScope := range singleOrgScopes(scope) {
+			view, err := t.accountView(ctx, tx, orgScope, account, asOf)
+			if err != nil {
+				return err
+			}
+			views = append(views, view)
+			if len(scope.Read) == 1 {
+				continue
+			}
+			own, err := t.generationBounds(ctx, tx, orgScope.Write, AWSUnitQuery{Account: account})
+			if err != nil {
+				return err
+			}
+			bounds = append(bounds, own)
+		}
+		return nil
+	})
 	if err != nil {
 		return AWSSnapshotView{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	if len(views) == 1 {
+		return views[0], nil
+	}
+	return mergeAccountViews(scope.Read, views, bounds, tableTime(asOf)), nil
+}
+
+// accountView reads one account's units and rows for one organization.
+func (t *sqlTables) accountView(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, account string, asOf time.Time) (AWSSnapshotView, error) {
 	view := AWSSnapshotView{}
-	if view.Units, err = t.awsUnits(ctx, tx, scope, AWSUnitQuery{Account: account, AsOf: asOf}); err != nil {
+	var err error
+	if view.Units, err = t.awsUnits(ctx, q, scope, AWSUnitQuery{Account: account, AsOf: asOf}); err != nil {
 		return AWSSnapshotView{}, err
 	}
-	if view.Resources, err = t.awsResources(ctx, tx, scope, AWSResourceQuery{Account: account, AsOf: asOf}); err != nil {
+	if view.Resources, err = t.awsResources(ctx, q, scope, AWSResourceQuery{Account: account, AsOf: asOf}); err != nil {
 		return AWSSnapshotView{}, err
 	}
-	if view.Health, err = t.awsHealth(ctx, tx, scope, AWSHealthQuery{Account: account, AsOf: asOf}); err != nil {
+	if view.Health, err = t.awsHealth(ctx, q, scope, AWSHealthQuery{Account: account, AsOf: asOf}); err != nil {
 		return AWSSnapshotView{}, err
 	}
-	if view.Flags, err = t.awsSecurityFlags(ctx, tx, scope, AWSFlagQuery{Account: account, AsOf: asOf}); err != nil {
-		return AWSSnapshotView{}, err
-	}
-	if err := tx.Commit(); err != nil {
+	if view.Flags, err = t.awsSecurityFlags(ctx, q, scope, AWSFlagQuery{Account: account, AsOf: asOf}); err != nil {
 		return AWSSnapshotView{}, err
 	}
 	return view, nil
@@ -886,7 +978,73 @@ func (t *sqlTables) AWSResources(ctx context.Context, scope tenancy.OrgScope, qu
 	if err != nil {
 		return nil, err
 	}
-	return t.awsResources(ctx, db, scope, query)
+	scope = inventoryScope(scope)
+	if len(scope.Read) == 1 {
+		return t.awsResources(ctx, db, scope, query)
+	}
+	// The limit applies to the merged rows, so each organization is read
+	// whole.
+	perOrg := query
+	perOrg.Limit = 0
+	out, err := readAnswering(ctx, t, db, scope, AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service, AsOf: query.AsOf},
+		func(tx *sql.Tx, orgScope tenancy.OrgScope) ([]AWSResource, error) {
+			return t.awsResources(ctx, tx, orgScope, perOrg)
+		},
+		func(row AWSResource) AWSUnit {
+			return AWSUnit{Account: row.Account, Region: row.Region, Service: row.Service}
+		})
+	if err != nil {
+		return nil, err
+	}
+	sortAWSResourceRows(out)
+	if query.Limit > 0 && len(out) > query.Limit {
+		out = out[:query.Limit]
+	}
+	return out, nil
+}
+
+// answeringOrgs is the organization that answers for each unit the query
+// matches, by the account view's rule.
+func (t *sqlTables) answeringOrgs(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSUnitQuery) (map[AWSUnit]string, error) {
+	units := make([][]AWSUnitStatus, 0, len(scope.Read))
+	bounds := make([]map[AWSUnit]awsGenerationBounds, 0, len(scope.Read))
+	for _, orgScope := range singleOrgScopes(scope) {
+		statuses, err := t.awsUnits(ctx, q, orgScope, query)
+		if err != nil {
+			return nil, err
+		}
+		own, err := t.generationBounds(ctx, q, orgScope.Write, query)
+		if err != nil {
+			return nil, err
+		}
+		units, bounds = append(units, statuses), append(bounds, own)
+	}
+	return answeringOrgOf(scope.Read, units, bounds, tableTime(query.AsOf)), nil
+}
+
+// readAnswering reads rows per organization in one transaction and keeps
+// each unit's rows from the organization that answers for it.
+func readAnswering[T any](ctx context.Context, t *sqlTables, db *sql.DB, scope tenancy.OrgScope, unitQuery AWSUnitQuery, read func(*sql.Tx, tenancy.OrgScope) ([]T, error), unitOf func(T) AWSUnit) ([]T, error) {
+	out := make([]T, 0)
+	err := t.readSnapshot(ctx, db, func(tx *sql.Tx) error {
+		answering, err := t.answeringOrgs(ctx, tx, scope, unitQuery)
+		if err != nil {
+			return err
+		}
+		for _, orgScope := range singleOrgScopes(scope) {
+			rows, err := read(tx, orgScope)
+			if err != nil {
+				return err
+			}
+			for _, row := range rows {
+				if answering[unitOf(row)] == orgScope.Write {
+					out = append(out, row)
+				}
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 func (t *sqlTables) awsResources(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSResourceQuery) ([]AWSResource, error) {
@@ -923,7 +1081,22 @@ func (t *sqlTables) AWSHealth(ctx context.Context, scope tenancy.OrgScope, query
 	if err != nil {
 		return nil, err
 	}
-	return t.awsHealth(ctx, db, scope, query)
+	scope = inventoryScope(scope)
+	if len(scope.Read) == 1 {
+		return t.awsHealth(ctx, db, scope, query)
+	}
+	out, err := readAnswering(ctx, t, db, scope, AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service, AsOf: query.AsOf},
+		func(tx *sql.Tx, orgScope tenancy.OrgScope) ([]AWSHealth, error) {
+			return t.awsHealth(ctx, tx, orgScope, query)
+		},
+		func(row AWSHealth) AWSUnit {
+			return AWSUnit{Account: row.Account, Region: row.Region, Service: row.Service}
+		})
+	if err != nil {
+		return nil, err
+	}
+	sortAWSHealthRows(out)
+	return out, nil
 }
 
 func (t *sqlTables) awsHealth(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSHealthQuery) ([]AWSHealth, error) {
@@ -962,7 +1135,22 @@ func (t *sqlTables) AWSSecurityFlags(ctx context.Context, scope tenancy.OrgScope
 	if err != nil {
 		return nil, err
 	}
-	return t.awsSecurityFlags(ctx, db, scope, query)
+	scope = inventoryScope(scope)
+	if len(scope.Read) == 1 {
+		return t.awsSecurityFlags(ctx, db, scope, query)
+	}
+	out, err := readAnswering(ctx, t, db, scope, AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service, AsOf: query.AsOf},
+		func(tx *sql.Tx, orgScope tenancy.OrgScope) ([]AWSSecurityFlag, error) {
+			return t.awsSecurityFlags(ctx, tx, orgScope, query)
+		},
+		func(row AWSSecurityFlag) AWSUnit {
+			return AWSUnit{Account: row.Account, Region: row.Region, Service: row.Service}
+		})
+	if err != nil {
+		return nil, err
+	}
+	sortAWSFlagRows(out)
+	return out, nil
 }
 
 func (t *sqlTables) awsSecurityFlags(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSFlagQuery) ([]AWSSecurityFlag, error) {
@@ -992,7 +1180,7 @@ func (t *sqlTables) awsSecurityFlags(ctx context.Context, q tablesQuerier, scope
 // changesSQL is the statement AWSChanges runs.
 func (t *sqlTables) changesSQL(scope tenancy.OrgScope, query AWSChangeQuery) (string, []any) {
 	var where sqlWhere
-	condition, args := visible(scope.Read, "c", "aws_change_coverage", "account", "region")
+	condition, args := t.firstChangeCopy(scope.Read, "c", time.Time{})
 	where.add(condition, args...)
 	where.equal("c.account", query.Account)
 	where.equal("c.region", query.Region)
@@ -1055,7 +1243,7 @@ func (t *sqlTables) AWSChangeCoverage(ctx context.Context, scope tenancy.OrgScop
 func (t *sqlTables) awsChangeCoverage(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, account, region string) ([]AWSPairCoverage, error) {
 	scope = inventoryScope(scope)
 	var where sqlWhere
-	condition, args := visible(scope.Read, "c", "aws_change_coverage", "account", "region")
+	condition, args := readOrgs(scope.Read, "c")
 	where.add(condition, args...)
 	where.equal("c.account", account)
 	where.equal("c.region", region)
@@ -1075,7 +1263,11 @@ func (t *sqlTables) awsChangeCoverage(ctx context.Context, q tablesQuerier, scop
 		if last := len(out) - 1; last < 0 || out[last].Account != rowAccount || out[last].Region != rowRegion {
 			out = append(out, AWSPairCoverage{Org: org, Account: rowAccount, Region: rowRegion})
 		}
-		out[len(out)-1].Intervals = append(out[len(out)-1].Intervals, AWSInterval{From: from.Time, To: to.Time})
+		// The pair names the first organization, in read order, that read it.
+		if slices.Index(scope.Read, org) < slices.Index(scope.Read, out[len(out)-1].Org) {
+			out[len(out)-1].Org = org
+		}
+		out[len(out)-1].Intervals = addCoverageInterval(out[len(out)-1].Intervals, AWSInterval{From: from.Time, To: to.Time})
 	}
 	return out, rows.Err()
 }

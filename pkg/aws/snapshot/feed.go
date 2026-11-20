@@ -72,17 +72,24 @@ type FeedRequest struct {
 	Window time.Duration
 	// Since, when set, makes the window exactly [Since, Until] and Window
 	// is ignored.
-	Since       time.Time
-	Until       time.Time
-	Account     string
-	Region      string
-	ActorClass  string
-	Service     string
-	Resource    string
-	Text        string
-	ShowRoutine bool
-	Cursor      string
-	Limit       int
+	Since      time.Time
+	Until      time.Time
+	Account    string
+	Region     string
+	ActorClass string
+	Service    string
+	// Services narrows the list, its counts and paging to changes in any
+	// of these services; empty means every service. The likely cause is
+	// still chosen over every service.
+	Services []string
+	// ServiceFacet asks for the per-service counts and the suspect's
+	// in_filter mark the Changes page shows.
+	ServiceFacet bool
+	Resource     string
+	Text         string
+	ShowRoutine  bool
+	Cursor       string
+	Limit        int
 }
 
 // ChangeFeed answers the change list from the store, the settings scope
@@ -91,6 +98,7 @@ type ChangeFeed struct {
 	store   *Store
 	scope   ScopeFunc
 	options func() FeedOptions
+	limits  func() ChangesLimits
 	suspect SuspectEngine
 	fields  FieldResolver
 	now     func() time.Time
@@ -112,6 +120,128 @@ func WithFeedOptions(read func() FeedOptions) FeedOption {
 		}
 	}
 }
+
+// ChangesLimits are how far back the change list and the inventory compare
+// may reach. The edition decides them: the open-source build serves 24 h
+// for both, and a licensed build may pass longer ones through
+// WithChangesLimits.
+type ChangesLimits struct {
+	// MaxWindow is the longest change list window, and how far back its
+	// first page may start.
+	MaxWindow time.Duration
+	// MaxCompareAge is how far back a compare may start.
+	MaxCompareAge time.Duration
+}
+
+// DefaultChangesLimits are the open-source limits: 24 h for both.
+func DefaultChangesLimits() ChangesLimits {
+	return ChangesLimits{MaxWindow: MaxFeedWindow, MaxCompareAge: MaxFeedWindow}
+}
+
+// effective fills an unset limit with the open-source one, so a seam that
+// returns a zero value never widens nor closes the page.
+func (limits ChangesLimits) effective() ChangesLimits {
+	if limits.MaxWindow <= 0 {
+		limits.MaxWindow = MaxFeedWindow
+	}
+	if limits.MaxCompareAge <= 0 {
+		limits.MaxCompareAge = MaxFeedWindow
+	}
+	return limits
+}
+
+// ChangesLimitsView is the limits block of the change list and compare
+// answers. The page builds its window switch and compare start picker from
+// it, so both durations are whole hours ("24h", "168h").
+type ChangesLimitsView struct {
+	MaxWindow     string `json:"max_window"`
+	MaxCompareAge string `json:"max_compare_age"`
+}
+
+// View renders the limits for an answer.
+func (limits ChangesLimits) View() ChangesLimitsView {
+	limits = limits.effective()
+	return ChangesLimitsView{MaxWindow: formatHours(limits.MaxWindow), MaxCompareAge: formatHours(limits.MaxCompareAge)}
+}
+
+func formatHours(value time.Duration) string {
+	if value%time.Hour == 0 {
+		return strconv.FormatInt(int64(value/time.Hour), 10) + "h"
+	}
+	return value.String()
+}
+
+// WithChangesLimits wires the edition's window and compare limits, read on
+// every request so a license change applies without a restart. Without it
+// the feed serves DefaultChangesLimits.
+func WithChangesLimits(read func() ChangesLimits) FeedOption {
+	return func(feed *ChangeFeed) {
+		if read != nil {
+			feed.limits = read
+		}
+	}
+}
+
+// Limits returns the limits this request is held to.
+func (feed *ChangeFeed) Limits() ChangesLimits {
+	if feed == nil || feed.limits == nil {
+		return DefaultChangesLimits()
+	}
+	return feed.limits().effective()
+}
+
+// ParseWindow reads a change list window: 1h and 24h always, and whole
+// days (7d, or 168h) up to limits.MaxWindow. locked reports a window
+// longer than the limits serve, which callers answer as window_locked
+// rather than as a bad request.
+func ParseWindow(value string, limits ChangesLimits) (window time.Duration, locked bool, err error) {
+	limits = limits.effective()
+	value = strings.TrimSpace(value)
+	switch value {
+	case "", "24h":
+		return FeedWindowDay, false, nil
+	case "1h":
+		return FeedWindowHour, false, nil
+	}
+	days := strings.HasSuffix(value, "d")
+	var span time.Duration
+	if days {
+		count, convErr := strconv.Atoi(strings.TrimSuffix(value, "d"))
+		if convErr != nil || count < 1 {
+			return 0, false, errWindowValue
+		}
+		span = time.Duration(count) * FeedWindowDay
+	} else {
+		parsed, parseErr := time.ParseDuration(value)
+		if parseErr != nil {
+			return 0, false, errWindowValue
+		}
+		span = parsed
+	}
+	// Longer windows are whole days; 1d is not one of them.
+	if span > FeedWindowDay && span%FeedWindowDay == 0 && span <= limits.MaxWindow {
+		return span, false, nil
+	}
+	if span > limits.MaxWindow || days {
+		return 0, true, nil
+	}
+	return 0, false, errWindowValue
+}
+
+// FormatWindow names a window the way the API takes it: 1h, 24h, 7d.
+func FormatWindow(window time.Duration) string {
+	if window > FeedWindowDay && window%FeedWindowDay == 0 {
+		return strconv.FormatInt(int64(window/FeedWindowDay), 10) + "d"
+	}
+	if window%time.Hour == 0 {
+		return strconv.FormatInt(int64(window/time.Hour), 10) + "h"
+	}
+	return window.String()
+}
+
+// errWindowValue is a window that is neither 1h, 24h nor a whole number
+// of days.
+var errWindowValue = errors.New("window must be 1h or 24h")
 
 // WithSuspectEngine wires the suspect engine.
 func WithSuspectEngine(engine SuspectEngine) FeedOption {
@@ -802,13 +932,17 @@ func abs(value int64) int64 {
 	return value
 }
 
-// bucketWidth is five minutes for an hour window and an hour otherwise, so
-// the grid has 12 or 24 columns.
+// bucketWidth is five minutes up to an hour, an hour up to a day and six
+// hours beyond, so the grid has 12, 24 or (for 7 days) 28 columns and a
+// long window still fits on the page.
 func bucketWidth(window time.Duration) time.Duration {
-	if window <= FeedWindowHour {
+	switch {
+	case window <= FeedWindowHour:
 		return 5 * time.Minute
+	case window <= FeedWindowDay:
+		return time.Hour
 	}
-	return time.Hour
+	return 6 * time.Hour
 }
 
 // buckets fills the activity grid from minute counts. Buckets are UTC
@@ -828,8 +962,17 @@ func buckets(since, until time.Time, width time.Duration, stored storage.AWSChan
 		}
 		return int(at.Sub(since) / width)
 	}
+	// The store groups changes by their truncated minute, so when since is
+	// not on a minute boundary the window's first minute row starts before
+	// since. The summary counts that row, so it belongs in the first bucket.
+	minuteSlot := func(minute time.Time) int {
+		if minute.Before(since) && minute.Add(time.Minute).After(since) {
+			return slot(since)
+		}
+		return slot(minute)
+	}
 	for _, minute := range stored.Minutes {
-		position := slot(minute.Minute)
+		position := minuteSlot(minute.Minute)
 		if position < 0 {
 			continue
 		}
@@ -855,7 +998,7 @@ func buckets(since, until time.Time, width time.Duration, stored storage.AWSChan
 			if count.Kind != storage.AWSChangeCountFailure {
 				continue
 			}
-			if position := slot(count.Minute); position >= 0 {
+			if position := minuteSlot(count.Minute); position >= 0 {
 				out[position].Errors += count.Events
 			}
 		}

@@ -117,6 +117,18 @@ type FeedSuspect struct {
 	// Candidates are the ranked changes, best first; tied ones are all
 	// marked and listed most recent first. ChangeID is the first.
 	Candidates []FeedSuspectCandidate `json:"candidates,omitempty"`
+	// InFilter is set when the request names a service filter view: false
+	// when the suspect change is in a service the filter hides. The
+	// suspect is always chosen over every service.
+	InFilter *bool `json:"in_filter,omitzero"`
+}
+
+// FeedServiceCount is one service's successful changes in the window and
+// scope, counted without the service filter.
+type FeedServiceCount struct {
+	Service string `json:"service"`
+	Label   string `json:"label"`
+	Count   int64  `json:"count"`
 }
 
 // FeedSuspectCandidate is one ranked suspect change.
@@ -217,10 +229,13 @@ type FeedItem struct {
 
 // ChangesAnswer is the GET /api/admin/aws/changes answer.
 type ChangesAnswer struct {
-	Window             FeedWindow    `json:"window"`
-	Complete           bool          `json:"complete"`
-	Summary            FeedSummary   `json:"summary"`
-	Buckets            []FeedBucket  `json:"buckets"`
+	Window   FeedWindow   `json:"window"`
+	Complete bool         `json:"complete"`
+	Summary  FeedSummary  `json:"summary"`
+	Buckets  []FeedBucket `json:"buckets"`
+	// BucketSeconds is the width of each bucket, so the page never infers
+	// the step from the window.
+	BucketSeconds      int64         `json:"bucket_seconds"`
 	Alarms             []FeedAlarm   `json:"alarms"`
 	AlarmHistoryStarts *time.Time    `json:"alarm_history_starts"`
 	Suspect            FeedSuspect   `json:"suspect"`
@@ -230,6 +245,10 @@ type ChangesAnswer struct {
 	Sync               FeedSync      `json:"sync"`
 	Items              []FeedItem    `json:"items"`
 	NextCursor         *string       `json:"next_cursor"`
+	// Services is set when the request asks for the service facet.
+	Services []FeedServiceCount `json:"services,omitzero"`
+	// Limits are the window and compare limits this request was held to.
+	Limits ChangesLimitsView `json:"limits"`
 }
 
 // GroupAnswer is the GET /api/admin/aws/changes/groups/{id} answer.

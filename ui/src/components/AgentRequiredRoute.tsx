@@ -1,18 +1,33 @@
+import { useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import { TopBar } from "@/components/TopBar";
 import { Spinner } from "@/components/feedback";
+import { useAccess } from "@/lib/access";
 
 export function AgentRequiredRoute({ title, children }: { title: string; children: React.ReactNode }) {
+  // Every role is asked, finance included (it gets only `enable` and
+  // `mode`). Waits for the session so the shell's role is known first.
+  const access = useAccess();
   const config = useQuery({
     queryKey: ["agent-config"],
     queryFn: api.getAgentConfig,
     staleTime: 60_000,
     retry: false,
+    // A refused probe is a final answer: a page mounting below must not ask again.
+    retryOnMount: false,
+    enabled: access.ready,
   });
+  // An older server refuses finance the probe with a 403: a final answer.
+  // Once the probe has answered (even with a refusal or an error) the page
+  // stays mounted. Without this, each new reader of the same probe re-asks it,
+  // the probe drops back to pending, the page unmounts and mounts again, and a
+  // refused probe loops about once a second.
+  const answered = useRef(false);
+  if (config.isSuccess || config.isError) answered.current = true;
 
-  if (config.isPending) {
+  if (!answered.current && (!access.ready || config.isPending)) {
     return <>
       <TopBar title={title} />
       <main className="flex flex-1 items-center justify-center p-6 text-sm text-ink-300">

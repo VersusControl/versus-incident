@@ -838,7 +838,7 @@ func (a *Adapter) commit(ctx context.Context, st *statusRecord, pl planned, plan
 		ps.LastSuccess = now
 		readPrev := spec.mode == modeSetup && !spec.window.Start.After(prevMonth(today))
 		if spec.mode == modeClose || (readPrev && finops.MonthClosed(prevMonth(today), today, billCloseDay)) {
-			ps.closeMonth(prevMonth(today).MonthKey())
+			ps.closeMonth(prevMonth(today).MonthKey(), a.options().retentionMonths())
 			ps.ClosedThrough = prevMonth(today).MonthKey()
 			closed[spec.payer] = true
 		}
@@ -911,7 +911,7 @@ func (a *Adapter) commit(ctx context.Context, st *statusRecord, pl planned, plan
 		}
 	}
 	if len(closed) > 0 {
-		if err := a.cache.pruneLines(ctx, today); err != nil {
+		if err := a.cache.pruneLines(ctx, today, a.options().retentionMonths()); err != nil {
 			return committed, err
 		}
 	}
@@ -1396,14 +1396,14 @@ func (w *payerWork) flush(ctx context.Context, refreshed time.Time) (wrote bool,
 func (p *payerState) closed(month string) bool { return slices.Contains(p.ClosedMonths, month) }
 
 // closeMonth freezes a month's days once AWS has closed its bill.
-func (p *payerState) closeMonth(month string) {
+func (p *payerState) closeMonth(month string, retention int) {
 	if !p.closed(month) {
 		p.ClosedMonths = append(p.ClosedMonths, month)
 		sort.Strings(p.ClosedMonths)
 	}
 	// Months past the line retention are gone; so is their mark.
-	if len(p.ClosedMonths) > linesRetentionMonths+1 {
-		p.ClosedMonths = p.ClosedMonths[len(p.ClosedMonths)-linesRetentionMonths-1:]
+	if len(p.ClosedMonths) > retention+1 {
+		p.ClosedMonths = p.ClosedMonths[len(p.ClosedMonths)-retention-1:]
 	}
 }
 

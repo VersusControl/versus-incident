@@ -22,6 +22,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	einowrap "github.com/VersusControl/versus-incident/pkg/agent/ai/eino"
+	agenttools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools"
 	commontools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/common"
 	elasticsearchtools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/elasticsearch"
 	k8stools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/k8s"
@@ -123,7 +124,7 @@ func (agent *Agent) buildRunner(ctx context.Context, chatModel model.ToolCalling
 		if _, ok := ledger.RunFromContext(ctx); ok {
 			runtimeTool = ledger.LedgeredTool{Tool: value}
 		}
-		adapted, err := einowrap.NewTool(guardedTool{Tool: runtimeTool}, agent.toolTimeout, MaxToolPayloadBytes)
+		adapted, err := einowrap.NewTool(guardedTool{Tool: runtimeTool, group: agenttools.AccessGroup(value)}, agent.toolTimeout, MaxToolPayloadBytes)
 		if err != nil {
 			return nil, err
 		}
@@ -159,6 +160,7 @@ func (agent *Agent) availableTools(ctx context.Context) ([]core.Tool, error) {
 			return nil, fmt.Errorf("chat: load tools: %w", err)
 		}
 	}
+	tools = agenttools.FilterCallerTools(ctx, tools)
 	tools = k8stools.FilterAuthorized(ctx, tools)
 	tools = elasticsearchtools.FilterAuthorized(ctx, tools)
 	tools = signoztools.FilterAuthorized(ctx, tools)
@@ -308,12 +310,12 @@ func (agent *Agent) Seed(ctx context.Context) []core.ToolCallTrace {
 		}
 	}
 	for _, value := range tools {
-		if !wanted[value.Name()] {
+		if !wanted[value.Name()] || !agenttools.CallerMayUseTool(ctx, value) {
 			continue
 		}
 		started := time.Now()
 		toolCtx, cancel := context.WithTimeout(ctx, agent.toolTimeout)
-		result, err := guardedTool{Tool: value}.Invoke(toolCtx, json.RawMessage(`{}`))
+		result, err := guardedTool{Tool: value, group: agenttools.AccessGroup(value)}.Invoke(toolCtx, json.RawMessage(`{}`))
 		cancel()
 		trace := core.ToolCallTrace{Name: value.Name(), DurationMs: time.Since(started).Milliseconds()}
 		if err != nil {
@@ -463,9 +465,23 @@ func newTurnGuard() *turnGuard {
 	return &turnGuard{cache: map[string]string{}, evidence: map[string]struct{}{}}
 }
 
-type guardedTool struct{ core.Tool }
+// guardedTool runs one tool call for a chat turn. It refuses a tool outside
+// the caller's allowed tool groups before the tool runs, then deduplicates
+// repeated calls within the turn.
+type guardedTool struct {
+	core.Tool
+	// group is the tool's access group, resolved before any wrapper hides it.
+	group string
+}
 
 func (value guardedTool) Invoke(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
+	group := value.group
+	if group == "" {
+		group = agenttools.AccessGroup(value.Tool)
+	}
+	if !core.CallerToolGroupAllowed(ctx, group) {
+		return agenttools.CallerToolDenied(value.Name()), nil
+	}
 	guard, _ := ctx.Value(turnGuardContextKey{}).(*turnGuard)
 	if guard == nil {
 		return value.Tool.Invoke(ctx, args)

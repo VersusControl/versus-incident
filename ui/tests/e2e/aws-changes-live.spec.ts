@@ -52,6 +52,9 @@ const THEMES = ["dark", "light"] as const;
 type Theme = (typeof THEMES)[number];
 type Viewport = (typeof ALL_VIEWPORTS)[number];
 const SURFACE = process.env.AWS_CHANGES_SURFACE || "aws-changes";
+// AWS_CHANGES_CAPTURE_SCALE=2 takes every capture at 2x (docs images, founder
+// 2026-11-19); unset keeps 1x.
+const SCALE = Number(process.env.AWS_CHANGES_CAPTURE_SCALE || "1");
 
 function stackScenario(): string {
   const dir = process.env.AWS_CHANGES_BROWSER_DIR ?? "";
@@ -118,7 +121,7 @@ async function open(
   watch: Watch,
   extra: { timezoneId?: string; hasTouch?: boolean } = {},
 ): Promise<Page> {
-  const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, colorScheme: theme, ...extra });
+  const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, deviceScaleFactor: SCALE, colorScheme: theme, ...extra });
   contexts.push(context);
   await context.addInitScript((value) => localStorage.setItem("versus.theme", value), theme);
   const page = await context.newPage();
@@ -1590,6 +1593,19 @@ test("ask AI agrees with the page", async ({ browser }) => {
 });
 
 // ---------------------------------------------------------------------------
+// Sign-in smoke: whatever the stack takes (the gateway secret, or the built-in
+// admin's login form on a licensed Enterprise boot), the page opens signed in
+// and shows the summary card.
+
+test("sign-in smoke: summary card", async ({ browser }) => {
+  const watch: Watch = { console: [], http: [] };
+  const page = await open(browser, DESKTOP, "dark", "/aws/changes", watch);
+  await settled(page);
+  await expect(page.getByTestId("app-authenticated")).toBeVisible();
+  record("sign-in smoke", { http: watch.http });
+});
+
+// ---------------------------------------------------------------------------
 // First read, page left alone: right after connect the card's line reads
 // "Reading the last 24 h…". A user who opens it then and waits must see the
 // answer arrive without pressing refresh.
@@ -1977,3 +1993,149 @@ for (const run of DISCONNECTED_RUNS) {
     expect(problems).toEqual([]);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Docs captures (src/in-development/aws-changes.md): desktop 1440 dark, each
+// cropped to its card after the state it shows is asserted. AWS_CHANGES_DOCS
+// lists the shots (overview, summary-warning, grid-gap, services-filter,
+// compare); run with AWS_CHANGES_CAPTURE_SCALE=2 for docs images. Each PNG's
+// pixel size is checked against its CSS size x scale. AWS_CHANGES_DOCS_QUERY
+// is appended to /aws/changes (for example ?from=<ISO> for Compare).
+
+const DOCS = (process.env.AWS_CHANGES_DOCS ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+
+function pngSize(file: string) {
+  const b = fs.readFileSync(file);
+  return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+}
+
+test("docs captures", async ({ browser }) => {
+  test.skip(DOCS.length === 0, "needs AWS_CHANGES_DOCS");
+  test.setTimeout(120_000);
+  const viewport = DESKTOP;
+  const theme: Theme = "dark";
+  const problems: string[] = [];
+  const files: Record<string, unknown> = {};
+  const watch: Watch = { console: [], http: [] };
+  const page = await open(browser, viewport, theme, `/aws/changes${process.env.AWS_CHANGES_DOCS_QUERY ?? ""}`, watch);
+  await settled(page);
+  // AWS_CHANGES_DOCS_ALL_SERVICES=1: every service, as after "Clear all" (a
+  // fresh install starts on RDS and IAM).
+  if (process.env.AWS_CHANGES_DOCS_ALL_SERVICES === "1") {
+    const clear = page.getByRole("button", { name: "Clear all", exact: true });
+    if (await clear.count()) {
+      await clear.click();
+      await expect(page.locator("[data-service-filter]")).toHaveCount(0, { timeout: 10_000 });
+      await settled(page);
+    }
+  }
+  await page.waitForTimeout(1000);
+  // The whole page in view (no outer scroll), so element boxes are page coordinates.
+  const extra = await page.evaluate(() => {
+    const m = document.querySelector("main");
+    return m ? Math.max(0, m.scrollHeight - m.clientHeight) : 0;
+  });
+  const height = viewport.height + extra;
+  if (extra > 0) await page.setViewportSize({ width: viewport.width, height });
+  await page.waitForTimeout(400);
+  await page.mouse.move(1, 1);
+  const pad = 10;
+  const clipOf = async (locators: Array<ReturnType<Page["locator"]>>) => {
+    const boxes = [];
+    for (const l of locators) {
+      const b = await l.first().boundingBox();
+      if (b) boxes.push(b);
+    }
+    if (!boxes.length) throw new Error("nothing to crop");
+    const x0 = Math.max(0, Math.floor(Math.min(...boxes.map((b) => b.x)) - pad));
+    const y0 = Math.max(0, Math.floor(Math.min(...boxes.map((b) => b.y)) - pad));
+    const x1 = Math.min(viewport.width, Math.ceil(Math.max(...boxes.map((b) => b.x + b.width)) + pad));
+    const y1 = Math.min(height, Math.ceil(Math.max(...boxes.map((b) => b.y + b.height)) + pad));
+    return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+  };
+  const save = async (name: string, clip?: { x: number; y: number; width: number; height: number }) => {
+    const out = capturePath(SURFACE, viewport.width, theme, `docs-${name}`);
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: out, animations: "disabled", clip, mask: masks(page) });
+    const size = pngSize(out);
+    const css = clip ?? { width: viewport.width, height };
+    if (size.width !== css.width * SCALE || size.height !== css.height * SCALE) problems.push(`${name}: ${size.width}x${size.height} px, want ${css.width * SCALE}x${css.height * SCALE} (CSS ${css.width}x${css.height} x ${SCALE})`);
+    files[name] = { out, size, css, scale: SCALE };
+  };
+  const card = page.locator("[data-summary-card]");
+  const grid = page.locator('section[aria-labelledby="changes-grid-title"]');
+  const compare = page.locator('section[aria-labelledby="changes-compare-title"]');
+  const notes: Record<string, unknown> = {};
+
+  if (DOCS.includes("overview")) {
+    for (const name of ["Accounts", "Regions"]) await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+    await expect(page.locator("[data-services-filter]")).toBeVisible();
+    await expect(page.locator("[data-likely-cause]")).toBeVisible();
+    await expect(grid).toBeVisible();
+    await expect(page.locator('[data-panel="changes"]')).toBeVisible();
+    await expect(compare).toBeVisible();
+    notes.overview = { card: norm(await card.innerText()).slice(0, 400) };
+    await save("overview");
+  }
+
+  if (DOCS.includes("summary-warning")) {
+    const line = page.locator("[data-warning-line]");
+    await expect(line).toBeVisible();
+    const text = norm(await line.innerText());
+    if (!/^Data not complete/.test(text)) problems.push(`warning line "${text}"`);
+    await line.locator('button[aria-haspopup="dialog"]').first().click();
+    const pop = page.locator("[data-warning-popover]");
+    await expect(pop).toBeVisible({ timeout: 5_000 });
+    notes.warning = { line: text, popover: norm(await pop.innerText()).slice(0, 600) };
+    await save("summary-warning", await clipOf([card, pop]));
+    await page.keyboard.press("Escape");
+    await page.mouse.move(1, 1);
+  }
+
+  if (DOCS.includes("grid-gap")) {
+    // A hatched gap: an unknown or partly read cell, or a hatch band.
+    await expect(grid.locator('[role="cell"][data-state="gap"], [role="cell"][data-state="partial"], [data-band]').first()).toBeAttached();
+    await expect(grid.locator("[data-alarms-chip]")).toBeVisible();
+    notes.grid = { gapCells: await grid.locator('[role="cell"][data-state="gap"]').count(), bands: await grid.locator("[data-band]").evaluateAll((els) => els.map((e) => e.getAttribute("title"))), chip: norm(await grid.locator("[data-alarms-chip]").innerText()) };
+    await save("grid-gap", await clipOf([grid]));
+  }
+
+  if (DOCS.includes("services-filter")) {
+    await page.locator("[data-services-filter]").getByRole("button", { name: /^Services/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Services" });
+    await expect(dialog).toBeVisible();
+    const options = await dialog.locator("li label").evaluateAll((labels) =>
+      labels.map((l) => ({
+        text: Array.from(l.querySelectorAll("span")).map((s) => (s.textContent ?? "").trim()).filter(Boolean).join(" "),
+        checked: (l.querySelector("input[type=checkbox]") as HTMLInputElement | null)?.checked ?? false,
+      })),
+    );
+    const checked = options.filter((o) => o.checked).map((o) => o.text);
+    if (!checked.some((t) => /^RDS\b/.test(t)) || !checked.some((t) => /^IAM\b/.test(t))) problems.push(`Services checked: ${checked.join(" | ")}`);
+    if (options.some((o) => !/\d$/.test(o.text))) problems.push(`a Services option has no count: ${options.map((o) => o.text).join(" | ")}`);
+    notes.services = options;
+    // The scope bar: the nearest box holding both the Services filter and the search.
+    await page.evaluate(() => {
+      let at = document.querySelector("[data-services-filter]")?.parentElement ?? null;
+      while (at && !at.querySelector('[role="search"]')) at = at.parentElement;
+      at?.setAttribute("data-docs-scope", "");
+    });
+    await save("services-filter", await clipOf([page.locator("[data-docs-scope]"), dialog]));
+    await page.keyboard.press("Escape");
+  }
+
+  if (DOCS.includes("compare")) {
+    await expect(compare.locator("[data-compare]").first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("button", { name: "Compare to", exact: true })).toBeVisible();
+    const url = await page.evaluate(() => performance.getEntriesByType("resource").map((e) => e.name).filter((n) => n.includes("/api/admin/aws/changes/compare")).pop() ?? "");
+    const wire = url ? ((await (await page.request.get(url)).json()) as Record<string, unknown[] | unknown>) : {};
+    const n = (k: string) => ((wire[k] as unknown[] | undefined) ?? []).length;
+    notes.compare = { url, added: n("added"), removed: n("removed"), changed: n("changed"), partial: n("partial"), between: wire.changes_between_total, panel: norm(await compare.innerText()).slice(0, 800) };
+    if (n("changed") === 0) problems.push("Compare shows no changed resource");
+    if (n("added") > 0 || n("removed") > 0) problems.push(`Compare lists ${n("added")} added and ${n("removed")} removed`);
+    await save("compare", await clipOf([compare]));
+  }
+
+  record("docs captures", { files, notes, problems, console: watch.console, http: watch.http });
+  expect(problems).toEqual([]);
+});

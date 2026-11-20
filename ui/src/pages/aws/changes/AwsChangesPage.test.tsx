@@ -64,6 +64,8 @@ vi.mock("@/lib/api", async (importActual) => {
       awsChanges: vi.fn(),
       awsChangesGroup: vi.fn(),
       awsChangesCompare: vi.fn(),
+      awsChangesPreferences: vi.fn(),
+      saveAwsChangesPreferences: vi.fn(),
     },
   };
 });
@@ -164,6 +166,9 @@ beforeEach(() => {
   // jsdom has no layout; the Dropdown and Show › scroll into view.
   Element.prototype.scrollIntoView = vi.fn();
   vi.mocked(api.awsChangesGroup).mockResolvedValue({ items: [], next_cursor: null });
+  // These pages answer for every service; the service filter has its own tests.
+  vi.mocked(api.awsChangesPreferences).mockResolvedValue({ services: [] });
+  vi.mocked(api.saveAwsChangesPreferences).mockResolvedValue({ services: [] });
 });
 
 afterEach(() => {
@@ -406,6 +411,88 @@ describe("Changes page — worst cases (07e)", () => {
     renderPage();
     await waitFor(() => expect(document.querySelector("[data-lock-note]")).toBeTruthy());
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("licensed limits (168h): 7d is open with no Enterprise mark, and choosing it reads 7 days", async () => {
+    const limits = { max_window: "168h", max_compare_age: "168h" };
+    serve(usualView({ limits }), usualCompare());
+    renderPage();
+    await summary();
+    const seven = await screen.findByRole("button", { name: "7d" });
+    expect(seven.getAttribute("aria-disabled")).toBeNull();
+    expect(seven.getAttribute("title")).toBeNull();
+    expect(screen.queryByRole("button", { name: "7d, Enterprise" })).toBeNull();
+    fireEvent.click(seven);
+    await waitFor(() => expect(vi.mocked(api.awsChanges).mock.calls.some(([q]) => (q as ChangesQuery).window === "7d")).toBe(true));
+    await waitFor(() => expect(screen.getByRole("button", { name: "7d" }).getAttribute("aria-pressed")).toBe("true"));
+    expect(document.querySelector("[data-lock-note]")).toBeNull();
+  });
+
+  it("licensed limits: the ?window=7d deep link opens the 7 day view without an Enterprise note", async () => {
+    serve(usualView({ limits: { max_window: "168h", max_compare_age: "168h" } }), usualCompare());
+    renderPage("/aws/changes?window=7d");
+    await waitFor(() => expect(vi.mocked(api.awsChanges).mock.calls.at(-1)?.[0]).toMatchObject({ window: "7d" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "7d" }).getAttribute("aria-pressed")).toBe("true"));
+    expect(document.querySelector("[data-lock-note]")).toBeNull();
+  });
+
+  it("licensed limits: Compare offers starting points back to max_compare_age", async () => {
+    serve(usualView({ limits: { max_window: "168h", max_compare_age: "100h" } }), usualCompare());
+    renderPage();
+    await summary();
+    fireEvent.click(screen.getByRole("button", { name: /Compare from/ }));
+    const labels = screen.getAllByRole("option").map((o) => o.textContent ?? "");
+    expect(labels.some((l) => l.includes("(2 d ago)"))).toBe(true);
+    expect(labels.some((l) => l.includes("(3 d ago)"))).toBe(true);
+    expect(labels.some((l) => l.includes("(100 h ago)"))).toBe(true);
+    expect(labels.some((l) => l.includes("(7 d ago)"))).toBe(false);
+  });
+
+  it("the Compare from list is as wide as its longest option and wraps past that, never cutting off the (2 d ago) suffix", async () => {
+    serve(usualView({ limits: { max_window: "168h", max_compare_age: "168h" } }), usualCompare());
+    renderPage();
+    await summary();
+    fireEvent.click(screen.getByRole("button", { name: /Compare from/ }));
+    const list = screen.getByRole("listbox", { name: "Compare from" });
+    expect(list.className).toContain("w-max");
+    expect(list.className).toContain("min-w-full");
+    expect(list.className).not.toMatch(/(^|\s)w-full(\s|$)/);
+    const twoDays = screen.getAllByRole("option").find((o) => (o.textContent ?? "").includes("(2 d ago)"));
+    expect(twoDays).toBeTruthy();
+    const label = twoDays?.querySelector("span") as HTMLElement;
+    expect(label.className).not.toContain("truncate");
+    expect(label.className).toContain("break-words");
+  });
+
+  it("an older server without limits falls back to 24 h: 7d locked and Compare stops at 24 h", async () => {
+    serve(usualView(), usualCompare());
+    renderPage();
+    await summary();
+    expect(screen.getByRole("button", { name: "7d, Enterprise" }).getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: /Compare from/ }));
+    const labels = screen.getAllByRole("option").map((o) => o.textContent ?? "");
+    expect(labels.at(-1)).toContain("(24 h ago)");
+    expect(labels.some((l) => l.includes("d ago"))).toBe(false);
+  });
+
+  it("OSS limits (24h): the 7d deep link reads 24 h and never sends window=7d", async () => {
+    serve(usualView({ limits: { max_window: "24h", max_compare_age: "24h" } }), usualCompare());
+    renderPage("/aws/changes?window=7d");
+    await waitFor(() => expect(document.querySelector("[data-lock-note]")).toBeTruthy());
+    expect(vi.mocked(api.awsChanges).mock.calls.every(([q]) => (q as ChangesQuery).window !== "7d")).toBe(true);
+  });
+
+  it("a 403 permission_required is a plain denial: no Retry, no alert, no poll", async () => {
+    vi.mocked(api.awsChanges).mockRejectedValue(
+      new ApiError(403, "infrastructure:view permission is required", { error: "forbidden", code: "permission_required", permission: "infrastructure:view" }),
+    );
+    vi.mocked(api.awsChangesCompare).mockResolvedValue(usualCompare());
+    renderPage();
+    expect(await screen.findByText("You don't have access to AWS Changes")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.body.textContent).not.toContain("infrastructure:view");
+    expect(vi.mocked(api.awsChanges)).toHaveBeenCalledTimes(1);
   });
 
   it("15 late delivery: the unsettled tail is only the dashed outline on the grid, with no label and no warning", async () => {

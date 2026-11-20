@@ -228,6 +228,8 @@ When the first sync is done, the account shows its services and regions.
 
 *The account after the first sync: readable services are counted. Services this account can't read, such as ones that need a support plan, aren't counted.*
 
+### FinOps
+
 Open **AWS > FinOps**. Versus first reads your cost as soon as the account is
 confirmed, with no wait for the daily refresh. Until AWS has a full day of
 cost, the page says **Waiting for the first complete day of cost

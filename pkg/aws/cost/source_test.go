@@ -157,7 +157,7 @@ func TestStoreReportsAndSavingStates(t *testing.T) {
 		t.Fatal("a report without a period has no key")
 	}
 	refs, err := s.ListReports(ctx)
-	if err != nil || len(refs) != 1 || refs[0].Month != "2026-10" || refs[0].Total != 43_520_000_000 || refs[0].Frozen.By != "admin" {
+	if err != nil || len(refs) != 1 || refs[0].Month != "2026-10" || refs[0].Total == nil || *refs[0].Total != 43_520_000_000 || refs[0].Frozen.By != "admin" {
 		t.Fatalf("reports %+v %v", refs, err)
 	}
 	got, err := s.GetReport(ctx, "2026-10")

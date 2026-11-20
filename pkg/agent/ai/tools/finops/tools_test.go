@@ -283,3 +283,119 @@ type disabledSource struct{ bigSource }
 func (*disabledSource) Status(context.Context) (core_finops.SourceStatus, error) {
 	return core_finops.SourceStatus{Enabled: false, DisabledReason: "ce_unavailable"}, nil
 }
+
+// TestToolsAcceptFinOpsViewWithoutInfrastructureView: a finance caller with
+// only the FinOps view reads cost; a caller with neither view does not.
+func TestToolsAcceptFinOpsViewWithoutInfrastructureView(t *testing.T) {
+	svc := core_finops.NewService(newBigSource(), nil, core_finops.Config{})
+	finance := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true,
+		Permissions: map[core.Permission]bool{core.PermissionFinOpsView: true, core.PermissionInfrastructureView: false}})
+	neither := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true,
+		Permissions: map[core.Permission]bool{core.PermissionFinOpsView: false, core.PermissionInfrastructureView: false}})
+	for _, tl := range New(func() core_finops.Reader { return svc }) {
+		args := `{}`
+		if tl.Name() == "cost_increase_detail" {
+			continue
+		}
+		res, err := tl.Invoke(finance, json.RawMessage(args))
+		if err != nil || !res.IsAvailable() {
+			t.Fatalf("%s refused a FinOps viewer: %+v %v", tl.Name(), res, err)
+		}
+		res, err = tl.Invoke(neither, json.RawMessage(args))
+		if err != nil || res.IsAvailable() {
+			t.Fatalf("%s answered a caller with neither view", tl.Name())
+		}
+	}
+}
+
+// TestToolsNarrowToTheCallerAccountScope: the tools read through the same
+// service path as the page, so a caller limited to one account sees only it.
+func TestToolsNarrowToTheCallerAccountScope(t *testing.T) {
+	svc := core_finops.NewService(newBigSource(), nil, core_finops.Config{AccountScope: cost.CallerAccounts})
+	scoped := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true,
+		Permissions: map[core.Permission]bool{core.PermissionFinOpsView: true}, Accounts: &core.AccountScope{IDs: []string{"100000000001", "100000000003"}}})
+	view, err := svc.Accounts(scoped, core_finops.Query{Period: "2026-10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Accounts) != 2 || view.Sync.AccountsTotal != 2 || len(view.Sync.MissingAccounts) != 1 || view.Sync.MissingAccounts[0].ID != "100000000003" {
+		t.Fatalf("scoped accounts %+v sync %+v", view.Accounts, view.Sync)
+	}
+	var tl core.Tool
+	for _, candidate := range New(func() core_finops.Reader { return svc }) {
+		if candidate.Name() == "cost_accounts" {
+			tl = candidate
+		}
+	}
+	res, err := tl.Invoke(scoped, json.RawMessage(`{"period":"2026-10"}`))
+	if err != nil || !res.IsAvailable() {
+		t.Fatalf("cost_accounts: %+v %v", res, err)
+	}
+	raw, _ := json.Marshal(res.Data)
+	for a := range 40 {
+		id := fmt.Sprintf("1000000000%02d", a)
+		if inScope := id == "100000000001" || id == "100000000003"; strings.Contains(string(raw), id) != inScope {
+			t.Fatalf("account %s in the tool answer = %v, want %v: %s", id, !inScope, inScope, raw)
+		}
+	}
+}
+
+// budgetSource is bigSource with one billing-account budget per account and
+// a whole-bill budget.
+type budgetSource struct{ *bigSource }
+
+func (s budgetSource) Status(ctx context.Context) (core_finops.SourceStatus, error) {
+	st, err := s.bigSource.Status(ctx)
+	for _, id := range []string{"100000000001", "100000000002"} {
+		st.Budgets = append(st.Budgets, core_finops.Budget{ID: "aws-" + id, Name: "Budget of " + id, Scope: core_finops.ScopeDeployment,
+			Monthly: core_finops.USD(1000), Accounts: []string{id}})
+		st.SkippedBudgets = append(st.SkippedBudgets, core_finops.SkippedBudget{Name: "Skipped of " + id, Reason: core_finops.SkipBudgetFilter, Accounts: []string{id}})
+	}
+	st.Budgets = append(st.Budgets, core_finops.Budget{ID: "aws-whole", Name: "Whole bill", Scope: core_finops.ScopeDeployment, Monthly: core_finops.USD(90000)})
+	return st, err
+}
+
+// TestToolsShowOnlyBudgetsInsideTheCallerAccountScope: budget_status and
+// cost_breakdown show a scoped caller only the budgets of its own account;
+// an unscoped caller sees every budget.
+func TestToolsShowOnlyBudgetsInsideTheCallerAccountScope(t *testing.T) {
+	svc := core_finops.NewService(budgetSource{newBigSource()}, nil, core_finops.Config{AccountScope: cost.CallerAccounts})
+	auth := core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionFinOpsView: true}}
+	unscoped := core.WithCallerAuthorization(context.Background(), auth)
+	auth.Accounts = &core.AccountScope{IDs: []string{"100000000002"}}
+	scoped := core.WithCallerAuthorization(context.Background(), auth)
+	tools := map[string]core.Tool{}
+	for _, tl := range New(func() core_finops.Reader { return svc }) {
+		tools[tl.Name()] = tl
+	}
+	answer := func(ctx context.Context, name string) string {
+		t.Helper()
+		res, err := tools[name].Invoke(ctx, json.RawMessage(`{"period":"2026-10"}`))
+		if err != nil || !res.IsAvailable() {
+			t.Fatalf("%s: %+v %v", name, res, err)
+		}
+		raw, _ := json.Marshal(res.Data)
+		return string(raw)
+	}
+	all := answer(unscoped, "budget_status")
+	for _, want := range []string{"Budget of 100000000001", "Budget of 100000000002", "Whole bill", "Skipped of 100000000001", "Skipped of 100000000002"} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("unscoped budget_status lost %q: %s", want, all)
+		}
+	}
+	if !strings.Contains(answer(unscoped, "cost_breakdown"), "Whole bill") {
+		t.Fatal("unscoped cost_breakdown lost the whole-bill budget")
+	}
+	mine := answer(scoped, "budget_status")
+	if !strings.Contains(mine, "Budget of 100000000002") || !strings.Contains(mine, "Skipped of 100000000002") {
+		t.Fatalf("scoped budget_status lost its own budget: %s", mine)
+	}
+	for _, name := range []string{"budget_status", "cost_breakdown"} {
+		out := answer(scoped, name)
+		for _, leak := range []string{"100000000001", "Whole bill"} {
+			if strings.Contains(out, leak) {
+				t.Fatalf("scoped %s shows %q: %s", name, leak, out)
+			}
+		}
+	}
+}

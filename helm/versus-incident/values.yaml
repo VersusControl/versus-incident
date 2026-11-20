@@ -540,7 +540,7 @@ connectors:
         pageBudget: 0
         # Agent and scheduler events counted per minute, not stored one
         # row each (service:Action, at most 32). Empty list counts nothing.
-        routineEvents: ["ssm:UpdateInstanceInformation", "ecs:SubmitTaskStateChange", "ecs:SubmitContainerStateChange", "logs:CreateLogStream"]
+        routineEvents: ["ssm:UpdateInstanceInformation", "ecs:SubmitTaskStateChange", "ecs:SubmitContainerStateChange", "logs:CreateLogStream", "config:PutEvaluations"]
         # Failed attempts by one principal, error code and service within
         # burstWindow of each other, at least burstMin, show as one row.
         burstWindow: "10m"

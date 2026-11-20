@@ -154,9 +154,10 @@ export function useShortcuts({ onHelp }: { onHelp: () => void }) {
 // separately ("AI: N · Webhook: M") without ever counting a bounded, loaded
 // page. The Sidebar deliberately shows NO count.
 // ---------------------------------------------------------------------------
-export function useOpenIncidentCount() {
+export function useOpenIncidentCount(enabled = true) {
   const q = useQuery({
     queryKey: ["incidents", "counts"],
+    enabled,
     queryFn: () => api.incidentCounts(),
     refetchInterval: () => (document.hidden ? false : 30_000),
     staleTime: 15_000,

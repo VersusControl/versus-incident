@@ -440,6 +440,70 @@ func (m *memoryTables) AWSUnits(_ context.Context, scope tenancy.OrgScope, query
 	asOf := tableTime(query.AsOf)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if len(scope.Read) == 1 {
+		return m.awsUnitsLocked(scope, query, asOf), nil
+	}
+	// Each organization is read on its own, then each unit is answered by
+	// one organization, as the account view does.
+	units := make([][]AWSUnitStatus, 0, len(scope.Read))
+	bounds := make([]map[AWSUnit]awsGenerationBounds, 0, len(scope.Read))
+	for _, orgScope := range singleOrgScopes(scope) {
+		units = append(units, m.awsUnitsLocked(orgScope, query, asOf))
+		bounds = append(bounds, m.generationBoundsLocked(orgScope.Write, func(unit AWSUnit) bool {
+			return matchAWSUnit(unit, query.Account, query.Region, query.Service)
+		}))
+	}
+	return mergeAWSUnits(scope.Read, units, bounds, asOf), nil
+}
+
+// generationBoundsLocked is the start of one organization's kept history
+// of every unit match accepts; the caller holds the read lock.
+func (m *memoryTables) generationBoundsLocked(org string, match func(AWSUnit) bool) map[AWSUnit]awsGenerationBounds {
+	out := map[AWSUnit]awsGenerationBounds{}
+	for key, entry := range m.units {
+		if key.org != org || entry == nil || !match(key.unit) {
+			continue
+		}
+		for _, version := range entry.generations {
+			bounds, seen := out[key.unit]
+			if !seen || version.row.Seq < bounds.firstSeq {
+				out[key.unit] = awsGenerationBounds{firstSeq: version.row.Seq, firstFrom: version.from}
+			}
+		}
+	}
+	return out
+}
+
+// answeringUnitsLocked is, per unit the query matches, the organization's
+// unit that answers for it at asOf, by the account view's rule; the caller
+// holds the read lock.
+func (m *memoryTables) answeringUnitsLocked(scope tenancy.OrgScope, query AWSUnitQuery, asOf time.Time) []memoryUnitKey {
+	match := func(unit AWSUnit) bool { return matchAWSUnit(unit, query.Account, query.Region, query.Service) }
+	out := make([]memoryUnitKey, 0)
+	if len(scope.Read) == 1 {
+		for _, key := range m.visibleUnits(scope) {
+			if match(key.unit) {
+				out = append(out, key)
+			}
+		}
+		return out
+	}
+	units := make([][]AWSUnitStatus, 0, len(scope.Read))
+	bounds := make([]map[AWSUnit]awsGenerationBounds, 0, len(scope.Read))
+	for _, orgScope := range singleOrgScopes(scope) {
+		units = append(units, m.awsUnitsLocked(orgScope, query, asOf))
+		bounds = append(bounds, m.generationBoundsLocked(orgScope.Write, match))
+	}
+	order, picks := pickAWSUnits(scope.Read, units, bounds, asOf)
+	for _, unit := range order {
+		out = append(out, memoryUnitKey{org: picks[unit].status.Org, unit: unit})
+	}
+	return out
+}
+
+// awsUnitsLocked reads the unit statuses of a scope; the caller holds the
+// read lock.
+func (m *memoryTables) awsUnitsLocked(scope tenancy.OrgScope, query AWSUnitQuery, asOf time.Time) []AWSUnitStatus {
 	out := make([]AWSUnitStatus, 0)
 	for _, key := range m.visibleUnits(scope) {
 		if !matchAWSUnit(key.unit, query.Account, query.Region, query.Service) {
@@ -457,7 +521,7 @@ func (m *memoryTables) AWSUnits(_ context.Context, scope tenancy.OrgScope, query
 		}
 		out = append(out, status)
 	}
-	return out, nil
+	return out
 }
 
 func copyAWSResource(row AWSResource) AWSResource {
@@ -475,10 +539,7 @@ func (m *memoryTables) AWSResources(_ context.Context, scope tenancy.OrgScope, q
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]AWSResource, 0)
-	for _, key := range m.visibleUnits(scope) {
-		if !matchAWSUnit(key.unit, query.Account, query.Region, query.Service) {
-			continue
-		}
+	for _, key := range m.answeringUnitsLocked(scope, AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service}, asOf) {
 		for _, version := range m.units[key].resources {
 			row := version.row
 			if !version.at(asOf) || query.Type != "" && row.Type != query.Type || query.App != "" && row.App != query.App || query.ARN != "" && row.ARN != query.ARN {
@@ -511,10 +572,7 @@ func (m *memoryTables) AWSHealth(_ context.Context, scope tenancy.OrgScope, quer
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]AWSHealth, 0)
-	for _, key := range m.visibleUnits(scope) {
-		if !matchAWSUnit(key.unit, query.Account, query.Region, query.Service) {
-			continue
-		}
+	for _, key := range m.answeringUnitsLocked(scope, AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service}, asOf) {
 		for _, version := range m.units[key].health {
 			row := version.row
 			if !version.at(asOf) || query.State != "" && row.State != query.State || query.ARN != "" && row.ARN != query.ARN && row.Ref != query.ARN {
@@ -545,10 +603,7 @@ func (m *memoryTables) AWSSecurityFlags(_ context.Context, scope tenancy.OrgScop
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]AWSSecurityFlag, 0)
-	for _, key := range m.visibleUnits(scope) {
-		if !matchAWSUnit(key.unit, query.Account, query.Region, query.Service) {
-			continue
-		}
+	for _, key := range m.answeringUnitsLocked(scope, AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service}, asOf) {
 		for _, version := range m.units[key].flags {
 			row := version.row
 			if !version.at(asOf) || query.Flag != "" && row.Flag != query.Flag || query.ARN != "" && row.ARN != query.ARN {
@@ -570,36 +625,27 @@ func (m *memoryTables) AWSSecurityFlags(_ context.Context, scope tenancy.OrgScop
 	return out, nil
 }
 
-func (m *memoryTables) coverageHolder(account, region string) func(string) bool {
-	return func(org string) bool { return len(m.coverage[memoryPairKey{org, account, region}]) > 0 }
-}
-
 func (m *memoryTables) AWSChanges(_ context.Context, scope tenancy.OrgScope, query AWSChangeQuery) ([]AWSChange, error) {
 	scope = inventoryScope(scope)
 	since, until := tableTime(query.Since), tableTime(query.Until)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]AWSChange, 0)
-	for _, org := range scope.Read {
-		for _, change := range m.changes[org] {
-			switch {
-			case query.Account != "" && change.Account != query.Account,
-				query.Region != "" && change.Region != query.Region,
-				query.Service != "" && change.Service != query.Service,
-				query.ResourceARN != "" && change.ResourceARN != query.ResourceARN,
-				query.App != "" && change.App != query.App,
-				!since.IsZero() && change.EventTime.Before(since),
-				!until.IsZero() && !change.EventTime.Before(until):
-				continue
-			}
-			if !firstHolder(scope.Read, org, m.coverageHolder(change.Account, change.Region)) {
-				continue
-			}
-			change.Fields, change.Detail = cloneTableMap(change.Fields), cloneTableJSON(change.Detail)
-			// The arrival time is read only by the change feed.
-			change.RecordedAt = time.Time{}
-			out = append(out, change)
+	for _, change := range m.firstChangeCopiesLocked(scope, time.Time{}) {
+		switch {
+		case query.Account != "" && change.Account != query.Account,
+			query.Region != "" && change.Region != query.Region,
+			query.Service != "" && change.Service != query.Service,
+			query.ResourceARN != "" && change.ResourceARN != query.ResourceARN,
+			query.App != "" && change.App != query.App,
+			!since.IsZero() && change.EventTime.Before(since),
+			!until.IsZero() && !change.EventTime.Before(until):
+			continue
 		}
+		change.Fields, change.Detail = cloneTableMap(change.Fields), cloneTableJSON(change.Detail)
+		// The arrival time is read only by the change feed.
+		change.RecordedAt = time.Time{}
+		out = append(out, change)
 	}
 	sort.Slice(out, func(left, right int) bool {
 		if !out[left].EventTime.Equal(out[right].EventTime) {
@@ -621,15 +667,30 @@ func (m *memoryTables) AWSChangeCoverage(_ context.Context, scope tenancy.OrgSco
 }
 
 func (m *memoryTables) changeCoverageLocked(scope tenancy.OrgScope, account, region string) []AWSPairCoverage {
-	out := make([]AWSPairCoverage, 0)
-	for key, intervals := range m.coverage {
-		if !scope.Contains(key.org) || account != "" && key.account != account || region != "" && key.region != region {
-			continue
+	// Every read organization's coverage counts: change history only grows,
+	// so what the default organization read stays read after a key is added.
+	byPair := map[[2]string]*AWSPairCoverage{}
+	intervals := map[[2]string][]AWSInterval{}
+	for _, org := range scope.Read {
+		for key, stored := range m.coverage {
+			if key.org != org || account != "" && key.account != account || region != "" && key.region != region || len(stored) == 0 {
+				continue
+			}
+			pair := [2]string{key.account, key.region}
+			if byPair[pair] == nil {
+				byPair[pair] = &AWSPairCoverage{Org: org, Account: key.account, Region: key.region}
+			}
+			intervals[pair] = append(intervals[pair], stored...)
 		}
-		if !firstHolder(scope.Read, key.org, m.coverageHolder(key.account, key.region)) {
-			continue
+	}
+	out := make([]AWSPairCoverage, 0, len(byPair))
+	for pair, coverage := range byPair {
+		list := intervals[pair]
+		sort.SliceStable(list, func(left, right int) bool { return list[left].From.Before(list[right].From) })
+		for _, interval := range list {
+			coverage.Intervals = addCoverageInterval(coverage.Intervals, interval)
 		}
-		out = append(out, AWSPairCoverage{Org: key.org, Account: key.account, Region: key.region, Intervals: append([]AWSInterval(nil), intervals...)})
+		out = append(out, *coverage)
 	}
 	sort.Slice(out, func(left, right int) bool {
 		if out[left].Account != out[right].Account {

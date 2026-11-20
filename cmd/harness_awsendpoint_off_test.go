@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,25 +26,23 @@ var harnessRedirectMarkers = []string{
 }
 
 // TestReleaseBuildCannotRedirectAWS: without a test build tag the redirect
-// does not exist, the variables do nothing (the connector and the cost
-// refresh both keep the hardened default transport), and no Go file of the
-// release build anywhere in the module names a variable or redirect symbol.
+// package compiles no redirect, the variables do nothing (the connector and
+// the cost refresh both keep the hardened default transport), and no Go file
+// of the release build anywhere in the module names a variable or redirect
+// symbol.
 func TestReleaseBuildCannotRedirectAWS(t *testing.T) {
 	t.Setenv("VERSUS_HARNESS_AWS_ENDPOINT_URL", "https://127.0.0.1:1")
 	t.Setenv("VERSUS_HARNESS_AWS_CA_BUNDLE", filepath.Join(t.TempDir(), "ca.pem"))
 	t.Setenv("VERSUS_HARNESS_FAKEAWS_URL", "http://127.0.0.1:1")
-	if client := awsHarnessHTTPClient(); client != nil {
-		t.Fatal("release build returned a redirecting AWS client")
-	}
 	cfg := &c.Config{}
 	cfg.Connectors.AWS.Budgets.MaxRequestsPerSecond = 2
-	connector := registerAWSSettingsController(fiber.New(), storage.NewMemory(), cfg)
-	if connector.httpClient != nil {
+	connector := mountAWS(fiber.New(), storage.NewMemory(), cfg)
+	if connector.HTTPClient != nil {
 		t.Fatal("release build handed the AWS connector a transport override")
 	}
 	conn := c.AWSConnectorConfig{Enable: true}
 	conn.OptionalData.CostExplorer = true
-	if opts := awsCostOptions(conn, []awscost.Target{{AccountID: "111122223333"}}, nil, connector); opts.HTTPClient != nil {
+	if opts := connector.CostOptions(conn, []awscost.Target{{AccountID: "111122223333"}}, nil); opts.HTTPClient != nil {
 		t.Fatal("release build overrides the cost adapter's hardened client")
 	}
 
@@ -51,16 +50,15 @@ func TestReleaseBuildCannotRedirectAWS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pkg, err := build.Default.ImportDir(directory, 0)
+	root := filepath.Dir(directory)
+	redirect, err := build.Default.ImportDir(filepath.Join(root, "pkg", "aws", "harnessendpoint"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ignored := strings.Join(pkg.IgnoredGoFiles, ",")
-	if !strings.Contains(ignored, "harness_awsendpoint.go") {
-		t.Fatalf("redirect file not excluded from the release build: ignored=%s", ignored)
+	if !slices.Contains(redirect.IgnoredGoFiles, "endpoint.go") {
+		t.Fatalf("redirect file not excluded from the release build: ignored=%v", redirect.IgnoredGoFiles)
 	}
 
-	root := filepath.Dir(directory)
 	scanned := 0
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {

@@ -278,6 +278,121 @@ func TestBucketsAcrossDSTAreUTCSteps(t *testing.T) {
 	}
 }
 
+// A 7-day window has 28 six-hour buckets in UTC steps from since, says so
+// in bucket_seconds, and still counts every stored change exactly.
+func TestWeekWindowBucketsAreSixHours(t *testing.T) {
+	eachBackend(t, func(t *testing.T) {
+		week := 7 * 24 * time.Hour
+		fixture := newFeedFixture(t, scopeOf(region), WithChangesLimits(func() ChangesLimits { return ChangesLimits{MaxWindow: week, MaxCompareAge: week} }))
+		now := fixture.clock.Now()
+		var found []model.Change
+		for index := 0; index < 40; index++ {
+			found = append(found, feedChange(fmt.Sprintf("w%03d", index), now.Add(-time.Duration(index*37+20)*time.Minute), model.ActorPipeline, ""))
+		}
+		fixture.pollSettled(account, region, found...)
+		fixture.pollSettled(account, model.GlobalRegion)
+		answer := fixture.answer(FeedRequest{Window: week})
+		if len(answer.Buckets) != 28 || answer.BucketSeconds != 21600 {
+			t.Fatalf("7d = %d buckets of %d s, want 28 of 21600 s", len(answer.Buckets), answer.BucketSeconds)
+		}
+		var counted int64
+		for index, bucket := range answer.Buckets {
+			if want := answer.Window.Since.Add(time.Duration(index) * 6 * time.Hour); !bucket.Start.Equal(want) || bucket.Start.Location() != time.UTC {
+				t.Fatalf("bucket %d starts %s, want %s", index, bucket.Start, want)
+			}
+			counted += bucket.Pipeline
+		}
+		if counted != 40 || answer.Summary.Total != 40 {
+			t.Fatalf("7d bucket sum %d, summary %+v, want 40", counted, answer.Summary)
+		}
+	})
+}
+
+// The 1 h and 24 h windows keep five-minute and hourly buckets.
+func TestShortWindowBucketsUnchanged(t *testing.T) {
+	fixture := newFeedFixture(t, scopeOf(region))
+	for _, want := range []struct {
+		window  time.Duration
+		buckets int
+		seconds int64
+	}{{time.Hour, 12, 300}, {24 * time.Hour, 24, 3600}} {
+		answer := fixture.answer(FeedRequest{Window: want.window})
+		if len(answer.Buckets) != want.buckets || answer.BucketSeconds != want.seconds {
+			t.Fatalf("%s = %d buckets of %d s, want %d of %d s", want.window, len(answer.Buckets), answer.BucketSeconds, want.buckets, want.seconds)
+		}
+		for index := 1; index < len(answer.Buckets); index++ {
+			if step := answer.Buckets[index].Start.Sub(answer.Buckets[index-1].Start); step != time.Duration(want.seconds)*time.Second {
+				t.Fatalf("%s bucket %d step %s", want.window, index, step)
+			}
+		}
+	}
+}
+
+// Each six-hour bucket holds exactly the sum of its six hourly buckets,
+// changes by class and failures alike.
+func TestSixHourBucketCountsEqualHourlySum(t *testing.T) {
+	since := time.Date(2026, 11, 13, 14, 27, 0, 0, time.UTC)
+	until := since.Add(7 * 24 * time.Hour)
+	classes := []model.ActorClass{model.ActorPipeline, model.ActorPerson, model.ActorAWSService, model.ActorUnknown}
+	var stored storage.AWSChangeFeed
+	for index := 0; index < 500; index++ {
+		at := since.Add(time.Duration(index*23) * time.Minute).Truncate(time.Minute)
+		stored.Minutes = append(stored.Minutes, storage.AWSChangeMinute{Minute: at, ActorClass: string(classes[index%len(classes)]), Events: int64(index%7 + 1)})
+		if index%5 == 0 {
+			stored.Counts = append(stored.Counts, storage.AWSChangeCount{Kind: storage.AWSChangeCountFailure, Minute: at, Events: int64(index%3 + 1)})
+		}
+	}
+	view := coverageView{since: since, until: until, settled: until, pairs: 1}
+	hourly := buckets(since, until, time.Hour, stored, nil, view)
+	sixHour := buckets(since, until, bucketWidth(7*24*time.Hour), stored, nil, view)
+	if len(hourly) != 168 || len(sixHour) != 28 {
+		t.Fatalf("buckets = %d hourly, %d six-hour", len(hourly), len(sixHour))
+	}
+	for index, bucket := range sixHour {
+		var sum FeedBucket
+		for _, hour := range hourly[index*6 : index*6+6] {
+			sum.Pipeline += hour.Pipeline
+			sum.Person += hour.Person
+			sum.AWSService += hour.AWSService
+			sum.Unknown += hour.Unknown
+			sum.Errors += hour.Errors
+		}
+		if bucket.Pipeline != sum.Pipeline || bucket.Person != sum.Person || bucket.AWSService != sum.AWSService || bucket.Unknown != sum.Unknown || bucket.Errors != sum.Errors {
+			t.Fatalf("six-hour bucket %d = %+v, hourly sum %+v", index, bucket, sum)
+		}
+	}
+}
+
+// A six-hour bucket takes its worst part: one unread hour makes it
+// partial, and it is gap only when none of it was read.
+func TestSixHourBucketStateIsWorstPart(t *testing.T) {
+	since := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	until := since.Add(7 * 24 * time.Hour)
+	width := bucketWidth(7 * 24 * time.Hour)
+	gap := func(from, to time.Time) FeedGap {
+		return FeedGap{Account: account, Region: region, From: from, To: to, Reason: string(model.GapDenied)}
+	}
+	view := coverageView{since: since, until: until, settled: until, pairs: 1, gaps: []FeedGap{
+		// One hour unread inside the second bucket.
+		gap(since.Add(8*time.Hour), since.Add(9*time.Hour)),
+		// The whole fourth bucket unread.
+		gap(since.Add(18*time.Hour), since.Add(24*time.Hour)),
+	}}
+	out := buckets(since, until, width, storage.AWSChangeFeed{}, nil, view)
+	if len(out) != 28 {
+		t.Fatalf("buckets = %d", len(out))
+	}
+	if out[0].State != BucketComplete || out[2].State != BucketComplete {
+		t.Fatalf("read buckets = %s, %s", out[0].State, out[2].State)
+	}
+	if out[1].State != BucketPartial || len(out[1].GapAccounts) != 1 || out[1].GapAccounts[0] != account {
+		t.Fatalf("bucket with one unread hour = %+v, want partial", out[1])
+	}
+	if out[3].State != BucketGap {
+		t.Fatalf("fully unread bucket = %+v, want gap", out[3])
+	}
+}
+
 // Only canonical ARNs match: a Lambda function and an ECS service both
 // named "api" in two accounts never match each other.
 func TestShortNameNeverMatchesAcrossResources(t *testing.T) {
@@ -623,5 +738,127 @@ func TestStackRunGroupsCloudFormationCalls(t *testing.T) {
 	group, err := fixture.feed.Group(context.Background(), answer.Items[1].ID, "", 50)
 	if err != nil || len(group.Items) != 4 {
 		t.Fatalf("group = %+v, %v", group, err)
+	}
+}
+
+// Adding a key moves writes to the licensed organization. The history the
+// default organization read before stays in the answer: its changes are
+// listed (a change both read is listed once), and the stretch it read is
+// never labelled as before the connection.
+func TestUpgradeKeepsDefaultOrgChangeHistory(t *testing.T) {
+	eachBackend(t, func(t *testing.T) {
+		fixture := newFeedFixture(t, scopeOf(region))
+		before := fixture.clock.Now()
+		fixture.pollSettled(account, region, feedChange("old-1", before.Add(-25*time.Hour), model.ActorPipeline, "arn:aws:iam::111122223333:role/deploy"),
+			feedChange("old-2", before.Add(-2*time.Hour), model.ActorPipeline, "arn:aws:iam::111122223333:role/deploy"))
+		fixture.pollSettled(account, model.GlobalRegion)
+
+		fixture.clock.Advance(time.Hour)
+		now := fixture.clock.Now()
+		upgraded := tenancy.NewOrgScope("acme", tenancy.DefaultOrgID)
+		licensed := New(fixture.provider, upgraded, WithClock(fixture.clock.Now))
+		if err := licensed.RecordChangePoll(account, region, ChangePoll{HistoryFrom: now.Add(-24 * time.Hour),
+			Found:   []model.Change{feedChange("old-2", before.Add(-2*time.Hour), model.ActorPipeline, "arn:aws:iam::111122223333:role/deploy"), feedChange("new-1", now.Add(-30*time.Minute), model.ActorPipeline, "arn:aws:iam::111122223333:role/deploy")},
+			Covered: []changes.Interval{{From: now.Add(-24 * time.Hour), To: now.Add(-15 * time.Minute)}}, Read: []changes.Interval{{From: now.Add(-24 * time.Hour), To: now}}}); err != nil {
+			t.Fatal(err)
+		}
+
+		state, found, err := fixture.provider.AWSChangePairState(context.Background(), upgraded, account, region)
+		if err != nil || !found {
+			t.Fatalf("pair state found=%v err=%v", found, err)
+		}
+		if !state.HistoryFrom.Equal(before.Add(-48*time.Hour)) || !state.ConnectedAt.Equal(before) || !state.LastPollAt.Equal(now) || state.Org != "acme" {
+			t.Fatalf("pair state after the upgrade = %+v", state)
+		}
+
+		week := 7 * 24 * time.Hour
+		feed := NewChangeFeed(licensed, WithFeedClock(fixture.clock.Now), WithScope(func(context.Context) ([]ScopeAccount, bool, error) { return fixture.scope, true, nil }),
+			WithChangesLimits(func() ChangesLimits { return ChangesLimits{MaxWindow: week, MaxCompareAge: week} }))
+		answer, err := feed.Answer(context.Background(), FeedRequest{Window: week})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]int{}
+		for _, item := range answer.Items {
+			seen[item.ID]++
+		}
+		if len(answer.Items) != 3 || seen["old-1"] != 1 || seen["old-2"] != 1 || seen["new-1"] != 1 {
+			t.Fatalf("items after the upgrade = %v", seen)
+		}
+		for _, gap := range gapsOf(answer, region) {
+			if gap.Reason == string(GapBeforeConnect) && gap.To.After(before.Add(-48*time.Hour)) {
+				t.Fatalf("read history labelled before connect: %+v", gap)
+			}
+		}
+	})
+}
+
+// With since and until off minute boundaries the store's first minute row
+// starts before since; the buckets still add up to the summary, by class
+// and for failures, at every window.
+func TestBucketsSumToSummaryOffMinuteBoundaries(t *testing.T) {
+	until := time.Date(2026, 11, 20, 13, 44, 37, 0, time.UTC)
+	classes := []model.ActorClass{model.ActorPipeline, model.ActorPerson, model.ActorAWSService, model.ActorUnknown}
+	for _, window := range []struct {
+		name   string
+		since  time.Time
+		until  time.Time
+		window time.Duration
+	}{
+		{"1h", until.Add(-FeedWindowHour), until, FeedWindowHour},
+		{"24h", until.Add(-FeedWindowDay), until, FeedWindowDay},
+		{"7d", until.Add(-7 * 24 * time.Hour), until, 7 * 24 * time.Hour},
+		{"custom", time.Date(2026, 11, 19, 2, 13, 41, 0, time.UTC), time.Date(2026, 11, 19, 9, 51, 8, 0, time.UTC), 0},
+	} {
+		t.Run(window.name, func(t *testing.T) {
+			since, end := window.since, window.until
+			span := end.Sub(since)
+			if window.window == 0 {
+				window.window = span
+			}
+			// Change times as the store keeps them: in [since, until), with
+			// one change in the first and last partial minutes each.
+			times := []time.Time{since.Add(13 * time.Second), end.Add(-2 * time.Second)}
+			for at := since.Add(time.Minute); at.Before(end); at = at.Add(span / 97) {
+				times = append(times, at)
+			}
+			byMinute := map[time.Time]int64{}
+			var stored storage.AWSChangeFeed
+			for index, at := range times {
+				minute := at.Truncate(time.Minute)
+				events := int64(index%4 + 1)
+				stored.Minutes = append(stored.Minutes, storage.AWSChangeMinute{Minute: minute, ActorClass: string(classes[index%len(classes)]), Events: events})
+				if index%3 == 0 {
+					byMinute[minute]++
+				}
+			}
+			for minute, events := range byMinute {
+				stored.Counts = append(stored.Counts, storage.AWSChangeCount{Kind: storage.AWSChangeCountFailure, Minute: minute, Events: events})
+			}
+			view := coverageView{since: since, until: end, settled: end, pairs: 1}
+			out := buckets(since, end, bucketWidth(window.window), stored, nil, view)
+			summary := summarize(stored, stored.Counts, nil)
+			var sum FeedBucket
+			for _, bucket := range out {
+				sum.Pipeline += bucket.Pipeline
+				sum.Person += bucket.Person
+				sum.AWSService += bucket.AWSService
+				sum.Unknown += bucket.Unknown
+				sum.Errors += bucket.Errors
+			}
+			if out[0].Pipeline == 0 {
+				t.Fatalf("first bucket misses the first partial minute: %+v", out[0])
+			}
+			if sum.Pipeline != summary.ByActorClass[string(model.ActorPipeline)] || sum.Person != summary.ByActorClass[string(model.ActorPerson)] ||
+				sum.AWSService != summary.ByActorClass[string(model.ActorAWSService)] || sum.Unknown != summary.ByActorClass[string(model.ActorUnknown)] {
+				t.Fatalf("bucket classes %+v, summary %+v", sum, summary.ByActorClass)
+			}
+			if total := sum.Pipeline + sum.Person + sum.AWSService + sum.Unknown; total != summary.Total {
+				t.Fatalf("bucket total %d, summary total %d", total, summary.Total)
+			}
+			if sum.Errors != summary.Errors || summary.Errors == 0 {
+				t.Fatalf("bucket errors %d, summary errors %d", sum.Errors, summary.Errors)
+			}
+		})
 	}
 }

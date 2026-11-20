@@ -53,6 +53,7 @@ import {
 import { fmtRel, truncate } from "@/lib/format";
 import { capChatMessage } from "@/lib/markdownPolicy";
 import { useStickyBottom } from "@/lib/useStickyBottom";
+import { mayListChatSessions, useAccess } from "@/lib/access";
 import { getStoredTheme, type Theme } from "@/lib/theme";
 import { kubernetesKey } from "@/lib/useKubernetesCluster";
 
@@ -467,12 +468,22 @@ export function ChatPage() {
     retry: false,
   });
 
+  // Sessions are shared, so a role that only reads cost (finance) may chat
+  // but not list them. The list waits for the session's permissions and is
+  // never asked for when they refuse it, so no refused request is sent.
+  const access = useAccess();
+  const listAllowed = mayListChatSessions(access.permissions);
   const sessionsQ = useQuery({
     queryKey: ["chat-sessions"],
     queryFn: api.listChatSessions,
+    enabled: access.ready && listAllowed,
     retry: (failureCount, error) =>
-      !(error instanceof ApiError && error.status === 503) && failureCount < 1,
+      !(error instanceof ApiError && (error.status === 503 || error.status === 403)) && failureCount < 1,
+    // A refused list is a final answer: the role may chat without listing its
+    // history (finance), so it is not asked again on each mount.
+    retryOnMount: false,
   });
+  const historyRefused = (access.ready && !listAllowed) || (sessionsQ.error instanceof ApiError && sessionsQ.error.status === 403);
   const sessionQ = useQuery({ queryKey: ["chat-session", selectedId], queryFn: () => api.getChatSession(selectedId as string), enabled: Boolean(selectedId), retry: 1 });
   const turns = sessionQ.data?.turns ?? [];
   const selectedRun = selectedId ? liveRuns[selectedId] : undefined;
@@ -543,7 +554,7 @@ export function ChatPage() {
         delete next[id];
         return next;
       });
-      await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      if (!historyRefused) await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
       queryClient.removeQueries({ queryKey: ["chat-session", id] });
       setLiveRuns((runs) => {
         if (!runs[id]) return runs;
@@ -630,7 +641,7 @@ export function ChatPage() {
           return run ? { ...runs, [id as string]: { ...run, active: false, stopping: false } } : runs;
         });
       }
-      await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      if (!historyRefused) await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
     }
   };
 
@@ -696,7 +707,7 @@ export function ChatPage() {
 
   const unavailable = sessionsQ.error instanceof ApiError && sessionsQ.error.status === 503;
   const conversationStarted = displayTurns.length > 0 || active;
-  const history = <HistoryList sessions={sessionsQ.data ?? []} selected={selectedId} selectedFull={sessionQ.data} loading={sessionsQ.isLoading} deleteErrors={deleteErrors} onSelect={selectThread} onDelete={deleteThread} onDismissDeleteError={(id) => setDeleteErrors((errors) => {
+  const history = <HistoryList sessions={sessionsQ.data ?? []} selected={selectedId} selectedFull={sessionQ.data} loading={sessionsQ.isLoading || !access.ready} deleteErrors={deleteErrors} onSelect={selectThread} onDelete={deleteThread} onDismissDeleteError={(id) => setDeleteErrors((errors) => {
     if (!errors[id]) return errors;
     const next = { ...errors };
     delete next[id];
@@ -742,7 +753,7 @@ export function ChatPage() {
           <main className="relative min-w-0 overflow-hidden">
             {unavailable ? (
               <div className="mx-auto mt-16 max-w-lg px-4"><div role="alert" className="rounded-card border border-sev-warn/40 bg-sev-warn/10 p-5"><h2 className="font-semibold text-ink-50">Chat is not enabled</h2><p className="mt-2 text-sm text-ink-300">Enable the AI Agent (AGENT_ENABLE=true) and model configuration, then retry.</p><button className="btn mt-4" onClick={() => sessionsQ.refetch()}>Retry</button></div></div>
-            ) : sessionsQ.isError ? (
+            ) : sessionsQ.isError && !historyRefused ? (
               <div className="mx-auto mt-12 max-w-lg px-4"><RetryableError error={sessionsQ.error} onRetry={() => sessionsQ.refetch()} retrying={sessionsQ.isFetching} context="Couldn't load chat history" /></div>
             ) : (
               <>

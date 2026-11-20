@@ -28,6 +28,9 @@ type CompareRequest struct {
 	Account string
 	Region  string
 	Service string
+	// Services narrows the compare to resources, units and changes in any
+	// of these services; empty means every service.
+	Services []string
 }
 
 // CompareResource names one added or removed resource.
@@ -104,6 +107,8 @@ type CompareAnswer struct {
 	Snapshots           CompareSnapshots  `json:"snapshots"`
 	ChangesBetween      []FeedItem        `json:"changes_between"`
 	ChangesBetweenTotal int64             `json:"changes_between_total"`
+	// Limits are the window and compare limits this request was held to.
+	Limits ChangesLimitsView `json:"limits"`
 }
 
 // Compare diffs the inventory between two times inside the tier's window.
@@ -125,12 +130,16 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	if from.IsZero() || !from.Before(to) {
 		return CompareAnswer{}, ErrBadFeedQuery
 	}
-	tierStart := now.Add(-MaxFeedWindow)
+	limits := feed.Limits()
+	tierStart := now.Add(-limits.MaxCompareAge)
 	if from.Before(tierStart.Add(-time.Minute)) {
 		return CompareAnswer{}, ErrWindowLocked
 	}
+	if request.Services, err = NormalizeServices(request.Services); err != nil {
+		return CompareAnswer{}, err
+	}
 	answer := CompareAnswer{From: from, To: to, Status: CompareOK, Added: []CompareResource{}, Removed: []CompareResource{},
-		Changed: []CompareChanged{}, Partial: []ComparePartial{}, ChangesBetween: []FeedItem{}}
+		Changed: []CompareChanged{}, Partial: []ComparePartial{}, ChangesBetween: []FeedItem{}, Limits: limits.View()}
 
 	history, err := feed.store.UnitHistory(ctx, Query{Account: request.Account, Region: request.Region, Service: request.Service})
 	if err != nil {
@@ -173,6 +182,9 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 			continue
 		}
 		seenPair[pairKey(unit.Unit.Account, unit.Unit.Region)] = true
+		if !serviceInFilter(request.Services, unit.Unit.Service) {
+			continue
+		}
 		if oldest.IsZero() || unit.Oldest.Before(oldest) {
 			oldest = unit.Oldest
 		}
@@ -228,7 +240,8 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 		return CompareAnswer{}, err
 	}
 	skip := func(resource model.Resource) bool {
-		return missing[unitKey(resource.Account, resource.Region, resource.Service)] || missing[unitKey(resource.Account, model.GlobalRegion, resource.Service)]
+		return missing[unitKey(resource.Account, resource.Region, resource.Service)] || missing[unitKey(resource.Account, model.GlobalRegion, resource.Service)] ||
+			!serviceInFilter(request.Services, resource.Service)
 	}
 	allowlist := feed.store.readAllowlist()
 	was := map[string]model.Resource{}
@@ -264,7 +277,7 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	named := map[string]bool{}
 	for _, gap := range append(append([]model.Gap(nil), before.Gaps...), after.Gaps...) {
 		key := unitKey(gap.Account, gap.Region, gap.Service)
-		if scoped && !inScope[pairKey(gap.Account, gap.Region)] || named[key] || missing[key] {
+		if scoped && !inScope[pairKey(gap.Account, gap.Region)] || named[key] || missing[key] || gap.Service != "" && !serviceInFilter(request.Services, gap.Service) {
 			continue
 		}
 		named[key] = true
@@ -280,7 +293,7 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	setIDHints(&answer)
 
 	stored, err := feeds.AWSChangeFeed(ctx, feed.store.scope, storage.AWSChangeFeedQuery{Account: request.Account, Region: request.Region, Service: request.Service,
-		Since: from, Until: to, RowLimit: maxChangesBetween})
+		Services: request.Services, Since: from, Until: to, RowLimit: maxChangesBetween})
 	if err != nil {
 		return CompareAnswer{}, err
 	}

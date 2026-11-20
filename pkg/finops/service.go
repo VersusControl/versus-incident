@@ -138,6 +138,9 @@ type Config struct {
 	Location *time.Location
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// AccountScope returns the account IDs the request's caller may read;
+	// limited false means every account. Nil reads every account.
+	AccountScope func(ctx context.Context) (ids []string, limited bool)
 }
 
 // detectionLookbackDays bounds the history SyncIncreases walks for
@@ -241,6 +244,85 @@ type scope struct {
 	// billed are the accounts with cost in the window when the comparison
 	// period was read per group (loadSummary); nil means sc.lines holds them.
 	billed map[string]bool
+	// visible is the caller's account scope narrowed by the query's
+	// accounts; nil means the caller may read every account.
+	visible map[string]bool
+}
+
+// unscopedKey marks a context whose load ignores the caller's account
+// scope: the sync and freeze paths write deployment-wide state, which a
+// scoped caller who triggered them must not narrow.
+type unscopedKey struct{}
+
+func unscoped(ctx context.Context) context.Context {
+	return context.WithValue(ctx, unscopedKey{}, true)
+}
+
+// visibleAccounts applies the caller's account scope to the query. It
+// returns nil and the query unchanged when the caller may read every
+// account; otherwise it returns the accounts the request may read (possibly
+// none) and the query narrowed to them.
+func (s *Service) visibleAccounts(ctx context.Context, q Query) (map[string]bool, Query) {
+	if all, _ := ctx.Value(unscopedKey{}).(bool); all || s.cfg.AccountScope == nil {
+		return nil, q
+	}
+	ids, limited := s.cfg.AccountScope(ctx)
+	if !limited {
+		return nil, q
+	}
+	visible := map[string]bool{}
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" && (len(q.Accounts) == 0 || slices.Contains(q.Accounts, id)) {
+			visible[id] = true
+		}
+	}
+	q.Accounts = sortedKeys(visible)
+	return visible, q
+}
+
+// accountIn reports whether the request reads the account: inside the
+// caller's scope and the query's account filter.
+func (sc *scope) accountIn(id string) bool {
+	if sc.visible != nil && !sc.visible[id] {
+		return false
+	}
+	return len(sc.q.Accounts) == 0 || slices.Contains(sc.q.Accounts, id)
+}
+
+// accountVisible reports whether the caller's scope allows the account,
+// whatever the query's filter.
+func (sc *scope) accountVisible(id string) bool {
+	return sc.visible == nil || sc.visible[id]
+}
+
+// coveredVisible reports whether a budget covering these accounts may be
+// shown to the caller: every account is inside the caller's scope. With no
+// account limit the budget covers every account, so a scoped caller never
+// sees it.
+func (sc *scope) coveredVisible(accounts []string) bool {
+	if sc.visible == nil {
+		return true
+	}
+	if len(accounts) == 0 {
+		return false
+	}
+	for _, id := range accounts {
+		if !sc.visible[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// budgetVisible reports whether the caller may see a budget: every account
+// it measures is inside the caller's scope. Its name, limit and accounts
+// would otherwise describe spend the caller cannot read, and it would be
+// measured on the visible lines only, reading as a false zero.
+func (sc *scope) budgetVisible(b Budget) bool {
+	if b.Scope == ScopeAccount {
+		return sc.coveredVisible([]string{b.Value})
+	}
+	return sc.coveredVisible(b.Accounts)
 }
 
 // meterOf is today's paid-request use; the cap falls back to the config.
@@ -305,11 +387,12 @@ func (s *Service) loadWindow(ctx context.Context, q Query, dims []Dimension, loo
 	if err != nil {
 		return nil, err
 	}
+	visible, q := s.visibleAccounts(ctx, q)
 	st, err := s.src.Status(ctx)
 	if err != nil {
 		return nil, err
 	}
-	sc := &scope{ctx: ctx, q: q, depth: q.depth(), st: st, cfg: s.cfg, today: s.today(), now: s.now(), meter: s.meterOf(st)}
+	sc := &scope{ctx: ctx, q: q, depth: q.depth(), st: st, cfg: s.cfg, today: s.today(), now: s.now(), meter: s.meterOf(st), visible: visible}
 	if !st.Enabled {
 		reason := st.DisabledReason
 		if reason == "" {
@@ -334,6 +417,9 @@ func (s *Service) loadWindow(ctx context.Context, q Query, dims []Dimension, loo
 		owners[k] = v
 	}
 	for _, a := range st.Accounts {
+		if !sc.accountVisible(a.ID) {
+			continue
+		}
 		if a.Group == "" {
 			a.Group = s.cfg.AccountGroups[a.ID]
 		}
@@ -370,7 +456,7 @@ func (s *Service) loadWindow(ctx context.Context, q Query, dims []Dimension, loo
 	}
 	var raw, base []CostLine
 	disjoint := sc.comp.Range.End.Before(sc.period.Range.Start) || sc.period.Range.End.Before(sc.comp.Range.Start)
-	collapse := summary && s.totals != nil && narrow.empty() && sc.comp.Available && disjoint &&
+	collapse := summary && s.totals != nil && narrow.empty() && sc.comp.Available && disjoint && visible == nil &&
 		len(q.Accounts) == 0 && len(q.Regions) == 0 && len(q.Teams) == 0
 	if collapse {
 		raw, base, err = s.summaryLines(ctx, sc, DateRange{from, to})
@@ -415,14 +501,14 @@ func (s *Service) loadWindow(ctx context.Context, q Query, dims []Dimension, loo
 	}
 
 	other := map[string]Micros{}
-	sc.filtered = len(q.Accounts) > 0 || len(q.Regions) > 0 || len(q.Teams) > 0
+	sc.filtered = visible != nil || len(q.Accounts) > 0 || len(q.Regions) > 0 || len(q.Teams) > 0
 	partial := map[Date]bool{}
 	// Months of lines: size the slices once instead of growing them.
 	sc.lines = make([]CostLine, 0, len(raw))
 	sc.complete = make([]CostLine, 0, len(raw))
 	for _, l := range raw {
 		sameCurrency := l.Currency == "" || st.Currency == "" || strings.EqualFold(l.Currency, st.Currency)
-		if sameCurrency && sc.period.Range.Contains(l.Day) {
+		if sameCurrency && sc.period.Range.Contains(l.Day) && sc.accountVisible(l.Account) {
 			sc.scopeLines = append(sc.scopeLines, l)
 		}
 		if !sc.match(l) {
@@ -478,7 +564,7 @@ func (s *Service) loadWindow(ctx context.Context, q Query, dims []Dimension, loo
 	}
 	slices.SortFunc(sync.PartialDays, func(a, b Date) int { return a.Compare(b) })
 	for _, a := range st.Accounts {
-		if len(q.Accounts) > 0 && !slices.Contains(q.Accounts, a.ID) {
+		if !sc.accountIn(a.ID) {
 			continue
 		}
 		sync.AccountsTotal++
@@ -766,7 +852,7 @@ func (s *Service) link(q Query, sub string) string {
 
 func (sc *scope) match(l CostLine) bool {
 	q := sc.q
-	if len(q.Accounts) > 0 && !slices.Contains(q.Accounts, l.Account) {
+	if !sc.accountIn(l.Account) {
 		return false
 	}
 	if len(q.Regions) > 0 && !slices.Contains(q.Regions, l.Region) {

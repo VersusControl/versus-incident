@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, type ChatEvent, type ChatSession } from "@/lib/api";
+import { api, ApiError, type ChatEvent, type ChatSession, type SSOSession } from "@/lib/api";
 import * as apiModule from "@/lib/api";
 import { DEVOPS_AGENT_DOCS_URL } from "@/components/chat/ActionCliHint";
 import { ChatPage } from "./ChatPage";
@@ -12,6 +12,20 @@ vi.mock("@/components/TopBar", () => ({
   TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => (
     <header><span>{title}</span>{actions}</header>
   ),
+}));
+
+// The signed-in session; none by default, as on an OSS binary.
+const role = vi.hoisted(() => ({ session: undefined as SSOSession | undefined }));
+vi.mock("@/lib/useEffectiveRole", () => ({
+  useEffectiveRole: () => ({
+    org: role.session ? "acme" : null,
+    enterprise: Boolean(role.session),
+    role: role.session?.role ?? null,
+    isAdmin: false,
+    hasSession: Boolean(role.session),
+    loading: false,
+    session: { data: role.session },
+  }),
 }));
 
 vi.mock("@/lib/api", async (importActual) => {
@@ -89,9 +103,48 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  role.session = undefined;
 });
 
 describe("ChatPage", () => {
+  it("works for a role refused the session list (finance): no error panel, no retry, a new session is started and used", async () => {
+    vi.mocked(api.listChatSessions).mockRejectedValue(new ApiError(403, "insufficient permissions", { error: "insufficient permissions", code: "finops_only" }));
+    renderPage();
+    await waitFor(() => expect(api.listChatSessions).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("Couldn't load chat history")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "use cost_accounts to list cost by account" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalledWith("session-1", "use cost_accounts to list cost by account", undefined, expect.any(Function), expect.any(AbortSignal)));
+    expect(api.createChatSession).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.getChatSession).toHaveBeenCalled());
+    // The refused list is not asked again after the turn.
+    expect(api.listChatSessions).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Couldn't load chat history")).toBeNull();
+  });
+
+  it("a finance-only session never asks for the shared session list, shows no error, and still chats", async () => {
+    role.session = {
+      org: "acme",
+      email: "fin@example.com",
+      subject: "fin",
+      mfa: false,
+      role: "finance",
+      roles: ["finance"],
+      permissions: ["finops:view"],
+      issued_at: "2026-11-20T00:00:00Z",
+      expires_at: "2026-11-21T00:00:00Z",
+    };
+    renderPage();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), { target: { value: "cost by account" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(api.streamChatMessage).toHaveBeenCalled());
+    await waitFor(() => expect(api.getChatSession).toHaveBeenCalled());
+    expect(api.listChatSessions).not.toHaveBeenCalled();
+    expect(screen.queryByText("Couldn't load chat history")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
   it("prefills an issue investigation without creating a session or sending until requested", async () => {
     renderPage("/agent/chat?provider=kubernetes&cluster=east&resource_id=apps~v1~deployments&namespace=shop&name=checkout&uid=root-uid&include_changes=true&issue=pod.crash_loop");
     const composer = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;

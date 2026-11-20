@@ -15,7 +15,10 @@ import {
   compareToOptions,
   resolveCompareFrom,
   resolveCompareTo,
-  COMPARE_PRESETS,
+  comparePresets,
+  maxCompareAgeMs,
+  presetAgo,
+  type ChangesLimits,
   type CompareChanged,
   type CompareResource,
   type CompareView,
@@ -81,7 +84,7 @@ function ChangedResource({ r, view }: { r: CompareChanged; view: ChangesView }) 
   );
 }
 
-type Scope = { account?: string; region?: string };
+type Scope = { account?: string; region?: string; service?: string };
 
 /** The change-list rows inside the compared span, with a link to the rest. */
 function ChangesBetween({ c, view, scope, toLabel }: { c: CompareView; view: ChangesView; scope: Scope; toLabel: string }) {
@@ -255,8 +258,11 @@ export function ComparePanel({
   to = "",
   onToChange = () => {},
   scope,
+  limits,
 }: {
   view: ChangesView;
+  /** The edition's limits from the Changes answer; the Compare answer's win once it lands. */
+  limits?: ChangesLimits;
   value: string;
   onChange: (v: string) => void;
   /** The compare end: "" for now, or an RFC 3339 time between `from` and now. */
@@ -267,14 +273,16 @@ export function ComparePanel({
   const from = resolveCompareFrom(value, view.window.until);
   const toTime = resolveCompareTo(to, from, view.window.until);
   const compare = useQuery({
-    queryKey: ["aws-changes", "compare", from, toTime, scope.account ?? "", scope.region ?? ""],
-    queryFn: () => api.awsChangesCompare({ from, to: toTime || undefined, account: scope.account, region: scope.region }),
+    queryKey: ["aws-changes", "compare", from, toTime, scope.account ?? "", scope.region ?? "", scope.service ?? ""],
+    queryFn: () => api.awsChangesCompare({ from, to: toTime || undefined, account: scope.account, region: scope.region, service: scope.service }),
   });
-  const options: Array<{ value: string; label: string }> = COMPARE_PRESETS.map((p) => ({
+  // The starting points reach back as far as the edition keeps history.
+  const presets = comparePresets(maxCompareAgeMs(compare.data?.limits ?? limits ?? view.limits));
+  const options: Array<{ value: string; label: string }> = presets.map((p) => ({
     value: p.key,
-    label: `${fmtClockOrDay(resolveCompareFrom(p.key, view.window.until), view.window.until)} (${p.hours} h ago)`,
+    label: `${fmtClockOrDay(resolveCompareFrom(p.key, view.window.until), view.window.until)} (${presetAgo(p.hours)})`,
   }));
-  if (!COMPARE_PRESETS.some((p) => p.key === value)) options.push({ value, label: fmtClockOrDay(from, view.window.until) });
+  if (!presets.some((p) => p.key === value)) options.push({ value, label: fmtClockOrDay(from, view.window.until) });
   const toOptions = compareToOptions(from, toTime, view.window.until);
   const toLabel = toTime ? fmtClockOrDay(toTime, view.window.until) : "now";
 
@@ -284,7 +292,16 @@ export function ComparePanel({
         <h2 id="changes-compare-title" className="card-title">
           Compare
         </h2>
-        <Dropdown value={value} options={options} onChange={onChange} aria-label="Compare from" className="min-w-[9rem]" />
+        {/* The list grows to its longest option, "Nov 18 14:23 (2 d ago)", whatever the trigger's width. */}
+        <Dropdown
+          value={value}
+          options={options}
+          onChange={onChange}
+          aria-label="Compare from"
+          className="min-w-[9rem]"
+          listClassName="w-max min-w-full max-w-[20rem]"
+          wrapOptions
+        />
         <span aria-hidden="true" className="text-xs text-ink-300">
           →
         </span>

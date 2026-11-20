@@ -279,7 +279,13 @@ func TestCloudTrailChanges(t *testing.T) {
 		if strings.HasPrefix(change.EventName, "Describe") || strings.HasPrefix(change.EventName, "List") || strings.HasPrefix(change.EventName, "Get") {
 			t.Errorf("read-only event stored as a change: %s %s", change.EventSource, change.EventName)
 		}
-		if change.Account != emulatorAccount || change.Region != testRegion || change.ID == "" || change.Time.IsZero() {
+		// Global services (IAM, STS and the rest) are stored under the
+		// global pseudo-Region; every other service keeps its own Region.
+		wantRegion := testRegion
+		if collect.IsGlobalSource(change.EventSource) {
+			wantRegion = model.GlobalRegion
+		}
+		if change.Account != emulatorAccount || change.Region != wantRegion || change.ID == "" || change.Time.IsZero() {
 			t.Errorf("change %s: account %q region %q id %q time %s", change.EventName, change.Account, change.Region, change.ID, change.Time)
 		}
 	}

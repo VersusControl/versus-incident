@@ -55,7 +55,7 @@ func (s *Service) getIncreases(ctx context.Context, sc *scope) ([]IncreaseRecord
 		// A record carries no region or team, so a filter that narrows to
 		// either cannot be checked against it without inventing an answer.
 		if len(sc.q.Regions) > 0 || len(sc.q.Teams) > 0 ||
-			(len(sc.q.Accounts) > 0 && !slices.Contains(sc.q.Accounts, r.Key.Account)) {
+			!sc.accountIn(r.Key.Account) {
 			continue
 		}
 		out = append(out, Reconcile(&r, r.Detected, sc.today, sc.now))
@@ -111,7 +111,7 @@ func (s *Service) detectIncreases(ctx context.Context, sc *scope) ([]IncreaseRec
 			continue
 		}
 		if len(sc.q.Regions) > 0 || len(sc.q.Teams) > 0 ||
-			(len(sc.q.Accounts) > 0 && !slices.Contains(sc.q.Accounts, r.Key.Account)) {
+			!sc.accountIn(r.Key.Account) {
 			continue
 		}
 		out = append(out, Reconcile(&r, r.Detected, sc.today, sc.now))
@@ -573,7 +573,7 @@ func (s *Service) getSavings(ctx context.Context, sc *scope) ([]SavingView, erro
 	}
 	var out []SavingView
 	for _, it := range EvaluateSavings(in, SavingsOptions{TargetCoverageBP: s.cfg.TargetCoverageBP}) {
-		if len(sc.q.Accounts) > 0 && !slices.Contains(sc.q.Accounts, it.Account) {
+		if !sc.accountIn(it.Account) {
 			continue
 		}
 		if len(sc.q.Regions) > 0 && !slices.Contains(sc.q.Regions, it.Region) {
@@ -688,7 +688,7 @@ func (s *Service) forecast(sc *scope, keep func(CostLine) bool) Forecast {
 
 func (s *Service) budgetLine(sc *scope, b Budget) BudgetLine {
 	var keep func(CostLine) bool
-	if b.Scope != ScopeDeployment {
+	if !b.WholeBill() {
 		keep = func(l CostLine) bool { return BudgetMatches(b, l.Account, sc.ownerOf(l).Name) }
 	}
 	fc := s.forecast(sc, keep)
@@ -721,12 +721,20 @@ func (s *Service) Budget(ctx context.Context, q Query) (BudgetView, error) {
 	if err != nil || !sc.header.Enabled {
 		return BudgetView{Header: headerOf(sc)}, err
 	}
-	v := BudgetView{Header: sc.header, Forecast: s.forecast(sc, nil), Budgets: []BudgetLine{}, Skipped: sc.st.SkippedBudgets}
+	v := BudgetView{Header: sc.header, Forecast: s.forecast(sc, nil), Budgets: []BudgetLine{}}
+	for _, sk := range sc.st.SkippedBudgets {
+		if sc.coveredVisible(sk.Accounts) {
+			v.Skipped = append(v.Skipped, sk)
+		}
+	}
 	bs, err := s.allBudgets(ctx, sc)
 	if err != nil {
 		return v, err
 	}
 	for _, b := range bs {
+		if !sc.budgetVisible(b) {
+			continue
+		}
 		v.Budgets = append(v.Budgets, s.budgetLine(sc, b))
 	}
 	return v, nil
@@ -744,7 +752,7 @@ func (s *Service) Accounts(ctx context.Context, q Query) (AccountsView, error) {
 	v := AccountsView{Header: sc.header, Accounts: []AccountRow{}, Groups: []AccountGroupRow{}}
 	ids := map[string]bool{}
 	for id := range sc.accounts {
-		if len(sc.q.Accounts) == 0 || slices.Contains(sc.q.Accounts, id) {
+		if sc.accountIn(id) {
 			ids[id] = true
 		}
 	}
@@ -846,7 +854,9 @@ func (s *Service) Report(ctx context.Context, q Query) (ReportView, error) {
 		return ReportView{Header: sc.header}, ErrReportNotMonth
 	}
 	month := sc.period.Calendar.Start.MonthKey()
-	if s.store != nil {
+	// A frozen report covers every account, so a caller limited to some
+	// accounts reads the live report built over its scope instead.
+	if s.store != nil && sc.visible == nil {
 		fr, err := s.store.GetReport(ctx, month)
 		if err != nil {
 			return ReportView{Header: sc.header}, err
@@ -940,23 +950,56 @@ func (s *Service) buildReport(ctx context.Context, sc *scope) (ReportView, error
 	return r, nil
 }
 
-// Reports lists frozen monthly reports.
+// Reports lists frozen monthly reports. A frozen report covers every
+// account, so a caller limited to some accounts gets each month without its
+// whole-bill total.
 func (s *Service) Reports(ctx context.Context) ([]ReportRef, error) {
 	if s.store == nil {
 		return []ReportRef{}, nil
 	}
-	return s.store.ListReports(ctx)
+	refs, err := s.store.ListReports(ctx)
+	if err != nil || !s.callerLimited(ctx) {
+		return refs, err
+	}
+	for i := range refs {
+		refs[i].Total = nil
+	}
+	return refs, nil
+}
+
+// callerLimited reports whether the request's caller may read only some
+// accounts.
+func (s *Service) callerLimited(ctx context.Context) bool {
+	visible, _ := s.visibleAccounts(ctx, Query{})
+	return visible != nil
 }
 
 // FreezeReport saves a closed month's report so its numbers never shift.
+// The saved report covers every account; a caller limited to some accounts
+// gets the live report over its own accounts back instead.
 func (s *Service) FreezeReport(ctx context.Context, month, by string) (ReportView, error) {
+	out, err := s.freezeReport(ctx, month, by)
+	if !s.callerLimited(ctx) {
+		return out, err
+	}
+	if err != nil && !errors.Is(err, ErrAlreadyFrozen) && !errors.Is(err, ErrBillNotClosed) {
+		return ReportView{}, err
+	}
+	scoped, readErr := s.Report(ctx, Query{Period: month})
+	if readErr != nil {
+		return ReportView{Header: scoped.Header}, readErr
+	}
+	return scoped, err
+}
+
+func (s *Service) freezeReport(ctx context.Context, month, by string) (ReportView, error) {
 	if s.store == nil {
 		return ReportView{}, ErrNoStore
 	}
 	if !monthKey.MatchString(month) {
 		return ReportView{}, ErrReportNotMonth
 	}
-	sc, err := s.loadFor(ctx, Query{Period: month}, detailDims)
+	sc, err := s.loadFor(unscoped(ctx), Query{Period: month}, detailDims)
 	if err != nil {
 		return ReportView{}, err
 	}
@@ -1086,7 +1129,7 @@ func (s *Service) SyncSavingDecisions(ctx context.Context) error {
 	if s.store == nil {
 		return ErrNoStore
 	}
-	sc, err := s.load(ctx, Query{})
+	sc, err := s.load(unscoped(ctx), Query{})
 	if err != nil || !sc.header.Enabled {
 		return err
 	}
@@ -1110,7 +1153,7 @@ func (s *Service) SyncIncreases(ctx context.Context) ([]IncreaseRecord, error) {
 	if s.store == nil {
 		return nil, ErrNoStore
 	}
-	sc, err := s.loadDetection(ctx)
+	sc, err := s.loadDetection(unscoped(ctx))
 	if err != nil || !sc.header.Enabled {
 		return nil, err
 	}

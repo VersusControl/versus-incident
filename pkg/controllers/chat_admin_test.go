@@ -1061,3 +1061,98 @@ func TestChatAdminFailureStatuses(t *testing.T) {
 		})
 	}
 }
+
+func TestRestrictedCallerChatAttachmentsAreRefusedBeforeLookup(t *testing.T) {
+	provider := storage.NewMemory()
+	if err := provider.SaveIncident(&storage.IncidentRecord{ID: "incident-1", OrgID: storage.DefaultOrgID, Title: "payments outage", Service: "api", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	services.SetStorage(provider)
+	t.Cleanup(func() { services.SetStorage(nil) })
+	newApp := func(groups []string) (*fiber.App, *rejectedAttachmentRunner) {
+		runner := &rejectedAttachmentRunner{}
+		app := fiber.New(fiber.Config{Immutable: true})
+		app.Use(func(c *fiber.Ctx) error {
+			middleware.MarkAuthorized(c)
+			middleware.SetRequestPermission(c, string(core.PermissionInfrastructureView), true)
+			if groups != nil {
+				middleware.SetRequestToolGroups(c, groups)
+			}
+			return c.Next()
+		})
+		app.Use(middleware.OrgInjector())
+		controller := NewChatAdminController(func(scope tenancy.OrgScope) *chatagent.Service {
+			return chatagent.NewService(chatagent.NewSessionStore(provider, scope, time.Now), runner, nil, time.Now)
+		})
+		controller.Register(app.Group("/api"))
+		return app, runner
+	}
+	send := func(t *testing.T, app *fiber.App, id, attachment string) (int, string) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/chat/sessions/"+id+"/messages", strings.NewReader(`{"message":"investigate","attachment":`+attachment+`}`))
+		request.Header.Set("Content-Type", "application/json")
+		response, err := app.Test(request, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(body)
+	}
+
+	app, runner := newApp([]string{core.ToolGroupFinOps})
+	id := createChatSession(t, app)
+	for _, test := range []struct{ name, attachment, message string }{
+		{"incident", `{"incident":{"id":"incident-1"}}`, "incident attachments"},
+		{"kubernetes resource", `{"resource":{"provider":"kubernetes","resource_id":"core~v1~pods","name":"pod"}}`, "Kubernetes attachments"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status, body := send(t, app, id, test.attachment)
+			if status != fiber.StatusForbidden || !strings.Contains(body, test.message) || strings.Contains(body, "payments outage") {
+				t.Fatalf("status=%d body=%s, want 403 naming %s", status, body, test.message)
+			}
+			if runner.calls.Load() != 0 {
+				t.Fatal("refused attachment started a run")
+			}
+		})
+	}
+
+	unrestricted, _ := newApp(nil)
+	unrestrictedID := createChatSession(t, unrestricted)
+	if status, body := send(t, unrestricted, unrestrictedID, `{"incident":{"id":"incident-1"}}`); status >= fiber.StatusBadRequest {
+		t.Fatalf("unrestricted incident attachment: status=%d body=%s", status, body)
+	}
+	allowed, _ := newApp([]string{core.ToolGroupFinOps, core.ToolGroupIncidents})
+	allowedID := createChatSession(t, allowed)
+	if status, body := send(t, allowed, allowedID, `{"incident":{"id":"incident-1"}}`); status >= fiber.StatusBadRequest {
+		t.Fatalf("incident attachment with the incidents group: status=%d body=%s", status, body)
+	}
+}
+
+func TestChatCallerAuthorizationCarriesToolGroups(t *testing.T) {
+	app := fiber.New()
+	var restricted, unrestricted []string
+	var restrictedSet bool
+	app.Get("/restricted", func(c *fiber.Ctx) error {
+		middleware.SetRequestToolGroups(c, []string{core.ToolGroupFinOps})
+		ctx := callerContext(c, context.Background())
+		restricted = core.CallerToolGroups(ctx)
+		restrictedSet = !core.CallerToolGroupAllowed(ctx, core.ToolGroupIncidents) && core.CallerToolGroupAllowed(ctx, core.ToolGroupFinOps)
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+	app.Get("/unrestricted", func(c *fiber.Ctx) error {
+		unrestricted = core.CallerToolGroups(callerContext(c, context.Background()))
+		return c.SendStatus(fiber.StatusNoContent)
+	})
+	for _, path := range []string{"/restricted", "/unrestricted"} {
+		if _, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil), -1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(restricted) != 1 || restricted[0] != core.ToolGroupFinOps || !restrictedSet {
+		t.Fatalf("restricted caller tool groups = %v allowed check = %v", restricted, restrictedSet)
+	}
+	if unrestricted != nil {
+		t.Fatalf("unrestricted caller tool groups = %v, want nil", unrestricted)
+	}
+}

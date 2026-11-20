@@ -145,7 +145,8 @@ func (m *memStore) ListReports(context.Context) ([]ReportRef, error) {
 	var out []ReportRef
 	for _, k := range sortedKeys(m.reports) {
 		r := m.reports[k]
-		out = append(out, ReportRef{Month: k, Frozen: *r.Frozen, Total: r.Summary.Total})
+		total := r.Summary.Total
+		out = append(out, ReportRef{Month: k, Frozen: *r.Frozen, Total: &total})
 	}
 	return out, nil
 }

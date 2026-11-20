@@ -1,6 +1,6 @@
 //go:build harness_awsendpoint || harness_fakeaws
 
-package main
+package harnessendpoint
 
 import (
 	"crypto/tls"
@@ -40,12 +40,11 @@ const (
 	harnessAWSMaxCABundle    = 1 << 20
 )
 
-// awsHarnessHTTPClient returns the transport every AWS client shares in a
-// test build. It is nil when no endpoint is configured, so AWS calls go to
+// HTTPClient returns the transport every AWS client shares in a test build. It is nil when no endpoint is configured, so AWS calls go to
 // AWS. A configured but unusable endpoint (bad URL, public host, unreadable
 // CA bundle) yields a client that refuses every request: a misconfigured
 // test build fails closed instead of falling back to real AWS.
-func awsHarnessHTTPClient() aws.HTTPClient {
+func HTTPClient() aws.HTTPClient {
 	raw, name := os.Getenv(harnessAWSEndpointEnv), harnessAWSEndpointEnv
 	if raw == "" {
 		raw, name = os.Getenv(harnessFakeAWSEnv), harnessFakeAWSEnv

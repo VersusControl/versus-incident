@@ -95,6 +95,15 @@ type Options struct {
 	// default; the totals path ignores it because it returns groups, not
 	// lines.
 	LineBudget int
+	// RetentionMonths returns how many months of cost lines are stored
+	// before the current month. Nil, or 13 or less, keeps 13. It decides
+	// what is deleted, so it follows the deployment's storage setting and
+	// never a license: a lapse must not delete data.
+	RetentionMonths func() int
+	// VisibleMonths returns how many months before the current month reads
+	// and the page reach. Nil, or 13 or less, shows 13; it never reaches
+	// past RetentionMonths. Stored months beyond it are kept, not shown.
+	VisibleMonths func() int
 
 	// Inventory is the collected inventory and change history (the
 	// snapshot store) for suspect changes and inventory savings; optional.
@@ -164,6 +173,32 @@ func (o Options) validate() error {
 }
 
 func (o Options) enabled() bool { return o.Enabled == nil || o.Enabled() }
+
+// retentionMonths is the stored cost-line retention, at least 13.
+func (o Options) retentionMonths() int {
+	if o.RetentionMonths == nil {
+		return linesRetentionMonths
+	}
+	return max(o.RetentionMonths(), linesRetentionMonths)
+}
+
+// visibleMonths is the read horizon, between 13 and the stored retention.
+func (o Options) visibleMonths() int {
+	if o.VisibleMonths == nil {
+		return linesRetentionMonths
+	}
+	return min(max(o.VisibleMonths(), linesRetentionMonths), o.retentionMonths())
+}
+
+// retentionStart is the first day of the month the given number of months
+// before today's month.
+func retentionStart(today finops.Date, months int) finops.Date {
+	first := today.MonthStart()
+	for i := 0; i < months; i++ {
+		first = first.AddDays(-1).MonthStart()
+	}
+	return first
+}
 
 func (o Options) today() finops.Date { return finops.DateOf(o.Now().In(o.Location)) }
 

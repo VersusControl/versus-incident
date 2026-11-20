@@ -44,6 +44,9 @@ var errLocalTablesDriverMissing = errors.New("storage: local AWS and FinOps tabl
 // tables.
 const localTablesFile = "aws-finops.sqlite"
 
+// localTablesConnections is the file-mode SQLite pool size.
+const localTablesConnections = 4
+
 func newPostgresTables(db *sql.DB) *sqlTables {
 	return &sqlTables{postgres: true, db: db, rollupsReady: new(atomic.Bool)}
 }
@@ -210,7 +213,12 @@ func openLocalTables(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(4)
+	// Keep every pooled connection open. With fewer idle slots than open
+	// ones, readers that overlap a poll close and reopen connections, and
+	// each reopen maps the WAL index again: slow, and fragile on a
+	// bind-mounted data folder.
+	db.SetMaxOpenConns(localTablesConnections)
+	db.SetMaxIdleConns(localTablesConnections)
 	steps, err := localTablesSchema()
 	if err == nil {
 		err = applyLocalSchema(context.Background(), db, steps)
@@ -341,6 +349,22 @@ func stringArgs(values []string) []any {
 	return out
 }
 
+// orgRank renders column's position in the read order as a CASE
+// expression, with one argument per organization.
+func orgRank(orgs []string, column string) (string, []any) {
+	var expression strings.Builder
+	args := make([]any, 0, len(orgs))
+	expression.WriteString("CASE ")
+	expression.WriteString(column)
+	for index, org := range orgs {
+		expression.WriteString(" WHEN ? THEN ")
+		expression.WriteString(strconv.Itoa(index))
+		args = append(args, org)
+	}
+	expression.WriteString(" END")
+	return expression.String(), args
+}
+
 // visible keeps a row of alias only when its organization is the first, in
 // read order, to hold the row's guard key in the guard table: no guard row
 // with the same key belongs to an organization ranked before it. The outer
@@ -350,25 +374,12 @@ func visible(orgs []string, alias, guard string, keys ...string) (string, []any)
 	if len(orgs) == 1 {
 		return alias + ".org_id = ?", []any{orgs[0]}
 	}
-	rank := func(column string) (string, []any) {
-		var expression strings.Builder
-		args := make([]any, 0, len(orgs))
-		expression.WriteString("CASE ")
-		expression.WriteString(column)
-		for index, org := range orgs {
-			expression.WriteString(" WHEN ? THEN ")
-			expression.WriteString(strconv.Itoa(index))
-			args = append(args, org)
-		}
-		expression.WriteString(" END")
-		return expression.String(), args
-	}
 	match := make([]string, len(keys))
 	for position, key := range keys {
 		match[position] = "g." + key + " = " + alias + "." + key
 	}
-	guardRank, guardArgs := rank("g.org_id")
-	rowRank, rowArgs := rank(alias + ".org_id")
+	guardRank, guardArgs := orgRank(orgs, "g.org_id")
+	rowRank, rowArgs := orgRank(orgs, alias+".org_id")
 	args := append(stringArgs(orgs), stringArgs(orgs)...)
 	args = append(append(args, guardArgs...), rowArgs...)
 	return alias + ".org_id IN (" + placeholders(len(orgs)) + ") AND NOT EXISTS (SELECT 1 FROM " + guard + " g WHERE g.org_id IN (" + placeholders(len(orgs)) + ") AND " +

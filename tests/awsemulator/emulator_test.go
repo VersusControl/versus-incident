@@ -33,7 +33,7 @@ import (
 
 const (
 	// endpointEnv and caBundleEnv are the test-build redirect the server
-	// binary reads (cmd/harness_awsendpoint.go); the tests read the same two.
+	// binary reads (pkg/aws/harnessendpoint/endpoint.go); the tests read the same two.
 	endpointEnv = "VERSUS_HARNESS_AWS_ENDPOINT_URL"
 	caBundleEnv = "VERSUS_HARNESS_AWS_CA_BUNDLE"
 
@@ -177,9 +177,9 @@ func readWorld(ctx context.Context) (*seededWorld, error) {
 }
 
 // emulatorClient is the same redirect the test build of the server installs
-// (cmd/harness_awsendpoint.go, which lives in package main and cannot be
-// imported): a request signed for the real regional AWS host keeps its Host
-// header and signature and is sent to the emulator instead. It accepts only a
+// (pkg/aws/harnessendpoint/endpoint.go): a request signed for the real
+// regional AWS host keeps its Host header and signature and is sent to the
+// emulator instead. It accepts only a
 // loopback or private endpoint and dials nothing else, so no request can
 // reach AWS.
 func emulatorClient(rawURL, caBundle string) (aws.HTTPClient, error) {

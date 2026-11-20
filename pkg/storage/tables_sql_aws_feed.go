@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"strings"
 	"time"
 
@@ -266,19 +265,63 @@ func (t *sqlTables) AWSChangePairState(ctx context.Context, scope tenancy.OrgSco
 		return AWSChangePairState{}, false, err
 	}
 	scope = inventoryScope(scope)
-	pair := AWSChangePairState{Org: scope.Write, Account: account, Region: region}
-	var connected, history, polled tableTimeValue
-	var skew int64
-	err = db.QueryRowContext(ctx, t.q(`SELECT connected_at, history_from, last_poll_at, late_arrivals, dropped, not_changes, clock_skew_ms FROM aws_change_pairs
- WHERE org_id = ? AND account = ? AND region = ?`), scope.Write, account, region).Scan(&connected, &history, &polled, &pair.LateArrivals, &pair.Dropped, &pair.NotChanges, &skew)
-	if errors.Is(err, sql.ErrNoRows) {
-		return AWSChangePairState{}, false, nil
-	}
-	if err != nil {
+	pairs, err := t.feedPairs(ctx, db, scope, AWSChangeFeedQuery{Account: account, Region: region})
+	if err != nil || len(pairs) == 0 {
 		return AWSChangePairState{}, false, err
 	}
-	pair.ConnectedAt, pair.HistoryFrom, pair.LastPollAt, pair.ClockSkew = connected.Time, history.Time, polled.Time, time.Duration(skew)*time.Millisecond
-	return pair, true, nil
+	return pairs[0], true, nil
+}
+
+// firstChangeCopy keeps one copy of each change event across the read
+// organizations: the row of the first organization, in read order, that
+// stored the event. Coverage plays no part, so a later read of a stretch
+// never hides a row a listing already showed. recordedBefore, when set,
+// counts only copies stored by then, matching the listing's pin: a copy
+// stored after a listing began never replaces one it already paged through.
+// The guard probe uses the (org_id, event_id) primary key.
+func (t *sqlTables) firstChangeCopy(orgs []string, alias string, recordedBefore time.Time) (string, []any) {
+	if len(orgs) == 1 {
+		return alias + ".org_id = ?", []any{orgs[0]}
+	}
+	guardRank, guardArgs := orgRank(orgs, "d.org_id")
+	rowRank, rowArgs := orgRank(orgs, alias+".org_id")
+	args := append(stringArgs(orgs), stringArgs(orgs)...)
+	pin := ""
+	if !recordedBefore.IsZero() {
+		pin = " AND (d.recorded_at IS NULL OR d.recorded_at <= ?)"
+		args = append(args, t.at(recordedBefore))
+	}
+	args = append(append(args, guardArgs...), rowArgs...)
+	return alias + ".org_id IN (" + placeholders(len(orgs)) + ") AND NOT EXISTS (SELECT 1 FROM aws_changes d WHERE d.org_id IN (" + placeholders(len(orgs)) + ")" +
+		" AND d.event_id = " + alias + ".event_id" + pin + " AND " + guardRank + " < " + rowRank + ")", args
+}
+
+// largestCount keeps, for each minute and count key, the row of the
+// organization that counted the most events; a tie goes to the first in
+// read order. A minute both organizations read counts once, never twice.
+// The guard probe uses the count table's primary key.
+func largestCount(orgs []string, alias string) (string, []any) {
+	if len(orgs) == 1 {
+		return alias + ".org_id = ?", []any{orgs[0]}
+	}
+	guardRank, guardArgs := orgRank(orgs, "d.org_id")
+	rowRank, rowArgs := orgRank(orgs, alias+".org_id")
+	args := append(stringArgs(orgs), stringArgs(orgs)...)
+	args = append(append(args, guardArgs...), rowArgs...)
+	match := make([]string, 0, 8)
+	for _, column := range []string{"account", "region", "kind", "event_name", "actor", "session_class", "error_code", "minute"} {
+		match = append(match, "d."+column+" = "+alias+"."+column)
+	}
+	return alias + ".org_id IN (" + placeholders(len(orgs)) + ") AND NOT EXISTS (SELECT 1 FROM aws_change_counts d WHERE d.org_id IN (" + placeholders(len(orgs)) + ")" +
+		" AND " + strings.Join(match, " AND ") + " AND (d.events > " + alias + ".events OR d.events = " + alias + ".events AND " + guardRank + " < " + rowRank + "))", args
+}
+
+// readOrgs keeps rows of alias from every read organization.
+func readOrgs(orgs []string, alias string) (string, []any) {
+	if len(orgs) == 1 {
+		return alias + ".org_id = ?", []any{orgs[0]}
+	}
+	return alias + ".org_id IN (" + placeholders(len(orgs)) + ")", stringArgs(orgs)
 }
 
 // likePattern escapes a value for LIKE ... ESCAPE '\' and wraps it.
@@ -289,13 +332,13 @@ func likePattern(value string) string {
 
 // feedWhere filters one feed table aliased alias. The text, actor class and
 // resource terms apply to the change rows only.
-func (t *sqlTables) feedWhere(scope tenancy.OrgScope, alias, timeColumn string, query AWSChangeFeedQuery) sqlWhere {
+func (t *sqlTables) feedWhere(condition string, args []any, alias, timeColumn string, query AWSChangeFeedQuery) sqlWhere {
 	var where sqlWhere
-	condition, args := visible(scope.Read, alias, "aws_change_coverage", "account", "region")
 	where.add(condition, args...)
 	where.equal(alias+".account", query.Account)
 	where.equal(alias+".region", query.Region)
 	where.equal(alias+".service", query.Service)
+	where.in(alias+".service", query.Services)
 	where.equal(alias+".actor_class", query.ActorClass)
 	if !query.Since.IsZero() {
 		where.add(alias+"."+timeColumn+" >= ?", t.at(query.Since))
@@ -307,7 +350,8 @@ func (t *sqlTables) feedWhere(scope tenancy.OrgScope, alias, timeColumn string, 
 }
 
 func (t *sqlTables) rowWhere(scope tenancy.OrgScope, query AWSChangeFeedQuery) sqlWhere {
-	where := t.feedWhere(scope, "c", "event_time", query)
+	condition, args := t.firstChangeCopy(scope.Read, "c", query.RecordedBefore)
+	where := t.feedWhere(condition, args, "c", "event_time", query)
 	if query.ResourceARN != "" {
 		key := query.ResourceKey
 		if key == "" {
@@ -370,6 +414,11 @@ func (t *sqlTables) AWSChangeFeed(ctx context.Context, scope tenancy.OrgScope, q
 	if feed.TopActors, err = t.feedTopActors(ctx, tx, scope, query); err != nil {
 		return AWSChangeFeed{}, err
 	}
+	if query.ServiceCounts {
+		if feed.ServiceCounts, err = t.feedServiceCounts(ctx, tx, scope, query); err != nil {
+			return AWSChangeFeed{}, err
+		}
+	}
 	if !query.Since.IsZero() {
 		before := query
 		before.Since, before.Until = time.Time{}, query.Since
@@ -414,9 +463,34 @@ func (t *sqlTables) feedTopActors(ctx context.Context, q tablesQuerier, scope te
 	return out, rows.Err()
 }
 
+// feedServiceCounts counts successful changes per service with every
+// filter but the service ones.
+func (t *sqlTables) feedServiceCounts(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSChangeFeedQuery) ([]AWSChangeServiceCount, error) {
+	where := t.rowWhere(scope, serviceCountQuery(query))
+	where.add("c.error_code = ''")
+	rows, err := q.QueryContext(ctx, t.q(`SELECT c.service, COUNT(*) FROM aws_changes c WHERE `+where.String()+` GROUP BY c.service`), where.args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]AWSChangeServiceCount, 0)
+	for rows.Next() {
+		var item AWSChangeServiceCount
+		if err := rows.Scan(&item.Service, &item.Events); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sortServiceCounts(out)
+	return out, nil
+}
+
 func (t *sqlTables) feedGapReasons(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSChangeFeedQuery) ([]AWSChangeGapReason, error) {
 	var where sqlWhere
-	condition, args := visible(scope.Read, "g2", "aws_change_coverage", "account", "region")
+	condition, args := readOrgs(scope.Read, "g2")
 	where.add(condition, args...)
 	where.equal("g2.account", query.Account)
 	where.equal("g2.region", query.Region)
@@ -426,8 +500,9 @@ func (t *sqlTables) feedGapReasons(ctx context.Context, q tablesQuerier, scope t
 	if !query.Until.IsZero() {
 		where.add("g2.gap_from < ?", t.at(query.Until))
 	}
+	rank, rankArgs := orgRank(scope.Read, "g2.org_id")
 	rows, err := q.QueryContext(ctx, t.q(`SELECT g2.account, g2.region, g2.gap_from, g2.gap_to, g2.reason, g2.detail FROM aws_change_gaps g2
- WHERE `+where.String()+` ORDER BY g2.account, g2.region, g2.gap_from`), where.args...)
+ WHERE `+where.String()+` ORDER BY g2.account, g2.region, g2.gap_from, `+rank), append(where.args, rankArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -447,12 +522,13 @@ func (t *sqlTables) feedGapReasons(ctx context.Context, q tablesQuerier, scope t
 
 func (t *sqlTables) feedPairs(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSChangeFeedQuery) ([]AWSChangePairState, error) {
 	var where sqlWhere
-	condition, args := visible(scope.Read, "p", "aws_change_coverage", "account", "region")
+	condition, args := readOrgs(scope.Read, "p")
 	where.add(condition, args...)
 	where.equal("p.account", query.Account)
 	where.equal("p.region", query.Region)
+	rank, rankArgs := orgRank(scope.Read, "p.org_id")
 	rows, err := q.QueryContext(ctx, t.q(`SELECT p.org_id, p.account, p.region, p.connected_at, p.history_from, p.last_poll_at, p.late_arrivals, p.dropped, p.not_changes, p.clock_skew_ms
- FROM aws_change_pairs p WHERE `+where.String()+` ORDER BY p.account, p.region`), where.args...)
+ FROM aws_change_pairs p WHERE `+where.String()+` ORDER BY p.account, p.region, `+rank), append(where.args, rankArgs...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -468,7 +544,10 @@ func (t *sqlTables) feedPairs(ctx context.Context, q tablesQuerier, scope tenanc
 		pair.ConnectedAt, pair.HistoryFrom, pair.LastPollAt, pair.ClockSkew = connected.Time, history.Time, polled.Time, time.Duration(skew)*time.Millisecond
 		out = append(out, pair)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return mergeChangePairs(scope.Write, out), nil
 }
 
 func (t *sqlTables) feedMinutes(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSChangeFeedQuery) ([]AWSChangeMinute, error) {
@@ -498,7 +577,8 @@ func (t *sqlTables) feedMinutes(ctx context.Context, q tablesQuerier, scope tena
 }
 
 func (t *sqlTables) feedCounts(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSChangeFeedQuery) ([]AWSChangeCount, error) {
-	where := t.feedWhere(scope, "n", "minute", query)
+	condition, args := largestCount(scope.Read, "n")
+	where := t.feedWhere(condition, args, "n", "minute", query)
 	if query.Text != "" {
 		pattern := likePattern(asciiLower(query.Text))
 		where.add(`(lower(n.event_name) LIKE ? ESCAPE '\' OR lower(`+t.apiNameColumn("n.event_source", "n.event_name")+`) LIKE ? ESCAPE '\')`, pattern, pattern)
@@ -576,7 +656,7 @@ func (t *sqlTables) AWSChangesByID(ctx context.Context, scope tenancy.OrgScope, 
 	for start := 0; start < len(ids); start += changeIDChunk {
 		chunk := ids[start:min(start+changeIDChunk, len(ids))]
 		var where sqlWhere
-		condition, args := visible(scope.Read, "c", "aws_change_coverage", "account", "region")
+		condition, args := t.firstChangeCopy(scope.Read, "c", time.Time{})
 		where.add(condition, args...)
 		where.in("c.event_id", chunk)
 		rows, err := db.QueryContext(ctx, t.q(`SELECT `+feedRowColumns+`, c.detail FROM aws_changes c WHERE `+where.String()+` ORDER BY c.event_time DESC, c.event_id DESC`), where.args...)

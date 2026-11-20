@@ -18,6 +18,7 @@ import { countWindowLabel } from "@/lib/countWindow";
 import { useTheme } from "@/lib/theme";
 import { roleLabel, isAdminRole } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
+import { badgeRole, retryUnlessForbidden, useAccess } from "@/lib/access";
 import { ShellContext } from "./shellContext";
 
 // TopBar truth table (the old bar showed a red "Agent
@@ -43,14 +44,20 @@ export function TopBar({
   showCountWindow = true,
 }: Props) {
   const shell = useContext(ShellContext);
-  const { open, originCounts, countWindow } = useOpenIncidentCount();
+  // The incident count and the agent state are incident reads: a role that
+  // cannot read incidents (finance) is never sent them, so the shell logs no
+  // refused request on every page.
+  const access = useAccess();
+  const readsIncidents = access.mayRead("incidents");
+  const { open, originCounts, countWindow } = useOpenIncidentCount(readsIncidents);
   const { theme, toggle } = useTheme();
 
   const config = useQuery({
     queryKey: ["agent-config"],
     queryFn: api.getAgentConfig,
     staleTime: 60_000,
-    retry: 1,
+    retry: retryUnlessForbidden,
+    enabled: readsIncidents,
   });
   const windowLabel = countWindowLabel(countWindow, "short");
   // Only poll the agent liveness endpoint when the agent is actually enabled.
@@ -62,7 +69,7 @@ export function TopBar({
     queryFn: api.status,
     // Only once the config says the agent is on: while it loads, or when it
     // cannot be read, the route may not exist and a request would 404.
-    enabled: config.data?.enable === true,
+    enabled: readsIncidents && config.data?.enable === true,
     refetchInterval: () => (document.hidden ? false : 30_000),
     retry: 1,
   });
@@ -135,14 +142,14 @@ export function TopBar({
             )}
           </Link>
         )}
-        <AgentChip
-          configLoading={config.isLoading}
+        {access.can("incidents") && <AgentChip
+          configLoading={config.isLoading || !access.ready}
           agentEnabled={config.data?.enable}
           mode={config.data?.mode}
           livenessLoading={liveness.isLoading}
           livenessError={liveness.isError}
           failures={liveness.failureCount}
-        />
+        />}
       </div>
     </header>
   );
@@ -277,7 +284,8 @@ function TopBarIdentity() {
     return null;
   }
   const identity = sess.email?.trim() || sess.subject?.trim() || "Signed in";
-  const admin = isAdminRole(access.role);
+  const role = badgeRole(sess) ?? access.role;
+  const admin = isAdminRole(role);
   return (
     <div className="hidden min-w-0 items-center gap-2 sm:flex" title={identity}>
       <span
@@ -293,7 +301,7 @@ function TopBarIdentity() {
           admin ? "bg-accent-subtle text-accent" : "bg-ink-700 text-ink-200",
         )}
       >
-        {roleLabel(access.role)}
+        {roleLabel(role)}
       </span>
     </div>
   );

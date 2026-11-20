@@ -3,6 +3,7 @@ package finops
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -39,7 +40,15 @@ type Budget struct {
 	Value   string `json:"scope_value,omitempty"` // account ID or team; empty for deployment
 	Monthly Micros `json:"monthly_micros"`
 	Source  string `json:"source"`
+	// Accounts, when set, limits the budget to these accounts' cost: a
+	// provider budget read from one of several billing accounts measures
+	// that bill only, never the other billing accounts' spend.
+	Accounts []string `json:"accounts,omitempty"`
 }
+
+// WholeBill reports a budget on the deployment's whole bill: deployment
+// scope and not limited to some accounts.
+func (b Budget) WholeBill() bool { return b.Scope == ScopeDeployment && len(b.Accounts) == 0 }
 
 // Reasons a provider budget is not shown.
 const (
@@ -53,6 +62,10 @@ const (
 type SkippedBudget struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
+	// Accounts, when set, are the accounts of the billing account the
+	// budget was read from, so a caller limited to other accounts never
+	// sees its name.
+	Accounts []string `json:"accounts,omitempty"`
 }
 
 // ReadOnly reports whether the UI may edit the budget.
@@ -181,6 +194,9 @@ func BudgetStatus(budget, actual Micros, f Forecast) string {
 // BudgetMatches reports whether a line counts toward a budget. team is the
 // resolved owner of the line.
 func BudgetMatches(b Budget, account, team string) bool {
+	if len(b.Accounts) > 0 && !slices.Contains(b.Accounts, account) {
+		return false
+	}
 	switch b.Scope {
 	case ScopeAccount:
 		return account == b.Value

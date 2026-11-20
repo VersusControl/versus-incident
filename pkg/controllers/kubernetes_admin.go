@@ -172,7 +172,7 @@ func (controller *KubernetesAdminController) requirePermission(ctx *fiber.Ctx) e
 }
 
 func persistedHistoryRequest(ctx *fiber.Ctx) bool {
-	path := ctx.Path()
+	path := routingPath(ctx)
 	return strings.HasSuffix(path, "/timeline") || strings.HasSuffix(path, "/changes") ||
 		strings.HasSuffix(path, "/crashes") || strings.HasSuffix(path, "/commits/stream") ||
 		strings.HasSuffix(path, "/break-logs") || strings.HasSuffix(path, "/issues") &&
@@ -308,7 +308,7 @@ func callerCanViewInfrastructure(ctx *fiber.Ctx) bool {
 // refuseCallerInfrastructureView is the one refusal every gated route gives a
 // caller without the permission: it names the permission, not the deployment.
 func refuseCallerInfrastructureView(ctx *fiber.Ctx) error {
-	return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:view permission is required"})
+	return refusePermission(ctx, core.PermissionInfrastructureView)
 }
 
 func (controller *KubernetesAdminController) clusters(ctx *fiber.Ctx) error {

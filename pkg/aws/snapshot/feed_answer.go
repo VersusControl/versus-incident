@@ -55,6 +55,8 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 		}
 	}
 	now := feed.now().UTC()
+	limits := feed.Limits()
+	maxWindow := limits.MaxWindow
 	cursor := feedCursor{RecordedBefore: now}
 	hasCursor := request.Cursor != ""
 	if hasCursor {
@@ -66,10 +68,12 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 		// tier is checked against the real now, with an hour's allowance
 		// for paging, and an older window is expired.
 		// A cursor without its window was not issued by this server.
-		if cursor.Since.IsZero() || cursor.Until.IsZero() || cursor.Since.Before(now.Add(-MaxFeedWindow-CursorAllowance)) {
+		if cursor.Since.IsZero() || cursor.Until.IsZero() || cursor.Since.Before(now.Add(-maxWindow-CursorAllowance)) {
 			return ChangesAnswer{}, ErrCursorExpired
 		}
 		request.Since, request.Until = cursor.Since, cursor.Until
+		// The service filter, like the window, is the first page's.
+		request.Services = cursor.Services
 		if cursor.RecordedBefore.After(now) {
 			cursor.RecordedBefore = now
 		}
@@ -85,25 +89,30 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 		}
 		request.Window = until.Sub(since)
 	}
-	if request.Window > MaxFeedWindow {
+	if request.Window > maxWindow {
 		return ChangesAnswer{}, ErrWindowLocked
 	}
 	since := until.Add(-request.Window)
 	// Every request, cursor or not, is held to the tier against the real
-	// now: a first page may start at most 24 h back, a later page at most
+	// now: a first page may start at most the tier window back, a later page at most
 	// the paging allowance more.
 	switch {
-	case hasCursor && now.Sub(since) > MaxFeedWindow+CursorAllowance:
+	case hasCursor && now.Sub(since) > maxWindow+CursorAllowance:
 		return ChangesAnswer{}, ErrCursorExpired
-	case !hasCursor && now.Sub(since) > MaxFeedWindow+time.Minute:
+	case !hasCursor && now.Sub(since) > maxWindow+time.Minute:
 		return ChangesAnswer{}, ErrWindowLocked
 	}
-	cursor.Since, cursor.Until = since, until
+	if request.Services, err = NormalizeServices(request.Services); err != nil {
+		return ChangesAnswer{}, err
+	}
+	cursor.Since, cursor.Until, cursor.Services = since, until, request.Services
 	options := feed.effectiveOptions()
-	stored, err := feeds.AWSChangeFeed(ctx, feed.store.scope, storage.AWSChangeFeedQuery{
-		Account: request.Account, Region: request.Region, Service: request.Service, ActorClass: request.ActorClass, ResourceARN: request.Resource, ResourceKey: resourceKey,
-		Text: request.Text, Since: since, Until: until, RecordedBefore: cursor.RecordedBefore, RowLimit: options.ReadCap,
-	})
+	query := storage.AWSChangeFeedQuery{
+		Account: request.Account, Region: request.Region, Service: request.Service, Services: request.Services, ActorClass: request.ActorClass,
+		ResourceARN: request.Resource, ResourceKey: resourceKey, Text: request.Text, Since: since, Until: until, RecordedBefore: cursor.RecordedBefore,
+		RowLimit: options.ReadCap, ServiceCounts: request.ServiceFacet,
+	}
+	stored, err := feeds.AWSChangeFeed(ctx, feed.store.scope, query)
 	if err != nil {
 		return ChangesAnswer{}, err
 	}
@@ -116,6 +125,7 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 
 	answer := ChangesAnswer{
 		Window:   FeedWindow{Since: since, Until: until, SettledUntil: view.settled},
+		Limits:   limits.View(),
 		Gaps:     view.gaps,
 		Accounts: view.accounts,
 		Regions:  view.regions,
@@ -137,7 +147,9 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 		}
 		counts = rowsAsCounts(stored.Rows)
 	}
-	answer.Buckets = buckets(since, until, bucketWidth(request.Window), stored, failureRows, view)
+	width := bucketWidth(request.Window)
+	answer.BucketSeconds = int64(width / time.Second)
+	answer.Buckets = buckets(since, until, width, stored, failureRows, view)
 	answer.Summary = summarize(stored, counts, failureRows)
 	answer.Summary.TotalIsLowerBound = !view.complete || stored.Truncated || request.Resource != "" && answer.Summary.Errors > 0
 	answer.Summary.Truncated = stored.Truncated
@@ -151,6 +163,9 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 	answer.Items, answer.NextCursor = pageItems, next
 	if answer.Items == nil {
 		answer.Items = []FeedItem{}
+	}
+	if request.ServiceFacet {
+		answer.Services = serviceFacet(stored.ServiceCounts)
 	}
 
 	alarmsKnown := true
@@ -171,10 +186,38 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 		// The alarms could not be read: whether one fired is unknown, so
 		// the answer is incomplete, never "no alarm".
 		answer.Suspect = FeedSuspect{Status: SuspectIncomplete}
+		markInFilter(&answer.Suspect, request)
 		return answer, nil
 	}
-	answer.Suspect = feed.findSuspect(ctx, feeds, stored, answer, items, request, view)
+	suspectStored, suspectItems, suspectAnswer := stored, items, answer
+	if len(request.Services) > 0 && len(answer.Alarms) > 0 {
+		// An alarm's likely cause is never hidden by the service filter:
+		// it is chosen from every service's changes in the window.
+		query.Services, query.ServiceCounts = nil, false
+		all, err := feeds.AWSChangeFeed(ctx, feed.store.scope, query)
+		if err != nil {
+			return ChangesAnswer{}, err
+		}
+		allCounts := all.Counts
+		if request.Resource != "" {
+			allCounts = rowsAsCounts(all.Rows)
+		}
+		suspectStored, suspectItems = all, feed.buildItems(all, allCounts, request.ShowRoutine, options)
+		suspectAnswer.Complete = view.complete && !all.Truncated
+	}
+	answer.Suspect = feed.findSuspect(ctx, feeds, suspectStored, suspectAnswer, suspectItems, request, view)
+	markInFilter(&answer.Suspect, request)
 	return answer, nil
+}
+
+// markInFilter tells the page whether the suspect change is in a service
+// its filter shows. A suspect with no change is never hidden.
+func markInFilter(suspect *FeedSuspect, request FeedRequest) {
+	if !request.ServiceFacet {
+		return
+	}
+	in := suspect.Change == nil || serviceInFilter(request.Services, suspect.Change.Service)
+	suspect.InFilter = &in
 }
 
 func summarize(stored storage.AWSChangeFeed, counts []storage.AWSChangeCount, failureRows []storage.AWSChange) FeedSummary {
@@ -393,7 +436,7 @@ func (feed *ChangeFeed) Group(ctx context.Context, id, cursorText string, limit 
 		return GroupAnswer{}, err
 	}
 	// Group tokens are not signed either: the same tier check applies.
-	if key.From.Before(feed.now().UTC().Add(-MaxFeedWindow - CursorAllowance)) {
+	if key.From.Before(feed.now().UTC().Add(-feed.Limits().MaxWindow - CursorAllowance)) {
 		return GroupAnswer{}, ErrCursorExpired
 	}
 	cursor := feedCursor{RecordedBefore: feed.now().UTC()}

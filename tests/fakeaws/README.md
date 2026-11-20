@@ -110,6 +110,9 @@ own CA (an AWS API emulator), set `VERSUS_HARNESS_AWS_CA_BUNDLE` to the PEM
 file; only the redirected transport trusts it. The older `harness_fakeaws`
 tag and `VERSUS_HARNESS_FAKEAWS_URL` variable still work the same way. A
 build without either tag has none of these variables and no redirect.
+The redirect is the `pkg/aws/harnessendpoint` package: any server binary built
+with the tag, OSS or Enterprise, passes `harnessendpoint.HTTPClient()` as its
+AWS transport.
 The FinOps cost refresh (Cost Explorer, Budgets, Cost Optimization Hub, Compute Optimizer) is redirected the same way.
 
 Per-request overrides (useful when one test needs two fixtures):

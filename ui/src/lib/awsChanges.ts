@@ -6,9 +6,9 @@ import { format } from "date-fns";
 // says "No changes" while any data in the window is missing. Missing data is
 // named once, by the summary card's warning line, never by hedged counts.
 
-export type ChangesWindow = "1h" | "24h";
-/** The switch also lists 7d, shown locked in this build. */
-export type ChangesWindowOption = ChangesWindow | "7d";
+export type ChangesWindow = "1h" | "24h" | "7d";
+/** Every option the window switch lists; 7d opens only when `limits` allow it. */
+export type ChangesWindowOption = ChangesWindow;
 export type ActorClass = "pipeline" | "person" | "aws_service" | "unknown";
 /**
  * `partial`: some account × Region pairs in the bucket were read and some
@@ -111,6 +111,12 @@ export interface ChangesSuspect {
   candidates?: SuspectCandidate[];
   alarm_id?: string | null;
   searched?: { accounts: string[]; regions: string[]; from: string; to: string } | null;
+  /**
+   * False when the likely cause sits in a service outside the page's service
+   * filter. The cause is always found over every service; the card still
+   * names it, marked.
+   */
+  in_filter?: boolean;
 }
 
 export interface ChangesGap {
@@ -186,6 +192,75 @@ export interface ChangesView {
   sync: ChangesSync;
   items: ChangeItem[];
   next_cursor: string | null;
+  /**
+   * Every service with changes in the window and scope, counted without the
+   * service filter and sorted by count, for the Services filter panel.
+   */
+  services?: ChangesService[];
+  /** What this edition serves; absent on older servers, read as 24 h each. */
+  limits?: ChangesLimits;
+  /**
+   * The length of one bucket in seconds: 300 up to 1 h, 3 600 up to 24 h,
+   * 21 600 beyond. Absent on older servers, which send hourly buckets.
+   */
+  bucket_seconds?: number;
+}
+
+/**
+ * The edition's limits, as Go durations ("24h", "168h"): the longest window
+ * the list serves and how far back Compare can start.
+ */
+export interface ChangesLimits {
+  max_window: string;
+  max_compare_age: string;
+}
+
+export interface ChangesService {
+  service: string;
+  label: string;
+  count: number;
+}
+
+/** `/preferences`: the signed-in user's saved service filter. Empty means all services. */
+export interface ChangesPreferences {
+  services: string[];
+}
+
+/** The services a user who has never chosen sees. */
+export const DEFAULT_SERVICES: readonly string[] = ["rds", "iam"];
+
+/** `rds,iam` for the `service` query parameter; undefined (all services) when empty. */
+export function serviceParam(services: readonly string[]): string | undefined {
+  return services.length > 0 ? services.join(",") : undefined;
+}
+
+/** The URL's `service=rds,iam`, as a list; an empty value means all services. */
+export function parseServiceParam(value: string): string[] {
+  return [...new Set(value.split(",").map((s) => s.trim()).filter(Boolean))];
+}
+
+/** A service's display name: the server's label, else the name in capitals for short ones. */
+export function serviceLabel(services: readonly ChangesService[] | undefined, service: string): string {
+  const known = services?.find((s) => s.service === service);
+  if (known?.label) return known.label;
+  return service.length <= 3 ? service.toUpperCase() : service.charAt(0).toUpperCase() + service.slice(1);
+}
+
+/** Up to this many services are named; more read as "N services". */
+const NAMED_SERVICES = 3;
+
+/** The card's filter label: "RDS, IAM", "5 services", or "All services" when unfiltered. */
+export function serviceFilterLabel(selected: readonly string[], services?: readonly ChangesService[]): string {
+  if (selected.length === 0) return "All services";
+  if (selected.length > NAMED_SERVICES) return `${selected.length} services`;
+  return selected.map((s) => serviceLabel(services, s)).join(", ");
+}
+
+/** "RDS or IAM", "RDS, IAM or S3": the services a "No changes" line names. */
+function servicesOr(selected: readonly string[], services?: readonly ChangesService[]): string {
+  const names = selected.map((s) => serviceLabel(services, s));
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
 }
 
 /** `/groups/{id}`: the members in the item shape, paged by cursor. */
@@ -241,6 +316,7 @@ export interface CompareView {
   /** Up to 20 change-list items between `from` and `to`, newest first. */
   changes_between: ChangeItem[];
   changes_between_total: number;
+  limits?: ChangesLimits;
 }
 
 export interface ChangesQuery {
@@ -320,6 +396,12 @@ export function isWindowLocked(error: unknown): boolean {
   if (e.status !== 403) return false;
   const body = e.body;
   return Boolean(body && typeof body === "object" && "error" in body && (body as { error: unknown }).error === "window_locked");
+}
+
+/** Any other 403: the caller's role is refused the page. A final answer, shown as a denial. */
+export function isPermissionDenied(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  return (error as { status?: unknown }).status === 403 && !isWindowLocked(error);
 }
 
 /** 400 `cursor_expired`: a list or group cursor's window left the 24 h tier; reload the first page. */
@@ -578,8 +660,8 @@ export function droppedText(dropped: number | null | undefined): string | null {
 }
 
 /** The change-list route for exactly the span `[from, to]`. */
-export function changesSpanSearch(from: string, to: string, scope: { account?: string; region?: string } = {}): string {
-  return changesQueryString({ since: from, until: to, account: scope.account, region: scope.region });
+export function changesSpanSearch(from: string, to: string, scope: { account?: string; region?: string; service?: string } = {}): string {
+  return changesQueryString({ since: from, until: to, account: scope.account, region: scope.region, service: scope.service });
 }
 
 /** "3 d ago", "5 h ago", "12 min ago": how long before `now` a time was. */
@@ -606,6 +688,25 @@ export function windowPhrase(view: Pick<ChangesView, "window">, window: ChangesW
 
 export function fmtCount(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+/**
+ * A grid cell's count: exact under 1,000, short above ("3.8k", "12k", ".4M",
+ * "3M"), so it fits a 6-hour column at 1280 px. Every short form is at most
+ * two digits and a unit, which is narrower than "999". The exact count stays
+ * in the cell's hover and aria-label.
+ */
+export function fmtCellCount(n: number): string {
+  if (n < 1000) return fmtCount(n);
+  const k = n / 1e3;
+  if (k < 9.95) return `${k.toFixed(1)}k`;
+  if (k < 99.5) return `${Math.round(k)}k`;
+  for (const [unit, size] of [["M", 1e6], ["B", 1e9]] as const) {
+    const v = n / size;
+    if (v < 0.95) return `.${Math.max(1, Math.round(v * 10))}${unit}`;
+    if (v < 99.5) return `${Math.round(v)}${unit}`;
+  }
+  return `${Math.round(n / 1e9)}B`;
 }
 
 /** Server-side masking (H31) is the rule; this is a second guard for an email-shaped actor. */
@@ -835,7 +936,7 @@ export function warningLine(view: ChangesView, window: ChangesWindow, custom = f
   // During the first read an account that cannot be read at all would keep
   // the card on "Reading…" forever, so its failure is named instead; the
   // causes are then limited to those failed accounts.
-  let inScope = (_account: string) => true;
+  let inScope: (account: string) => boolean = () => true;
   if (view.sync.first_read_pending) {
     const failed = new Set(view.accounts.filter(failedBeforeFirstRead).map((a) => a.account));
     if (failed.size === 0) {
@@ -897,9 +998,21 @@ export function warningLine(view: ChangesView, window: ChangesWindow, custom = f
   };
 }
 
-/** "No changes in the last 24 h", or the exact span; said only when no warning line shows (H1). */
-export function noChangesText(view: Pick<ChangesView, "window">, window: ChangesWindow, custom = false): string {
-  return `No changes ${windowPhrase(view, window, custom)}`;
+/**
+ * "No changes in the last 24 h", or the exact span; said only when no warning
+ * line shows (H1). With a service filter it names the services: "No RDS or
+ * IAM changes in the last 24 h", or "No changes in 5 services …".
+ */
+export function noChangesText(
+  view: Pick<ChangesView, "window"> & Partial<Pick<ChangesView, "services">>,
+  window: ChangesWindow,
+  custom = false,
+  selected: readonly string[] = [],
+): string {
+  const when = windowPhrase(view, window, custom);
+  if (selected.length === 0) return `No changes ${when}`;
+  if (selected.length > NAMED_SERVICES) return `No changes in ${selected.length} services ${when}`;
+  return `No ${servicesOr(selected, view.services)} changes ${when}`;
 }
 
 /** Where a time sits along the window, 0..100. */
@@ -919,6 +1032,88 @@ export function bucketIndexFor(buckets: ChangesBucket[], iso: string): number {
     if (Date.parse(buckets[i].start) <= t) idx = i;
   }
   return idx;
+}
+
+const DAY_MS = 86_400_000;
+/** The column width the grid uses for windows longer than a day. */
+export const LONG_STEP_SECONDS = 21_600;
+
+/**
+ * The step the server bucketed by, in seconds: `bucket_seconds` when sent,
+ * otherwise read from the first two starts (older servers), or the window
+ * spread over the buckets when there is only one.
+ */
+export function bucketStepSeconds(view: Pick<ChangesView, "buckets" | "window" | "bucket_seconds">): number {
+  if (typeof view.bucket_seconds === "number" && view.bucket_seconds > 0) return view.bucket_seconds;
+  const b = view.buckets;
+  if (b.length >= 2) {
+    const d = (Date.parse(b[1].start) - Date.parse(b[0].start)) / 1000;
+    if (d > 0) return d;
+  }
+  const span = (Date.parse(view.window.until) - Date.parse(view.window.since)) / 1000;
+  return b.length > 0 && span > 0 ? Math.round(span / b.length) : 3600;
+}
+
+/**
+ * The combined state of several buckets read as one: `gap` only when none
+ * of them was read, `partial` when any part is missing, `arriving` when any
+ * part is not settled yet, else `complete`.
+ */
+export function mergedBucketState(states: BucketState[]): BucketState {
+  if (states.length > 0 && states.every((s) => s === "gap")) return "gap";
+  if (states.some((s) => s === "gap" || s === "partial")) return "partial";
+  if (states.some((s) => s === "arriving")) return "arriving";
+  return "complete";
+}
+
+/**
+ * The columns the activity grid draws, and their step in seconds. A window
+ * longer than a day reads in 6 hour columns; an older server that still
+ * sends hourly buckets for it has them grouped here, counts summed and the
+ * state merged as the server would.
+ */
+export function gridBuckets(view: Pick<ChangesView, "buckets" | "window" | "bucket_seconds">): { buckets: ChangesBucket[]; stepSeconds: number } {
+  const step = bucketStepSeconds(view);
+  const span = Date.parse(view.window.until) - Date.parse(view.window.since);
+  if (!(span > DAY_MS) || step >= LONG_STEP_SECONDS) return { buckets: view.buckets, stepSeconds: step };
+  const per = Math.max(1, Math.round(LONG_STEP_SECONDS / step));
+  if (per === 1) return { buckets: view.buckets, stepSeconds: step };
+  const out: ChangesBucket[] = [];
+  for (let i = 0; i < view.buckets.length; i += per) {
+    const group = view.buckets.slice(i, i + per);
+    const accounts = new Set<string>();
+    for (const b of group) for (const a of b.gap_accounts ?? []) accounts.add(a);
+    const merged: ChangesBucket = {
+      start: group[0].start,
+      pipeline: group.reduce((n, b) => n + b.pipeline, 0),
+      person: group.reduce((n, b) => n + b.person, 0),
+      aws_service: group.reduce((n, b) => n + b.aws_service, 0),
+      unknown: group.reduce((n, b) => n + b.unknown, 0),
+      errors: group.reduce((n, b) => n + b.errors, 0),
+      state: mergedBucketState(group.map((b) => b.state)),
+    };
+    if (accounts.size > 0) merged.gap_accounts = [...accounts];
+    out.push(merged);
+  }
+  return { buckets: out, stepSeconds: step * per };
+}
+
+/** Row label width in px at `sm` and up (`sm:w-36`). */
+const ROW_HEADER_PX = 144;
+/** The widest the hour columns may need together, so the grid fits the card at 1280 px. */
+const COLUMNS_BUDGET_PX = 720;
+/** The usual column floor, enough for a three digit count. */
+const CELL_FLOOR_PX = 24;
+
+/**
+ * The grid's horizontal sizing: each column's minimum width and the table's,
+ * so the columns share the card's width and never push past it. The table's
+ * floor grows with the columns, so the overlays (percent of the row box)
+ * stay over the hours they describe.
+ */
+export function gridLayout(columns: number): { cellMinPx: number; tableMinPx: number } {
+  const cellMinPx = columns > 0 ? Math.min(CELL_FLOOR_PX, Math.floor(COLUMNS_BUDGET_PX / columns)) : CELL_FLOOR_PX;
+  return { cellMinPx, tableMinPx: Math.max(576, ROW_HEADER_PX + columns * cellMinPx) };
 }
 
 /** Three shading steps: 1–99, 100–999, 1 000+. */
@@ -948,8 +1143,44 @@ export function permissionFix(permission: string): string {
   return JSON.stringify({ Effect: "Allow", Action: [permission], Resource: "*" }, null, 2);
 }
 
+// ---------- Limits ----------------------------------------------------------
+
+const HOUR_MS = 3_600_000;
+
+/** What an older server without `limits` serves: 24 h for both. */
+export const DEFAULT_LIMIT_MS = 24 * HOUR_MS;
+
+const DURATION_UNIT_MS: Record<string, number> = { h: HOUR_MS, m: 60_000, s: 1_000, ms: 1 };
+
+/** A Go duration ("168h", "24h0m0s", "90m") in milliseconds, or null when it does not parse. */
+export function parseDuration(text: string | null | undefined): number | null {
+  const s = text?.trim() ?? "";
+  if (!/^(?:\d+(?:\.\d+)?(?:ms|h|m|s))+$/.test(s)) return null;
+  let sum = 0;
+  for (const [, n, unit] of s.matchAll(/(\d+(?:\.\d+)?)(ms|h|m|s)/g)) sum += Number(n) * DURATION_UNIT_MS[unit];
+  return sum;
+}
+
+/** The longest window the list serves; 24 h when the server does not say. */
+export function maxWindowMs(limits: ChangesLimits | null | undefined): number {
+  return parseDuration(limits?.max_window) ?? DEFAULT_LIMIT_MS;
+}
+
+/** How far back Compare can start; 24 h when the server does not say. */
+export function maxCompareAgeMs(limits: ChangesLimits | null | undefined): number {
+  return parseDuration(limits?.max_compare_age) ?? DEFAULT_LIMIT_MS;
+}
+
+const WINDOW_MS: Record<ChangesWindow, number> = { "1h": HOUR_MS, "24h": 24 * HOUR_MS, "7d": 168 * HOUR_MS };
+
+/** Whether the edition serves `w`, from its `limits`. */
+export function windowAllowed(w: ChangesWindow, limits: ChangesLimits | null | undefined): boolean {
+  return WINDOW_MS[w] <= maxWindowMs(limits);
+}
+
 // ---------- Compare ---------------------------------------------------------
 
+/** The Compare "from" presets inside 24 h, offered by every edition. */
 export const COMPARE_PRESETS = [
   { key: "1h", hours: 1 },
   { key: "3h", hours: 3 },
@@ -958,16 +1189,35 @@ export const COMPARE_PRESETS = [
   { key: "24h", hours: 24 },
 ] as const;
 
+/** Presets past 24 h, offered as far back as `max_compare_age` reaches. */
+const LONG_COMPARE_HOURS = [48, 72, 168, 336, 720] as const;
+
 export const DEFAULT_COMPARE = "6h";
 
-/** A preset key ("6h") or an RFC 3339 time, resolved against the server's `until`. */
-export function resolveCompareFrom(value: string, until: string): string {
-  const preset = COMPARE_PRESETS.find((p) => p.key === value);
-  if (preset) return new Date(Date.parse(until) - preset.hours * 3_600_000).toISOString();
-  return Number.isNaN(Date.parse(value)) ? resolveCompareFrom(DEFAULT_COMPARE, until) : value;
+/**
+ * The Compare "from" presets the edition allows: the 24 h set, then 2, 3,
+ * 7, 14 and 30 days back while inside `maxAgeMs`, and `maxAgeMs` itself
+ * (whole hours) when it falls between them.
+ */
+export function comparePresets(maxAgeMs: number): Array<{ key: string; hours: number }> {
+  const out: Array<{ key: string; hours: number }> = COMPARE_PRESETS.map((p) => ({ key: p.key, hours: p.hours }));
+  const maxHours = Math.floor(maxAgeMs / HOUR_MS);
+  for (const h of LONG_COMPARE_HOURS) if (h <= maxHours) out.push({ key: `${h}h`, hours: h });
+  if (maxHours > 24 && !out.some((p) => p.hours === maxHours)) out.push({ key: `${maxHours}h`, hours: maxHours });
+  return out;
 }
 
-const HOUR_MS = 3_600_000;
+/** "(6 h ago)", "(3 d ago)": how far back a preset starts. */
+export function presetAgo(hours: number): string {
+  return hours > 24 && hours % 24 === 0 ? `${hours / 24} d ago` : `${hours} h ago`;
+}
+
+/** A preset key ("6h", "168h") or an RFC 3339 time, resolved against the server's `until`. */
+export function resolveCompareFrom(value: string, until: string): string {
+  const preset = /^(\d+)h$/.exec(value);
+  if (preset) return new Date(Date.parse(until) - Number(preset[1]) * HOUR_MS).toISOString();
+  return Number.isNaN(Date.parse(value)) ? resolveCompareFrom(DEFAULT_COMPARE, until) : value;
+}
 
 /**
  * The compare end as the API takes it: "" for now, or the picked time when it

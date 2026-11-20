@@ -51,7 +51,7 @@ func (controller *AWSSettingsController) Register(router fiber.Router) {
 // auditAWSSettings records every write and the external-id reveal. Reads are
 // not audited; they carry no secret.
 func auditAWSSettings(ctx *fiber.Ctx) error {
-	path := strings.TrimSuffix(ctx.Path(), "/")
+	path := routingPath(ctx)
 	if strings.Contains(path, "/admin/aws/finops") {
 		return auditFinOpsRefusal(ctx)
 	}
@@ -122,7 +122,7 @@ func (controller *AWSSettingsController) requireInfrastructureView(ctx *fiber.Ct
 func (controller *AWSSettingsController) requireSettingsWrite(ctx *fiber.Ctx) error {
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureSettingsWrite))
 	if !explicit || !allowed {
-		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:settings:write permission is required"})
+		return refusePermission(ctx, core.PermissionInfrastructureSettingsWrite)
 	}
 	return ctx.Next()
 }

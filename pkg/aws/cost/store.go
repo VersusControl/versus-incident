@@ -343,7 +343,8 @@ func (s *Store) ListReports(ctx context.Context) ([]finops.ReportRef, error) {
 	}
 	out := make([]finops.ReportRef, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, finops.ReportRef{Month: row.Month, Total: finops.Micros(row.TotalMicros), Frozen: finops.Frozen{At: row.FrozenAt, By: row.FrozenBy}})
+		total := finops.Micros(row.TotalMicros)
+		out = append(out, finops.ReportRef{Month: row.Month, Total: &total, Frozen: finops.Frozen{At: row.FrozenAt, By: row.FrozenBy}})
 	}
 	return out, nil
 }

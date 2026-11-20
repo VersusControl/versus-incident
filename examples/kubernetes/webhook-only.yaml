@@ -153,6 +153,15 @@ data:
             max_generations: 48
             max_age: "168h"
             change_retention: "336h"
+          changes:
+            lookback: "24h"
+            overlap: "15m"
+            page_budget: 0
+            routine_events: ["ssm:UpdateInstanceInformation","ecs:SubmitTaskStateChange","ecs:SubmitContainerStateChange","logs:CreateLogStream","config:PutEvaluations"]
+            burst_window: "10m"
+            burst_min: 5
+            failure_keep: 20
+            read_cap: 20000
         applications:
           sources: ["appregistry","cloudformation","tags"]
           tag_keys: ["app","service"]
@@ -224,7 +233,7 @@ spec:
         app.kubernetes.io/name: versus-incident
         app.kubernetes.io/instance: versus-incident
       annotations:
-        checksum/config: 6ff4d120d923671cb4c0f967f369ca9372fd9a07952191aa221726fa0c0d75c2
+        checksum/config: 03c0fd7ce47f311be43087a5131a351e0f36beb050729a7e7e9209c1095b099b
         checksum/secret: ec8fcf0c4dddb86d91954f4bf31a91b032a51848a4fa1ea0a24e221c068f23b6
     spec:
       serviceAccountName: versus-incident

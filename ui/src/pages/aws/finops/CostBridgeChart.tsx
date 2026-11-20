@@ -4,6 +4,7 @@ import { ChevronRight } from "lucide-react";
 import type { FinOpsBridgeView, FinOpsBridgeRow } from "@/lib/api";
 import {
   accountColumn,
+  axisLabels,
   bridgeGeometry,
   bridgeX,
   fmtMoney,
@@ -87,18 +88,24 @@ function BarSvg({
 }
 
 function Axis({ g, currency }: { g: BridgeGeometry; currency?: string }) {
+  const ticks = axisLabels(g.ticks.filter((t) => !(g.broken && t === g.lo)));
   return (
     <div aria-hidden="true" className="relative h-4 text-2xs text-ink-400">
-      {g.broken && <span className="absolute left-0 top-0 -translate-x-1/2 font-mono">//</span>}
-      {g.ticks.filter((t) => !(g.broken && t === g.lo)).map((t) => (
-        <span
-          key={t}
-          className="absolute top-0 -translate-x-1/2 font-mono tabular-nums"
-          style={{ left: `${bridgeX(g, t) * 100}%` }}
-        >
-          {fmtMoneyAxis(t, currency)}
-        </span>
-      ))}
+      {g.broken && <span className="absolute left-0 top-0 font-mono">//</span>}
+      {ticks.map((t) => {
+        const x = bridgeX(g, t);
+        // The end labels sit inside the column, not over its neighbours.
+        const shift = x <= 0.02 ? "" : x >= 0.98 ? "-translate-x-full" : "-translate-x-1/2";
+        return (
+          <span
+            key={t}
+            className={clsx("absolute top-0 whitespace-nowrap font-mono tabular-nums", shift)}
+            style={{ left: `${x * 100}%` }}
+          >
+            {fmtMoneyAxis(t, currency)}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -212,12 +219,14 @@ export function CostBridgeChart({
 
   return (
     <div className="-mx-4 overflow-x-auto px-4">
-      <table className="w-full min-w-[760px] border-separate border-spacing-0 whitespace-nowrap text-xs">
+      {/* Text columns wrap so the table fits the card at desktop widths; the
+          bar column keeps a floor so its bars and axis never collapse. */}
+      <table className="w-full min-w-[760px] border-separate border-spacing-0 text-xs" data-bridge-table>
         <caption className="sr-only">What moved the cost, one row per driver</caption>
         <thead>
           <tr className="text-left text-2xs text-ink-300">
             <th scope="col" className="py-1.5 pr-3 font-normal">Driver</th>
-            <th scope="col" className="w-[28%] py-1.5 font-normal">
+            <th scope="col" className="w-[24%] min-w-[10rem] py-1.5 font-normal">
               <span className="sr-only">Bar</span>
             </th>
             <th scope="col" className="py-1.5 pl-2 pr-3 text-right font-normal">
@@ -227,7 +236,7 @@ export function CostBridgeChart({
             <th scope="col" className="py-1.5 pr-3 font-normal">Service</th>
             {owner.show && <th scope="col" className="py-1.5 pr-3 font-normal">Owner</th>}
             <th scope="col" className="py-1.5 pr-3 font-normal">Why</th>
-            <th scope="col" className="py-1.5 pr-3 font-normal">Status</th>
+            <th scope="col" className="whitespace-nowrap py-1.5 pr-3 font-normal">Status</th>
             <th scope="col" className="w-6 py-1.5">
               <span className="sr-only">Details</span>
             </th>
@@ -250,7 +259,7 @@ export function CostBridgeChart({
                   focus && "bg-ink-600/30",
                 )}
               >
-                <td className={clsx("py-1.5 pr-3", focus && "border-l-2 border-l-sev-high-solid pl-2")}>
+                <td className={clsx("min-w-[10rem] break-words py-1.5 pr-3", focus && "border-l-2 border-l-sev-high-solid pl-2")}>
                   {href ? (
                     <Link
                       to={href}
@@ -268,18 +277,20 @@ export function CostBridgeChart({
                   )}
                 </td>
                 <td className="py-1.5">
-                  <BarSvg g={g} bar={bar} tone={tone} label={barLabel(bar, name, currency)} focusable={!href} />
+                  <div className="min-w-[10rem]" data-bar-cell>
+                    <BarSvg g={g} bar={bar} tone={tone} label={barLabel(bar, name, currency)} focusable={!href} />
+                  </div>
                 </td>
-                <td className={clsx("py-1.5 pl-2 pr-3 text-right font-mono tabular-nums", AMOUNT_TEXT[tone])}>
+                <td className={clsx("whitespace-nowrap py-1.5 pl-2 pr-3 text-right font-mono tabular-nums", AMOUNT_TEXT[tone])}>
                   {fmtMoney(bar.amount, { signed: !isEdge, currency })}
                 </td>
                 {showAccount && (
-                  <td className="py-1.5 pr-3">{bar.kind === "driver" && <AccountCell row={bar.row} />}</td>
+                  <td className="whitespace-nowrap py-1.5 pr-3">{bar.kind === "driver" && <AccountCell row={bar.row} />}</td>
                 )}
                 <td className="py-1.5 pr-3 text-ink-100">
                   {bar.kind === "driver" && bar.row?.service_label}
                   {details && bar.kind === "driver" && bar.row?.usage_type && (
-                    <span className="block font-mono text-2xs text-ink-400">{bar.row.usage_type}</span>
+                    <span className="block break-all font-mono text-2xs text-ink-400">{bar.row.usage_type}</span>
                   )}
                   {bar.kind === "driver" && bar.row?.resources === "too_large" && (
                     <span className="block">
@@ -291,7 +302,7 @@ export function CostBridgeChart({
                   <td className="py-1.5 pr-3">{bar.kind === "driver" && <OwnerCell row={bar.row} />}</td>
                 )}
                 <td className="py-1.5 pr-3">{bar.kind === "driver" && <WhyCell why={bar.row?.why} />}</td>
-                <td className="py-1.5 pr-3">{bar.kind === "driver" && <StatusWord status={bar.row?.status} />}</td>
+                <td className="whitespace-nowrap py-1.5 pr-3" data-status-cell>{bar.kind === "driver" && <StatusWord status={bar.row?.status} />}</td>
                 <td className="py-1.5 text-ink-400">
                   {href && <ChevronRight size={14} aria-hidden="true" />}
                 </td>
@@ -301,7 +312,9 @@ export function CostBridgeChart({
           <tr aria-hidden="true">
             <td />
             <td className="pt-1">
-              <Axis g={g} currency={currency} />
+              <div className="min-w-[10rem]">
+                <Axis g={g} currency={currency} />
+              </div>
             </td>
             <td colSpan={7} />
           </tr>

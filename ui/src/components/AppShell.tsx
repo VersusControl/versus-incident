@@ -8,6 +8,8 @@ import { QueryErrorBoundary } from "./ErrorBoundary";
 import { ShellContext } from "./shellContext";
 import { ReauthModal } from "@/lib/auth";
 import { useShortcuts } from "@/lib/hooks";
+import { pathArea, useAccess } from "@/lib/access";
+import { AccessDeniedPage } from "./AccessDenied";
 
 // AppShell: skip-link (first tab stop), desktop rail / mobile drawer,
 // toast outlet, global shortcuts, re-auth modal mount.
@@ -16,6 +18,12 @@ export function AppShell() {
   const [help, setHelp] = useState(false);
   const mainRef = useRef<HTMLDivElement>(null);
   const { pathname } = useLocation();
+  // A page the caller's role cannot open is not mounted at all, so it sends
+  // no request the server would refuse; a plain refusal stands in. Until the
+  // session's permissions are known no page is mounted either, so a deep
+  // link or reload sends nothing before the role is read.
+  const access = useAccess();
+  const allowed = pathname === "/" || access.can(pathArea(pathname));
 
   useShortcuts({ onHelp: useCallback(() => setHelp((h) => !h), []) });
 
@@ -62,7 +70,13 @@ export function AppShell() {
                 navigating away remounts a clean boundary — and drops the cached
                 payload the crashed page rendered from. */}
             <QueryErrorBoundary key={pathname} context="Couldn't render this page">
-              <Outlet />
+              {!access.ready ? (
+                <div className="flex-1" aria-busy="true" data-shell-pending />
+              ) : allowed ? (
+                <Outlet />
+              ) : (
+                <AccessDeniedPage />
+              )}
             </QueryErrorBoundary>
           </div>
         </div>

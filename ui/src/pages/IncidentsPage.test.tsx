@@ -100,6 +100,8 @@ vi.mock("@/lib/api", async (importActual) => {
     ...actual,
     api: {
       ...actual.api,
+      // An OSS binary: the deployment probe answers 404 at once, so the shell knows the role.
+      getSSODeployment: vi.fn().mockRejectedValue(new actual.ApiError(404, "not found")),
       listIncidentsIndex: vi.fn(),
       searchIncidentsIndex: vi.fn(),
       incidentCounts: vi.fn().mockResolvedValue({

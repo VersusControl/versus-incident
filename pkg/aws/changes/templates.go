@@ -377,6 +377,45 @@ var serviceNames = map[string][2]string{
 	"states.amazonaws.com":               {"step-functions", "Step Functions"},
 }
 
+// otherServiceLabels names services outside the catalog whose events reach
+// the change list, by the ID ServiceForSource gives them.
+var otherServiceLabels = map[string]string{
+	"athena":            "Athena",
+	"backup":            "Backup",
+	"cloudtrail":        "CloudTrail",
+	"codebuild":         "CodeBuild",
+	"codepipeline":      "CodePipeline",
+	"cognito-identity":  "Cognito",
+	"cognito-idp":       "Cognito",
+	"config":            "Config",
+	"ecr":               "ECR",
+	"elasticfilesystem": "EFS",
+	"glue":              "Glue",
+	"guardduty":         "GuardDuty",
+	"kms":               "KMS",
+	"logs":              "CloudWatch Logs",
+	"organizations":     "Organizations",
+	"securityhub":       "Security Hub",
+	"sso":               "IAM Identity Center",
+	"sts":               "STS",
+	"tagging":           "Tagging",
+}
+
+// ServiceLabel is the display name of a service ID as ServiceForSource
+// returns it: the catalog label, a known label for other services, or the
+// ID itself.
+func ServiceLabel(service string) string {
+	for _, names := range serviceNames {
+		if names[0] == service {
+			return names[1]
+		}
+	}
+	if label, ok := otherServiceLabels[service]; ok {
+		return label
+	}
+	return service
+}
+
 // ServiceForSource returns the catalog service ID for an event source, or
 // the source's first DNS label when it is not in the catalog.
 func ServiceForSource(eventSource string) string {

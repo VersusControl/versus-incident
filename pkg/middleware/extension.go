@@ -107,6 +107,55 @@ func RequestPermission(c *fiber.Ctx, permission string) (allowed, explicit bool)
 	return allowed, explicit
 }
 
+// RequestAccountScopeKey is the fiber Locals key an auth adapter sets to the
+// []string of cloud account IDs the caller may read. Absent means every
+// account; an empty list means none. Community OSS never sets it.
+const RequestAccountScopeKey = "versus.account_scope"
+
+// SetRequestAccountScope records the cloud accounts the caller may read.
+func SetRequestAccountScope(c *fiber.Ctx, ids []string) {
+	scope := make([]string, len(ids))
+	for i, id := range ids {
+		scope[i] = strings.Clone(id)
+	}
+	c.Locals(RequestAccountScopeKey, scope)
+}
+
+// RequestAccountScope returns the account IDs an auth adapter supplied, and
+// whether it supplied any decision at all.
+func RequestAccountScope(c *fiber.Ctx) (ids []string, explicit bool) {
+	ids, explicit = c.Locals(RequestAccountScopeKey).([]string)
+	if !explicit {
+		return nil, false
+	}
+	return append([]string{}, ids...), true
+}
+
+// RequestToolGroupsKey is the fiber Locals key an auth adapter sets to the
+// []string of agent tool groups the caller may use. Absent means every group;
+// an empty list means none. Community OSS never sets it.
+const RequestToolGroupsKey = "versus.tool_groups"
+
+// SetRequestToolGroups limits the agent tools the caller may use to the listed
+// groups. A nil or empty list allows no tool.
+func SetRequestToolGroups(c *fiber.Ctx, groups []string) {
+	scope := make([]string, len(groups))
+	for i, group := range groups {
+		scope[i] = strings.Clone(group)
+	}
+	c.Locals(RequestToolGroupsKey, scope)
+}
+
+// RequestToolGroups returns the tool groups an auth adapter supplied, and
+// whether it supplied any restriction at all.
+func RequestToolGroups(c *fiber.Ctx) (groups []string, explicit bool) {
+	groups, explicit = c.Locals(RequestToolGroupsKey).([]string)
+	if !explicit {
+		return nil, false
+	}
+	return append([]string{}, groups...), true
+}
+
 // SetRequestActor records an actor identifier supplied by an authenticated adapter.
 func SetRequestActor(c *fiber.Ctx, actor string) {
 	c.Locals(requestActorContextKey, strings.Clone(strings.TrimSpace(actor)))

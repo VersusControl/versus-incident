@@ -118,7 +118,8 @@ func seedTablesPlanData(t *testing.T, p *postgresProvider, scope tenancy.OrgScop
 
 // TestPostgresTablesMainQueriesUseIndexes proves the statements behind the
 // main read paths have an index: resources by unit, name and ARN, changes in
-// a window, cost by team, service and day, and open increases. "a|b" accepts
+// a window (for one organization and for an enterprise read of two), cost
+// by team, service and day, and open increases. "a|b" accepts
 // either of two indexes that lead with the same key.
 func TestPostgresTablesMainQueriesUseIndexes(t *testing.T) {
 	defer failOnPanic(t)
@@ -147,6 +148,9 @@ func TestPostgresTablesMainQueriesUseIndexes(t *testing.T) {
 		}},
 		{"changes in a time window", "aws_changes_time", func() (string, []any) {
 			return p.changesSQL(scope, AWSChangeQuery{Since: tablesBase.Add(10 * time.Hour), Until: tablesBase.Add(12 * time.Hour)})
+		}},
+		{"changes in a time window for an enterprise read", "aws_changes_time", func() (string, []any) {
+			return p.changesSQL(enterprise, AWSChangeQuery{Since: tablesBase.Add(10 * time.Hour), Until: tablesBase.Add(12 * time.Hour)})
 		}},
 		{"changes of a resource", "aws_changes_resource", func() (string, []any) {
 			return p.changesSQL(scope, AWSChangeQuery{ResourceARN: "arn:3", Since: tablesBase, Until: tablesBase.Add(48 * time.Hour)})

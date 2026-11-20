@@ -21,6 +21,12 @@ import (
 // the global stream up to coveredUntil, and returns the change list.
 func changeFeedWith(t *testing.T, now time.Time, coveredUntil time.Time, events ...changes.Event) *snapshot.ChangeFeed {
 	t.Helper()
+	return changeFeedOver(t, now, coveredUntil, nil, events...)
+}
+
+// changeFeedOver is changeFeedWith with extra feed options.
+func changeFeedOver(t *testing.T, now time.Time, coveredUntil time.Time, options []snapshot.FeedOption, events ...changes.Event) *snapshot.ChangeFeed {
+	t.Helper()
 	store := snapshot.New(storage.NewMemory(), tenancy.DefaultOrgScope(), snapshot.WithClock(func() time.Time { return now }))
 	found := []changes.Interval{{From: now.Add(-48 * time.Hour), To: coveredUntil}}
 	normalized := make([]model.Change, 0, len(events))
@@ -38,7 +44,7 @@ func changeFeedWith(t *testing.T, now time.Time, coveredUntil time.Time, events 
 			t.Fatal(err)
 		}
 	}
-	return snapshot.NewChangeFeed(store, snapshot.WithFeedClock(func() time.Time { return now }))
+	return snapshot.NewChangeFeed(store, append([]snapshot.FeedOption{snapshot.WithFeedClock(func() time.Time { return now })}, options...)...)
 }
 
 func invokeChanges(t *testing.T, feed ChangeAnswerer, args string) (*core.ToolResult, string) {
@@ -117,6 +123,22 @@ func TestChangesToolRefusesAndExplains(t *testing.T) {
 	}
 	if NewChanges(nil) != nil {
 		t.Fatal("nil source built a tool")
+	}
+}
+
+// TestChangesToolFollowsTheFeedWindowLimits: a change list whose edition
+// serves 7 days answers a 7d window, and a longer one is locked naming 7d.
+func TestChangesToolFollowsTheFeedWindowLimits(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	feed := changeFeedOver(t, fixedNow, fixedNow.Add(-20*time.Minute),
+		[]snapshot.FeedOption{snapshot.WithChangesLimits(func() snapshot.ChangesLimits {
+			return snapshot.ChangesLimits{MaxWindow: week, MaxCompareAge: week}
+		})})
+	if result, encoded := invokeChanges(t, feed, `{"window":"7d"}`); result.Reason == "window_locked" || !result.IsAvailable() {
+		t.Fatalf("7d window with a 7-day limit: %s", encoded)
+	}
+	if result, encoded := invokeChanges(t, feed, `{"window":"8d"}`); result.Reason != "window_locked" || result.Data["max_window"] != "7d" {
+		t.Fatalf("8d window with a 7-day limit: %s", encoded)
 	}
 }
 

@@ -237,6 +237,72 @@ func assertBudgets(t *testing.T, sc *scenario, st finops.SourceStatus) {
 	}
 }
 
+// Two standalone accounts can each hold a budget with the same name and
+// scope. Each keeps its own ID and measures its own bill only.
+func TestStandaloneAccountBudgetsKeepTheirOwnIDAndBill(t *testing.T) {
+	sc := loadScenario(t, "single-account")
+	h := newHarness(t, sc, func(o *Options) {
+		o.Payers = []Payer{{AccountID: "111111111111", Credentials: credsFor("AKIDONE")}, {AccountID: "222222222222", Credentials: credsFor("AKIDTWO")}}
+		o.Connected = []string{"111111111111", "222222222222"}
+	})
+	if _, err := h.adapter.Refresh(ctx, KindScheduled); err != nil {
+		t.Fatal(err)
+	}
+	// The fake bills every account to every payer; a standalone account
+	// bills only itself.
+	stored, err := h.adapter.cache.status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for payer, state := range stored.Payers {
+		state.Accounts = map[string]*accountState{payer: {}}
+	}
+	if err := h.adapter.cache.putStatus(stored); err != nil {
+		t.Fatal(err)
+	}
+	st, err := h.adapter.Source().Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Budgets) == 0 || len(st.Budgets) != 2*len(sc.ExpectedBudgets) {
+		t.Fatalf("%d budgets for two accounts, want %d", len(st.Budgets), 2*len(sc.ExpectedBudgets))
+	}
+	ids := map[string]bool{}
+	byAccount := map[string]int{}
+	for _, b := range st.Budgets {
+		if ids[b.ID] {
+			t.Fatalf("budget id %s repeated across accounts", b.ID)
+		}
+		ids[b.ID] = true
+		if len(b.Accounts) != 1 || b.WholeBill() {
+			t.Fatalf("budget %q measures %v, want its own account only", b.Name, b.Accounts)
+		}
+		byAccount[b.Accounts[0]]++
+	}
+	if byAccount["111111111111"] != len(sc.ExpectedBudgets) || byAccount["222222222222"] != len(sc.ExpectedBudgets) {
+		t.Fatalf("budgets per account = %v", byAccount)
+	}
+	for _, b := range st.Budgets {
+		if finops.BudgetMatches(b, otherAccount(b.Accounts[0]), "") {
+			t.Fatalf("budget %q of %s counts the other account's cost", b.Name, b.Accounts[0])
+		}
+	}
+	// A skipped budget names its own billing account, so a caller limited
+	// to the other account does not see its name.
+	for _, sk := range st.SkippedBudgets {
+		if len(sk.Accounts) != 1 {
+			t.Fatalf("skipped budget %q names accounts %v, want its own account only", sk.Name, sk.Accounts)
+		}
+	}
+}
+
+func otherAccount(account string) string {
+	if account == "111111111111" {
+		return "222222222222"
+	}
+	return "111111111111"
+}
+
 func TestProviderBudgetsMapOnlyWhatTheyMean(t *testing.T) {
 	sc := loadScenario(t, "single-account")
 	h := newHarness(t, sc, nil)

@@ -8,7 +8,8 @@ import { ApiError, api, type AgentConfigView, type BaselineRow } from "@/lib/api
 
 vi.mock("@/lib/api", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/api")>();
-  return { ...actual, api: { ...actual.api, getAgentConfig: vi.fn(), status: vi.fn(), shadowStats: vi.fn(),
+  // An OSS binary: the deployment probe answers 404 at once, so the shell knows the role.
+  return { ...actual, api: { ...actual.api, getSSODeployment: vi.fn().mockRejectedValue(new actual.ApiError(404, "not found")), getAgentConfig: vi.fn(), status: vi.fn(), shadowStats: vi.fn(),
     detectStats: vi.fn(), listPatterns: vi.fn(), listShadow: vi.fn(), listServices: vi.fn(), listBaselines: vi.fn(), getServiceHealth: vi.fn() } };
 });
 afterEach(cleanup);

@@ -419,7 +419,7 @@ func (f fetcher) budgets(ctx context.Context, tagKey string) (out []finops.Budge
 			return nil, nil, err
 		}
 		for _, b := range resp.Budgets {
-			nb, reason := mapBudget(b, tagKey)
+			nb, reason := mapBudget(b, f.payer, tagKey)
 			if reason != "" {
 				skipped = append(skipped, finops.SkippedBudget{Name: aws.ToString(b.BudgetName), Reason: reason})
 				continue
@@ -434,7 +434,7 @@ func (f fetcher) budgets(ctx context.Context, tagKey string) (out []finops.Budge
 	return nil, nil, errTruncated
 }
 
-func mapBudget(b budgettypes.Budget, tagKey string) (finops.Budget, string) {
+func mapBudget(b budgettypes.Budget, payer, tagKey string) (finops.Budget, string) {
 	if b.BudgetType != budgettypes.BudgetTypeCost || b.TimeUnit != budgettypes.TimeUnitMonthly || b.BudgetLimit == nil || b.BudgetLimit.Amount == nil || b.BudgetName == nil {
 		return finops.Budget{}, finops.SkipBudgetNotMonthlyCost
 	}
@@ -455,8 +455,15 @@ func mapBudget(b budgettypes.Budget, tagKey string) (finops.Budget, string) {
 	if !ok {
 		return finops.Budget{}, finops.SkipBudgetFilter
 	}
-	out.ID = "aws-" + finops.BudgetID(out.Scope, out.Value+"|"+out.Name)
+	out.ID = providerBudgetID(payer, out)
 	return out, ""
+}
+
+// providerBudgetID is stable for one billing account's budget: two
+// standalone accounts with a budget of the same name and scope get
+// different IDs.
+func providerBudgetID(payer string, b finops.Budget) string {
+	return "aws-" + finops.BudgetID(b.Scope, payer+"|"+b.Value+"|"+b.Name)
 }
 
 // netAmortized reports a budget measured in net amortized cost, the one

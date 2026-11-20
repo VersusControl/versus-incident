@@ -45,7 +45,7 @@ func validateChatKubernetesAttachment(ctx *fiber.Ctx, attachment *core.ChatAttac
 	}
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureView))
 	if !explicit || !allowed {
-		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:view permission is required"})
+		return refusePermission(ctx, core.PermissionInfrastructureView)
 	}
 	chatKubernetesResolverMu.RLock()
 	resolver := chatKubernetesResolver

@@ -88,6 +88,60 @@ type AWSChangePairState struct {
 	ClockSkew    time.Duration `json:"clock_skew"`
 }
 
+// mergeChangePairs folds the states every read organization keeps for one
+// account and Region into one, keeping the input's pair order. The input
+// lists each pair's states in read order, so a tie goes to the first
+// organization. The earliest connect time and history start win, so
+// history read before a key was added is never labelled as before the
+// connection; the latest poll gives the poll time and clock skew. Each
+// counter is the largest any organization kept: both may have read the same
+// stretch, so adding them would count its events twice. The state is the
+// write organization's when it holds one.
+func mergeChangePairs(write string, states []AWSChangePairState) []AWSChangePairState {
+	out := make([]AWSChangePairState, 0, len(states))
+	index := map[[2]string]int{}
+	for _, state := range states {
+		key := [2]string{state.Account, state.Region}
+		at, seen := index[key]
+		if !seen {
+			index[key] = len(out)
+			out = append(out, state)
+			continue
+		}
+		merged := &out[at]
+		if state.Org == write {
+			merged.Org = write
+		}
+		if state.ConnectedAt.Before(merged.ConnectedAt) {
+			merged.ConnectedAt = state.ConnectedAt
+		}
+		if state.HistoryFrom.Before(merged.HistoryFrom) {
+			merged.HistoryFrom = state.HistoryFrom
+		}
+		if state.LastPollAt.After(merged.LastPollAt) {
+			merged.LastPollAt, merged.ClockSkew = state.LastPollAt, state.ClockSkew
+		}
+		merged.LateArrivals = max(merged.LateArrivals, state.LateArrivals)
+		merged.Dropped = max(merged.Dropped, state.Dropped)
+		merged.NotChanges = max(merged.NotChanges, state.NotChanges)
+	}
+	return out
+}
+
+// addCoverageInterval appends next to intervals sorted by start, folding it
+// into the last one when they overlap. Two organizations may have read the
+// same stretch; the answer lists it once, so the newest interval is the
+// one that ends last.
+func addCoverageInterval(intervals []AWSInterval, next AWSInterval) []AWSInterval {
+	if last := len(intervals) - 1; last >= 0 && next.From.Before(intervals[last].To) {
+		if next.To.After(intervals[last].To) {
+			intervals[last].To = next.To
+		}
+		return intervals
+	}
+	return append(intervals, next)
+}
+
 // AWSChangePoll is one poll of one account and region.
 type AWSChangePoll struct {
 	Account string
@@ -130,9 +184,12 @@ type AWSChangePollResult struct {
 
 // AWSChangeFeedQuery selects one change window. Empty filters match all.
 type AWSChangeFeedQuery struct {
-	Account    string
-	Region     string
-	Service    string
+	Account string
+	Region  string
+	Service string
+	// Services matches a change in any of these services; empty matches
+	// all. It applies together with Service.
+	Services   []string
 	ActorClass string
 	// ResourceARN matches a change whose resources list holds exactly this
 	// ARN; ResourceKey, when set, also matches a change whose folded
@@ -151,6 +208,48 @@ type AWSChangeFeedQuery struct {
 	RowLimit int
 	// IncludeDetail returns each row's detail document.
 	IncludeDetail bool
+	// ServiceCounts asks for AWSChangeFeed.ServiceCounts.
+	ServiceCounts bool
+}
+
+// AWSChangeServiceCount counts one service's successful changes.
+type AWSChangeServiceCount struct {
+	Service string `json:"service"`
+	Events  int64  `json:"events"`
+}
+
+// serviceCountQuery is the query a service count uses: every filter but
+// the service ones, so the counts show what a service filter hides.
+func serviceCountQuery(query AWSChangeFeedQuery) AWSChangeFeedQuery {
+	query.Service, query.Services = "", nil
+	return query
+}
+
+// serviceMatches reports whether a change's service passes the query's
+// service filters.
+func serviceMatches(query AWSChangeFeedQuery, service string) bool {
+	if query.Service != "" && service != query.Service {
+		return false
+	}
+	if len(query.Services) == 0 {
+		return true
+	}
+	for _, want := range query.Services {
+		if service == want {
+			return true
+		}
+	}
+	return false
+}
+
+// sortServiceCounts orders service counts most first, then by service.
+func sortServiceCounts(counts []AWSChangeServiceCount) {
+	sort.Slice(counts, func(left, right int) bool {
+		if counts[left].Events != counts[right].Events {
+			return counts[left].Events > counts[right].Events
+		}
+		return counts[left].Service < counts[right].Service
+	})
 }
 
 // AWSChangeMinute counts successful changes of one actor class in one
@@ -193,6 +292,9 @@ type AWSChangeFeed struct {
 	TopActors []AWSChangeActorCount
 	// LastBefore is the newest successful change before Since in scope.
 	LastBefore time.Time
+	// ServiceCounts are successful changes per service, most first,
+	// counted without the service filters. Set only when the query asks.
+	ServiceCounts []AWSChangeServiceCount
 	// Rows are newest first.
 	Rows      []AWSChange
 	Truncated bool

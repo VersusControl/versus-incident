@@ -596,9 +596,10 @@ type ReportView struct {
 	CopySummary string         `json:"copy_summary"`
 }
 
-// ReportRef lists a frozen report.
+// ReportRef lists a frozen report. Total is the whole bill the report was
+// frozen with; it is left out for a caller limited to some accounts.
 type ReportRef struct {
-	Month  string `json:"month"`
-	Frozen Frozen `json:"frozen"`
-	Total  Micros `json:"total_micros"`
+	Month  string  `json:"month"`
+	Frozen Frozen  `json:"frozen"`
+	Total  *Micros `json:"total_micros,omitempty"`
 }
