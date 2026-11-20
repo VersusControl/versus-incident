@@ -27,6 +27,7 @@ import (
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/tests/fakekube"
@@ -1433,7 +1434,9 @@ func TestWriteKubernetesReturnsSafeActionableDiagnostics(t *testing.T) {
 			var logs bytes.Buffer
 			previous := log.Writer()
 			log.SetOutput(&logs)
-			t.Cleanup(func() { log.SetOutput(previous) })
+			previousLevel := logging.Level()
+			logging.Setup("debug")
+			t.Cleanup(func() { log.SetOutput(previous); logging.Setup(logging.LevelName(previousLevel)) })
 			app := fiber.New()
 			app.Get("/", func(ctx *fiber.Ctx) error { return writeKubernetes(ctx, nil, test.err) })
 			response, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1)
@@ -1456,7 +1459,19 @@ func TestWriteKubernetesReturnsSafeActionableDiagnostics(t *testing.T) {
 				t.Fatalf("raw cause leaked: body=%+v logs=%q", body, logs.String())
 			}
 			if !bytes.Contains(logs.Bytes(), []byte("code="+test.code)) {
-				t.Fatalf("safe code absent from log: %q", logs.String())
+				t.Fatalf("safe code absent from the debug log: %q", logs.String())
+			}
+
+			// A failed request is per-request detail: the default log
+			// stays quiet, so a browser polling a failing cluster cannot
+			// flood it.
+			logs.Reset()
+			logging.Setup("info")
+			if _, err := app.Test(httptest.NewRequest(http.MethodGet, "/", nil), -1); err != nil {
+				t.Fatal(err)
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("a failed request logged at the default level: %q", logs.String())
 			}
 		})
 	}

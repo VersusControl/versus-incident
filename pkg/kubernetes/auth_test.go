@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -454,13 +455,58 @@ func TestExpiringBearerSourceRefreshesOnceWithSkew(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("refresh calls = %d", calls)
 	}
+	// Inside the renewal window the token still valid with margin is served
+	// at once, and one refresh runs in the background.
 	now = now.Add(61 * time.Second)
 	if _, err := source.Authorization(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	settleRefresh(t, source)
 	if calls != 2 {
 		t.Fatalf("refresh calls after skew = %d", calls)
 	}
+}
+
+// authorizeRenewed asks source for a token once its renewal window has
+// begun: the call starts the background refresh, which is waited for, and
+// the answer is what the source then serves, without starting another.
+func authorizeRenewed(t *testing.T, source CredentialSource) (string, error) {
+	t.Helper()
+	var expiring *expiringBearerSource
+	switch typed := source.(type) {
+	case *expiringBearerSource:
+		expiring = typed
+	case *gkeCredentialSource:
+		expiring = typed.expiringBearerSource
+	case *aksCredentialSource:
+		expiring = typed.expiringBearerSource
+	default:
+		t.Fatalf("source %T does not renew in the background", source)
+	}
+	_, _ = source.Authorization(t.Context())
+	settleRefresh(t, expiring)
+	expiring.mu.Lock()
+	defer expiring.mu.Unlock()
+	if expiring.servableLocked(expiring.now()) {
+		return expiring.header, nil
+	}
+	return "", expiring.recordedErrorLocked()
+}
+
+// settleRefresh waits until source has no refresh in flight.
+func settleRefresh(t *testing.T, source *expiringBearerSource) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		source.mu.Lock()
+		idle := source.inflight == nil
+		source.mu.Unlock()
+		if idle {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("token refresh did not finish")
 }
 
 func TestExpiringBearerSourceCanceledWaiterReturns(t *testing.T) {
@@ -481,12 +527,22 @@ func TestExpiringBearerSourceCanceledWaiterReturns(t *testing.T) {
 	}()
 	<-refreshStarted
 
+	// A waiter whose deadline passes while another caller's token request is
+	// still in flight returns at once: the token host has not answered in
+	// time. A waiter that is cancelled returns only the cancellation.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	started := time.Now()
 	_, err := source.Authorization(ctx)
-	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 250*time.Millisecond {
+	if !errors.Is(err, ErrTokenEndpointUnavailable) || time.Since(started) > 250*time.Millisecond {
 		t.Fatalf("blocked waiter error = %v after %v", err, time.Since(started))
+	}
+	cancelled, cancelWaiter := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancelWaiter)
+	started = time.Now()
+	_, err = source.Authorization(cancelled)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrTokenEndpointUnavailable) || time.Since(started) > 250*time.Millisecond {
+		t.Fatalf("cancelled waiter error = %v after %v", err, time.Since(started))
 	}
 	close(releaseRefresh)
 	if err := <-firstDone; err != nil {
@@ -1183,7 +1239,7 @@ func TestRegistryBlockedProjectedVerificationKeepsOtherClusterResponsive(t *test
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	before := time.Now()
-	_, resolveErr := registry.resolveCluster(ctx, "org", "fast")
+	_, resolveErr := registry.resolveCluster(ctx, "org", "fast", nil)
 	close(release)
 	if resolveErr != nil {
 		t.Fatalf("blocked JWKS stopped another cluster: %v", resolveErr)
@@ -1774,5 +1830,288 @@ func TestUncommittedCredentialReplacementsKeepTheirStableCooldown(t *testing.T) 
 	recovery.committed("publication")
 	if recovery.replacementStreak != 0 || !recovery.deadline().IsZero() {
 		t.Fatal("committed recovery did not reset the replacement cooldown")
+	}
+}
+
+// reviewIdentity is the review answer a fake cluster gives for one token.
+type reviewIdentity struct {
+	username, uid string
+	groups        []string
+	extra         map[string][]string
+}
+
+// identityReviewCluster answers identity reviews from a per-token table and
+// counts them.
+type identityReviewCluster struct {
+	server  *httptest.Server
+	mu      sync.Mutex
+	answers map[string]reviewIdentity
+	reviews atomic.Int64
+}
+
+func newIdentityReviewCluster(t *testing.T) *identityReviewCluster {
+	t.Helper()
+	cluster := &identityReviewCluster{answers: map[string]reviewIdentity{}}
+	cluster.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apis/authentication.k8s.io/v1/selfsubjectreviews" {
+			writeJSON(w, map[string]any{"items": []any{}})
+			return
+		}
+		cluster.reviews.Add(1)
+		cluster.mu.Lock()
+		answer, ok := cluster.answers[r.Header.Get("Authorization")]
+		cluster.mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		user := map[string]any{"username": answer.username, "groups": answer.groups}
+		if answer.uid != "" {
+			user["uid"] = answer.uid
+		}
+		if answer.extra != nil {
+			user["extra"] = answer.extra
+		}
+		writeJSON(w, map[string]any{"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview", "status": map[string]any{"userInfo": user}})
+	}))
+	t.Cleanup(cluster.server.Close)
+	return cluster
+}
+
+func (cluster *identityReviewCluster) answer(header string, identity reviewIdentity) {
+	cluster.mu.Lock()
+	cluster.answers[header] = identity
+	cluster.mu.Unlock()
+}
+
+// rotatingProviderService connects a provider source to the cluster. rotate
+// makes the source issue header next, as an hourly refresh does.
+func rotatingProviderService(t *testing.T, cluster *identityReviewCluster, provider string) (*Service, func(string)) {
+	t.Helper()
+	var next atomic.Value
+	next.Store("first-token")
+	base := &expiringBearerSource{now: time.Now, skew: time.Minute, refresh: func(context.Context) (string, time.Time, error) {
+		return next.Load().(string), time.Now().Add(time.Hour), nil
+	}}
+	var source CredentialSource = &aksCredentialSource{expiringBearerSource: base}
+	if provider == "gke" {
+		source = &gkeCredentialSource{expiringBearerSource: base}
+	}
+	service := newTestService(t, cluster.server.URL, Scope{OrgID: "default", ClusterID: "identity", CredentialID: "configured"})
+	service.client.credentials = source
+	rotate := func(token string) {
+		current, _ := base.Authorization(t.Context())
+		next.Store(token)
+		base.rejectBearer(current)
+	}
+	return service, rotate
+}
+
+// validateRenewal validates the current token, waits for its proof and
+// validates again: the previous token may serve while the proof runs.
+func validateRenewal(t *testing.T, service *Service) error {
+	t.Helper()
+	if err := service.validateCredential(t.Context()); err != nil {
+		return err
+	}
+	settleProofs(t, service.client)
+	return service.validateCredential(t.Context())
+}
+
+// Field rule: AKS and GKE renewals whose review carries per-token extras keep
+// one epoch and one storage key across 100 refreshes.
+func TestAKSAndGKERenewalsWithPerTokenExtrasKeepOneEpoch(t *testing.T) {
+	for _, provider := range []string{"aks", "gke"} {
+		t.Run(provider, func(t *testing.T) {
+			isolateProblems(t, 10*time.Minute, newFakeClock().Now)
+			cluster := newIdentityReviewCluster(t)
+			service, rotate := rotatingProviderService(t, cluster, provider)
+			identity := func(n int) reviewIdentity {
+				if provider == "aks" {
+					return reviewIdentity{username: "abababab-0000-4000-8000-000000000007", groups: []string{"cdcdcdcd-0000-4000-8000-000000000008", "system:authenticated"},
+						extra: map[string][]string{"oid": {"abababab-0000-4000-8000-000000000007"}, "authentication.kubernetes.io/credential-id": {fmt.Sprintf("JTI=%d", n)}, "xms_session": {fmt.Sprintf("session-%d", n)}}}
+				}
+				return reviewIdentity{username: "100000000000000000001", groups: []string{"system:authenticated"},
+					extra: map[string][]string{"iam.gke.io/user-assertion": {fmt.Sprintf("assertion-a-%d", n)}, "user-assertion.cloud.google.com": {fmt.Sprintf("assertion-b-%d", n)}}}
+			}
+			cluster.answer("Bearer first-token", identity(0))
+			if err := service.validateCredential(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			key := service.captureCredentialID()
+			for n := 1; n <= 100; n++ {
+				token := fmt.Sprintf("token-%d", n)
+				cluster.answer("Bearer "+token, identity(n))
+				rotate(token)
+				if err := validateRenewal(t, service); err != nil {
+					t.Fatalf("refresh %d retired the epoch: %v", n, err)
+				}
+			}
+			if service.identity.ctx.Err() != nil || service.captureCredentialID() != key || service.identity.servingHeader != "Bearer token-100" {
+				t.Fatal("per-token review fields changed the epoch or its storage key")
+			}
+		})
+	}
+}
+
+// A changed username, UID or group set retires the epoch, and the debug line
+// names the changed field, never its value.
+func TestReviewedIdentityChangeRetiresAndLogsTheFieldName(t *testing.T) {
+	base := reviewIdentity{username: "user-value-1", uid: "uid-value-1", groups: []string{"group-value-1", "system:authenticated"}, extra: map[string][]string{"oid": {"oid-value-1"}}}
+	for field, changed := range map[string]reviewIdentity{
+		"username":  {username: "user-value-2", uid: base.uid, groups: base.groups, extra: base.extra},
+		"uid":       {username: base.username, uid: "uid-value-2", groups: base.groups, extra: base.extra},
+		"groups":    {username: base.username, uid: base.uid, groups: []string{"group-value-2", "system:authenticated"}, extra: base.extra},
+		"extra:oid": {username: base.username, uid: base.uid, groups: base.groups, extra: map[string][]string{"oid": {"oid-value-2"}}},
+	} {
+		t.Run(field, func(t *testing.T) {
+			logs := captureLogLines(t, "debug")
+			cluster := newIdentityReviewCluster(t)
+			service, rotate := rotatingProviderService(t, cluster, "aks")
+			cluster.answer("Bearer first-token", base)
+			if err := service.validateCredential(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			cluster.answer("Bearer changed-token", changed)
+			rotate("changed-token")
+			if err := validateRenewal(t, service); !errors.Is(err, ErrCredentialUnavailable) || service.identity.ctx.Err() == nil {
+				t.Fatalf("a changed %s kept the epoch: %v", field, err)
+			}
+			var found bool
+			for _, line := range logs.all() {
+				if strings.Contains(line, "value-") {
+					t.Fatalf("an identity value reached the log: %q", line)
+				}
+				if strings.Contains(line, "identity changed") && strings.Contains(line, "fields="+field+";") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("no debug line named the changed field %s: %q", field, logs.all())
+			}
+		})
+	}
+}
+
+// A review extra key that is not on the allowlist is ignored, so a new key
+// appearing on a renewal does not retire the epoch.
+func TestUnknownNewExtraKeyDoesNotRetire(t *testing.T) {
+	for _, provider := range []string{"aks", "gke"} {
+		t.Run(provider, func(t *testing.T) {
+			cluster := newIdentityReviewCluster(t)
+			service, rotate := rotatingProviderService(t, cluster, provider)
+			identity := reviewIdentity{username: "reader", groups: []string{"system:authenticated"}, extra: map[string][]string{"oid": {"object-id"}}}
+			cluster.answer("Bearer first-token", identity)
+			if err := service.validateCredential(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			identity.extra = map[string][]string{"oid": {"object-id"}, "new.example.com/per-token": {"anything"}, "authentication.kubernetes.io/pod-name": {"pod"}}
+			cluster.answer("Bearer second-token", identity)
+			rotate("second-token")
+			if err := validateRenewal(t, service); err != nil || service.identity.ctx.Err() != nil {
+				t.Fatalf("an unknown extra key retired the epoch: %v", err)
+			}
+		})
+	}
+}
+
+// The allowlist matches keys exactly and only deletes keys; an answer with no
+// extra left and one with no extra at all give the same principal.
+func TestReviewAllowlistMatchesExactlyAndEmptyExtraEqualsMissing(t *testing.T) {
+	cluster := newIdentityReviewCluster(t)
+	service, _ := rotatingProviderService(t, cluster, "aks")
+	principal := func(identity reviewIdentity) string {
+		cluster.answer("Bearer probe", identity)
+		value, err := service.client.selfSubjectPrincipal(t.Context(), "Bearer probe", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	user := reviewIdentity{username: "reader", uid: "uid", groups: []string{"b", "a"}}
+	missing := principal(user)
+	user.extra = map[string][]string{}
+	empty := principal(user)
+	user.extra = map[string][]string{"OID": {"object-id"}, "oid ": {"object-id"}, "pod-name": {"pod"}}
+	dropped := principal(user)
+	if missing != empty || missing != dropped {
+		t.Fatalf("empty, missing and dropped extras differ:\n%s\n%s\n%s", missing, empty, dropped)
+	}
+	if want := `self-subject-review:{"username":"reader","uid":"uid","groups":["a","b"],"extra":null}`; missing != want {
+		t.Fatalf("principal = %s, want %s", missing, want)
+	}
+	user.extra = map[string][]string{"oid": {"object-id", "second"}}
+	if kept := principal(user); !strings.Contains(kept, `"extra":{"oid":["object-id","second"]}`) {
+		t.Fatalf("the allowlisted key lost values: %s", kept)
+	}
+	gke, _ := rotatingProviderService(t, cluster, "gke")
+	cluster.answer("Bearer probe", reviewIdentity{username: "reader", uid: "uid", groups: []string{"b", "a"}, extra: map[string][]string{"oid": {"object-id"}}})
+	if value, err := gke.client.selfSubjectPrincipal(t.Context(), "Bearer probe", nil); err != nil || value != missing {
+		t.Fatalf("GKE kept an extra key: %s %v", value, err)
+	}
+}
+
+// Three principal-change rebuilds in a row write exactly one warning at the
+// default level; a single rebuild writes nothing there.
+func TestIdentityChangesInARowWarnOnce(t *testing.T) {
+	for _, changes := range []int{1, 4} {
+		t.Run(fmt.Sprintf("%d changes", changes), func(t *testing.T) {
+			logs := captureLogLines(t, "info")
+			isolateProblems(t, 10*time.Minute, newFakeClock().Now)
+			cluster := newIdentityReviewCluster(t)
+			service, rotate := rotatingProviderService(t, cluster, "aks")
+			groups := func(n int) reviewIdentity {
+				return reviewIdentity{username: "reader", groups: []string{fmt.Sprintf("group-%d", n%2), "system:authenticated"}, extra: map[string][]string{"oid": {"object-id"}}}
+			}
+			cluster.answer("Bearer first-token", groups(0))
+			if err := service.validateCredential(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			for n := 1; n <= changes; n++ {
+				token := fmt.Sprintf("token-%d", n)
+				cluster.answer("Bearer "+token, groups(n))
+				rotate(token)
+				if err := validateRenewal(t, service); !errors.Is(err, ErrCredentialUnavailable) {
+					t.Fatalf("group change %d kept the epoch: %v", n, err)
+				}
+				service = newService(t.Context(), service.client, service.Scope(), time.Minute)
+				if !service.identity.known {
+					t.Fatalf("the successor after change %d was not proven", n)
+				}
+			}
+			lines := visible(logs.all())
+			want := 0
+			if changes >= unstableIdentityRebuilds {
+				want = 1
+			}
+			if len(lines) != want {
+				t.Fatalf("%d changes wrote %d lines at default level: %q", changes, len(lines), lines)
+			}
+			if want == 1 && (!strings.HasPrefix(lines[0], `WARN kubernetes: cluster "identity" identity is not stable: groups changed on 3 credential renewals in a row`) || strings.Contains(lines[0], "group-")) {
+				t.Fatalf("warning = %q", lines[0])
+			}
+		})
+	}
+}
+
+// Sources other than AKS and GKE keep today's principal for the same review
+// answer: only the credential-id field is dropped, every other extra stays.
+func TestReviewPrincipalIsUnchangedForOtherModes(t *testing.T) {
+	cluster := newIdentityReviewCluster(t)
+	answer := reviewIdentity{username: "system:serviceaccount:versus:versus-reader", uid: "sa-uid", groups: []string{"system:serviceaccounts", "system:authenticated"},
+		extra: map[string][]string{"authentication.kubernetes.io/credential-id": {"JTI=1"}, "authentication.kubernetes.io/pod-name": {"versus-0"}, "authentication.kubernetes.io/node-name": {"node-1"}}}
+	cluster.answer("Bearer probe", answer)
+	want := `self-subject-review:{"username":"system:serviceaccount:versus:versus-reader","uid":"sa-uid","groups":["system:authenticated","system:serviceaccounts"],"extra":{"authentication.kubernetes.io/node-name":["node-1"],"authentication.kubernetes.io/pod-name":["versus-0"]}}`
+	for name, source := range map[string]CredentialSource{
+		"in_cluster or token_file": &tokenFileSource{path: "/nonexistent"},
+		"token":                    &credentialSource{},
+		"client_certificate":       &credentialSource{certificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return new(tls.Certificate), nil }},
+		"eks":                      &eksCredentialSource{expiringBearerSource: &expiringBearerSource{}},
+	} {
+		service := newTestService(t, cluster.server.URL, Scope{OrgID: "default", ClusterID: "modes"})
+		service.client.credentials = source
+		if principal, err := service.client.selfSubjectPrincipal(t.Context(), "Bearer probe", nil); err != nil || principal != want {
+			t.Fatalf("%s principal changed:\n%s\nwant\n%s (%v)", name, principal, want, err)
+		}
 	}
 }

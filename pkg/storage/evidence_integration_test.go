@@ -159,6 +159,39 @@ func TestPostgresRetainedSamplesAndCursorOrderingRemainExact(t *testing.T) {
 	}
 }
 
+func TestEvidencePartitionsListEventMonthsThenObservationMonthsAndSkipRetiredJournalMonths(t *testing.T) {
+	day := func(year int, month time.Month, d int) time.Time {
+		return time.Date(year, month, d, 12, 0, 0, 0, time.UTC)
+	}
+	batch := EvidenceBatch{
+		At:             day(2026, time.March, 10),
+		CoveredThrough: day(2026, time.April, 2),
+		Records: []EvidenceRecord{
+			{At: day(2026, time.January, 5)},
+			{At: day(2025, time.December, 20)},
+			{At: day(2026, time.March, 1)},
+		},
+		Issues: []EvidenceIssue{{LastSeen: day(2026, time.February, 14)}, {}},
+	}
+	const events, observations = "kubernetes_evidence_events", "kubernetes_evidence_occurrence_observations"
+	want := []evidencePartition{
+		{parent: events, at: day(2026, time.January, 5)},
+		{parent: events, at: day(2026, time.February, 14)},
+		{parent: events, at: day(2026, time.March, 10)},
+		{parent: events, at: day(2026, time.April, 2)},
+		{parent: observations, at: day(2026, time.February, 14)},
+		{parent: observations, at: day(2026, time.March, 10)},
+		{parent: observations, at: day(2026, time.April, 2)},
+	}
+	if got := evidencePartitionsFor(batch, time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)); !reflect.DeepEqual(got, want) {
+		t.Fatalf("partitions with cutoff:\n got %+v\nwant %+v", got, want)
+	}
+	withoutCutoff := append([]evidencePartition{{parent: events, at: day(2025, time.December, 20)}}, want...)
+	if got := evidencePartitionsFor(batch, time.Time{}); !reflect.DeepEqual(got, withoutCutoff) {
+		t.Fatalf("partitions without cutoff:\n got %+v\nwant %+v", got, withoutCutoff)
+	}
+}
+
 func TestPostgresEvidencePartitionLifecyclePreservesDisabledRetention(t *testing.T) {
 	dsn := os.Getenv("TEST_POSTGRES_DSN")
 	if dsn == "" {

@@ -4,25 +4,29 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/google/uuid"
 )
 
 type CaptureStatus struct {
-	EvidenceMode  string                       `json:"evidence_mode,omitempty"`
-	EvidenceError string                       `json:"evidence_error,omitempty"`
-	Mode          string                       `json:"mode"`
-	Reason        string                       `json:"reason,omitempty"`
-	LastCycleAt   *time.Time                   `json:"last_cycle_at,omitempty"`
-	Behind        bool                         `json:"behind"`
-	Verification  *projectedVerificationStatus `json:"verification,omitempty"`
+	EvidenceMode  string     `json:"evidence_mode,omitempty"`
+	EvidenceError string     `json:"evidence_error,omitempty"`
+	Mode          string     `json:"mode"`
+	Reason        string     `json:"reason,omitempty"`
+	LastCycleAt   *time.Time `json:"last_cycle_at,omitempty"`
+	Behind        bool       `json:"behind"`
+	// ProofSince is when requests started failing because a renewed
+	// credential could not be proved; set only with a proof reason.
+	ProofSince   *time.Time                   `json:"proof_since,omitempty"`
+	Verification *projectedVerificationStatus `json:"verification,omitempty"`
 	// HistorySave is present only on pages served from saved history, and only
 	// while the published capture has not reached it: the cluster was read, so
 	// live pages stay current, but saved history ends at the last checkpoint.
@@ -96,7 +100,7 @@ func (service *Service) recordHistorySaveRejection(batchID string) {
 		err = provider.WriteBlob(historySaveRejectionKey(service.scope), payload)
 	}
 	if err != nil {
-		log.Printf("kubernetes: history save rejection note deferred")
+		logging.Debugf("kubernetes: history save rejection note deferred")
 	}
 }
 
@@ -166,11 +170,19 @@ func (service *Service) CaptureStatus() CaptureStatus {
 		return service.withEvidenceStatus(service.effectiveCaptureStatus())
 	}
 	loop.mu.Lock()
-	defer loop.mu.Unlock()
 	status := loop.status
+	loop.mu.Unlock()
 	if status.LastCycleAt != nil {
 		at := *status.LastCycleAt
 		status.LastCycleAt = &at
+	}
+	// A proof outage pauses requests while the loop runs; the status names
+	// it, and since when, unless the loop already has a reason of its own.
+	if reason, since := service.proofStatus(); reason != "" && status.Reason == "" {
+		status.Reason, status.ProofSince = reason, nil
+		if !since.IsZero() {
+			status.ProofSince = &since
+		}
 	}
 	return service.withEvidenceStatus(status)
 }
@@ -214,7 +226,7 @@ func (service *Service) StartCapture(parent context.Context) {
 			close(loop.done)
 		}
 		if effective.Reason != "" {
-			log.Printf("kubernetes: capture using demand mode: %s", effective.Reason)
+			service.logDemandCapture(effective.Reason)
 		}
 		return
 	}
@@ -227,16 +239,19 @@ func (service *Service) effectiveCaptureStatus() CaptureStatus {
 	}
 	rotating := false
 	if service.client != nil {
-		switch service.client.credentials.(type) {
-		case *expiringBearerSource, *tokenFileSource:
-			rotating = true
+		if source, ok := service.client.credentials.(interface{ rotating() bool }); ok {
+			rotating = source.rotating()
 		}
 	}
 	service.identity.mu.Lock()
 	known := service.identity.known
 	service.identity.mu.Unlock()
+	proofReason, proofSince := service.proofStatus()
 	if rotating && !known {
 		status := CaptureStatus{Mode: "demand", Reason: "stable_principal_unverified"}
+		if proofReason != "" {
+			status.Reason = proofReason
+		}
 		if source, ok := service.client.credentials.(*tokenFileSource); ok && source.verifier != nil {
 			verification := source.verifier.verificationStatus()
 			status.Verification = &verification
@@ -249,7 +264,29 @@ func (service *Service) effectiveCaptureStatus() CaptureStatus {
 	if !atomicStorage {
 		return CaptureStatus{Mode: "demand", Reason: "atomic_storage_unavailable"}
 	}
-	return CaptureStatus{Mode: "continuous", Behind: true}
+	status := CaptureStatus{Mode: "continuous", Behind: true}
+	if proofReason != "" {
+		// A proof outage pauses requests without changing the mode; the
+		// status names the proof as the cause, and since when.
+		status.Reason = proofReason
+		if !proofSince.IsZero() {
+			since := proofSince
+			status.ProofSince = &since
+		}
+	}
+	return status
+}
+
+// logDemandCapture says why a cluster saves history only on demand. Storage
+// without atomic writes is a setting to fix and warns; a rotating credential
+// whose identity is not verified yet is the normal start of such a credential,
+// so it stays at debug.
+func (service *Service) logDemandCapture(reason string) {
+	if reason != "atomic_storage_unavailable" {
+		logging.Debugf("kubernetes: capture using demand mode: %s", reason)
+		return
+	}
+	problems().Fail(slog.LevelWarn, problemKey(service.scope.OrgID, service.scope.ClusterID, "capture_mode"), reason, "kubernetes: cluster %q saves history only on demand reason=%s (storage without atomic writes); set STORAGE_TYPE to postgres or file to save history continuously", service.scope.ClusterID, reason)
 }
 
 func (service *Service) StopCapture() {
@@ -333,7 +370,7 @@ func (registry *ServiceRegistry) StartCapture(ctx context.Context) {
 		services = append(services, entry.Service)
 		r := entry.Service.recovery
 		if r == nil {
-			r = &clusterRecovery{}
+			r = &clusterRecovery{cluster: entry.Info.ID}
 			entry.Service.recovery = r
 			registry.recoveries[entry.Info.ID] = r
 		}
@@ -359,6 +396,25 @@ func (registry *ServiceRegistry) CloseContext(ctx context.Context) error {
 	if registry.closeDone == nil {
 		registry.closed = true
 		registry.closeDone = make(chan struct{})
+		// Stop the background resolves and token refreshes, and record no
+		// failure from anything still finishing.
+		if registry.stopLifetime != nil {
+			registry.stopLifetime()
+		}
+		for _, r := range registry.recoveries {
+			r.close()
+		}
+		for _, entry := range registry.entries {
+			if entry.Service == nil {
+				continue
+			}
+			entry.Service.recovery.close()
+			if entry.Service.client != nil {
+				if source, ok := entry.Service.client.credentials.(interface{ closeSource() }); ok {
+					source.closeSource()
+				}
+			}
+		}
 		recoveryDone := []chan struct{}{}
 		for _, r := range registry.recoveries {
 			if r.cancel != nil {
@@ -435,7 +491,7 @@ func (service *Service) capture(loop *captureLoop) {
 	store := service.changeStore()
 	defer func() {
 		if err := store.ReleaseLease(loop.owner); err != nil {
-			log.Printf("kubernetes: capture lease release unavailable")
+			logging.Debugf("kubernetes: capture lease release unavailable")
 		}
 	}()
 	ticker := time.NewTicker(time.Second)
@@ -456,7 +512,7 @@ func (service *Service) capture(loop *captureLoop) {
 		}); err == nil {
 			service.captureOwned(loop, store, leaseTTL, renewInterval, leaseExpires, ticker.C)
 			if err := store.ReleaseLease(loop.owner); err != nil {
-				log.Printf("kubernetes: capture lease release unavailable")
+				logging.Debugf("kubernetes: capture lease release unavailable")
 			}
 			loop.mu.Lock()
 			loop.owner = uuid.NewString()
@@ -699,7 +755,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 		return err
 	}
 	service.rememberBreaks(broken, "", now, partial, deferredRoots...)
-	service.evaluateIssueAlertsWithDeferred(broken, deferredRoots, loop.owner, now, partial)
+	service.evaluateIssueAlertsWithDeferred(broken, deferredRoots, loop.owner, now, alertBaselinePartial(snapshot), alertKindsSettled(snapshot), alertListedKinds(snapshot))
 	service.enqueueBreakLogs(snapshot, loop.owner, loop.ownedContext)
 	for kind, at := range success {
 		loop.success[kind] = at

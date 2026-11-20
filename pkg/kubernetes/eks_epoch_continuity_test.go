@@ -228,7 +228,7 @@ func TestEKSUnprovedTokensDoNotRideAProvedEpoch(t *testing.T) {
 			}
 			before := sts.calls.Load()
 			unproved := "Bearer " + encodeEKSToken(target(sts))
-			if principal, err := service.client.credentials.(*eksCredentialSource).verifiedCredentialPrincipal(t.Context(), unproved); err != nil || principal != "" {
+			if principal, _, err := service.client.credentials.(*eksCredentialSource).verifiedCredentialPrincipal(t.Context(), unproved); err != nil || principal != "" {
 				t.Fatalf("unproved token proved %q err=%v", principal, err)
 			}
 			if err := service.acceptCredential(t.Context(), unproved); !errors.Is(err, ErrCredentialUnavailable) {

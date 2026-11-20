@@ -27,6 +27,7 @@ func TestEvidenceReadFailurePreservesCauseWithoutSensitiveDiagnostics(t *testing
 	previous := log.Writer()
 	log.SetOutput(&output)
 	t.Cleanup(func() { log.SetOutput(previous) })
+	setLogLevel(t, "debug")
 	cause := fmt.Errorf("synthetic-private-provider-detail: %w", storage.ErrUnsupported)
 	err := evidenceReadFailure(evidenceStoreQuery, cause)
 	if !errors.Is(err, storage.ErrUnsupported) || DiagnoseError(err).Code != DiagnoseError(cause).Code {
@@ -1394,6 +1395,7 @@ func TestHistoricalIssuesReportStoreStageWhileReadModelsConvert(t *testing.T) {
 	previous := log.Writer()
 	log.SetOutput(&output)
 	t.Cleanup(func() { log.SetOutput(previous) })
+	setLogLevel(t, "debug")
 	now := time.Now().UTC()
 	_, err := service.historicalIssues(t.Context(), IssueOptions{Since: now.Add(-time.Hour), Until: now})
 	detail := DiagnoseError(err)

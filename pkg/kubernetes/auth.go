@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -23,6 +24,41 @@ const maxCredentialFileBytes = int64(1 << 20)
 
 var errSelfSubjectReviewUnsupported = errors.New("kubernetes: self subject review unsupported")
 
+// ErrTokenEndpointUnavailable marks a cloud token request that got no
+// definite answer: the connection failed or timed out, or the host answered
+// 429 or 5xx. The configured credential may be fine, so the request is retried
+// with backoff until the host answers. Any other failure (a 4xx such as
+// invalid_client, a missing token file, an invalid answer) is a definite one.
+var ErrTokenEndpointUnavailable = errors.New("kubernetes: cloud token endpoint unavailable")
+
+// tokenEndpointUnavailable classifies a cloud token request. It returns an
+// error wrapping ErrTokenEndpointUnavailable when the request got no definite
+// answer, and nil when response is a definite answer for the caller to read.
+// A failed request drops the client's idle connections, so the next attempt
+// dials again and resolves the host again rather than reusing a connection
+// opened while the network was still coming up.
+// abandonedAttempt reports whether err only says that the caller stopped
+// waiting. A caller that cancelled is never evidence about the credential. A
+// deadline that passed while the token host had not answered is: the token
+// request got no answer in time, which is a token endpoint failure whichever
+// deadline (the client's, the attempt's or the request's) ran out first.
+func abandonedAttempt(ctx context.Context, err error) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	return errors.Is(ctx.Err(), context.Canceled) || !errors.Is(err, ErrTokenEndpointUnavailable)
+}
+
+func tokenEndpointUnavailable(client *http.Client, response *http.Response, err error, failure string) error {
+	if err == nil && response != nil && response.StatusCode != http.StatusTooManyRequests && response.StatusCode < 500 {
+		return nil
+	}
+	if client != nil {
+		client.CloseIdleConnections()
+	}
+	return fmt.Errorf("%s: %w", failure, ErrTokenEndpointUnavailable)
+}
+
 // CredentialSource supplies request and TLS credentials without exposing them
 // through connector configuration or status DTOs.
 type CredentialSource interface {
@@ -35,9 +71,22 @@ type credentialSource struct {
 	certificate   func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
 }
 
+// tokenWaitKey carries how long a caller waits for a token refresh in flight
+// when it has no token to send, shorter than its own deadline. A user
+// request sets it, so it is answered at once that the token host has not
+// answered yet instead of waiting out the refresh.
+type tokenWaitKey struct{}
+
+func withTokenWait(ctx context.Context, limit time.Duration) context.Context {
+	return context.WithValue(ctx, tokenWaitKey{}, limit)
+}
+
+// tokenRefreshTimeout bounds one background token refresh, the same bound a
+// cloud token client puts on one request.
+const tokenRefreshTimeout = 10 * time.Second
+
 type expiringBearerSource struct {
-	lockOnce          sync.Once
-	lock              chan struct{}
+	mu                sync.Mutex
 	refresh           func(context.Context) (string, time.Time, error)
 	now               func() time.Time
 	skew              time.Duration
@@ -47,6 +96,46 @@ type expiringBearerSource struct {
 	principalVerified bool
 	retryAt           time.Time
 	failures          int
+	// unreachable is set while the last refresh got no definite answer from
+	// the token host, so a call inside its backoff says the same.
+	unreachable bool
+	// inflight is closed when the refresh running now ends; nil when none
+	// runs. Refreshes run on lifetime, which closeSource cancels.
+	inflight       chan struct{}
+	lifetime       context.Context
+	stop           context.CancelFunc
+	closed         bool
+	refreshTimeout time.Duration
+	current        atomic.Pointer[expiringToken]
+}
+
+// expiringToken is the current token and its expiry, read without the
+// refresh lock so the epoch can record a token's expiry without waiting on a
+// refresh in progress.
+type expiringToken struct {
+	header  string
+	expires time.Time
+}
+
+// rotating reports that the source renews its token on its own.
+func (source *expiringBearerSource) rotating() bool { return true }
+
+// credentialExpiry is header's recorded expiry, or zero when header is not
+// the current token.
+func (source *expiringBearerSource) credentialExpiry(header string) time.Time {
+	current := source.current.Load()
+	if current == nil || header == "" || subtle.ConstantTimeCompare([]byte(header), []byte(current.header)) != 1 {
+		return time.Time{}
+	}
+	return current.expires
+}
+
+// currentCredential reports whether header is the current token. A source
+// that has issued none yet accepts any header, as a test or a constructor
+// presenting its own token does.
+func (source *expiringBearerSource) currentCredential(header string) bool {
+	current := source.current.Load()
+	return current == nil || subtle.ConstantTimeCompare([]byte(header), []byte(current.header)) == 1
 }
 
 func (source *expiringBearerSource) credentialPrincipal() string {
@@ -73,6 +162,34 @@ type credentialEpoch struct {
 	known                  bool
 	retired                bool
 	renewal                bool
+	// source is where a proved source's principal came from; it never
+	// changes within an epoch.
+	source principalSource
+	// servingHeader is the token requests send for a proved source, with its
+	// recorded expiry; servingRejected is set once the cluster answered it 401.
+	servingHeader   string
+	servingExpires  time.Time
+	servingRejected bool
+	// upgradeReady marks an unknown epoch whose token was proven after
+	// start; the next commit or cluster lookup ends it. upgraded marks it
+	// ended that way; its successor starts with no backoff and keeps the
+	// warm inventory.
+	upgradeReady bool
+	upgraded     bool
+	// unreachable is set when the epoch was retired at its start because the
+	// token host gave no definite answer, so a later check of the retired
+	// epoch keeps saying the host is retrying rather than naming the
+	// credential unavailable for good.
+	unreachable bool
+	// upgradePrincipal is the digest of the principal the late proof
+	// returned; a successor on renewed bytes takes the warm inventory only
+	// when it is proven for this same principal.
+	upgradePrincipal [32]byte
+	// proofFailing is set while requests fail because a renewal cannot be
+	// proved, with the status code and since when.
+	proofFailing      bool
+	proofFailingCode  string
+	proofFailingSince time.Time
 }
 
 type credentialEpochContextKey struct{}
@@ -146,14 +263,23 @@ func (service *Service) validateCredential(ctx context.Context) error {
 	}
 	epoch := service.identity
 	epoch.mu.Lock()
-	defer epoch.mu.Unlock()
 	if epoch.retired || epoch.ctx.Err() != nil {
-		epoch.retired = true
-		return ErrCredentialUnavailable
+		defer epoch.mu.Unlock()
+		return retiredEpochErrorLocked(epoch)
 	}
+	epoch.mu.Unlock()
+	// The token is fetched off the epoch lock, so a caller waiting on a
+	// token host never holds up the others; its wait ends on its own
+	// deadline.
 	header, err := service.client.credentials.Authorization(ctx)
+	epoch.mu.Lock()
+	if epoch.retired || epoch.ctx.Err() != nil {
+		defer epoch.mu.Unlock()
+		return retiredEpochErrorLocked(epoch)
+	}
 	if err != nil {
-		if ctx.Err() != nil {
+		defer epoch.mu.Unlock()
+		if abandonedAttempt(ctx, err) {
 			return ctx.Err()
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -163,24 +289,56 @@ func (service *Service) validateCredential(ctx context.Context) error {
 			epoch.retired = true
 			epoch.cancel()
 		}
+		if errors.Is(err, ErrTokenEndpointUnavailable) {
+			// The token host gave no definite answer: the fault keeps saying so,
+			// so it is reported as retrying rather than as a credential to fix.
+			return credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
+		}
 		return ErrCredentialUnavailable
 	}
+	if source, ok := service.client.credentials.(provenCredentialSource); ok {
+		// A proof may be in flight; it is waited for off the epoch lock.
+		epoch.mu.Unlock()
+		_, err := service.admitProven(ctx, source, header)
+		return err
+	}
+	defer epoch.mu.Unlock()
 	return service.acceptCredentialLocked(ctx, header)
 }
 
+// retiredEpochErrorLocked is the answer of a retired epoch, which keeps the
+// token endpoint cause when the token host gave no answer.
+func retiredEpochErrorLocked(epoch *credentialEpoch) error {
+	epoch.retired = true
+	if epoch.unreachable {
+		return credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
+	}
+	return ErrCredentialUnavailable
+}
+
 func (service *Service) acceptCredential(ctx context.Context, header string) error {
-	_, _, err := service.acceptCredentialForRequest(ctx, header)
+	_, _, _, err := service.acceptCredentialForRequest(ctx, header)
 	return err
 }
 
-func (service *Service) acceptCredentialForRequest(ctx context.Context, header string) (uint64, *tls.Certificate, error) {
+// acceptCredentialForRequest admits header for one request and returns the
+// header the request must send. For a source whose renewals are proved that
+// can be the previous, proven token while header is still a candidate.
+func (service *Service) acceptCredentialForRequest(ctx context.Context, header string) (string, uint64, *tls.Certificate, error) {
+	if source, ok := service.client.credentials.(provenCredentialSource); ok {
+		admission, err := service.admitProven(ctx, source, header)
+		if err != nil {
+			return "", 0, nil, err
+		}
+		return admission.header, admission.generation, admission.certificate, nil
+	}
 	epoch := service.identity
 	epoch.mu.Lock()
 	defer epoch.mu.Unlock()
 	if err := service.acceptCredentialLocked(ctx, header); err != nil {
-		return 0, nil, err
+		return "", 0, nil, err
 	}
-	return epoch.requestGeneration.Load(), epoch.certificate, nil
+	return header, epoch.requestGeneration.Load(), epoch.certificate, nil
 }
 
 // commitConflictError reports that a listing could not be committed because the
@@ -199,6 +357,14 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 		return err
 	}
 	epoch := service.identity
+	// The token is fetched before the epoch lock is taken, so a commit that
+	// waits on a token host never holds up the readers behind that lock.
+	var header string
+	var authErr error
+	credentials := service.client != nil && service.client.credentials != nil
+	if credentials {
+		header, authErr = service.client.credentials.Authorization(ctx)
+	}
 	epoch.mu.Lock()
 	defer epoch.mu.Unlock()
 	// The epoch lock is shared by every writer. A deadline spent waiting for it
@@ -210,12 +376,21 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 	if epoch.retired || epoch.ctx.Err() != nil {
 		return commitConflictError{cause: ErrCredentialUnavailable}
 	}
-	if service.client != nil && service.client.credentials != nil {
-		header, err := service.client.credentials.Authorization(ctx)
-		if err != nil {
-			return err
+	if credentials {
+		if authErr != nil {
+			return authErr
 		}
-		if err := service.acceptCredentialLocked(ctx, header); err != nil {
+		if source, ok := service.client.credentials.(provenCredentialSource); ok {
+			// A commit never waits on a proof: with no token allowed to
+			// serve yet, it fails fast and is retried.
+			_, wait, err := service.admitProvenLocked(ctx, source, header, true)
+			if err != nil {
+				return err
+			}
+			if wait != nil {
+				return credentialFault(&proofError{class: "pending"})
+			}
+		} else if err := service.acceptCredentialLocked(ctx, header); err != nil {
 			return err
 		}
 	}
@@ -246,30 +421,30 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 		epoch.cancel()
 		return ErrCredentialUnavailable
 	}
-	digest := sha256.New()
-	digest.Write([]byte(header))
-	if certificate != nil {
-		for _, encoded := range certificate.Certificate {
-			digest.Write(encoded)
-		}
-	}
-	var fingerprint [32]byte
-	copy(fingerprint[:], digest.Sum(nil))
+	fingerprint := credentialFingerprint(header, certificate)
 	principal := ""
 	if source, ok := service.client.credentials.(interface {
-		verifiedCredentialPrincipal(context.Context, string) (string, error)
+		verifiedCredentialPrincipal(context.Context, string) (string, proofOutcome, error)
 	}); ok {
-		principal, err = source.verifiedCredentialPrincipal(ctx, header)
+		principal, _, err = source.verifiedCredentialPrincipal(ctx, header)
 		if err != nil {
 			if errors.Is(err, ErrUnauthorized) {
 				epoch.retired = true
 				epoch.cancel()
+				return credentialFault(err)
 			}
-			return credentialFault(err)
+			// On a review-based epoch the provider proof is not this epoch's
+			// principal source: its failure changes nothing, and review
+			// decides below.
+			if epoch.reviewPrincipal == "" {
+				return credentialFault(err)
+			}
+			principal = ""
 		}
 	} else if source, ok := service.client.credentials.(interface{ credentialPrincipal() string }); ok {
 		principal = source.credentialPrincipal()
 	}
+	previousReview := epoch.reviewPrincipal
 	// A Kubernetes-authenticated UserInfo includes groups, UID and extras.
 	// A same subject or provider display name alone cannot prove equivalence.
 	if epoch.reviewPrincipal != "" && subtle.ConstantTimeCompare(fingerprint[:], epoch.reviewFingerprint[:]) == 1 {
@@ -314,12 +489,18 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 	sameFingerprint := subtle.ConstantTimeCompare(fingerprint[:], epoch.fingerprint[:]) == 1
 	samePrincipal := subtle.ConstantTimeCompare(principalHash[:], epoch.principal[:]) == 1
 	if epoch.initialized && ((!sameFingerprint && !(known && epoch.known && samePrincipal)) || known != epoch.known || !samePrincipal) {
+		if known && epoch.known && !samePrincipal {
+			service.client.noteIdentityChange(service.scope.ClusterID, changedIdentityFields(previousReview, principal))
+		}
 		epoch.renewal = true
 		epoch.retired = true
 		epoch.cancel()
 		return ErrCredentialUnavailable
 	}
 	if !epoch.initialized || !sameFingerprint {
+		if epoch.initialized && known {
+			service.client.noteIdentityKept(service.scope.ClusterID)
+		}
 		epoch.requestGeneration.Add(1)
 	}
 	epoch.initialized, epoch.fingerprint, epoch.principal, epoch.known = true, fingerprint, principalHash, known
@@ -396,7 +577,8 @@ func (client *Client) selfSubjectPrincipal(ctx context.Context, header string, c
 	defer closeTransport()
 	response, err := reviewer.Do(request)
 	if err != nil {
-		return "", ErrCredentialUnavailable
+		// The typed failure still unwraps to ErrCredentialUnavailable.
+		return "", proofTransportError(err)
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
@@ -404,6 +586,9 @@ func (client *Client) selfSubjectPrincipal(ctx context.Context, header string, c
 		return "", errSelfSubjectReviewUnsupported
 	case http.StatusUnauthorized:
 		return "", ErrUnauthorized
+	}
+	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 {
+		return "", proofStatusError(response, time.Now())
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return "", ErrCredentialUnavailable
@@ -444,56 +629,178 @@ func (client *Client) selfSubjectPrincipal(ctx context.Context, header string, c
 	}
 	return "self-subject-review:" + string(identity), nil
 }
+
+// Authorization returns the current token while it is valid with a margin
+// before its expiry, and never waits on a refresh to do so. A refresh starts
+// in the background when the token enters its renewal window; it runs on the
+// source's own context, bounded by tokenRefreshTimeout, so its outcome is
+// always recorded and its backoff spaces the next one. A caller with no
+// servable token waits for the refresh in flight up to its own deadline; at
+// that deadline it is told the token host has not answered, and nothing is
+// recorded. A failed refresh with no servable token answers its recorded
+// class at once.
 func (source *expiringBearerSource) Authorization(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	source.lockOnce.Do(func() {
-		source.lock = make(chan struct{}, 1)
-		source.lock <- struct{}{}
-	})
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-source.lock:
-	}
-	defer func() { source.lock <- struct{}{} }()
+	source.mu.Lock()
 	now := source.now()
-	if now.Before(source.retryAt) {
-		return "", credentialFault(ErrCredentialUnavailable)
+	if source.servableLocked(now) {
+		header := source.header
+		source.startRefreshLocked(now)
+		source.mu.Unlock()
+		return header, nil
 	}
-	if source.header != "" && now.Add(source.skew).Before(source.expires) {
+	source.startRefreshLocked(now)
+	wait := source.inflight
+	if wait == nil {
+		err := source.recordedErrorLocked()
+		source.mu.Unlock()
+		return "", err
+	}
+	source.mu.Unlock()
+	var bound <-chan time.Time
+	if limit, ok := ctx.Value(tokenWaitKey{}).(time.Duration); ok && limit > 0 {
+		timer := time.NewTimer(limit)
+		defer timer.Stop()
+		bound = timer.C
+	}
+	select {
+	case <-wait:
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return "", ctx.Err()
+		}
+		return "", credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
+	case <-bound:
+		return "", credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.servableLocked(source.now()) {
 		return source.header, nil
 	}
-	token, expires, err := source.refresh(ctx)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", credentialFault(err)
+	return "", source.recordedErrorLocked()
+}
+
+// servableLocked reports whether the current token may be sent: it was not
+// rejected and stays valid for proofGraceMargin, so transit time or a
+// cluster clock a little ahead cannot turn it into a rejection.
+func (source *expiringBearerSource) servableLocked(now time.Time) bool {
+	return source.header != "" && now.Add(proofGraceMargin).Before(source.expires)
+}
+
+// startRefreshLocked starts one background refresh when the token is
+// missing or inside its renewal window, none is running, the backoff has
+// passed and the source is open.
+func (source *expiringBearerSource) startRefreshLocked(now time.Time) {
+	renewAt := max(source.skew, proofGraceMargin)
+	if source.header != "" && now.Add(renewAt).Before(source.expires) {
+		return
+	}
+	if source.inflight != nil || now.Before(source.retryAt) || source.closed {
+		return
+	}
+	if source.lifetime == nil {
+		source.lifetime, source.stop = context.WithCancel(context.Background())
+	}
+	timeout := source.refreshTimeout
+	if timeout <= 0 {
+		timeout = tokenRefreshTimeout
+	}
+	ctx, cancel := context.WithTimeout(source.lifetime, timeout)
+	done := make(chan struct{})
+	source.inflight = done
+	go func() {
+		defer cancel()
+		token, expires, err := source.refresh(ctx)
+		source.mu.Lock()
+		defer close(done)
+		defer source.mu.Unlock()
+		source.inflight = nil
+		source.recordLocked(ctx, token, expires, err)
+	}()
+}
+
+// recordLocked records a refresh outcome. A refresh the source's Close ended
+// records nothing.
+func (source *expiringBearerSource) recordLocked(ctx context.Context, token string, expires time.Time, err error) {
+	now := source.now()
+	if err == nil {
+		header, headerErr := bearerHeader(token)
+		if headerErr != nil || !expires.After(now) {
+			err = errors.New("kubernetes: credential provider returned an invalid token")
+		} else {
+			if now.Add(proofGraceMargin).Before(expires) {
+				source.header, source.expires = header, expires
+				source.current.Store(&expiringToken{header: header, expires: expires})
+			}
+			if now.Add(max(source.skew, proofGraceMargin)).Before(expires) {
+				source.retryAt, source.failures, source.unreachable = time.Time{}, 0, false
+				return
+			}
+			// A token that arrives already inside its renewal window would
+			// start the next refresh at once. It counts as an invalid answer
+			// from the provider, so the backoff spaces the next refresh.
+			err = errors.New("kubernetes: credential provider returned a token that expires too soon")
 		}
-		source.failures++
-		source.retryAt = now.Add(time.Second * time.Duration(1<<min(source.failures-1, 6)))
-		return "", credentialFault(ErrCredentialUnavailable)
 	}
-	header, err := bearerHeader(token)
-	if err != nil || !expires.After(now) {
-		return "", credentialFault(errors.New("kubernetes: credential provider returned an invalid token"))
+	if source.closed {
+		return
 	}
-	source.header = header
-	source.expires = expires
-	source.retryAt, source.failures = time.Time{}, 0
-	return header, nil
+	source.failures++
+	source.retryAt = now.Add(time.Second * time.Duration(1<<min(source.failures-1, 6)))
+	// No answer from the host (a transport error, the refresh's own timeout,
+	// 429 or 5xx) is retried as a host outage; anything else is definite.
+	source.unreachable = errors.Is(err, ErrTokenEndpointUnavailable) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil
+}
+
+// pendingError is nil while the current token may be sent. Otherwise it is
+// what a caller would be told now: the token class while a refresh waits on
+// the token host, is about to start, or the host gave no answer; the
+// recorded definite answer during its backoff.
+func (source *expiringBearerSource) pendingError() error {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	now := source.now()
+	if source.servableLocked(now) {
+		return nil
+	}
+	if source.inflight == nil && now.Before(source.retryAt) && !source.unreachable {
+		return source.recordedErrorLocked()
+	}
+	return credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
+}
+
+// recordedErrorLocked is the answer while no token is servable and no
+// refresh is running.
+func (source *expiringBearerSource) recordedErrorLocked() error {
+	if source.unreachable {
+		return credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
+	}
+	return credentialFault(ErrCredentialUnavailable)
+}
+
+// closeSource stops the refresh in flight and any later one.
+func (source *expiringBearerSource) closeSource() {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	source.closed = true
+	if source.stop != nil {
+		source.stop()
+	}
 }
 
 // rejectBearer invalidates only the token that actually received the rejection.
-// Waiting for an in-progress refresh cannot invalidate its newer result.
+// A refresh in progress cannot be invalidated by it: its newer token is kept.
 func (source *expiringBearerSource) rejectBearer(header string) bool {
-	source.lockOnce.Do(func() { source.lock = make(chan struct{}, 1); source.lock <- struct{}{} })
-	<-source.lock
-	defer func() { source.lock <- struct{}{} }()
+	source.mu.Lock()
+	defer source.mu.Unlock()
 	if header == "" || subtle.ConstantTimeCompare([]byte(header), []byte(source.header)) != 1 {
 		return false
 	}
 	source.header, source.expires = "", time.Time{}
+	source.current.Store(nil)
 	return true
 }
 
@@ -508,6 +815,10 @@ func (source *credentialSource) Authorization(ctx context.Context) (string, erro
 	header, err := source.authorization(ctx)
 	return header, credentialFault(err)
 }
+
+// rotating reports false: a static token or certificate changes only when
+// the operator changes it.
+func (source *credentialSource) rotating() bool { return false }
 
 func (source *credentialSource) ClientCertificate(info *tls.CertificateRequestInfo) (*tls.Certificate, error) {
 	if source == nil || source.certificate == nil {
@@ -555,12 +866,21 @@ func (source *tokenFileSource) ClientCertificate(*tls.CertificateRequestInfo) (*
 	return new(tls.Certificate), nil
 }
 
-func (source *tokenFileSource) verifiedCredentialPrincipal(ctx context.Context, header string) (string, error) {
+// rotating reports that the token file is re-read and may change.
+func (source *tokenFileSource) rotating() bool { return true }
+
+func (source *tokenFileSource) verifiedCredentialPrincipal(ctx context.Context, header string) (string, proofOutcome, error) {
 	if source.verifier == nil {
-		return "", nil
+		return "", proofNotApplicable, nil
 	}
 	principal, err := source.verifier.verify(ctx, strings.TrimPrefix(header, "Bearer "))
-	return principal, credentialFault(err)
+	switch {
+	case err != nil:
+		return "", proofUnavailable, credentialFault(err)
+	case principal == "":
+		return "", proofNotApplicable, nil
+	}
+	return principal, proofProven, nil
 }
 
 func clientCertificateCredential(certificateFile, keyFile string, certificateData, keyData []byte) (CredentialSource, error) {

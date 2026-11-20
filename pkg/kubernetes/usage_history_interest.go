@@ -3,11 +3,11 @@ package kubernetes
 import (
 	"context"
 	"errors"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -68,7 +68,7 @@ func (service *Service) queueUsageInterest(item usageInterest) {
 		if len(state.workers) >= 16 {
 			state.Unlock()
 			service.changes.mu.Unlock()
-			log.Printf("kubernetes: usage history interest worker limit reached")
+			logging.Debugf("kubernetes: usage history interest worker limit reached")
 			return
 		}
 		ctx, cancel := context.WithCancel(service.identity.ctx)
@@ -101,7 +101,7 @@ func (service *Service) queueUsageInterest(item usageInterest) {
 	previous, exists := worker.pending[id]
 	if !exists && len(worker.pending) >= usageHistoryPods {
 		if !worker.overflowLogged {
-			log.Printf("kubernetes: usage history interest queue limit reached")
+			logging.Debugf("kubernetes: usage history interest queue limit reached")
 			worker.overflowLogged = true
 		}
 	} else {
@@ -145,7 +145,7 @@ func (worker *usageInterestWorker) failed(stage string, err error) {
 	if errors.Is(err, errUsageInterestContention) {
 		code = "storage_conflict"
 	}
-	log.Printf("kubernetes: usage history bridge %s failed: code=%s; pending interests retained", stage, code)
+	logging.Debugf("kubernetes: usage history bridge %s failed: code=%s; pending interests retained", stage, code)
 }
 
 func (service *Service) runUsageInterestWorker(worker *usageInterestWorker) {

@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -214,7 +214,7 @@ func (service *Service) importUsageInterest(ctx context.Context, now time.Time) 
 	entries, _, err := readUsageManifest(provider, usageBridgePrefix(service.cacheKey())+"interest")
 	if err != nil || ctx.Err() != nil {
 		if err != nil && ctx.Err() == nil {
-			log.Printf("kubernetes: usage history bridge interest_read failed: code=%s", DiagnoseError(err).Code)
+			logging.Debugf("kubernetes: usage history bridge interest_read failed: code=%s", DiagnoseError(err).Code)
 		}
 		return
 	}
@@ -260,7 +260,7 @@ func (service *Service) publishUsageSamples(ctx context.Context, publications ma
 	}
 	if err := service.updateUsageManifest(ctx, provider, updates, now); err != nil {
 		if ctx.Err() == nil {
-			log.Printf("kubernetes: usage history bridge snapshot_manifest failed: code=%s", DiagnoseError(err).Code)
+			logging.Debugf("kubernetes: usage history bridge snapshot_manifest failed: code=%s", DiagnoseError(err).Code)
 		}
 		return
 	}
@@ -302,7 +302,7 @@ func (service *Service) publishUsageSamples(ctx context.Context, publications ma
 			})
 			if err != nil {
 				if ctx.Err() == nil {
-					log.Printf("kubernetes: usage history bridge snapshot_write failed: code=%s", DiagnoseError(err).Code)
+					logging.Debugf("kubernetes: usage history bridge snapshot_write failed: code=%s", DiagnoseError(err).Code)
 				}
 				break
 			}

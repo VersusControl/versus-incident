@@ -306,7 +306,7 @@ func TestEKSBearerCannotOutliveSigningSession(t *testing.T) {
 				t.Fatal("bearer refreshed before effective boundary")
 			}
 			now = expected.Add(-time.Minute)
-			if _, err := source.Authorization(t.Context()); err != nil || calls != 2 {
+			if _, err := authorizeRenewed(t, source); err != nil || calls != 2 {
 				t.Fatal("effective boundary did not retrieve signing credentials")
 			}
 			now = origin.Add(sessionLifetime + time.Second)
@@ -355,14 +355,14 @@ func TestEKSRenewableRoleSessionBeforeAndAfterBearerBoundary(t *testing.T) {
 			}
 			if lifetime > 14*time.Minute {
 				now = now.Add(13 * time.Minute)
-				if _, err = source.Authorization(t.Context()); err != nil || fixture.calls != 1 {
+				if _, err = authorizeRenewed(t, source); err != nil || fixture.calls != 1 {
 					t.Fatal("bearer renewal unnecessarily exchanged role session")
 				}
 				now = now.Add(16 * time.Minute)
 			} else {
 				now = now.Add(2 * time.Minute)
 			}
-			second, err := source.Authorization(t.Context())
+			second, err := authorizeRenewed(t, source)
 			if err != nil || fixture.calls != 2 || second == first {
 				t.Fatalf("role/session renewal failed: calls=%d err=%v", fixture.calls, err)
 			}
@@ -428,7 +428,7 @@ func TestEKSIRSAContainerAndIMDSRenewSessionsAndRecoverProviderOutage(t *testing
 			if err = os.WriteFile(assertionPath, []byte("synthetic-assertion-two"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			second, err := source.Authorization(t.Context())
+			second, err := authorizeRenewed(t, source)
 			if err != nil || second == first {
 				t.Fatalf("session rotation failed: %v", err)
 			}
@@ -441,6 +441,13 @@ func TestEKSIRSAContainerAndIMDSRenewSessionsAndRecoverProviderOutage(t *testing
 			}
 			now = now.Add(2 * time.Minute)
 			outage, fixture.fail = true, true
+			// The session token has not expired yet, so the outage does not
+			// refuse it; once it expires the outage is reported.
+			if still, err := source.Authorization(t.Context()); err != nil || still != second {
+				t.Fatalf("provider outage refused a session token that has not expired: %v", err)
+			}
+			settleRefresh(t, source.(*expiringBearerSource))
+			now = now.Add(time.Minute + time.Second)
 			if _, err = source.Authorization(t.Context()); err == nil || strings.Contains(err.Error(), "synthetic metadata") || strings.Contains(err.Error(), "synthetic STS") {
 				t.Fatal("provider outage was hidden or leaked details")
 			}

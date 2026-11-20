@@ -511,3 +511,50 @@ func TestKubernetesSyncHealthRevokedCredentialKeepsRequestOrg(t *testing.T) {
 		}
 	}
 }
+
+// proofOutage is a renewal whose identity proof could not be completed. It
+// unwraps to the credential fault the kubernetes package returns for it.
+type proofOutage struct{}
+
+func (proofOutage) Error() string                { return "kubernetes: credential identity proof proof_unavailable" }
+func (proofOutage) Unwrap() error                { return kubernetes.ErrCredentialUnavailable }
+func (proofOutage) CredentialProofFailure() bool { return true }
+
+// A renewal whose proof host does not answer is not a dead credential: the
+// Overview keeps the proof's own code instead of naming the credential
+// unresolved, is not answered 503, and never asks for a rotation.
+func TestKubernetesOverviewDuringAProofOutageDoesNotBlameTheCredential(t *testing.T) {
+	cluster := newSyncHealthCluster(t, "", func(service *kubernetes.Service) *KubernetesAdminController {
+		controller := NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(service))
+		controller.resolve = func(string, string) (*kubernetes.Service, error) { return nil, proofOutage{} }
+		return controller
+	})
+	status, body := kubernetesAnswer(t, cluster.app, http.MethodGet, "/api/admin/kubernetes/overview?cluster=cluster", "")
+	if status != fiber.StatusBadGateway || kubernetesAnswerCode(t, body) == "connector_credential_unresolved" || strings.Contains(strings.ToLower(string(body)), "rotate") {
+		t.Fatalf("overview during a proof outage status=%d body=%s", status, body)
+	}
+}
+
+// While the cloud token host gives no answer the credential may be fine: the
+// Overview answers the retryable credential_unavailable with the token
+// endpoint remedy, never connector_credential_unresolved or a rotation.
+func TestKubernetesOverviewDuringATokenHostOutageAnswersRetryable(t *testing.T) {
+	outage := fmt.Errorf("%w: %w", kubernetes.ErrCredentialUnavailable, kubernetes.ErrTokenEndpointUnavailable)
+	cluster := newSyncHealthCluster(t, "", func(service *kubernetes.Service) *KubernetesAdminController {
+		controller := NewKubernetesAdminControllerWithRegistry(kubernetes.NewServiceRegistry(service))
+		controller.resolve = func(string, string) (*kubernetes.Service, error) { return nil, outage }
+		return controller
+	})
+	status, body := kubernetesAnswer(t, cluster.app, http.MethodGet, "/api/admin/kubernetes/overview?cluster=cluster", "")
+	var answer struct {
+		Code      string `json:"code"`
+		Action    string `json:"action"`
+		Retryable bool   `json:"retryable"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		t.Fatalf("body %s: %v", body, err)
+	}
+	if answer.Code != "credential_unavailable" || !answer.Retryable || !strings.Contains(answer.Action, "token endpoint") || strings.Contains(strings.ToLower(string(body)), "rotate") {
+		t.Fatalf("overview during a token host outage status=%d body=%s", status, body)
+	}
+}
