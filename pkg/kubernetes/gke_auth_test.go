@@ -61,25 +61,29 @@ func TestGKECredentialErrorIsRedacted(t *testing.T) {
 	}
 }
 
-type contextCheckingTokenSource struct {
-	want context.Context
-}
-
 type gkeCallerContextKey struct{}
 
-func (source contextCheckingTokenSource) Token(ctx context.Context) (*oauth2.Token, error) {
-	if ctx != source.want {
-		return nil, errors.New("caller context was not forwarded")
-	}
-	return &oauth2.Token{AccessToken: "context-token", Expiry: time.Now().Add(time.Hour)}, nil
-}
-
-func TestGKESourceForwardsCallerContext(t *testing.T) {
+// The token refresh runs on the source's own context, bounded by the refresh
+// timeout, never on a caller's: a caller that gives up does not end it, so
+// its outcome is always recorded.
+func TestGKESourceRefreshesOnItsOwnContext(t *testing.T) {
 	ctx := context.WithValue(context.Background(), gkeCallerContextKey{}, "caller")
-	source := newGKESource(contextCheckingTokenSource{want: ctx}, time.Now)
+	source := newGKESource(ownContextTokenSource{}, time.Now)
 	if _, err := source.Authorization(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+type ownContextTokenSource struct{}
+
+func (ownContextTokenSource) Token(ctx context.Context) (*oauth2.Token, error) {
+	if ctx.Value(gkeCallerContextKey{}) != nil {
+		return nil, errors.New("refresh ran on the caller's context")
+	}
+	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > tokenRefreshTimeout {
+		return nil, errors.New("refresh is not bounded by the refresh timeout")
+	}
+	return &oauth2.Token{AccessToken: "own-context-token", Expiry: time.Now().Add(time.Hour)}, nil
 }
 
 func TestGKECredentialEndpointsAreClosed(t *testing.T) {

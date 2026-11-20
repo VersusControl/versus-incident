@@ -3,9 +3,10 @@ package kubernetes
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"maps"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/google/uuid"
 )
@@ -154,7 +156,7 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 	defer func() {
 		if ownedLease != nil {
 			if err := ownedLease.release(); err != nil {
-				log.Printf("kubernetes: inventory lease release deferred")
+				logging.Debugf("kubernetes: inventory lease release deferred")
 			}
 		}
 	}()
@@ -318,11 +320,15 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			service.identity.mu.Unlock()
 			// A storage failure or a lease outcome is not a credential or cluster
 			// failure, so the credential recovery gate stays open.
-			if !renewal && countsAgainstCredential(err) {
+			credentialFailure := !renewal && countsAgainstCredential(err)
+			if credentialFailure {
 				service.recovery.failed(err, service.client, service.scope.OrgID)
 			}
 			index = nil
-			service.logInventoryCycle(err)
+			// The credential check above already warns about a credential
+			// failure, and a routine renewal is not a failure to act on, so
+			// the cycle adds only its debug line for either.
+			service.logInventoryCycle(err, !credentialFailure && !renewal)
 			var unanswered restoreProofUnanswered
 			cache.mu.Lock()
 			if errors.As(err, &unanswered) && len(cache.generation.View.Kinds) == 0 {
@@ -331,9 +337,11 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				cache.failed = false
 				if time.Since(cache.keptStoredLogged) >= keptStoredLogInterval {
 					cache.keptStoredLogged = time.Now()
-					log.Printf("kubernetes: inventory restore unanswered, stored generation kept class=%s", class)
+					logging.Debugf("kubernetes: inventory restore unanswered, stored generation kept class=%s", class)
 				}
-			} else {
+			} else if !errors.Is(err, errEpochUpgraded) {
+				// An epoch that ended because its token was proven is
+				// stopping, not failing: its successor takes this inventory.
 				cache.failed, cache.failedClass = true, class
 			}
 			if class == "forbidden" || class == "unauthorized" {
@@ -343,6 +351,7 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			wait, backoff = backoff, min(service.collectionCadence(15*time.Second), backoff*2)
 		} else {
 			service.clearInventoryCycleLog()
+			service.recovery.reportConnected(service.scope.ClusterID, generation.View.Kinds)
 			backoff = 100 * time.Millisecond
 		}
 		timer := time.NewTimer(wait)
@@ -569,7 +578,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		defer func() {
 			progress.pause(time.Now().UTC())
 			status := progress.snapshot()
-			log.Printf("kubernetes: first sync phase=%s elapsed_s=%.3f connected_s=%.3f listing_s=%.3f building_s=%.3f metrics_s=%.3f remaining=%s", status.Step, time.Since(status.StartedAt).Seconds(), status.PhaseSeconds["connected"], status.PhaseSeconds["listing"], status.PhaseSeconds["building"], status.PhaseSeconds["metrics"], strings.Join(status.RemainingKinds, ","))
+			logging.Debugf("kubernetes: first sync phase=%s elapsed_s=%.3f connected_s=%.3f listing_s=%.3f building_s=%.3f metrics_s=%.3f remaining=%s", status.Step, time.Since(status.StartedAt).Seconds(), status.PhaseSeconds["connected"], status.PhaseSeconds["listing"], status.PhaseSeconds["building"], status.PhaseSeconds["metrics"], strings.Join(status.RemainingKinds, ","))
 		}()
 	}
 	resources := make(map[string][]ProjectedResource, len(generation.Resources))
@@ -1272,9 +1281,73 @@ func inventorySyncError() error { return errors.New("kubernetes: inventory is sy
 // different orgs on the same cluster share one logger, and one org's failure must
 // never suppress or overwrite another org's line. The scope map is bounded, and
 // dropping the oldest bookkeeping costs at most a repeated line.
+//
+// Failures a user can act on are also written as warnings through problems,
+// keyed by org, cluster and class, so a failure that lasts is repeated at most
+// once per throttle window and a credential rotation does not repeat it.
 type inventoryKindLog struct {
 	mu     sync.Mutex
 	scopes map[kubeindex.Scope]map[string]string
+	// problems is created on first use; tests set one with their own clock,
+	// and set now and window to the same clock and window.
+	problems *logging.Throttle
+	now      func() time.Time
+	window   time.Duration
+	// episodes holds, per warning key, the kinds already warned about in the
+	// current failure episode.
+	episodes map[string]*kindEpisode
+}
+
+// kindEpisode is one failure episode of a warning key: every kind warned
+// about since it started, and when its last failing kind recovered. A kind
+// that fails on and off, or recovers while others keep failing, stays in
+// warned, so it is not warned about again until the episode ends: when no
+// kind has failed for one throttle window.
+type kindEpisode struct {
+	warned    map[string]bool
+	clearedAt time.Time
+}
+
+func (state *inventoryKindLog) clock() time.Time {
+	if state.now == nil {
+		return time.Now()
+	}
+	return state.now()
+}
+
+func (state *inventoryKindLog) windowLen() time.Duration {
+	if state.window <= 0 {
+		return logging.DefaultThrottleWindow
+	}
+	return state.window
+}
+
+// episode returns the current failure episode of key, starting a new one
+// when the last one has been clear for a full window. Callers hold the lock.
+func (state *inventoryKindLog) episode(key string, now time.Time) *kindEpisode {
+	if state.episodes == nil {
+		state.episodes = map[string]*kindEpisode{}
+	}
+	episode := state.episodes[key]
+	if episode == nil || !episode.clearedAt.IsZero() && now.Sub(episode.clearedAt) >= state.windowLen() {
+		episode = &kindEpisode{warned: map[string]bool{}}
+		state.episodes[key] = episode
+	}
+	episode.clearedAt = time.Time{}
+	return episode
+}
+
+// cleared notes that no kind fails under key, and forgets the episode once it
+// has been clear for a full window. Callers hold the lock.
+func (state *inventoryKindLog) cleared(key string, now time.Time) {
+	episode := state.episodes[key]
+	switch {
+	case episode == nil:
+	case episode.clearedAt.IsZero():
+		episode.clearedAt = now
+	case now.Sub(episode.clearedAt) >= state.windowLen():
+		delete(state.episodes, key)
+	}
 }
 
 const (
@@ -1286,6 +1359,32 @@ const (
 
 func newInventoryKindLog() *inventoryKindLog {
 	return &inventoryKindLog{scopes: make(map[kubeindex.Scope]map[string]string)}
+}
+
+// throttle returns the warning throttle. Callers hold the lock.
+func (state *inventoryKindLog) throttle() *logging.Throttle {
+	if state.problems == nil {
+		state.problems = &logging.Throttle{}
+	}
+	return state.problems
+}
+
+// inventoryProblemClasses are the classes a kind warning can carry, so a kind
+// that stops failing with one of them clears its warning.
+var inventoryProblemClasses = []string{"forbidden", "unauthorized", "timeout", "unavailable", "record_limit", "record_rejected", "incomplete_pages"}
+
+// inventoryKindProblem reports whether a kind failing with class is worth a
+// warning. A timeout counts only for Namespace and Pod: on another kind it is
+// usually one slow list that the next cycle retries, while Namespace or Pod
+// timing out means the API server itself is not answering.
+func inventoryKindProblem(kind, class string) bool {
+	if _, _, ok := problemCause(class, true); !ok {
+		return false
+	}
+	if class == "timeout" {
+		return kind == "Namespace" || kind == "Pod"
+	}
+	return true
 }
 
 // entries returns the bookkeeping for one scope. Callers hold the lock.
@@ -1304,7 +1403,8 @@ func (state *inventoryKindLog) entries(scope kubeindex.Scope) map[string]string 
 	return entries
 }
 
-// report writes one line for every kind whose reported state changed.
+// report writes one debug line for every kind whose reported state changed,
+// and one warning per failure class that names the kinds failing with it.
 func (state *inventoryKindLog) report(scope kubeindex.Scope, kinds map[string]kubeindex.KindStatus) {
 	if state == nil {
 		return
@@ -1317,32 +1417,76 @@ func (state *inventoryKindLog) report(scope kubeindex.Scope, kinds map[string]ku
 		names = append(names, kind)
 	}
 	sort.Strings(names)
+	failing := map[string][]string{}
 	for _, kind := range names {
 		status := kinds[kind]
+		if inventoryKindProblem(kind, status.Error) {
+			failing[status.Error] = append(failing[status.Error], kind)
+		}
 		signature := status.State + "|" + status.Error + "|" + strconv.Itoa(status.Skipped) + "|" + strconv.FormatBool(status.Absent)
 		if last[kind] == signature {
 			continue
 		}
 		last[kind] = signature
-		log.Print(inventoryKindLine(kind, status))
+		logging.Debugf("%s", inventoryKindLine(kind, status))
+	}
+	throttle := state.throttle()
+	now := state.clock()
+	for _, class := range inventoryProblemClasses {
+		key := problemKey(scope.OrgID, scope.ClusterID, "kinds|"+class)
+		failed := failing[class]
+		if len(failed) == 0 {
+			state.cleared(key, now)
+			throttle.Clear(key, "kubernetes: cluster %q reads every kind without %s again", scope.ClusterID, class)
+			continue
+		}
+		episode := state.episode(key, now)
+		for _, kind := range failed {
+			episode.warned[kind] = true
+		}
+		warned := make([]string, 0, len(episode.warned))
+		for kind := range episode.warned {
+			warned = append(warned, kind)
+		}
+		sort.Strings(warned)
+		// Namespace or Pod failing with the rest means the API server itself
+		// is not answering, so the hint is the cluster's, not the kinds'.
+		perKind := !slices.Contains(failed, "Namespace") && !slices.Contains(failed, "Pod")
+		cause, check, _ := problemCause(class, perKind)
+		list := problemKindList(failed)
+		// The kinds warned about in this episode are the cause the throttle
+		// compares, so only a kind that starts failing outside them is
+		// reported at once; one that fails on and off is not.
+		throttle.Fail(slog.LevelWarn, key, strings.Join(warned, ","), "kubernetes: cluster %q cannot read kind=%s (%s); %s", scope.ClusterID, list, cause, check)
 	}
 }
 
-// cycle writes one line when the inventory cycle itself fails. A cycle failure
-// is not a kind: it names the class only.
-func (state *inventoryKindLog) cycle(scope kubeindex.Scope, err error) {
+// cycle writes one debug line when the inventory cycle itself fails or changes
+// class. A cycle failure is not a kind: it names the class only. When warn is
+// set and the cause needs action, it also writes a throttled warning naming
+// the cluster, the cause and what to check.
+func (state *inventoryKindLog) cycle(scope kubeindex.Scope, err error, warn bool) {
 	if state == nil || err == nil {
 		return
 	}
 	class := errorClass(err)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if warn {
+		reason := recoveryReason(err, "")
+		if reason == "collection_unavailable" {
+			reason = class
+		}
+		if cause, check, ok := problemCause(reason, false); ok {
+			state.throttle().Fail(slog.LevelWarn, problemKey(scope.OrgID, scope.ClusterID, "cycle"), reason, "kubernetes: cluster %q inventory cycle failed class=%s (%s); %s", scope.ClusterID, boundedLogToken(reason), cause, check)
+		}
+	}
 	last := state.entries(scope)
 	if last[inventoryCycleLogKey] == class {
 		return
 	}
 	last[inventoryCycleLogKey] = class
-	log.Printf("kubernetes: inventory cycle failed class=%s", class)
+	logging.Debugf("kubernetes: inventory cycle failed class=%s", class)
 }
 
 // cycleSucceeded clears the cycle failure mark, so a failure that returns after a
@@ -1354,6 +1498,7 @@ func (state *inventoryKindLog) cycleSucceeded(scope kubeindex.Scope) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	delete(state.entries(scope), inventoryCycleLogKey)
+	state.throttle().Clear(problemKey(scope.OrgID, scope.ClusterID, "cycle"), "kubernetes: cluster %q inventory cycle recovered", scope.ClusterID)
 }
 
 // inventoryKindLine renders a kind state without any of the objects it holds.
@@ -1401,11 +1546,11 @@ func (service *Service) logInventoryKinds(kinds map[string]kubeindex.KindStatus)
 	service.inventoryLog.report(service.indexScope(), kinds)
 }
 
-func (service *Service) logInventoryCycle(cause error) {
+func (service *Service) logInventoryCycle(cause error, warn bool) {
 	if service == nil {
 		return
 	}
-	service.inventoryLog.cycle(service.indexScope(), cause)
+	service.inventoryLog.cycle(service.indexScope(), cause, warn)
 }
 
 func (service *Service) clearInventoryCycleLog() {

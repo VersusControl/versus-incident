@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"cmp"
 	"container/heap"
-	"log"
 	"slices"
 	"time"
 
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -216,7 +216,7 @@ func newestCaptureRecordFirst(a, b storage.EvidenceRecord) int {
 // dropped_pod_churn counts Pod and Event creations and deletions;
 // dropped_changes counts every other change and crash termination.
 func logCaptureTrim(trim captureTrim) {
-	log.Printf("kubernetes: history capture over the save limit, kept newest offered=%d kept=%d dropped=%d dropped_from=%s dropped_to=%s dropped_changes=%d dropped_pod_churn=%d",
+	logging.Debugf("kubernetes: history capture over the save limit, kept newest offered=%d kept=%d dropped=%d dropped_from=%s dropped_to=%s dropped_changes=%d dropped_pod_churn=%d",
 		trim.offered, trim.kept, trim.droppedTotal(), trim.from.UTC().Format(time.RFC3339Nano), trim.to.UTC().Format(time.RFC3339Nano),
 		trim.dropped[captureTierChanges], trim.dropped[captureTierChurn])
 }

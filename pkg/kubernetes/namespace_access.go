@@ -3,7 +3,7 @@ package kubernetes
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -430,8 +430,9 @@ func (service *Service) unmatchedExclusions(discovery Discovery) []string {
 	return unmatched
 }
 
-// reportUnmatchedExclusions logs, once per process and cluster, the excluded
-// resource names the cluster does not serve, after its first full discovery.
+// reportUnmatchedExclusions logs, at most once per throttle window for each
+// cluster and name, the excluded resource names the cluster does not serve,
+// after its first full discovery.
 func (service *Service) reportUnmatchedExclusions(cache *inventoryCache, discovery Discovery) {
 	cache.mu.Lock()
 	checked := cache.exclusionsChecked
@@ -441,7 +442,10 @@ func (service *Service) reportUnmatchedExclusions(cache *inventoryCache, discove
 		return
 	}
 	for _, name := range service.unmatchedExclusions(discovery) {
-		log.Printf("kubernetes: exclude_resources entry %q matches no resource this cluster serves; check the plural API name, for example secrets", boundedLogToken(name))
+		// Through the shared throttle, so a successor service after a
+		// credential rotation does not warn again.
+		token := boundedLogToken(name)
+		problems().Fail(slog.LevelWarn, problemKey(service.scope.OrgID, service.scope.ClusterID, "exclude_resources|"+token), "unmatched", "kubernetes: cluster %q exclude_resources entry %q matches no resource this cluster serves (invalid config); check the plural API name, for example secrets", service.scope.ClusterID, token)
 	}
 }
 

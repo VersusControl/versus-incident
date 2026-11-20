@@ -547,6 +547,12 @@ func TestTwoOSWritersCaptureHistoryAndDeliverAlertsAcrossTakeover(t *testing.T) 
 		page, e := base.(storage.EvidenceStore).QueryEvidence(t.Context(), scope, storage.EvidenceQuery{Since: time.Now().Add(-time.Hour), Until: time.Now(), Type: "issue_opened", Rule: "pod.crash_loop", Limit: 100})
 		return e == nil && page.Total == 2
 	})
+	alphaHistory := "/api/admin/kubernetes/issues?cluster=alpha&since=" + time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	wait("authorized alpha history serves the captured occurrences", 30, func() bool {
+		code, b := request(second, "GET", alphaHistory, true)
+		items, _ := b["items"].([]any)
+		return code == 200 && len(items) > 0
+	})
 	alphaDenied.Store(true)
 	wait("actual current alpha credential permission loss fails closed", 60, func() bool {
 		code, _ := request(second, "GET", "/api/admin/kubernetes/workloads?cluster=alpha", true)
@@ -557,8 +563,18 @@ func TestTwoOSWritersCaptureHistoryAndDeliverAlertsAcrossTakeover(t *testing.T) 
 	} else if items, _ := b["items"].([]any); len(items) == 0 {
 		t.Fatal("alpha permission failure stalled healthy beta")
 	}
-	if code, _ := request(second, "GET", "/api/admin/kubernetes/issues?cluster=alpha&since="+time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), true); code != 403 {
-		t.Fatal("current denied alpha replayed history")
+	// Authority is proved per kind, on each kind's own inventory cadence, so the
+	// denial reaches the remaining kinds over the following cycles. From the
+	// moment a kind is denied its saved history is withheld: the read either
+	// refuses outright (no kind is readable any more) or serves no occurrence of
+	// the denied kinds, never the occurrences captured before the denial.
+	if code, b := request(second, "GET", alphaHistory, true); code != 403 {
+		items, _ := b["items"].([]any)
+		if code != 200 || len(items) != 0 {
+			t.Fatalf("current denied alpha replayed history: HTTP%d body=%v", code, b)
+		}
+	} else if b["code"] != "history_authority_denied" {
+		t.Fatalf("current denied alpha history refusal: HTTP%d body=%v", code, b)
 	}
 	alphaDenied.Store(false)
 	wait("same-credential alpha recovers without restarting surviving writer", 60, func() bool {

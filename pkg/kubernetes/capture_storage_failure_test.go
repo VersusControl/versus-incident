@@ -653,8 +653,8 @@ func TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica(t *testing.T) {
 // proofFailingSource resolves a token but cannot prove whose it is.
 type proofFailingSource struct{ *credentialSource }
 
-func (proofFailingSource) verifiedCredentialPrincipal(context.Context, string) (string, error) {
-	return "", errors.New("principal proof endpoint refused the token")
+func (proofFailingSource) verifiedCredentialPrincipal(context.Context, string) (string, proofOutcome, error) {
+	return "", proofUnavailable, errors.New("principal proof endpoint refused the token")
 }
 
 func TestEveryCredentialFailureClosesTheGate(t *testing.T) {

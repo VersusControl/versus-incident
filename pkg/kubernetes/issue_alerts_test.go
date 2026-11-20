@@ -3,9 +3,13 @@ package kubernetes
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
+	"maps"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -699,6 +703,7 @@ func TestIssueAlertEnrichmentSharedOnceAndHistoryFailureDegradesOnlyOptionalCont
 	previous := log.Writer()
 	log.SetOutput(&logged)
 	defer log.SetOutput(previous)
+	setLogLevel(t, "debug")
 	var alerts []IssueAlert
 	s.SetIssueAlertSink(func(_ context.Context, a IssueAlert) (Outcome, error) {
 		alerts = append(alerts, a)
@@ -762,5 +767,765 @@ func TestIssueAlertWorkerBoundAndCancellation(t *testing.T) {
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("worker leaked")
+	}
+}
+
+// crashingDeploymentSnapshot is a ready snapshot in which each named
+// Deployment has one Pod in a crash loop that terminated at brokeAt.
+func crashingDeploymentSnapshot(brokeAt time.Time, names ...string) kubeindex.Snapshot {
+	childAt := time.Now().UTC().Add(-time.Minute)
+	snapshot := kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{
+		"Pod":        {State: "ready", ObservedAt: childAt, CompletedAt: childAt.Add(time.Second)},
+		"ReplicaSet": {State: "ready", ObservedAt: childAt.Add(2 * time.Second), CompletedAt: childAt.Add(3 * time.Second)},
+		"Deployment": {State: "ready"},
+	}}
+	for _, name := range names {
+		snapshot.Records = append(snapshot.Records,
+			kubeindex.Record{
+				Kind: "Pod", UID: name + "-pod", Name: name + "-pod", Namespace: "shop", OwnerObservedAt: childAt.Add(time.Second),
+				Owners:     []kubeindex.OwnerRef{{Kind: "ReplicaSet", UID: name + "-replica", Name: name + "-replica", Controller: true, ControllerKnown: true}},
+				Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", TerminatedAt: brokeAt, TerminatedReason: "Error", ExitCode: 1}},
+			},
+			kubeindex.Record{
+				Kind: "ReplicaSet", UID: name + "-replica", Name: name + "-replica", Namespace: "shop", Replicas: 1, OwnerObservedAt: childAt.Add(3 * time.Second),
+				Owners: []kubeindex.OwnerRef{{Kind: "Deployment", UID: name, Name: name, Controller: true, ControllerKnown: true}},
+			},
+			kubeindex.Record{Kind: "Deployment", UID: name, Name: name, Namespace: "shop", Replicas: 1},
+		)
+	}
+	return snapshot
+}
+
+// Alerts enabled by an earlier release on a cluster it captured on demand
+// only were never evaluated. When the cluster turns continuous, what its first
+// cycle finds was already broken: it is the baseline and sends nothing. A
+// problem that starts after that alerts once. Alerts enabled on a continuous
+// cluster keep alerting from their first cycle.
+func TestIssueAlertsFirstContinuousCycleAfterDemandCaptureIsTheBaseline(t *testing.T) {
+	brokeAt := time.Now().UTC().Add(-time.Minute)
+	t.Run("enabled_before_continuous_capture", func(t *testing.T) {
+		s, alerts := issueAlertCaptureService(t)
+		provider, key := s.logSettingsStore()
+		if err := breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+			state.Settings.Alerts = breaklogs.Alerts{Enabled: true, Level: "warning", EnabledAt: time.Now().UTC().Add(-time.Hour), UpdatedBy: "actor"}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		runIssueAlertCaptureCycle(t, s, crashingDeploymentSnapshot(brokeAt, "payments-worker", "crashloop"))
+		select {
+		case alert := <-alerts:
+			t.Fatalf("the first continuous cycle alerted on a workload that was already broken: %+v", alert)
+		default:
+		}
+		runIssueAlertCaptureCycle(t, s, crashingDeploymentSnapshot(brokeAt, "payments-worker", "crashloop", "oomkill"))
+		select {
+		case alert := <-alerts:
+			if alert.Workload != "oomkill" {
+				t.Fatalf("alert after the baseline = %+v, want the new break only", alert)
+			}
+		default:
+			t.Fatal("a break that started after the baseline did not alert")
+		}
+		select {
+		case alert := <-alerts:
+			t.Fatalf("a second alert after the baseline: %+v", alert)
+		default:
+		}
+	})
+	t.Run("enabled_on_a_continuous_cluster", func(t *testing.T) {
+		s, alerts := issueAlertCaptureService(t)
+		runIssueAlertCaptureCycle(t, s, crashingDeploymentSnapshot(time.Now().UTC(), "checkout"))
+		select {
+		case <-alerts:
+		default:
+			t.Fatal("alerts enabled on a continuous cluster missed their first break")
+		}
+	})
+}
+
+// The baseline of breaks that existed before alerting could see them closes
+// only on a complete cycle. A first continuous cycle whose Deployments are
+// still warming defers the break to its root, and one whose Pods are not
+// listed yet sees no break at all: neither sends anything nor closes the
+// baseline, so the break joins it on the first complete cycle instead of
+// alerting then. Only that cycle records when alerts began to be evaluated.
+func TestIssueAlertsBaselineClosesOnlyOnACompleteCycle(t *testing.T) {
+	brokeAt := time.Now().UTC().Add(-time.Minute)
+	cases := map[string]func(kubeindex.Snapshot) kubeindex.Snapshot{
+		"deployments_warming": func(full kubeindex.Snapshot) kubeindex.Snapshot {
+			out := kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{
+				"Pod":        full.Kinds["Pod"],
+				"ReplicaSet": full.Kinds["ReplicaSet"],
+				"Deployment": {State: "warming", Error: "syncing"},
+			}}
+			for _, r := range full.Records {
+				if r.Kind != "Deployment" {
+					out.Records = append(out.Records, r)
+				}
+			}
+			return out
+		},
+		"pods_not_listed": func(kubeindex.Snapshot) kubeindex.Snapshot {
+			return kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{
+				"ReplicaSet": {State: "warming", Error: "syncing"}, "Deployment": {State: "warming", Error: "syncing"},
+			}}
+		},
+	}
+	for name, first := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, alerts := issueAlertCaptureService(t)
+			provider, key := s.logSettingsStore()
+			if err := breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+				state.Settings.Alerts = breaklogs.Alerts{Enabled: true, Level: "warning", EnabledAt: time.Now().UTC().Add(-time.Hour), UpdatedBy: "actor"}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			evaluatedFrom := func() time.Time {
+				state, err := breaklogs.LoadSettings(provider, key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return state.Settings.Alerts.EvaluatedFrom
+			}
+			full := crashingDeploymentSnapshot(brokeAt, "payments-worker", "crashloop")
+			runIssueAlertCaptureCycle(t, s, first(full))
+			if !evaluatedFrom().IsZero() {
+				t.Fatal("an incomplete cycle recorded when alerts began to be evaluated")
+			}
+			runIssueAlertCaptureCycle(t, s, full)
+			select {
+			case alert := <-alerts:
+				t.Fatalf("a break that existed before alerting alerted once the cycle completed: workload=%s rule=%s", alert.Workload, alert.Rule)
+			default:
+			}
+			if evaluatedFrom().IsZero() {
+				t.Fatal("the first complete cycle did not record when alerts began to be evaluated")
+			}
+			runIssueAlertCaptureCycle(t, s, crashingDeploymentSnapshot(brokeAt, "payments-worker", "crashloop", "oomkill"))
+			select {
+			case alert := <-alerts:
+				if alert.Workload != "oomkill" {
+					t.Fatalf("alert after the baseline = %s, want the new break only", alert.Workload)
+				}
+			default:
+				t.Fatal("a break that started after the baseline closed did not alert")
+			}
+		})
+	}
+}
+
+// enableAlertsBeforeContinuousCapture records alerts enabled an hour ago and
+// never evaluated, so the first continuous cycles gather the baseline.
+func enableAlertsBeforeContinuousCapture(t *testing.T, s *Service) func() time.Time {
+	t.Helper()
+	provider, key := s.logSettingsStore()
+	if err := breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+		state.Settings.Alerts = breaklogs.Alerts{Enabled: true, Level: "warning", EnabledAt: time.Now().UTC().Add(-time.Hour), UpdatedBy: "actor"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return func() time.Time {
+		state, err := breaklogs.LoadSettings(provider, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state.Settings.Alerts.EvaluatedFrom
+	}
+}
+
+// A captured kind the identity may not list, or lists only inside its
+// namespaces, is a steady gap: waiting does not fill it. The baseline closes
+// on the first cycle that is otherwise complete, so a break that starts later
+// alerts, while the breaks that were already there stay quiet.
+func TestIssueAlertsBaselineClosesWithASteadyListingGap(t *testing.T) {
+	observed := time.Now().UTC().Add(-time.Minute)
+	gaps := map[string]kubeindex.KindStatus{
+		"Node":      {State: "error", Error: "forbidden", Partial: true},
+		"Event":     {State: "error", Error: "forbidden", Partial: true},
+		"ConfigMap": {State: "error", Error: "forbidden", Partial: true},
+		"Secret":    {State: "error", Error: "forbidden", Partial: true},
+		"Service":   {State: "ready", Error: "namespace_scope", Partial: true, ObservedAt: observed},
+	}
+	for kind, gap := range gaps {
+		t.Run(kind+"/"+gap.Error, func(t *testing.T) {
+			s, alerts := issueAlertCaptureService(t)
+			evaluatedFrom := enableAlertsBeforeContinuousCapture(t, s)
+			old := crashingDeploymentSnapshot(observed, "payments-worker")
+			old.Kinds[kind] = gap
+			for range 3 {
+				runIssueAlertCaptureCycle(t, s, old)
+			}
+			select {
+			case alert := <-alerts:
+				t.Fatalf("a break that existed before alerting alerted: workload=%s", alert.Workload)
+			default:
+			}
+			if evaluatedFrom().IsZero() {
+				t.Fatalf("with %s steadily %s the baseline never closed", kind, gap.Error)
+			}
+			later := crashingDeploymentSnapshot(observed, "payments-worker")
+			later.Records = append(later.Records, crashingDeploymentSnapshot(time.Now().UTC(), "checkout").Records...)
+			later.Kinds[kind] = gap
+			runIssueAlertCaptureCycle(t, s, later)
+			select {
+			case alert := <-alerts:
+				if alert.Workload != "checkout" {
+					t.Fatalf("alert after the baseline = %s, want the new break only", alert.Workload)
+				}
+			default:
+				t.Fatalf("with %s steadily %s a break that started after the baseline did not alert", kind, gap.Error)
+			}
+		})
+	}
+}
+
+// Continuous cycles that never complete close the baseline after 15 minutes
+// on the breaks gathered so far, with one debug line and nothing at the
+// default level; alerting never stays off for good.
+func TestIssueAlertsBaselineClosesAfterItsBound(t *testing.T) {
+	logs := captureLogLines(t, "debug")
+	s, alerts := issueAlertCaptureService(t)
+	evaluatedFrom := enableAlertsBeforeContinuousCapture(t, s)
+	clock := newFakeClock()
+	s.alertBaselineClock = clock.Now
+	start := clock.Now()
+	observed := time.Now().UTC().Add(-time.Minute)
+	incomplete := func(names ...string) kubeindex.Snapshot {
+		snapshot := crashingDeploymentSnapshot(observed, names...)
+		// A listing that keeps stopping part way is not a steady gap.
+		snapshot.Kinds["Node"] = kubeindex.KindStatus{State: "ready", Error: "incomplete_pages", Partial: true, ObservedAt: observed}
+		return snapshot
+	}
+	for clock.Now().Sub(start) < alertBaselineBound {
+		runIssueAlertCaptureCycle(t, s, incomplete("payments-worker"))
+		if !evaluatedFrom().IsZero() {
+			t.Fatalf("the baseline closed %s into incomplete cycles, before its bound", clock.Now().Sub(start))
+		}
+		clock.advance(time.Minute)
+	}
+	runIssueAlertCaptureCycle(t, s, incomplete("payments-worker"))
+	select {
+	case alert := <-alerts:
+		t.Fatalf("a break gathered into the baseline alerted: workload=%s", alert.Workload)
+	default:
+	}
+	if evaluatedFrom().IsZero() {
+		t.Fatal("the baseline stayed open past its bound")
+	}
+	clock.advance(time.Minute)
+	later := incomplete("payments-worker")
+	later.Records = append(later.Records, crashingDeploymentSnapshot(time.Now().UTC(), "checkout").Records...)
+	runIssueAlertCaptureCycle(t, s, later)
+	select {
+	case alert := <-alerts:
+		if alert.Workload != "checkout" {
+			t.Fatalf("alert after the bound = %s, want the new break only", alert.Workload)
+		}
+	default:
+		t.Fatal("a break that started after the bound closed the baseline did not alert")
+	}
+	closed := 0
+	for _, line := range logs.all() {
+		if strings.Contains(line, "issue alert baseline closed") {
+			closed++
+		}
+	}
+	if closed != 1 {
+		t.Fatalf("the bound wrote %d baseline lines, want one", closed)
+	}
+	if lines := visible(logs.all()); len(lines) != 0 {
+		t.Fatalf("baselining wrote at the default level: %q", lines)
+	}
+}
+
+// alertWorkload is one Deployment in alertWorkloadSnapshot: crash is a Pod in
+// a crash loop that last terminated at at; unavailable is a Deployment whose
+// Pod is running between restarts, not ready since at; healthy has no break.
+type alertWorkload struct {
+	name, state string
+	at          time.Time
+}
+
+func alertWorkloadSnapshot(workloads ...alertWorkload) kubeindex.Snapshot {
+	childAt := time.Now().UTC().Add(-time.Minute)
+	snapshot := kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{
+		"Pod":        {State: "ready", ObservedAt: childAt, CompletedAt: childAt.Add(time.Second)},
+		"ReplicaSet": {State: "ready", ObservedAt: childAt.Add(2 * time.Second), CompletedAt: childAt.Add(3 * time.Second)},
+		"Deployment": {State: "ready"},
+	}}
+	for _, w := range workloads {
+		pod := kubeindex.Record{
+			Kind: "Pod", UID: w.name + "-pod", Name: w.name + "-pod", Namespace: "shop", OwnerObservedAt: childAt.Add(time.Second), Phase: "Running", ReadyStatus: "True",
+			Owners:     []kubeindex.OwnerRef{{Kind: "ReplicaSet", UID: w.name + "-replica", Name: w.name + "-replica", Controller: true, ControllerKnown: true}},
+			Containers: []kubeindex.ContainerState{{Name: "app"}},
+		}
+		deployment := kubeindex.Record{Kind: "Deployment", UID: w.name, Name: w.name, Namespace: "shop", Replicas: 1, Available: 1, Summary: map[string]string{"available_replicas": "1"}}
+		switch w.state {
+		case "crash":
+			pod.ReadyStatus = "False"
+			pod.Containers = []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", TerminatedAt: w.at, TerminatedReason: "Error", ExitCode: 1, RestartCount: 3}}
+			deployment.Available, deployment.Summary = 0, map[string]string{"available_replicas": "0"}
+		case "unavailable":
+			pod.ReadyStatus, pod.ReadyTransitionAt = "False", w.at
+			pod.Containers = []kubeindex.ContainerState{{Name: "app", RestartCount: 3, StartedAt: w.at.Add(-time.Second)}}
+			deployment.Available, deployment.Summary = 0, map[string]string{"available_replicas": "0"}
+			deployment.AvailableStatus, deployment.AvailableTransitionAt = "False", w.at
+		case "never_ready", "stalled":
+			// A Pod that has never passed its readiness probe: the Deployment
+			// is unavailable with no failure time until its progress deadline
+			// passes at at.
+			pod.ReadyStatus = "False"
+			deployment.Available, deployment.Summary = 0, map[string]string{"available_replicas": "0"}
+			if w.state == "stalled" {
+				deployment.ProgressingStatus, deployment.ProgressingReason, deployment.ProgressingTransitionAt = "False", "ProgressDeadlineExceeded", w.at
+			}
+		}
+		snapshot.Records = append(snapshot.Records, pod,
+			kubeindex.Record{
+				Kind: "ReplicaSet", UID: w.name + "-replica", Name: w.name + "-replica", Namespace: "shop", Replicas: 1, OwnerObservedAt: childAt.Add(3 * time.Second),
+				Owners: []kubeindex.OwnerRef{{Kind: "Deployment", UID: w.name, Name: w.name, Controller: true, ControllerKnown: true}},
+			},
+			deployment,
+		)
+	}
+	return snapshot
+}
+
+// bindAlertClusterUID gives the service the cluster UID its saved history is
+// bound to, as a committed inventory generation does.
+func bindAlertClusterUID(s *Service, uid string) {
+	s.changes.mu.Lock()
+	defer s.changes.mu.Unlock()
+	s.changes.evidenceEnabled = true
+	s.changes.inventories[s.indexScope()] = &inventoryCache{generation: inventoryGeneration{
+		EvidenceScope: storage.EvidenceScope{OrgID: s.scope.OrgID, ClusterID: s.scope.ClusterID, ClusterUID: uid},
+	}}
+}
+
+// issueAlertCaptureServiceOn is issueAlertCaptureService on a shared store,
+// reading through the named credential.
+func issueAlertCaptureServiceOn(t *testing.T, provider storage.Provider, credentialID string) (*Service, <-chan IssueAlert) {
+	t.Helper()
+	s := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "org", ClusterID: "cluster", CredentialID: credentialID})
+	s.SetChangeStorage(provider)
+	s.SetScrubber(breakLogScrubber{})
+	t.Cleanup(s.StopCapture)
+	if err := s.changeStore().ClaimLease("owner", time.Now().UTC(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	close(done)
+	s.changes.captures[s.indexScope()] = &captureLoop{
+		ctx: ctx, cancel: cancel, done: done, owner: "owner", owned: true,
+		status: CaptureStatus{Mode: "continuous"},
+		next:   map[string]time.Time{}, success: map[string]time.Time{}, gapFrom: map[string]time.Time{},
+	}
+	alerts := make(chan IssueAlert, 64)
+	s.SetIssueAlertSink(func(_ context.Context, alert IssueAlert) (Outcome, error) {
+		alerts <- alert
+		return Outcome{NotificationOutcome: "sent"}, nil
+	})
+	return s, alerts
+}
+
+// drainAlerts returns the workloads the sink received since the last call.
+func drainAlerts(alerts <-chan IssueAlert) map[string][]string {
+	got := map[string][]string{}
+	for {
+		select {
+		case alert := <-alerts:
+			got[alert.Workload] = append(got[alert.Workload], alert.Rule)
+		default:
+			return got
+		}
+	}
+}
+
+// After an upgrade the earlier release's alert record, kept per configured
+// cluster, does not stand in for this release's record, which is bound to the
+// cluster UID: the earlier record may not cover what is broken now (its
+// capture was rebuilding, or it never saw a break that started late). The
+// first complete cycle is the baseline, and the earlier record stays exactly
+// as it was for a replica of that release still running alongside.
+func TestIssueAlertsAfterUpgradeTheFirstCompleteCycleIsTheBaseline(t *testing.T) {
+	provider := storage.NewMemory()
+	s, alerts := issueAlertCaptureServiceOn(t, provider, "reader")
+	bindAlertClusterUID(s, "cluster-uid-1")
+	enabledAt := time.Now().UTC().Add(-10 * time.Minute)
+	settingsProvider, settingsKey := s.logSettingsStore()
+	if err := breaklogs.UpdateSettings(settingsProvider, settingsKey, func(state *breaklogs.SettingsState) error {
+		state.Settings.Alerts = breaklogs.Alerts{Enabled: true, Level: "warning", EnabledAt: enabledAt, UpdatedBy: "actor"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	earlier := []byte(fmt.Sprintf(`{"start":%q,"enabled_at":%q,"sent":3,"seen":{},"enriched":{},"suppressed":{},"rollup":false,"rollup_count":0,"rollup_severity":""}`,
+		time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339Nano), enabledAt.Format(time.RFC3339Nano)))
+	if err := provider.WriteBlob(settingsKey+".alert-window", earlier); err != nil {
+		t.Fatal(err)
+	}
+	brokeAt := time.Now().UTC().Add(-3 * time.Minute)
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"nodes-api", "crash", brokeAt}, alertWorkload{"crashloop", "crash", brokeAt}))
+	if got := drainAlerts(alerts); len(got) != 0 {
+		t.Fatalf("the first cycle after the upgrade alerted on workloads already broken: %v", got)
+	}
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"nodes-api", "crash", brokeAt}, alertWorkload{"crashloop", "crash", time.Now().UTC()}, alertWorkload{"oomkill", "crash", time.Now().UTC()}))
+	got := drainAlerts(alerts)
+	if len(got) != 1 || len(got["oomkill"]) == 0 {
+		t.Fatalf("alerts after the baseline = %v, want the new break only", got)
+	}
+	if kept, err := provider.ReadBlob(settingsKey + ".alert-window"); err != nil || !bytes.Equal(kept, earlier) {
+		t.Fatalf("the earlier release's alert record changed: %s err=%v", kept, err)
+	}
+}
+
+// A workload the baseline found broken stays quiet while it stays broken,
+// even when it flips between issue types or its break time moves with every
+// restart, or it was missing from the baseline as the type it shows later. It
+// alerts again only after a complete cycle sees it healthy. A workload that
+// breaks after the baseline keeps the usual rules: each issue type it shows
+// reaches the sink.
+func TestIssueAlertsBaselineHoldsAFlappingWorkload(t *testing.T) {
+	s, alerts := issueAlertCaptureService(t)
+	evaluatedFrom := enableAlertsBeforeContinuousCapture(t, s)
+	at := func(ago time.Duration) time.Time { return time.Now().UTC().Add(-ago) }
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"crashloop", "crash", at(4 * time.Minute)}, alertWorkload{"payments-worker", "unavailable", at(4 * time.Minute)}))
+	if evaluatedFrom().IsZero() {
+		t.Fatal("the first complete cycle did not close the baseline")
+	}
+	flaps := [][]alertWorkload{
+		{{"crashloop", "unavailable", at(3 * time.Minute)}, {"payments-worker", "crash", at(3 * time.Minute)}},
+		{{"crashloop", "crash", at(2 * time.Minute)}, {"payments-worker", "unavailable", at(2 * time.Minute)}},
+		{{"crashloop", "unavailable", at(time.Minute)}, {"payments-worker", "crash", at(time.Minute)}},
+	}
+	for i, cycle := range flaps {
+		runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(cycle...))
+		if got := drainAlerts(alerts); len(got) != 0 {
+			t.Fatalf("flap %d alerted on a workload broken before the baseline: %v", i, got)
+		}
+	}
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"crashloop", "crash", at(30 * time.Second)}, alertWorkload{"payments-worker", "healthy", time.Time{}}, alertWorkload{"oomkill", "crash", at(30 * time.Second)}))
+	if got := drainAlerts(alerts); len(got) != 1 || len(got["oomkill"]) == 0 {
+		t.Fatalf("alerts after the flaps = %v, want the new break only", got)
+	}
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"crashloop", "crash", at(30 * time.Second)}, alertWorkload{"payments-worker", "crash", at(10 * time.Second)}, alertWorkload{"oomkill", "unavailable", at(10 * time.Second)}))
+	got := drainAlerts(alerts)
+	if len(got["crashloop"]) != 0 {
+		t.Fatalf("a workload still broken since before the baseline alerted: %v", got)
+	}
+	if len(got["payments-worker"]) == 0 {
+		t.Fatalf("a workload that broke again after a healthy complete cycle did not alert: %v", got)
+	}
+	if rules := got["oomkill"]; len(rules) != 1 || rules[0] != "workload.unavailable" {
+		t.Fatalf("a workload broken after the baseline that changed issue type reached the sink with %v, want workload.unavailable", rules)
+	}
+}
+
+// The alert record is bound to the cluster UID, not to the credential that
+// reads it. A record written through one principal is found after the
+// principal changes on the same cluster: no new baseline, the workloads held
+// stay held, and a new break alerts at once. The same configured cluster
+// behind a different cluster UID has no record and starts a baseline.
+func TestIssueAlertsRecordSurvivesAPrincipalChangeOnTheSameCluster(t *testing.T) {
+	provider := storage.NewMemory()
+	first, firstAlerts := issueAlertCaptureServiceOn(t, provider, "principal-a")
+	bindAlertClusterUID(first, "cluster-uid-1")
+	enableAlertsBeforeContinuousCapture(t, first)
+	brokeAt := time.Now().UTC().Add(-3 * time.Minute)
+	runIssueAlertCaptureCycle(t, first, alertWorkloadSnapshot(alertWorkload{"crashloop", "crash", brokeAt}))
+	if got := drainAlerts(firstAlerts); len(got) != 0 {
+		t.Fatalf("the baseline alerted: %v", got)
+	}
+	first.StopCapture()
+
+	renewed, renewedAlerts := issueAlertCaptureServiceOn(t, provider, "principal-b")
+	bindAlertClusterUID(renewed, "cluster-uid-1")
+	runIssueAlertCaptureCycle(t, renewed, alertWorkloadSnapshot(alertWorkload{"crashloop", "unavailable", time.Now().UTC()}, alertWorkload{"checkout", "crash", time.Now().UTC()}))
+	if got := drainAlerts(renewedAlerts); len(got) != 1 || len(got["checkout"]) == 0 {
+		t.Fatalf("after the principal change alerts = %v, want the new break only", got)
+	}
+	renewed.StopCapture()
+
+	other, otherAlerts := issueAlertCaptureServiceOn(t, provider, "principal-b")
+	bindAlertClusterUID(other, "cluster-uid-2")
+	runIssueAlertCaptureCycle(t, other, alertWorkloadSnapshot(alertWorkload{"crashloop", "crash", time.Now().UTC()}, alertWorkload{"checkout", "crash", time.Now().UTC()}))
+	if got := drainAlerts(otherAlerts); len(got) != 0 {
+		t.Fatalf("another cluster behind the same name alerted on its first cycle: %v", got)
+	}
+}
+
+// A workload broken with no failure time yet is part of the baseline too.
+// When its progress deadline passes after the baseline it shows a stalled
+// rollout with a fresh time, and stays quiet: it was broken all along.
+func TestIssueAlertsBaselineHoldsAWorkloadThatStallsLater(t *testing.T) {
+	s, alerts := issueAlertCaptureService(t)
+	enableAlertsBeforeContinuousCapture(t, s)
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"probe-api", "never_ready", time.Time{}}))
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"probe-api", "never_ready", time.Time{}}))
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"probe-api", "stalled", time.Now().UTC()}, alertWorkload{"oomkill", "crash", time.Now().UTC()}))
+	if got := drainAlerts(alerts); len(got) != 1 || len(got["oomkill"]) == 0 {
+		t.Fatalf("alerts after the progress deadline = %v, want the new break only", got)
+	}
+}
+
+// keepsHistoryWithoutAClusterUID turns on saved history for a cluster that has
+// not established its UID, as for an identity that cannot list Namespaces.
+func keepsHistoryWithoutAClusterUID(t *testing.T, s *Service) {
+	t.Helper()
+	s.changes.mu.Lock()
+	s.changes.evidenceEnabled = true
+	s.changes.mu.Unlock()
+	if s.evidenceStore() == nil {
+		t.Fatal("the fixture store keeps no history")
+	}
+	if _, known := s.alertClusterUID(t.Context()); known {
+		t.Fatal("the fixture cluster already has a UID")
+	}
+}
+
+// partlyListed lists Nodes only part way on every cycle, so no cycle is ever
+// complete for the cluster as a whole.
+func partlyListed(workloads ...alertWorkload) kubeindex.Snapshot {
+	snapshot := alertWorkloadSnapshot(workloads...)
+	snapshot.Kinds["Node"] = kubeindex.KindStatus{State: "ready", Error: "incomplete_pages", Partial: true, ObservedAt: time.Now().UTC()}
+	return snapshot
+}
+
+// A cluster that keeps history but never establishes its UID still alerts:
+// its record is the configured cluster's unscoped one.
+func TestIssueAlertsWithoutAClusterUIDStillAlert(t *testing.T) {
+	s, alerts := issueAlertCaptureService(t)
+	keepsHistoryWithoutAClusterUID(t, s)
+	for range 3 {
+		runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"checkout", "crash", time.Now().UTC()}))
+	}
+	if got := drainAlerts(alerts); len(got["checkout"]) == 0 {
+		t.Fatalf("a new break did not alert on a cluster without a UID: %v", got)
+	}
+	provider, settingsKey := s.logSettingsStore()
+	if _, err := provider.ReadBlob(settingsKey + ".alert-window.unscoped"); err != nil {
+		t.Fatalf("the unscoped alert record was not written: %v", err)
+	}
+}
+
+// When the cluster UID arrives later, its record starts from the unscoped
+// one: workloads held by the baseline stay held, breaks already alerted do
+// not alert again, no new baseline swallows a new break, and the record is
+// saved under the UID from then on.
+func TestIssueAlertsCarryTheUnscopedRecordOverWhenTheClusterUIDArrives(t *testing.T) {
+	s, alerts := issueAlertCaptureService(t)
+	keepsHistoryWithoutAClusterUID(t, s)
+	enableAlertsBeforeContinuousCapture(t, s)
+	old := time.Now().UTC().Add(-time.Hour)
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"payments", "crash", old}))
+	if got := drainAlerts(alerts); len(got) != 0 {
+		t.Fatalf("the baseline alerted: %v", got)
+	}
+	checkoutAt := time.Now().UTC()
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"payments", "crash", old}, alertWorkload{"checkout", "crash", checkoutAt}))
+	if got := drainAlerts(alerts); len(got) != 1 || len(got["checkout"]) == 0 {
+		t.Fatalf("alerts without a UID = %v, want the new break only", got)
+	}
+
+	bindAlertClusterUID(s, "cluster-uid-1")
+	runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"payments", "crash", time.Now().UTC()}, alertWorkload{"checkout", "crash", checkoutAt}, alertWorkload{"oomkill", "crash", time.Now().UTC()}))
+	got := drainAlerts(alerts)
+	if len(got["oomkill"]) == 0 {
+		t.Fatalf("a new break once the UID arrived did not alert: %v", got)
+	}
+	if len(got["payments"]) != 0 {
+		t.Fatalf("a workload held by the baseline alerted once the UID arrived: %v", got)
+	}
+	// The sink sees an open break on every cycle and folds it into its
+	// episode; a break admitted before the UID arrived is not admitted again.
+	provider, settingsKey := s.logSettingsStore()
+	encoded, err := provider.ReadBlob(alertCheckpointKey(settingsKey, "cluster-uid-1"))
+	if err != nil {
+		t.Fatalf("the record was not saved under the cluster UID: %v", err)
+	}
+	var record issueAlertCheckpoint
+	if err := json.Unmarshal(encoded, &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.Sent != 2 || len(record.Seen) != 2 || record.BaselineRoots["payments"] != "Deployment" {
+		t.Fatalf("record under the UID sent=%d seen=%d held=%v, want the unscoped record carried over with one new admission", record.Sent, len(record.Seen), record.BaselineRoots)
+	}
+}
+
+// On a cluster where some other kind never lists in full, a held workload is
+// released once a cycle lists Pods and its own kind in full and sees it
+// healthy, so a later break on it alerts. A held workload that no longer
+// exists is dropped on the same terms, and one whose kind was listed only in
+// part stays held.
+func TestIssueAlertsHeldWorkloadReleasedWhenItsOwnKindIsListedInFull(t *testing.T) {
+	s, alerts := issueAlertCaptureService(t)
+	enableAlertsBeforeContinuousCapture(t, s)
+	clock := newFakeClock()
+	s.alertBaselineClock = clock.Now
+	old := time.Now().UTC().Add(-time.Hour)
+	for range 20 {
+		runIssueAlertCaptureCycle(t, s, partlyListed(alertWorkload{"payments", "crash", old}, alertWorkload{"retired", "crash", old}, alertWorkload{"ledger", "crash", old}))
+		clock.advance(time.Minute)
+	}
+	if got := drainAlerts(alerts); len(got) != 0 {
+		t.Fatalf("the baseline alerted: %v", got)
+	}
+	held := func() map[string]string {
+		s.changes.mu.Lock()
+		defer s.changes.mu.Unlock()
+		return maps.Clone(s.changes.issueAlerts[s.indexScope()].baselineRoots)
+	}
+	if roots := held(); len(roots) != 3 {
+		t.Fatalf("held workloads after the baseline = %v, want three", roots)
+	}
+
+	// Deployments listed only in part: ledger is not seen and stays held.
+	deploymentsPartial := partlyListed(alertWorkload{"payments", "healthy", time.Time{}})
+	deploymentsPartial.Kinds["Deployment"] = kubeindex.KindStatus{State: "ready", Error: "incomplete_pages", Partial: true, ObservedAt: time.Now().UTC()}
+	runIssueAlertCaptureCycle(t, s, deploymentsPartial)
+	if roots := held(); roots["ledger"] == "" || roots["retired"] == "" {
+		t.Fatalf("a cycle that listed Deployments in part released workloads: %v", roots)
+	}
+
+	runIssueAlertCaptureCycle(t, s, partlyListed(alertWorkload{"payments", "healthy", time.Time{}}, alertWorkload{"ledger", "crash", old}))
+	roots := held()
+	if _, ok := roots["payments"]; ok {
+		t.Fatalf("a healthy workload stayed held: %v", roots)
+	}
+	if _, ok := roots["retired"]; ok {
+		t.Fatalf("a workload that no longer exists stayed held: %v", roots)
+	}
+	if roots["ledger"] != "Deployment" {
+		t.Fatalf("a workload still broken was released: %v", roots)
+	}
+
+	runIssueAlertCaptureCycle(t, s, partlyListed(alertWorkload{"payments", "crash", time.Now().UTC()}, alertWorkload{"ledger", "crash", time.Now().UTC()}))
+	got := drainAlerts(alerts)
+	if len(got["payments"]) == 0 {
+		t.Fatalf("a workload that recovered and broke again did not alert: %v", got)
+	}
+	if len(got["ledger"]) != 0 {
+		t.Fatalf("a workload broken all along alerted: %v", got)
+	}
+}
+
+// The start of an open baseline is part of the alert record: after a restart
+// the 15-minute bound counts from the first incomplete cycle, not from the
+// first cycle of the new process.
+func TestIssueAlertsBaselineBoundSurvivesARestart(t *testing.T) {
+	provider := storage.NewMemory()
+	clock := newFakeClock()
+	first, firstAlerts := issueAlertCaptureServiceOn(t, provider, "reader")
+	first.alertBaselineClock = clock.Now
+	evaluatedFrom := enableAlertsBeforeContinuousCapture(t, first)
+	old := time.Now().UTC().Add(-time.Hour)
+	for range 10 {
+		runIssueAlertCaptureCycle(t, first, partlyListed(alertWorkload{"payments", "crash", old}))
+		clock.advance(time.Minute)
+	}
+	first.StopCapture()
+	if got := drainAlerts(firstAlerts); len(got) != 0 || !evaluatedFrom().IsZero() {
+		t.Fatalf("the baseline closed or alerted early: %v", got)
+	}
+
+	restarted, alerts := issueAlertCaptureServiceOn(t, provider, "reader")
+	restarted.alertBaselineClock = clock.Now
+	for range 6 {
+		runIssueAlertCaptureCycle(t, restarted, partlyListed(alertWorkload{"payments", "crash", old}))
+		clock.advance(time.Minute)
+	}
+	if evaluatedFrom().IsZero() {
+		t.Fatal("after a restart the baseline bound started over")
+	}
+	runIssueAlertCaptureCycle(t, restarted, partlyListed(alertWorkload{"payments", "crash", old}, alertWorkload{"checkout", "crash", time.Now().UTC()}))
+	if got := drainAlerts(alerts); len(got) != 1 || len(got["checkout"]) == 0 {
+		t.Fatalf("alerts after the bound = %v, want the new break only", got)
+	}
+}
+
+// Turning alerts off and on while a baseline is still open ends that
+// baseline: alerts enabled anew start from their own time, so a break after
+// that alerts at once.
+func TestIssueAlertsReenableDuringABaselineEndsIt(t *testing.T) {
+	s, alerts := issueAlertCaptureService(t)
+	enableAlertsBeforeContinuousCapture(t, s)
+	old := time.Now().UTC().Add(-time.Hour)
+	runIssueAlertCaptureCycle(t, s, partlyListed(alertWorkload{"payments", "crash", old}))
+	for _, enabled := range []bool{false, true} {
+		time.Sleep(2 * time.Millisecond)
+		if err := s.SaveIssueAlertSettings(t.Context(), enabled, "warning", "actor"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(2 * time.Millisecond)
+	runIssueAlertCaptureCycle(t, s, partlyListed(alertWorkload{"payments", "crash", old}, alertWorkload{"checkout", "crash", time.Now().UTC()}))
+	got := drainAlerts(alerts)
+	if len(got["checkout"]) == 0 {
+		t.Fatalf("a break after alerts were enabled again went into the earlier baseline: %v", got)
+	}
+	if len(got["payments"]) != 0 {
+		t.Fatalf("a break older than the new setting alerted: %v", got)
+	}
+}
+
+// The cluster UID is text the API server reports. On file storage a UID that
+// holds path separators must not steer where the alert record is written: the
+// record stays inside the data directory under a digest of the UID, and no
+// other blob (another cluster's settings) is touched.
+func TestIssueAlertRecordForACraftedClusterUIDStaysInsideTheDataDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "data")
+	provider, err := storage.NewFile(storage.FileOptions{DataDir: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := issueAlertCaptureServiceOn(t, provider, "reader")
+	settingsProvider, settingsKey := s.logSettingsStore()
+	if err := breaklogs.UpdateSettings(settingsProvider, settingsKey, func(state *breaklogs.SettingsState) error {
+		state.Settings.Alerts = breaklogs.Alerts{Enabled: true, Level: "warning", EnabledAt: time.Now().UTC().Add(-time.Hour), UpdatedBy: "actor"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settingsBefore, err := provider.ReadBlob(settingsKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range []string{"x/../../../../ESCAPED/planted", "x/../" + settingsKey} {
+		bindAlertClusterUID(s, uid)
+		runIssueAlertCaptureCycle(t, s, alertWorkloadSnapshot(alertWorkload{"checkout", "crash", time.Now().UTC()}))
+		key := alertCheckpointKey(settingsKey, uid)
+		if strings.ContainsAny(strings.TrimPrefix(key, settingsKey), `/\`) || strings.Contains(key, "..") {
+			t.Fatalf("alert record key %q carries the UID's path text", key)
+		}
+		if record, err := provider.ReadBlob(key); err != nil || len(record) == 0 {
+			t.Fatalf("alert record for UID %q not found under its digest key: %v", uid, err)
+		}
+	}
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && !strings.HasPrefix(path, directory+string(filepath.Separator)) {
+			t.Errorf("the alert cycle wrote %s outside the data directory", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cycle itself updates the settings (when alerts were evaluated
+	// from), but the settings blob must never be replaced by an alert record.
+	after, err := provider.ReadBlob(settingsKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(after, &shape); err != nil || shape["settings"] == nil || shape["sent"] != nil || shape["seen"] != nil {
+		t.Fatalf("the settings blob was overwritten by an alert record: %s (before %s)", after, settingsBefore)
 	}
 }

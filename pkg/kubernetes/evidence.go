@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"slices"
 	"sort"
@@ -16,6 +15,7 @@ import (
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -82,7 +82,7 @@ func evidenceReadFailure(stage evidenceReadStage, err error) error {
 		cause = next
 	}
 	if stage != evidenceIdentityProof || identityProofLog.allow(class) {
-		log.Printf("kubernetes: historical evidence failed stage=%s class=%s cause_type=%T", stage, class, cause)
+		logging.Debugf("kubernetes: historical evidence failed stage=%s class=%s cause_type=%T", stage, class, cause)
 	}
 	return &evidenceReadError{stage: stage, cause: err}
 }
@@ -491,6 +491,8 @@ func (service *Service) authorizeEvidence(ctx context.Context, namespace string)
 }
 
 func (service *Service) authorizeEvidenceKind(ctx context.Context, namespace, id string) error {
+	ctx, cancelIdentity := service.credentialContext(ctx)
+	defer cancelIdentity()
 	ctx = context.WithValue(ctx, captureReadContextKey{}, nil)
 	parts := strings.Split(id, "~")
 	if len(parts) != 3 {

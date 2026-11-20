@@ -203,6 +203,18 @@ func syncFailureClass(err error) string {
 	var throttled *ErrThrottled
 	class := "unavailable"
 	switch {
+	case IsCredentialProofFailure(err):
+		// The credential may be fine: the proof that vouches for its renewal
+		// could not be completed, never a rejected credential.
+		class = "proof_unreachable"
+		var proof *proofError
+		if errors.As(err, &proof) {
+			class = proof.syncClass()
+		}
+	case errors.Is(err, ErrTokenEndpointUnavailable):
+		// The cloud token host gave no answer: the credential may be fine,
+		// and Versus keeps retrying, so it is never a rejected credential.
+		class = "token_endpoint_unreachable"
 	case errors.Is(err, ErrCredentialUnavailable), errors.Is(err, ErrUnauthorized):
 		// A credential that expired, was revoked, or was rejected is one fault
 		// with one remedy, whichever layer noticed it.

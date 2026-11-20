@@ -92,23 +92,23 @@ func TestCanonicalAWSPrincipalRemovesOnlySessionParts(t *testing.T) {
 func TestEKSIdentityVerifierProvesTokenAndCachesPerToken(t *testing.T) {
 	fake := newFakeSTS(t, "production")
 	verifier := fake.verifier("production")
-	first, err := verifier.principal(t.Context(), fake.token("reader", "s1", nil))
+	first, _, err := verifier.principal(t.Context(), fake.token("reader", "s1", nil))
 	if err != nil || first == "" {
 		t.Fatalf("principal=%q err=%v", first, err)
 	}
 	for i := 0; i < 3; i++ {
-		if again, _ := verifier.principal(t.Context(), fake.token("reader", "s1", nil)); again != first {
+		if again, _, _ := verifier.principal(t.Context(), fake.token("reader", "s1", nil)); again != first {
 			t.Fatalf("cached principal changed: %q", again)
 		}
 	}
 	if fake.calls.Load() != 1 {
 		t.Fatalf("unchanged token re-verified: %d calls", fake.calls.Load())
 	}
-	renewed, _ := verifier.principal(t.Context(), fake.token("reader", "s2", nil))
+	renewed, _, _ := verifier.principal(t.Context(), fake.token("reader", "s2", nil))
 	if renewed != first || fake.calls.Load() != 2 {
 		t.Fatalf("renewed session principal=%q calls=%d", renewed, fake.calls.Load())
 	}
-	if other, _ := verifier.principal(t.Context(), fake.token("writer", "s1", nil)); other == "" || other == first {
+	if other, _, _ := verifier.principal(t.Context(), fake.token("writer", "s1", nil)); other == "" || other == first {
 		t.Fatalf("different role reused principal: %q", other)
 	}
 }
@@ -128,7 +128,7 @@ func TestEKSIdentityVerifierRefusesTokensItCannotProve(t *testing.T) {
 		"sts rejects":   newFakeSTS(t, "another-cluster").token("reader", "s1", nil),
 		"wrong account": fake.token("reader", "s1", url.Values{"account": {"12"}}),
 	} {
-		principal, err := verifier.principal(t.Context(), token)
+		principal, _, err := verifier.principal(t.Context(), token)
 		if err != nil || principal != "" {
 			t.Fatalf("%s proved %q err=%v", name, principal, err)
 		}

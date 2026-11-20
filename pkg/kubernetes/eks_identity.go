@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,10 +30,19 @@ type eksCredentialSource struct {
 	identity *eksIdentityVerifier
 }
 
-func (source *eksCredentialSource) verifiedCredentialPrincipal(ctx context.Context, header string) (string, error) {
-	principal, err := source.identity.principal(ctx, strings.TrimPrefix(header, "Bearer "))
-	return principal, credentialFault(err)
+func (source *eksCredentialSource) verifiedCredentialPrincipal(ctx context.Context, header string) (string, proofOutcome, error) {
+	return source.identity.principal(ctx, strings.TrimPrefix(header, "Bearer "))
 }
+
+// proofHost is the STS host the proof calls.
+func (source *eksCredentialSource) proofHost() string {
+	if source.identity == nil || source.identity.endpoint == nil {
+		return ""
+	}
+	return source.identity.endpoint.Host
+}
+
+func (source *eksCredentialSource) provesRenewals() {}
 
 func (source *eksCredentialSource) normalizeReviewedUser(user *reviewedUserInfo) {
 	normalizeEKSReviewedUser(user)
@@ -58,44 +69,47 @@ func newEKSIdentityVerifier(endpoint, clusterName string, client *http.Client) *
 	return &eksIdentityVerifier{endpoint: parsed, clusterName: clusterName, client: client}
 }
 
-// principal returns a stable identity for the token, or "" when it cannot be
-// proved. An unproved token keeps the existing byte-bound epoch behavior.
-func (verifier *eksIdentityVerifier) principal(ctx context.Context, token string) (string, error) {
+// principal proves the token's identity. A token that is not a presigned
+// request to the configured STS endpoint, or an identity STS reports in a
+// form with no stable principal, is not applicable: it keeps the byte-bound
+// epoch. A failed STS call is unavailable; STS refusing the signature is a
+// definite rejection.
+func (verifier *eksIdentityVerifier) principal(ctx context.Context, token string) (string, proofOutcome, error) {
 	if verifier == nil || verifier.client == nil {
-		return "", nil
+		return "", proofNotApplicable, nil
 	}
 	digest := sha256.Sum256([]byte(token))
 	verifier.mu.Lock()
 	if verifier.cached != "" && digest == verifier.cachedToken {
 		cached := verifier.cached
 		verifier.mu.Unlock()
-		return cached, nil
+		return cached, proofProven, nil
 	}
 	verifier.mu.Unlock()
 
 	target, ok := verifier.presignedRequest(token)
 	if !ok {
-		return "", nil
+		return "", proofNotApplicable, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return "", nil
+		return "", proofNotApplicable, nil
 	}
 	request.Header.Set("x-k8s-aws-id", verifier.clusterName)
 	request.Header.Set("Accept", "application/json")
 	response, err := verifier.client.Do(request)
 	if err != nil {
-		return "", nil
+		return "", proofUnavailable, proofTransportError(err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", nil
+		return "", proofUnavailable, stsAnswerError(response)
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 64<<10+1))
 	if err != nil || len(raw) > 64<<10 {
-		return "", nil
+		return "", proofUnavailable, &proofError{class: "invalid_answer"}
 	}
 	var result struct {
 		GetCallerIdentityResponse struct {
@@ -107,17 +121,17 @@ func (verifier *eksIdentityVerifier) principal(ctx context.Context, token string
 		} `json:"GetCallerIdentityResponse"`
 	}
 	if json.Unmarshal(raw, &result) != nil {
-		return "", nil
+		return "", proofUnavailable, &proofError{class: "invalid_answer"}
 	}
 	caller := result.GetCallerIdentityResponse.GetCallerIdentityResult
 	principal, ok := canonicalAWSPrincipal(caller.Account, caller.Arn, caller.UserID)
 	if !ok {
-		return "", nil
+		return "", proofNotApplicable, nil
 	}
 	verifier.mu.Lock()
 	verifier.cachedToken, verifier.cached = digest, principal
 	verifier.mu.Unlock()
-	return principal, nil
+	return principal, proofProven, nil
 }
 
 // presignedRequest accepts only a GetCallerIdentity request to the configured
@@ -204,4 +218,50 @@ func normalizeEKSReviewedUser(user *reviewedUserInfo) {
 	if trimmed, found := strings.CutSuffix(user.UID, ":"+session); found {
 		user.UID = trimmed
 	}
+}
+
+// stsThrottleCodes are the STS error codes that mean "slow down".
+var stsThrottleCodes = map[string]bool{"Throttling": true, "ThrottlingException": true, "RequestLimitExceeded": true, "TooManyRequestsException": true}
+
+// stsAnswerError classifies an STS answer other than 200. Only a 401 or 403
+// is a definite rejection of the signed request (InvalidClientTokenId,
+// SignatureDoesNotMatch, ExpiredToken and the like). A throttling code, a
+// 429 or a 5xx is unavailable and keeps its Retry-After; any other answer is
+// unavailable too, since nothing in it says the token is bad.
+func stsAnswerError(response *http.Response) error {
+	switch {
+	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
+		return fmt.Errorf("kubernetes: identity provider refused the credential: %w", ErrUnauthorized)
+	case response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500:
+		return proofStatusError(response, time.Now())
+	}
+	raw, _ := io.ReadAll(io.LimitReader(response.Body, 16<<10))
+	if stsThrottleCodes[stsErrorCode(raw)] {
+		failure := proofStatusError(response, time.Now())
+		failure.class = "429"
+		return failure
+	}
+	return &proofError{class: "4xx"}
+}
+
+// stsErrorCode reads the error code from a JSON or XML STS error body. It
+// returns "" when there is none.
+func stsErrorCode(raw []byte) string {
+	var document struct {
+		Error struct {
+			Code string `json:"Code"`
+		} `json:"Error"`
+	}
+	if json.Unmarshal(raw, &document) == nil && document.Error.Code != "" {
+		return document.Error.Code
+	}
+	var envelope struct {
+		Error struct {
+			Code string `xml:"Code"`
+		} `xml:"Error"`
+	}
+	if xml.Unmarshal(raw, &envelope) == nil {
+		return envelope.Error.Code
+	}
+	return ""
 }

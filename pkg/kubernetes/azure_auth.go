@@ -62,7 +62,11 @@ func newAKSCredentialSource(options AuthOptions) (CredentialSource, error) {
 	default:
 		return nil, errors.New("kubernetes: unsupported AKS credential mode")
 	}
-	return &expiringBearerSource{refresh: refresh, now: time.Now, skew: 2 * time.Minute}, nil
+	base := &expiringBearerSource{refresh: refresh, now: time.Now, skew: 2 * time.Minute}
+	cloud := entraClouds[environment]
+	cloud.authority = authority
+	verifier := newEntraTokenVerifier(cloud, options.AKSTenantID, options.AKSServerID, fixedCredentialHTTPClient(), time.Now, base.skew, base.credentialExpiry)
+	return &aksCredentialSource{expiringBearerSource: base, proof: verifier.principal, host: verifier.host()}, nil
 }
 
 func fixedCredentialHTTPClient() *http.Client {
@@ -128,8 +132,11 @@ func requestAzureToken(ctx context.Context, client *http.Client, endpoint string
 
 func executeAzureTokenRequest(client *http.Client, request *http.Request) (string, time.Time, error) {
 	response, err := client.Do(request)
-	if err != nil {
-		return "", time.Time{}, errors.New("kubernetes: AKS credential endpoint unavailable")
+	if unavailable := tokenEndpointUnavailable(client, response, err, "kubernetes: AKS credential endpoint unavailable"); unavailable != nil {
+		if response != nil {
+			_ = response.Body.Close()
+		}
+		return "", time.Time{}, unavailable
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -137,7 +144,10 @@ func executeAzureTokenRequest(client *http.Client, request *http.Request) (strin
 		return "", time.Time{}, errors.New("kubernetes: AKS credential endpoint rejected the request")
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, azureTokenResponseLimit+1))
-	if err != nil || len(body) > azureTokenResponseLimit {
+	if err != nil {
+		return "", time.Time{}, tokenEndpointUnavailable(client, nil, err, "kubernetes: AKS credential endpoint unavailable")
+	}
+	if len(body) > azureTokenResponseLimit {
 		return "", time.Time{}, errors.New("kubernetes: invalid AKS credential response")
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))

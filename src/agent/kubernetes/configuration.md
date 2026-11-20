@@ -200,7 +200,34 @@ this mode does not perform cluster discovery. Grant only the Google IAM needed
 to access the cluster endpoint, then bind the principal through Kubernetes
 RBAC.
 
-### Change capture
+### Identity check
+
+EKS, AKS and GKE tokens are renewed often. After each renewal, Versus checks
+that the new token belongs to the same identity before it uses the token. When
+the check passes, history and continuous capture carry on across the renewal.
+
+The check calls one host per provider. Allow outbound HTTPS to it:
+
+| Provider | Host |
+| --- | --- |
+| EKS | The regional STS host Versus already uses for tokens: `sts.<region>.amazonaws.com`, or `sts.<region>.amazonaws.com.cn` in China regions. |
+| AKS, `environment: public` | `login.microsoftonline.com` |
+| AKS, `environment: government` | `login.microsoftonline.us` |
+| AKS, `environment: china` | `login.chinacloudapi.cn` and `login.partner.microsoftonline.cn` |
+| GKE | `oauth2.googleapis.com` |
+
+Then requests pause until the check
+answers again. History is kept and nothing is rebuilt. The capture status shows why:
+
+| Reason | Meaning |
+| --- | --- |
+| `proof_unreachable` | Versus can't reach the check host. |
+| `proof_host_not_allowed` | The AKS signing keys are on a host outside the list above. The connector's `environment` doesn't match the cluster's tenant. |
+| `proof_unavailable` | The check host answered but couldn't confirm the token now, for example a server error or rate limit. |
+
+See [Security and troubleshooting](#security-and-troubleshooting) for what to do.
+
+## Change capture
 
 `change_capture` defaults to `continuous`: Versus records supported changes
 while running, even when nobody has the dashboard open. To opt out, set
@@ -377,7 +404,7 @@ Because the default role has no `secrets`, the chart also sets
 `exclude_resources: ["secrets"]`, so Versus never tries to list Secrets. Secret
 is then reported as not collected, not as a warning or a permission error.
 
-#### Where to see what is not read
+### Where to see what is not read
 
 On the Kubernetes page, a grey info marker sits next to **Last synced** in the
 top bar, for example **1 not collected**. Hover, focus or press it to open the
@@ -409,7 +436,7 @@ connectors:
 | Without the optional kinds (`kubernetesReaderRBAC.optionalKinds: false`) | Everything except Gateway, HTTPRoute, and the Argo CD, Argo Rollouts and Flux kinds | Saved every cycle |
 | Namespace-only `Role`/`RoleBinding` | Live, partial view of the granted namespaces only | Not saved |
 
-#### Helm releases need Secret access
+### Helm releases need Secret access
 
 Helm stores each release in a Secret in the release namespace. To list Helm
 releases, the connector identity needs `list` on `secrets`. Without it, the Helm
@@ -440,7 +467,7 @@ If you manage the role yourself, add this rule to it, and remove `secrets` from
     verbs: ["list"]
 ```
 
-#### Optional kinds
+### Optional kinds
 
 The default role reads Gateway API Gateways and HTTPRoutes, Argo CD
 Applications, Argo Rollouts, and Flux Kustomizations and HelmReleases. The
@@ -448,7 +475,7 @@ grants are harmless when those CRDs are not installed. To leave them out, set
 `kubernetesReaderRBAC.optionalKinds: false` in the chart, or remove the last four
 rules from your own role. Everything else is still shown.
 
-#### Namespace-only access
+### Namespace-only access
 
 A namespace-only role, a `Role` and `RoleBinding` in each observed namespace
 with no cluster-wide grant, gives a live, partial view of those namespaces
@@ -587,3 +614,12 @@ Pod-log diagnostics use the same safe codes, including
 | `request_timeout` | Check API-server reachability and control-plane latency before increasing the timeout. |
 | `response_too_large` or `operation_budget_exhausted` | Narrow the namespace, resource category, selectors, search query, or result limit. |
 | `connector_configuration_invalid` | Check the endpoint, network policy, CA selection, and auth-mode fields, then restart Versus. |
+| `proof_unreachable` | Allow outbound HTTPS from Versus to the identity check host named in the warning. See [Identity check](#identity-check) for the host per provider. |
+| `proof_host_not_allowed` | Set the AKS `environment` to the cloud of the cluster's tenant: `public`, `government`, or `china`. Restart Versus. |
+| `proof_unavailable` | Usually clears on its own. Versus retries and resumes with history kept. If it lasts, check that the identity check host and the cluster API server are healthy. |
+
+The server log shows one line when each cluster connects, and a warning that
+names the cluster, the cause and what to check when a kind cannot be read or
+collection fails. A failure that lasts is repeated at most every 10 minutes.
+Set `LOG_LEVEL=debug` for more detail: each kind's state, capture stages,
+timings and retries.

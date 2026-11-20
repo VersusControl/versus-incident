@@ -383,7 +383,7 @@ func evidencePartitionsFor(batch EvidenceBatch, cutoff time.Time) []evidencePart
 		eventTimes[batch.CoveredThrough.UTC().Format("2006-01")] = batch.CoveredThrough
 		observationTimes[batch.CoveredThrough.UTC().Format("2006-01")] = batch.CoveredThrough
 	}
-	partitions := make([]evidencePartition, 0, len(eventTimes)+len(observationTimes))
+	partitions := make([]evidencePartition, 0)
 	for _, entry := range []struct {
 		parent string
 		times  map[string]time.Time

@@ -240,8 +240,8 @@ small connection limit.
 at most **25,000 records** and **15 MiB**, on every storage backend. A larger
 capture, for example during a rollout that replaces thousands of Pods, is still
 saved: Versus keeps open issues and crash status, then the newest changes that
-fit, and drops the oldest. Pages show a normal save. The server writes one line
-per such capture:
+fit, and drops the oldest. Pages show a normal save. With `LOG_LEVEL=debug`,
+the server writes one line per such capture:
 
 ```text
 kubernetes: history capture over the save limit, kept newest offered=… kept=… dropped=… dropped_from=… dropped_to=… dropped_changes=… dropped_pod_churn=…
@@ -266,14 +266,16 @@ says why. Live pages stay current.
 When Versus has no saved time to show, the first two notices end with
 "showing the last saved data" instead.
 
-Log lines to act on:
+Log lines to act on. Each Kubernetes warning names the cluster and repeats at
+most every 10 minutes while the failure lasts; the `capture stage=…` and
+`recovery stage=…` detail lines behind them are written with `LOG_LEVEL=debug`.
 
 | Log line | Meaning | What to do |
 |----------|---------|------------|
-| `kubernetes: capture stage=journal reason=storage_unavailable` | A save failed for a temporary reason. Pages show `history_save_delayed`. | Check database health and connections. |
-| `kubernetes: capture stage=journal reason=storage_rejected`, then `kubernetes: history store rejected a capture; collection continues and the next capture records the gap reason=<reason>` | The database refused a capture for good. Pages show `history_save_rejected`. | Read `reason=` and see the next row. |
-| `kubernetes: history capture refused before saving reason=<reason> class=<class>` | The capture was not saved. `kubernetes: history captures are prepared for saving again` follows once saving resumes. | See the reasons below. |
-| `kubernetes: recovery stage=credential_recovery reason=credential_unavailable` (or `credential_rejected`) | A real credential failure. | Restore or rotate the connector credential. |
+| `WARN kubernetes: cluster "<name>" inventory cycle failed class=storage_unavailable (storage unavailable); …` | A save failed for a temporary reason. Pages show `history_save_delayed`. | Check database health and connections. |
+| `WARN kubernetes: cluster "<name>" history store rejected a capture; collection continues and the next capture records the gap reason=<reason> (storage rejected); …` | The database refused a capture for good. Pages show `history_save_rejected`. | Read `reason=` and see the next row. |
+| `WARN kubernetes: cluster "<name>" history capture refused before saving reason=<reason> class=<class> (capture cannot be saved); …` | The capture can never be saved. `kubernetes: cluster "<name>" history captures are prepared for saving again` follows once saving resumes. A refusal the next capture usually clears (`authority_unverified`, `incomplete_inventory`) is written only with `LOG_LEVEL=debug`. | See the reasons below. |
+| `WARN kubernetes: cluster "<name>" credential check failed reason=credential_unavailable (credential unavailable); …` (or `credential_rejected`) | A real credential failure. | Restore or rotate the connector credential. |
 | `storage: evidence save timed out in one transaction; saving it in parts of N records` or `storage: evidence save part timed out; retrying it alone at N records` | A save was too slow. Occasional lines are fine. | If they are frequent, check database load and lower [`save_chunk`](#large-clusters). |
 | `storage: evidence saves keep appending most records offered=… inserted=…` | History is growing faster than the cluster is changing. Brief bursts during a large rollout are expected. | If it keeps appearing on a quiet cluster, report it with the log line. |
 

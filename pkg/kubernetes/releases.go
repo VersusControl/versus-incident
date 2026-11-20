@@ -77,6 +77,10 @@ func (service *Service) Releases(ctx context.Context, options HelmReleaseOptions
 	if options.Namespace != "" && !safeSegment(options.Namespace) || options.Status != "" && !safeSegment(options.Status) {
 		return HelmReleasePage{}, ErrInvalidArguments
 	}
+	// Bound to the credential epoch so each Secret read sends the token the
+	// epoch admits; a failed admission is reported like a failed read.
+	ctx, cancelIdentity := service.credentialContext(ctx)
+	defer cancelIdentity()
 	ctx, cancel := ensureOperationBudget(ctx)
 	defer cancel()
 	result := HelmReleasePage{Items: []HelmRelease{}}
@@ -147,6 +151,8 @@ func (service *Service) Release(ctx context.Context, namespace, name string) (He
 	if service.resourceExcluded("core~v1~secrets") {
 		return HelmRelease{}, errHelmNeedsSecretList
 	}
+	ctx, cancelIdentity := service.credentialContext(ctx)
+	defer cancelIdentity()
 	metadata, err := service.readHelmMetadata(ctx, namespace, name)
 	if errors.Is(err, ErrForbidden) {
 		return HelmRelease{}, errHelmNeedsSecretList

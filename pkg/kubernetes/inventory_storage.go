@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
+	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/google/uuid"
 )
@@ -101,7 +103,7 @@ func rememberFirstPublication(provider storage.Provider, scope Scope, at time.Ti
 func preserveFirstPublication(provider storage.Provider, scope Scope, at time.Time) time.Time {
 	recorded, err := rememberFirstPublication(provider, scope, at)
 	if err != nil {
-		log.Printf("kubernetes: first publication metadata persistence deferred")
+		logging.Debugf("kubernetes: first publication metadata persistence deferred")
 	}
 	if err == nil && !recorded.IsZero() {
 		return recorded
@@ -472,7 +474,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	defer func() {
 		if !published {
 			if err := lease.cleanupUnreferenced(record.DataOwner, record.Slot); err != nil {
-				log.Printf("kubernetes: orphan inventory cleanup deferred")
+				logging.Debugf("kubernetes: orphan inventory cleanup deferred")
 			}
 		}
 	}()
@@ -497,7 +499,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 		generation.EvidenceFailure = errorClass(evidenceErr)
 		refusal = "reason=" + captureRefusalReason(evidenceErr) + " class=" + generation.EvidenceFailure
 	}
-	noteCaptureRefusal(cache, refusal)
+	noteCaptureRefusal(service.scope, cache, refusal)
 	payload, err := json.Marshal(generation)
 	if err != nil {
 		return err
@@ -538,7 +540,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 		if retiredOwner != "" && retiredOwner != record.DataOwner {
 			for slot := 0; slot < 2; slot++ {
 				if err := lease.cleanupUnreferenced(retiredOwner, slot); err != nil {
-					log.Printf("kubernetes: retired inventory cleanup deferred")
+					logging.Debugf("kubernetes: retired inventory cleanup deferred")
 				}
 			}
 		}
@@ -634,6 +636,10 @@ func (lease *inventoryLease) commitJournal(parent context.Context, service *Serv
 // it records the uncovered interval as a coverage gap. Every other failure is
 // returned unchanged and keeps its retry.
 func (service *Service) abandonRejectedHistorySave(cache *inventoryCache, batchID string, err error) error {
+	key := problemKey(service.scope.OrgID, service.scope.ClusterID, "history_save")
+	if err == nil {
+		problems().Clear(key, "kubernetes: cluster %q history saves again", service.scope.ClusterID)
+	}
 	var saveFailure *captureStorageError
 	if !errors.As(err, &saveFailure) || !saveFailure.rejected || cache == nil {
 		return err
@@ -641,7 +647,8 @@ func (service *Service) abandonRejectedHistorySave(cache *inventoryCache, batchI
 	cache.mu.Lock()
 	cache.abandonedSave = batchID
 	cache.mu.Unlock()
-	log.Printf("kubernetes: history store rejected a capture; collection continues and the next capture records the gap reason=%s", captureRefusalReason(err))
+	reason := captureRefusalReason(err)
+	problems().Fail(slog.LevelWarn, key, reason, "kubernetes: cluster %q history store rejected a capture; collection continues and the next capture records the gap reason=%s (storage rejected); restarting does not help, so if it repeats on every capture report it with this line", service.scope.ClusterID, reason)
 	return nil
 }
 
@@ -649,7 +656,18 @@ func (service *Service) abandonRejectedHistorySave(cache *inventoryCache, batchI
 // differs from the last one logged for the cache's scope, and logs once when
 // captures are prepared for saving again. refusal is empty for a capture that
 // was prepared. A scope without a cache yet logs every refusal.
-func noteCaptureRefusal(cache *inventoryCache, refusal string) {
+//
+// A refusal that can never succeed warns through the shared throttle, keyed
+// by org and cluster, so a successor service after a credential rotation
+// does not warn again; the line that ends it is shown at info. A refusal the
+// next capture usually clears (permissions not confirmed yet, an incomplete
+// listing, a storage timeout) is debug, since a lasting cause of those is
+// warned about by the inventory cycle.
+func noteCaptureRefusal(scope Scope, cache *inventoryCache, refusal string) {
+	key := problemKey(scope.OrgID, scope.ClusterID, "capture_refusal")
+	if refusal == "" && problems().Clear(key, "kubernetes: cluster %q lasting capture refusal cleared", scope.ClusterID) {
+		logging.Infof("kubernetes: cluster %q history captures are prepared for saving again", scope.ClusterID)
+	}
 	if cache != nil {
 		cache.refusal.mu.Lock()
 		previous := cache.refusal.logged
@@ -659,13 +677,30 @@ func noteCaptureRefusal(cache *inventoryCache, refusal string) {
 			return
 		}
 		if refusal == "" {
-			log.Printf("kubernetes: history captures are prepared for saving again")
+			if !captureRefusalLasting(previous) {
+				logging.Debugf("kubernetes: history captures are prepared for saving again")
+			}
 			return
 		}
 	}
-	if refusal != "" {
-		log.Printf("kubernetes: history capture refused before saving %s", refusal)
+	switch {
+	case refusal == "":
+	case captureRefusalLasting(refusal):
+		problems().Fail(slog.LevelWarn, key, refusal, "kubernetes: cluster %q history capture refused before saving %s (capture cannot be saved); restarting does not help, so if it repeats on every capture report it with this line", scope.ClusterID, refusal)
+	default:
+		logging.Debugf("kubernetes: history capture refused before saving %s", refusal)
 	}
+}
+
+// captureRefusalLasting reports a refusal that retrying the same capture
+// cannot fix. refusal has the form "reason=<reason> class=<class>".
+func captureRefusalLasting(refusal string) bool {
+	reason, _, _ := strings.Cut(strings.TrimPrefix(refusal, "reason="), " ")
+	switch reason {
+	case "over_save_limit", "unstorable_text", "invalid_capture", "store_unsupported":
+		return true
+	}
+	return false
 }
 
 func (service *Service) historySaveAbandoned(cache *inventoryCache, batchID string) bool {

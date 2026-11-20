@@ -108,7 +108,7 @@ func TestFileModelStateRejectsUnsafeArtifactLeafForAllOperations(t *testing.T) {
 	if err := models.Put("acme", "health", "key", 1, []byte("inside")); err != nil {
 		t.Fatal(err)
 	}
-	artifact := provider.blobPath("models/acme/health/key")
+	artifact, _ := provider.blobPath("models/acme/health/key")
 	if err := os.Remove(artifact); err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestFileModelStateRejectsHardlinkedLeaves(t *testing.T) {
 	if err := models.Put("acme", "health", "key", 1, []byte("inside")); err != nil {
 		t.Fatal(err)
 	}
-	artifact := provider.blobPath("models/acme/health/key")
+	artifact, _ := provider.blobPath("models/acme/health/key")
 	if err := os.Remove(artifact); err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestFileModelPagingRejectsSymlinkAndConcurrentWrite(t *testing.T) {
 	if err := models.Put("acme", "health", "b", 1, []byte("b")); err != nil {
 		t.Fatal(err)
 	}
-	target := provider.blobPath("models/acme/health/a")
+	target, _ := provider.blobPath("models/acme/health/a")
 	if err := os.Remove(target); err != nil {
 		t.Fatal(err)
 	}

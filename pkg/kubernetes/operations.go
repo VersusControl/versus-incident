@@ -1546,6 +1546,8 @@ func (service *Service) proveNamespaceWorkloadRead(ctx context.Context, namespac
 	if err := service.validateCredential(ctx); err != nil {
 		return err
 	}
+	ctx, cancelIdentity := service.credentialContext(ctx)
+	defer cancelIdentity()
 	proof, cancel := withOperationBudget(context.WithValue(ctx, captureReadContextKey{}, nil), 6*time.Second, 16, 2<<20, 10000)
 	defer cancel()
 	var unavailable error
