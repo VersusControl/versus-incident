@@ -1185,7 +1185,7 @@ for (const theme of THEMES) {
     if (chat.openedMs === null) problems.push(`chat never opens: ${chat.answer}`);
     else {
       if (chat.answer.includes(PROD) || /Production/.test(chat.answer)) problems.push("chat answer names Production");
-      if (!/444455556666|Staging/.test(chat.answer)) problems.push(`chat answer does not name Staging: "${chat.answer.slice(-400)}"`);
+      if (!(chat.answer.includes(STAGING) || /Staging/.test(chat.answer))) problems.push(`chat answer does not name Staging: "${chat.answer.slice(-400)}"`);
     }
     await rshot(page, "finance-limited", "chat", theme, "cost-accounts-answer");
     record(`RB finance-limited ${theme}`, { l1440, l1280, chatOpenedMs: chat.openedMs, answer: chat.answer.slice(-1200), problems, console: watch.console, http: watch.http });
@@ -1744,7 +1744,7 @@ for (const theme of THEMES) {
       await page.getByRole("link", { name: "Ask AI" }).first().click();
       const chat = await askCost(page, watch);
       if (chat.openedMs === null) problems.push(`${persona}: chat never opens: ${chat.answer.slice(0, 200)}`);
-      else if (!/444455556666|Staging/.test(chat.answer)) problems.push(`${persona}: no cost_accounts answer: "${chat.answer.slice(-300)}"`);
+      else if (!(chat.answer.includes(STAGING) || /Staging/.test(chat.answer))) problems.push(`${persona}: no cost_accounts answer: "${chat.answer.slice(-300)}"`);
       if (persona === "financeLimited" && (chat.answer.includes(PROD) || /Production/.test(chat.answer))) problems.push(`${persona}: answer names Production`);
       await rshot(page, persona === "financeAll" ? "finance-all" : "finance-limited", "chat", theme, "answer");
       watch.phase = "chat-reload";
