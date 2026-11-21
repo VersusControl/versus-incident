@@ -203,7 +203,7 @@ func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage)
 		}
 	}
 	for rootUID, positions := range need {
-		lookup, stop := context.WithTimeout(ctx, 500*time.Millisecond)
+		lookup, stop := context.WithTimeout(ctx, openOccurrenceLookupTimeout)
 		stored, err := service.historicalIssues(lookup, IssueOptions{RootUID: rootUID, Namespace: page.Items[positions[0]].Root.Namespace, Since: time.Now().UTC().Add(-breaklogs.Retention), Until: time.Now().UTC(), Limit: 100, itemsOnly: true})
 		stop()
 		if err != nil {

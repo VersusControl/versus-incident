@@ -17,6 +17,10 @@ import (
 // finish within it fails as a history timeout instead of holding a request.
 var persistedHistoryReadTimeout = 2 * time.Second
 
+// openOccurrenceLookupTimeout bounds the persisted lookup that pins one live
+// broken root to its open occurrence while an issue list is built.
+var openOccurrenceLookupTimeout = 500 * time.Millisecond
+
 var errHistoryUnavailable = errors.New("kubernetes: persisted history store unavailable")
 var errHistoryTimeout = errors.New("kubernetes: persisted history store timed out")
 var errHistoryUpgrading = errors.New("kubernetes: persisted history read models are converting")

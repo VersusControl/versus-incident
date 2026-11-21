@@ -173,6 +173,50 @@ func saveDelayFixture(t *testing.T) (string, *fakekube.Server) {
 	return upstream.URL, fixture
 }
 
+func TestCaptureCadenceDivisorDefaultsToProductionPace(t *testing.T) {
+	scope := Scope{OrgID: "default", ClusterID: "cluster"}
+	for name, service := range map[string]*Service{
+		"no option":  NewService(nil, scope, 0),
+		"divisor 1":  NewService(nil, scope, 0, WithCaptureCadenceDivisor(1)),
+		"divisor 0":  NewService(nil, scope, 0, WithCaptureCadenceDivisor(0)),
+		"nil option": NewService(nil, scope, 0, nil),
+	} {
+		for kind, cadence := range captureCadences {
+			if got := service.collectionCadence(cadence); got != cadence {
+				t.Fatalf("%s: %s cadence %s, want production %s", name, kind, got, cadence)
+			}
+		}
+		if got := service.collectionCadence(inventoryCadence("Namespace")); got != time.Minute {
+			t.Fatalf("%s: Namespace inventory cadence %s", name, got)
+		}
+	}
+	newClient := func() *Client {
+		client, err := NewClient(Config{Endpoint: "http://127.0.0.1:1", AllowLoopbackHTTP: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client
+	}
+	for name, service := range map[string]*Service{
+		"no option": NewService(newClient(), scope, 0),
+		"divisor 1": NewService(newClient(), scope, 0, WithCaptureCadenceDivisor(1)),
+	} {
+		if limiter := service.client.indexLimiter; limiter.Limit() != 2 || limiter.Burst() != 4 {
+			t.Fatalf("%s: list rate %v burst %d, want production 2/4", name, limiter.Limit(), limiter.Burst())
+		}
+	}
+	fast := NewService(newClient(), scope, 0, WithCaptureCadenceDivisor(10))
+	if got := fast.collectionCadence(captureCadences["ConfigMap"]); got != 30*time.Second {
+		t.Fatalf("divided ConfigMap cadence %s", got)
+	}
+	if limiter := fast.client.indexLimiter; limiter.Limit() != 20 || limiter.Burst() != 4 {
+		t.Fatalf("fixture list rate %v burst %d", limiter.Limit(), limiter.Burst())
+	}
+	if got := fast.Scoped(Scope{OrgID: "default", ClusterID: "other"}).collectionCadence(time.Minute); got != 6*time.Second {
+		t.Fatalf("scoped service lost the fixture pace: %s", got)
+	}
+}
+
 // useFixturePace raises the background read limiter to a fixture rate and
 // shortens collection cadences, so a scenario that waits for the next
 // autonomous capture sees it within seconds. What each capture reads and
@@ -527,6 +571,9 @@ func TestRejectedHistorySaveDoesNotStopCollection(t *testing.T) {
 		}
 	}
 	observed.rejecting = false
+	// The first save after the release is the one that must carry the gap;
+	// a slow test can see later saves land before it looks.
+	released := len(observed.saved)
 	observed.mu.Unlock()
 	service.recovery.mu.Lock()
 	credentialFailures := service.recovery.failures
@@ -539,13 +586,13 @@ func TestRejectedHistorySaveDoesNotStopCollection(t *testing.T) {
 	// gap, and clears the rejection.
 	waitUntil(t, 75*time.Second, "the next capture saved after the rejection", func() bool {
 		observed.mu.Lock()
-		saved := observed.saved[len(observed.saved)-1].ID != observed.first
+		saved := len(observed.saved) > released
 		observed.mu.Unlock()
 		return saved && historySaveCleared(t, service)
 	})
 	observed.mu.Lock()
 	defer observed.mu.Unlock()
-	recovered := observed.saved[len(observed.saved)-1]
+	recovered := observed.saved[released]
 	gap := false
 	for _, record := range recovered.Records {
 		gap = gap || record.Type == "coverage_gap" && !record.GapFrom.After(checkpoint.At)

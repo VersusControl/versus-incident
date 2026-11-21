@@ -1,10 +1,17 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,5 +124,106 @@ func TestNewKubernetesServiceRequiresModeForEveryNestedAuthGroup(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+// kubernetesGoroutines counts live goroutines whose stack runs code from the
+// Kubernetes connector package.
+func kubernetesGoroutines(t *testing.T) int {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := pprof.Lookup("goroutine").WriteTo(&buf, 2); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, stack := range strings.Split(buf.String(), "\n\n") {
+		if strings.Contains(stack, "versus-incident/pkg/kubernetes.") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestKubernetesRegistryWithoutStartCaptureStartsNothing proves that building
+// the cluster registry the way a composition root does (construction, change
+// storage, scrubber, log-stream context, issue-alert sink, and resolving a
+// cluster) starts no inventory sync, no capture and no connector goroutine:
+// those, and the recovery supervisor (the only caller of the restart path in
+// superviseCluster), start only from StartCapture. Construction does make one
+// synchronous identity review (SelfSubjectReview) to pin the credential's
+// principal; it is the only request allowed before StartCapture. The control
+// half calls StartCapture and sees reads and goroutines appear, so the probe
+// is able to notice them.
+func TestKubernetesRegistryWithoutStartCaptureStartsNothing(t *testing.T) {
+	var mu sync.Mutex
+	var paths []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	requests := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), paths...)
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	cfg := config.KubernetesConnectorConfig{KubernetesToolConfig: config.KubernetesToolConfig{
+		Endpoint: server.URL, CAData: base64.StdEncoding.EncodeToString(caPEM), AllowLoopback: true,
+		ClusterID: "cluster", Auth: config.KubernetesAuthConfig{Mode: "token", Token: "construction-probe"},
+	}}
+
+	before := kubernetesGoroutines(t)
+	registry, errs := NewKubernetesRegistry(cfg, tenancy.DefaultOrgScope())
+	if len(errs) != 0 {
+		t.Fatalf("registry did not build: %v", errs)
+	}
+	defer registry.Close()
+	t.Logf("requests after construction: %v", requests())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	scrubber, _ := NewRedactor(false, nil)
+	registry.Each(func(service *kubernetes.Service) {
+		service.SetChangeStorage(storage.NewMemory())
+		service.SetScrubber(scrubber)
+		service.SetLogStreamContext(ctx)
+	})
+	ConfigureKubernetesIssueAlerts(registry, func(context.Context, string, kubernetes.IssueAlert) (kubernetes.Outcome, error) {
+		return kubernetes.Outcome{}, nil
+	})
+	if _, err := registry.ResolveCluster(storage.DefaultOrgID, "cluster"); err != nil {
+		t.Fatalf("resolve cluster: %v", err)
+	}
+	t.Logf("requests after resolve: %v", requests())
+	// Longer than the recovery supervisor's 1 s ticker, so a supervisor or an
+	// inventory start would have made its first request by now.
+	time.Sleep(1500 * time.Millisecond)
+	const identityReview = "/apis/authentication.k8s.io/v1/selfsubjectreviews"
+	reviews := 0
+	for _, path := range requests() {
+		if path != identityReview {
+			t.Fatalf("building the registry without StartCapture read %s; all requests: %v", path, requests())
+		}
+		reviews++
+	}
+	if reviews > 1 {
+		t.Fatalf("construction repeated the identity review %d times", reviews)
+	}
+	if after := kubernetesGoroutines(t); after > before {
+		t.Fatalf("building the registry without StartCapture left %d connector goroutines running (before: %d)", after-before, before)
+	}
+
+	registry.StartCapture(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(requests()) == reviews && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(requests()) == reviews {
+		t.Fatal("control: StartCapture sent no API request; the probe cannot see a sync")
+	}
+	if kubernetesGoroutines(t) <= before {
+		t.Fatal("control: StartCapture started no connector goroutine; the probe cannot see one")
 	}
 }

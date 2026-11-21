@@ -461,7 +461,7 @@ func TestNativeHistoryCapacityUsesBoundedSharedManifest(t *testing.T) {
 
 func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 	now := time.Now().UTC()
-	backend := &nativeResourceBackend{records: workloadStreamRecords("StatefulSet", 1, 1), block: true, started: make(chan struct{})}
+	backend := &nativeResourceBackend{records: workloadStreamRecords("StatefulSet", 1, 1), block: true}
 	service := nativeResourceService(t, backend)
 	if _, _, err := service.IndexSnapshot(logStreamTestContext(), "Pod", "StatefulSet"); err != nil {
 		t.Fatalf("warm native index/discovery: %v", err)
@@ -471,6 +471,15 @@ func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(logStreamTestContext())
 	defer cancel()
+	// A continuous owner refreshes its index from the inventory worker's
+	// published generation, as StartCapture runs it. The worker publishes the
+	// listed kinds before its optional metrics read, which this backend holds
+	// open, so the Pod listing is there to refresh from while metrics blocks.
+	service.startInventory(ctx)
+	waitUntil(t, 5*time.Second, "inventory worker to publish the Pod listing", func() bool {
+		generation, err := service.readInventory(context.WithValue(ctx, cachedCaptureContextKey{}, true))
+		return err == nil && generation.View.Kinds["Pod"].ObservedAt.After(now)
+	})
 	done := make(chan struct{})
 	loop := &captureLoop{ctx: ctx, cancel: cancel, done: done, owner: "native-owner", next: map[string]time.Time{}, success: map[string]time.Time{}, completed: map[string]time.Time{}, gapFrom: map[string]time.Time{}, status: CaptureStatus{Mode: "continuous"}}
 	for kind := range captureCadences {
@@ -482,6 +491,9 @@ func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	ticks := make(chan time.Time, 1)
+	// The worker's own metrics read may already be held open, so the sync
+	// point is a metrics request issued after the owner starts: its sampler's.
+	metricsBefore := backend.metrics.Load()
 	go func() {
 		defer close(done)
 		service.captureOwned(loop, store, time.Minute, 20*time.Millisecond, now.Add(time.Minute), ticks)
@@ -494,11 +506,7 @@ func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 			t.Error("owner or blocked metrics goroutine leaked")
 		}
 	}()
-	select {
-	case <-backend.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("metrics request never started")
-	}
+	waitUntil(t, 2*time.Second, "the owner's sampler to open a metrics request", func() bool { return backend.metrics.Load() > metricsBefore })
 	index, _ := service.indexes.ForScope(service.indexScope())
 	// The actual owner must refresh a stale Pod index while metrics is blocked.
 	if err := index.Refresh(ctx, "Pod", 0, now.Add(-time.Minute), func(context.Context) ([]kubeindex.Record, bool, error) { return backend.records[1:], true, nil }); err != nil {
@@ -506,18 +514,17 @@ func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 	}
 	loop.mu.Lock()
 	loop.next["Pod"] = now.Add(-time.Second)
+	before := loop.completed["Pod"]
 	loop.mu.Unlock()
 	ticks <- time.Now()
-	deadline := time.Now().Add(time.Second)
-	for {
-		observed := index.Snapshot().Kinds["Pod"].ObservedAt
-		if observed.After(now) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("blocked native metrics request stalled owner Pod refresh")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Log("actual captureOwned refreshes native Pod LIST while metrics HTTP body is blocked; cancellation joins sampler and lease-renewal children")
+	// The worker relists Pods on its own cycles too, so a fresh index alone
+	// does not prove the owner ran: only an owner capture cycle records a
+	// completed Pod capture.
+	waitUntil(t, time.Second, "owner Pod capture while metrics is blocked", func() bool {
+		loop.mu.Lock()
+		completed := loop.completed["Pod"]
+		loop.mu.Unlock()
+		return completed.After(before) && index.Snapshot().Kinds["Pod"].ObservedAt.After(now)
+	})
+	t.Log("actual captureOwned refreshes the Pod index from the published listing while the metrics HTTP body is blocked; cancellation joins sampler and lease-renewal children")
 }

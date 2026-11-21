@@ -1019,7 +1019,12 @@ func TestHangingTokenHostAtBootAnswersRetryableAndWarnsOnce(t *testing.T) {
 	cluster := testClusterID(t)
 	var dials atomic.Int32
 	fixture := newFakeCluster(t, "synthetic-a", "api")
-	client, err := NewClient(fixture.trustedConfig(hangingTokenSource(&dials)))
+	// Each refresh gives up on the hanging host after half a second instead
+	// of the production ten, so the polling window below spans several
+	// failed refreshes and still sees exactly one warning.
+	source := hangingTokenSource(&dials)
+	source.refreshTimeout = 500 * time.Millisecond
+	client, err := NewClient(fixture.trustedConfig(source))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1029,7 +1034,7 @@ func TestHangingTokenHostAtBootAnswersRetryableAndWarnsOnce(t *testing.T) {
 	registry := NewServiceRegistry(service)
 	defer registry.Close()
 
-	deadline := time.Now().Add(12 * time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	polls := 0
 	for time.Now().Before(deadline) {
 		started := time.Now()
@@ -1270,6 +1275,10 @@ func TestDarkTokenHostWithCaptureRunningNeverQueuesRequests(t *testing.T) {
 	var dials atomic.Int32
 	var issued atomic.Bool
 	source := hangingTokenSource(&dials)
+	// Each refresh gives up on the dark host after half a second instead of
+	// the production ten, so the polling window spans several failed
+	// refreshes and the supervised retries they trigger.
+	source.refreshTimeout = 500 * time.Millisecond
 	dark := source.refresh
 	expires := time.Now().Add(proofGraceMargin + 2*time.Second)
 	source.refresh = func(ctx context.Context) (string, time.Time, error) {
@@ -1297,7 +1306,7 @@ func TestDarkTokenHostWithCaptureRunningNeverQueuesRequests(t *testing.T) {
 		pollers.Add(1)
 		go func() {
 			defer pollers.Done()
-			for time.Until(expires.Add(-proofGraceMargin)) > -20*time.Second {
+			for time.Until(expires.Add(-proofGraceMargin)) > -3*time.Second {
 				asked := time.Now()
 				_, err := registry.ResolveCluster("org", cluster)
 				if waited := time.Since(asked); waited > 1500*time.Millisecond {
@@ -1315,5 +1324,8 @@ func TestDarkTokenHostWithCaptureRunningNeverQueuesRequests(t *testing.T) {
 	pollers.Wait()
 	if answers.Load() == 0 || slow.Load() != 0 {
 		t.Fatalf("answers=%d slow=%d", answers.Load(), slow.Load())
+	}
+	if dials.Load() < 2 {
+		t.Fatalf("the dark token host was dialled %d times, want several failed refreshes inside the window", dials.Load())
 	}
 }

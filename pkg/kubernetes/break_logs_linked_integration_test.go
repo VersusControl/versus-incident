@@ -1257,6 +1257,13 @@ func TestLinkedBreakUnrelatedPodFloodKeepsScopedIdentity(t *testing.T) {
 	}{{"2100-within-budget", 2100, true, false}, {"5000-over-budget", 5000, false, false}, {"5000-broken-priority", 5000, false, true}} {
 		for _, backend := range linkedBackends(t) {
 			t.Run(flood.name+"/"+backend.name, func(t *testing.T) {
+				if !flood.wantNoLoss && testing.Short() {
+					// The 2100-Pod flood runs the same manifest path, metadata
+					// cap and retired-target priority in short mode, and
+					// TestLinkedBreakDurableIndependentMetadataAndLiveSamplingCaps
+					// covers sampling past the cap with a broken Pod kept.
+					t.Skip("5000-Pod flood runs without -short")
+				}
 				kube := linkedKube(t)
 				cluster := linkedCluster("flood-" + backend.name)
 				zero := 0
