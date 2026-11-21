@@ -27,6 +27,7 @@ type postgresDetectionEpisode struct {
 	PendingExpiresAt        time.Time
 	LastCompletedToken      string
 	LastNotificationOutcome string
+	HandledNotifications    int64
 }
 
 func (p *postgresProvider) RecordDetectionOccurrence(occurrence DetectionOccurrence) (DetectionEpisodeDecision, error) {
@@ -67,7 +68,7 @@ func (p *postgresProvider) RecordDetectionOccurrenceForOrg(orgID string, occurre
 		SELECT episode_id, fingerprint, incident_id, occurrence_count, first_seen, last_seen,
 		       highest_observed_severity, highest_handled_severity, highest_notified_severity,
 		       pending_kind, pending_severity, pending_token, pending_owner,
-		       pending_expires_at, last_completed_token, last_notification_outcome
+		       pending_expires_at, last_completed_token, last_notification_outcome, handled_notifications
 		FROM vs_detection_episodes
 		WHERE org_id = $1 AND fingerprint = $2 AND closed_at IS NULL
 		FOR UPDATE`, orgID, fingerprint))
@@ -77,7 +78,7 @@ func (p *postgresProvider) RecordDetectionOccurrenceForOrg(orgID string, occurre
 			SELECT episode_id, fingerprint, incident_id, occurrence_count, first_seen, last_seen,
 			       highest_observed_severity, highest_handled_severity, highest_notified_severity,
 			       pending_kind, pending_severity, pending_token, pending_owner,
-			       pending_expires_at, last_completed_token, last_notification_outcome
+			       pending_expires_at, last_completed_token, last_notification_outcome, handled_notifications
 			FROM vs_detection_episodes
 			WHERE org_id = $1 AND identity_version = $2
 			  AND lower(btrim(agent_kind)) = $3 AND lower(btrim(source)) = $4
@@ -181,6 +182,7 @@ func (p *postgresProvider) RecordDetectionOccurrenceForOrg(orgID string, occurre
 		decision.NotificationKind = DetectionNotificationInitial
 		decision.ClaimToken = episode.PendingToken
 		decision.ClaimExpiresAt = episode.PendingExpiresAt
+		decision.NotificationSequence = 1
 		if err := tx.Commit(); err != nil {
 			return DetectionEpisodeDecision{}, fmt.Errorf("storage: commit detection episode open: %w", err)
 		}
@@ -216,6 +218,9 @@ func (p *postgresProvider) RecordDetectionOccurrenceForOrg(orgID string, occurre
 		if owner == "" {
 			owner = uuid.NewString()
 		}
+		if supersededBySeverity(episode.PendingSeverity, episode.HighestObservedSeverity) {
+			episode.HandledNotifications = nextNotificationSequence(episode.HandledNotifications, episode.HighestHandledSeverity)
+		}
 		episode.PendingKind = claimKind
 		episode.PendingSeverity = episode.HighestObservedSeverity
 		episode.PendingToken = uuid.NewString()
@@ -226,11 +231,11 @@ func (p *postgresProvider) RecordDetectionOccurrenceForOrg(orgID string, occurre
 		occurrence_count = $3, last_seen = $4, highest_observed_severity = $5,
 		pending_kind = NULLIF($6, ''), pending_severity = NULLIF($7, ''),
 		pending_token = NULLIF($8, ''), pending_owner = NULLIF($9, ''),
-		pending_expires_at = $10
+		pending_expires_at = $10, handled_notifications = $11
 		WHERE org_id = $1 AND episode_id = $2`, orgID, episode.EpisodeID,
 		episode.OccurrenceCount, episode.LastSeen, episode.HighestObservedSeverity,
 		episode.PendingKind, episode.PendingSeverity, episode.PendingToken,
-		episode.PendingOwner, nullTime(episode.PendingExpiresAt))
+		episode.PendingOwner, nullTime(episode.PendingExpiresAt), episode.HandledNotifications)
 	if err != nil {
 		return DetectionEpisodeDecision{}, fmt.Errorf("storage: update detection episode: %w", err)
 	}
@@ -258,6 +263,7 @@ func (p *postgresProvider) RecordDetectionOccurrenceForOrg(orgID string, occurre
 		decision.NotificationKind = claimKind
 		decision.ClaimToken = episode.PendingToken
 		decision.ClaimExpiresAt = episode.PendingExpiresAt
+		decision.NotificationSequence = nextNotificationSequence(episode.HandledNotifications, episode.HighestHandledSeverity)
 	}
 	if err := tx.Commit(); err != nil {
 		return DetectionEpisodeDecision{}, fmt.Errorf("storage: commit detection occurrence: %w", err)
@@ -323,7 +329,7 @@ func (p *postgresProvider) CompleteDetectionNotificationForOrg(orgID string, com
 		SELECT episode_id, fingerprint, incident_id, occurrence_count, first_seen, last_seen,
 		       highest_observed_severity, highest_handled_severity, highest_notified_severity,
 		       pending_kind, pending_severity, pending_token, pending_owner,
-		       pending_expires_at, last_completed_token, last_notification_outcome
+		       pending_expires_at, last_completed_token, last_notification_outcome, handled_notifications
 		FROM vs_detection_episodes WHERE org_id = $1 AND episode_id = $2 FOR UPDATE`, orgID, completion.EpisodeID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
@@ -338,17 +344,25 @@ func (p *postgresProvider) CompleteDetectionNotificationForOrg(orgID string, com
 		return ErrDetectionClaimLost
 	}
 	if detectionNotificationTerminal(completion.Outcome) {
+		episode.HandledNotifications = nextNotificationSequence(episode.HandledNotifications, episode.HighestHandledSeverity)
 		episode.HighestHandledSeverity = episode.PendingSeverity
 		if detectionNotificationDelivered(completion.Outcome) {
 			episode.HighestNotifiedSeverity = episode.PendingSeverity
 		}
 	}
+	// An unfinished notification keeps the severity it was attempted with,
+	// so a retry at a higher severity is numbered anew.
+	attempted := episode.PendingSeverity
+	if detectionNotificationTerminal(completion.Outcome) {
+		attempted = ""
+	}
 	_, err = tx.Exec(`UPDATE vs_detection_episodes SET
 		highest_handled_severity = NULLIF($3, ''), highest_notified_severity = NULLIF($4, ''),
-		last_completed_token = $5, last_notification_outcome = $6, pending_kind = NULL, pending_severity = NULL,
-		pending_token = NULL, pending_owner = NULL, pending_expires_at = NULL
+		last_completed_token = $5, last_notification_outcome = $6, pending_kind = NULL, pending_severity = NULLIF($8, ''),
+		pending_token = NULL, pending_owner = NULL, pending_expires_at = NULL, handled_notifications = $7
 		WHERE org_id = $1 AND episode_id = $2`, orgID, episode.EpisodeID,
-		episode.HighestHandledSeverity, episode.HighestNotifiedSeverity, completion.ClaimToken, completion.Outcome)
+		episode.HighestHandledSeverity, episode.HighestNotifiedSeverity, completion.ClaimToken, completion.Outcome,
+		episode.HandledNotifications, attempted)
 	if err != nil {
 		return fmt.Errorf("storage: update detection completion: %w", err)
 	}
@@ -403,7 +417,7 @@ func scanPostgresDetectionEpisode(row rowScanner) (*postgresDetectionEpisode, er
 	if err := row.Scan(&episode.EpisodeID, &episode.Fingerprint, &episode.IncidentID, &episode.OccurrenceCount,
 		&episode.FirstSeen, &episode.LastSeen, &episode.HighestObservedSeverity,
 		&handled, &notified, &pendingKind, &pendingSeverity, &pendingToken, &pendingOwner,
-		&pendingExpires, &completed, &notificationOutcome); err != nil {
+		&pendingExpires, &completed, &notificationOutcome, &episode.HandledNotifications); err != nil {
 		return nil, err
 	}
 	episode.FirstSeen = episode.FirstSeen.UTC()

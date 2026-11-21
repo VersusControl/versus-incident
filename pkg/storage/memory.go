@@ -49,6 +49,8 @@ type memoryDetectionEpisode struct {
 	PendingExpiresAt        time.Time
 	LastCompletedToken      string
 	LastNotificationOutcome string
+	// HandledNotifications counts the notifications that came to an end.
+	HandledNotifications int64 `json:",omitempty"`
 }
 
 // NewMemory returns a Provider that keeps all state in memory. Intended
@@ -214,6 +216,9 @@ func (m *memoryProvider) claimDetectionNotification(episode *memoryDetectionEpis
 	if owner == "" {
 		owner = uuid.NewString()
 	}
+	if supersededBySeverity(episode.PendingSeverity, episode.HighestObservedSeverity) {
+		episode.HandledNotifications = nextNotificationSequence(episode.HandledNotifications, episode.HighestHandledSeverity)
+	}
 	episode.PendingKind = kind
 	episode.PendingSeverity = episode.HighestObservedSeverity
 	episode.PendingToken = uuid.NewString()
@@ -224,6 +229,7 @@ func (m *memoryProvider) claimDetectionNotification(episode *memoryDetectionEpis
 	decision.NotificationKind = kind
 	decision.ClaimToken = episode.PendingToken
 	decision.ClaimExpiresAt = episode.PendingExpiresAt
+	decision.NotificationSequence = nextNotificationSequence(episode.HandledNotifications, episode.HighestHandledSeverity)
 	return decision
 }
 
@@ -276,6 +282,7 @@ func (m *memoryProvider) CompleteDetectionNotification(completion DetectionNotif
 		return ErrDetectionClaimLost
 	}
 	if detectionNotificationTerminal(completion.Outcome) {
+		episode.HandledNotifications = nextNotificationSequence(episode.HandledNotifications, episode.HighestHandledSeverity)
 		episode.HighestHandledSeverity = episode.PendingSeverity
 		if detectionNotificationDelivered(completion.Outcome) {
 			episode.HighestNotifiedSeverity = episode.PendingSeverity
@@ -284,7 +291,11 @@ func (m *memoryProvider) CompleteDetectionNotification(completion DetectionNotif
 	episode.LastCompletedToken = completion.ClaimToken
 	episode.LastNotificationOutcome = completion.Outcome
 	episode.PendingKind = ""
-	episode.PendingSeverity = ""
+	if detectionNotificationTerminal(completion.Outcome) {
+		// An unfinished notification keeps the severity it was attempted
+		// with, so a retry at a higher severity is numbered anew.
+		episode.PendingSeverity = ""
+	}
 	episode.PendingToken = ""
 	episode.PendingOwner = ""
 	episode.PendingExpiresAt = time.Time{}

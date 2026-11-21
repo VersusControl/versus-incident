@@ -25,6 +25,11 @@ type Config struct {
 	// item reads keep working, so a connector can attach and then record a
 	// permission failure for the whole inventory.
 	ForbidLists bool
+	// LogStart dates the timestamped follow stream's lines. It defaults to a
+	// fixed day so raw reads have stable bytes; a client test that resumes
+	// from a cursor sets a recent time, because a connector clamps a resume
+	// older than its log read window to that window.
+	LogStart time.Time
 }
 
 type Fault struct {
@@ -146,11 +151,12 @@ type Server struct {
 	projectedKey     *ecdsa.PrivateKey
 	projectedKeyID   string
 	forbidLists      bool
+	logStart         time.Time
 }
 
 func NewServer(config Config) (*Server, error) {
 	store := NewStore()
-	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl), logFixtures: make(map[logStreamKey]logFixture), listHolds: make(map[string]*listHold), forbidLists: config.ForbidLists}
+	server := &Server{store: store, scenario: config.Scenario, startedAt: time.Now(), faults: make(map[string]Fault), counters: make(map[requestKey]requestCount), logStreams: make(map[logStreamKey]LogStreamCounter), logControls: make(map[logStreamKey]logControl), logFixtures: make(map[logStreamKey]logFixture), listHolds: make(map[string]*listHold), forbidLists: config.ForbidLists, logStart: config.LogStart}
 	for resource, fault := range config.Faults {
 		server.faults[resource] = fault
 	}
@@ -990,6 +996,9 @@ func (server *Server) streamLogs(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if !server.logStart.IsZero() {
+		base = server.logStart.UTC()
+	}
 	chunksWritten := 0
 	writeLine := func(timestamp time.Time, text string) bool {
 		if timestamp.Before(since) {

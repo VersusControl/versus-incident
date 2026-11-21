@@ -592,19 +592,30 @@ func TestBrokenIssuesOnPermissionLimitedClusterReturnReadableIssues(t *testing.T
 	}
 }
 
+// inventoryScaleRecords is the inventory size the paging scale tests read:
+// sixty thousand records, or six pages of them in short mode, which pages,
+// completes and keeps last-good the same way.
+func inventoryScaleRecords() int {
+	if testing.Short() {
+		return 3000
+	}
+	return 60000
+}
+
 func TestInventoryPagesSixtyThousandRecords(t *testing.T) {
 	t.Parallel()
+	total := inventoryScaleRecords()
 	var pages atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pages.Add(1)
 		offset, _ := strconv.Atoi(r.URL.Query().Get("continue"))
 		items := make([]any, 0, 500)
-		for i := offset; i < offset+500 && i < 60000; i++ {
+		for i := offset; i < offset+500 && i < total; i++ {
 			name := "pod-" + strconv.Itoa(i)
 			items = append(items, map[string]any{"metadata": map[string]any{"uid": name, "name": name, "namespace": "shop"}})
 		}
 		next := ""
-		if offset+500 < 60000 {
+		if offset+500 < total {
 			next = strconv.Itoa(offset + 500)
 		}
 		writeJSON(w, map[string]any{"items": items, "metadata": map[string]string{"continue": next}})
@@ -613,14 +624,14 @@ func TestInventoryPagesSixtyThousandRecords(t *testing.T) {
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
 	ctx := context.WithValue(t.Context(), discoveryContextKey{}, Discovery{Resources: []ResourceDefinition{{ID: indexedResourceIDs["Pod"], Kind: "Pod", Version: "v1", Resource: "pods", Namespaced: true, Available: true}}})
 	records, complete, err := service.loadIndexKind(ctx, "Pod")
-	if err != nil || !complete || len(records) != 60000 || pages.Load() != 120 {
+	if err != nil || !complete || len(records) != total || pages.Load() != int32(total/500) {
 		t.Fatalf("records=%d complete=%v pages=%d err=%v", len(records), complete, pages.Load(), err)
 	}
 	index := kubeindex.NewUnbounded()
 	if err := index.Ingest("Pod", records, true, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(index.Snapshot().Records); got != 60000 {
+	if got := len(index.Snapshot().Records); got != total {
 		t.Fatalf("indexed %d", got)
 	}
 	if err := index.Refresh(t.Context(), "Pod", 0, time.Now().UTC(), func(context.Context) ([]kubeindex.Record, bool, error) {
@@ -628,13 +639,14 @@ func TestInventoryPagesSixtyThousandRecords(t *testing.T) {
 	}); err == nil {
 		t.Fatal("failed refresh succeeded")
 	}
-	if view := index.Snapshot(); len(view.Records) != 60000 || view.Kinds["Pod"].State != "error" {
+	if view := index.Snapshot(); len(view.Records) != total || view.Kinds["Pod"].State != "error" {
 		t.Fatalf("failed refresh discarded last-good: records=%d status=%+v", len(view.Records), view.Kinds["Pod"])
 	}
 }
 
 func TestInventoryMetricsPagesEveryPodAndKeepsLastGood(t *testing.T) {
 	t.Parallel()
+	total := inventoryScaleRecords()
 	var fail atomic.Bool
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -646,10 +658,10 @@ func TestInventoryMetricsPagesEveryPodAndKeepsLastGood(t *testing.T) {
 		next := ""
 		if r.URL.Path == "/apis/metrics.k8s.io/v1beta1/pods" {
 			offset, _ := strconv.Atoi(r.URL.Query().Get("continue"))
-			for i := offset; i < offset+500 && i < 60000; i++ {
+			for i := offset; i < offset+500 && i < total; i++ {
 				items = append(items, map[string]any{"metadata": map[string]any{"name": "pod-" + strconv.Itoa(i), "namespace": "shop"}, "timestamp": now, "window": "30s", "containers": []any{map[string]any{"name": "app", "usage": map[string]any{"cpu": "1m", "memory": "1Mi"}}}})
 			}
-			if offset+500 < 60000 {
+			if offset+500 < total {
 				next = strconv.Itoa(offset + 500)
 			}
 		}
@@ -658,12 +670,12 @@ func TestInventoryMetricsPagesEveryPodAndKeepsLastGood(t *testing.T) {
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
 	usage := service.collectInventoryUsage(t.Context(), Usage{})
-	if len(usage.Pods) != 60000 || usage.PodMetrics.Total != 60000 || !usage.PodMetrics.Complete || usage.Truncated {
+	if len(usage.Pods) != total || usage.PodMetrics.Total != total || !usage.PodMetrics.Complete || usage.Truncated {
 		t.Fatalf("metrics pods=%d status=%+v partial=%+v", len(usage.Pods), usage.PodMetrics, usage.Partial)
 	}
 	fail.Store(true)
 	next := service.collectInventoryUsage(t.Context(), usage)
-	if len(next.Pods) != 60000 || next.PodMetrics.Complete || next.Fresh || len(next.Partial) == 0 {
+	if len(next.Pods) != total || next.PodMetrics.Complete || next.Fresh || len(next.Partial) == 0 {
 		t.Fatalf("failed sample lost/stated healthy last-good: pods=%d status=%+v", len(next.Pods), next.PodMetrics)
 	}
 }

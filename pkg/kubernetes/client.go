@@ -76,6 +76,13 @@ type contextDialer interface {
 	DialContext(context.Context, string, string) (net.Conn, error)
 }
 
+// productionIndexRate and productionIndexBurst pace a client's inventory
+// LIST requests.
+const (
+	productionIndexRate  = 2
+	productionIndexBurst = 4
+)
+
 // Client is a read-only, bounded Kubernetes API transport.
 type Client struct {
 	namespace    string
@@ -241,7 +248,7 @@ func NewClient(config Config) (*Client, error) {
 	client := &Client{
 		namespace: config.Namespace,
 		base:      base, credentials: credentials, timeout: timeout, maxBodyBytes: maxBodyBytes,
-		indexLimiter: rate.NewLimiter(2, 4), discoveryLimiter: newDiscoveryLimiter(), metadataDenied: map[metadataDenyKey]metadataDenyMemo{},
+		indexLimiter: rate.NewLimiter(productionIndexRate, productionIndexBurst), discoveryLimiter: newDiscoveryLimiter(), metadataDenied: map[metadataDenyKey]metadataDenyMemo{},
 		http:       &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
 		streamHTTP: &http.Client{Transport: streamTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return ErrRedirect }},
 	}

@@ -664,10 +664,15 @@ func TestReadersKeepLastGenerationWhileANewDenialIsProven(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				// The kind waits on its authority check: never readable, never
+				// a settled permission gap, and the cluster is not ready.
 				for _, kind := range kinds {
-					if report.Kinds[kind].Error != "forbidden" {
-						t.Fatalf("%s whose new denial is in question was still served as readable: %+v", kind, report.Kinds[kind])
+					if state := report.Kinds[kind]; state.State != "pending" || state.Error != authorityPendingClass {
+						t.Fatalf("%s whose new denial is in question was not reported as waiting on its check: %+v", kind, state)
 					}
+				}
+				if report.State == "ready" || report.State == "error" {
+					t.Fatalf("a pending authority check reported the cluster %s", report.State)
 				}
 				view, _, err := cluster.service.CachedIndexSnapshot(ctx, kinds...)
 				if err != nil {

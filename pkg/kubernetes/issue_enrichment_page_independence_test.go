@@ -116,6 +116,7 @@ func requireNoPageHistoryPartial(t *testing.T, page IssuePage) {
 // the same issue is enriched identically whether it lands on page 1 or
 // page 2. Its >500-change window marks only that issue; the page stays clean.
 func TestIssuesEnrichmentIsPageIndependent(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	brokeAt := now.Add(-6 * time.Hour)
 	provider := storage.NewMemory()
@@ -220,6 +221,7 @@ func TestIssuesHistoryReadErrorMarksOnlyThePagePartial(t *testing.T) {
 // The two windows overlap by one minute, so they are read together when both
 // issues are on the page.
 func TestIssuesEnrichmentIgnoresANeighboursCappedWindow(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	brokeAt := now.Add(-6 * time.Hour)
 	neighbourBrokeAt := brokeAt.Add(31 * time.Minute)

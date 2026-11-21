@@ -5,7 +5,11 @@ an alarm, and how your resources differ from an earlier time.** Open
 **AWS > Changes**. The page reads CloudTrail and only reads: nothing on it acts
 on AWS.
 
-![AWS Changes page: scope bar, summary card with a likely cause, activity grid, and the Changes and Compare cards side by side](../docs/images/aws-changes-overview-dark.png)
+![AWS Changes page: scope bar, summary card with a likely cause, activity grid, and the Changes and Compare cards side by side](../../docs/images/aws-changes-overview-dark.png)
+
+**Try it quickly:** [AWS Quickstart](/agent/aws/quickstart)
+
+**Full setup and every setting:** [Changes setup](/agent/aws/configuration#changes-setup)
 
 ## Read the page in 30 seconds
 
@@ -35,7 +39,7 @@ When you follow a link to an exact span, a chip shows it, for example
 
 ### Services filter
 
-![Services filter panel open with a checkbox per service and its change count, RDS and IAM checked](../docs/images/aws-changes-services-filter-dark.png)
+![Services filter panel open with a checkbox per service and its change count, RDS and IAM checked](../../docs/images/aws-changes-services-filter-dark.png)
 
 - **Default:** RDS and IAM are checked. A busy account writes thousands of
   routine changes (AWS Config, Athena, Auto Scaling); the default keeps the
@@ -56,7 +60,7 @@ that view. Your saved choice changes only when you use the panel or its chips.
 
 ## Summary card
 
-![Summary card with Changes 12, By people 3, Automation 9, Accounts 1/2, a likely cause, top actors, and the warning line open on a CloudTrail gap in Staging](../docs/images/aws-changes-summary-warning-dark.png)
+![Summary card with Changes 12, By people 3, Automation 9, Accounts 1/2, a likely cause, top actors, and the warning line open on a CloudTrail gap in Staging](../../docs/images/aws-changes-summary-warning-dark.png)
 
 ### The numbers
 
@@ -148,7 +152,7 @@ raise the warning line.
 
 ## Activity grid
 
-![Activity grid with rows for Automation, Person, AWS service and Errors, a hatched gap band, a red alarm line and the 4 alarms chip](../docs/images/aws-changes-grid-gap-dark.png)
+![Activity grid with rows for Automation, Person, AWS service and Errors, a hatched gap band, a red alarm line and the 4 alarms chip](../../docs/images/aws-changes-grid-gap-dark.png)
 
 - **Rows:** Automation, Person, AWS service, Unknown (only when present) and
   Errors. Each row label shows its total.
@@ -204,7 +208,7 @@ actor name. Account and Region chips appear when you look at more than one.
 
 ## Compare
 
-![Compare card from 21:08 to Now: 0 added, 0 removed, 6 changed, field lines with before and after values, and 2 groups not compared](../docs/images/aws-changes-compare-dark.png)
+![Compare card from 21:08 to Now: 0 added, 0 removed, 6 changed, field lines with before and after values, and 2 groups not compared](../../docs/images/aws-changes-compare-dark.png)
 
 Compare shows how your resources at one time differ from another, from saved
 snapshots.

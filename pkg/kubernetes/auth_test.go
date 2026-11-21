@@ -467,6 +467,102 @@ func TestExpiringBearerSourceRefreshesOnceWithSkew(t *testing.T) {
 	}
 }
 
+// The renewal window scales with the token's lifetime. A short-lived token is
+// renewed at half its life and served until the serving margin, never
+// counted as a failure; only a token that expires within the margin is an
+// invalid answer. Tokens of 15 minutes or more renew at the configured skew,
+// exactly as before.
+func TestExpiringBearerSourceRenewalWindowFollowsTokenLifetime(t *testing.T) {
+	start := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name     string
+		skew     time.Duration
+		lifetime time.Duration
+		window   time.Duration
+	}{
+		{"90s token", 2 * time.Minute, 90 * time.Second, 45 * time.Second},
+		{"120s token", 2 * time.Minute, 120 * time.Second, 60 * time.Second},
+		{"60s token", time.Minute, 60 * time.Second, 45 * time.Second},
+		{"EKS 15m token", time.Minute, 15 * time.Minute, time.Minute},
+		{"AKS 1h token", 2 * time.Minute, time.Hour, 2 * time.Minute},
+		{"GKE 1h token", 2 * time.Minute, time.Hour, 2 * time.Minute},
+		{"15m token, small skew", 10 * time.Second, 15 * time.Minute, proofGraceMargin},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := start
+			var calls atomic.Int32
+			source := &expiringBearerSource{now: func() time.Time { return now }, skew: test.skew, refresh: func(context.Context) (string, time.Time, error) {
+				calls.Add(1)
+				return "token-" + strconv.Itoa(int(calls.Load())), now.Add(test.lifetime), nil
+			}}
+			if got, err := authorizeRenewed(t, source); err != nil || got != "Bearer token-1" {
+				t.Fatalf("first token = %q, %v", got, err)
+			}
+			if source.renewWindow != test.window || source.failures != 0 || !source.retryAt.IsZero() {
+				t.Fatalf("window=%s failures=%d retryAt=%s, want window %s and no backoff", source.renewWindow, source.failures, source.retryAt, test.window)
+			}
+			if test.window != max(test.skew, proofGraceMargin) && test.lifetime >= 15*time.Minute {
+				t.Fatalf("a long-lived token renews at %s, not at the skew", test.window)
+			}
+			expires := now.Add(test.lifetime)
+			now = expires.Add(-test.window - time.Second)
+			if got, err := authorizeRenewed(t, source); err != nil || got != "Bearer token-1" || calls.Load() != 1 {
+				t.Fatalf("before the window: %q %v calls=%d", got, err, calls.Load())
+			}
+			now = expires.Add(-test.window + time.Second)
+			if got, err := authorizeRenewed(t, source); err != nil || got != "Bearer token-2" || calls.Load() != 2 {
+				t.Fatalf("inside the window: %q %v calls=%d", got, err, calls.Load())
+			}
+			if source.failures != 0 || source.unreachable {
+				t.Fatalf("a renewal counted as a failure: failures=%d", source.failures)
+			}
+		})
+	}
+}
+
+// A token that expires within the serving margin cannot be sent and counts
+// as an invalid answer, spaced by the backoff. A token that lives longer than
+// the margin but no longer than its renewal window is served, and the next
+// refresh waits half its usable life, so a provider that always issues such
+// tokens is not asked once a second.
+func TestExpiringBearerSourceShortTokensAtTheMargin(t *testing.T) {
+	now := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	lifetime := proofGraceMargin
+	var calls atomic.Int32
+	source := &expiringBearerSource{now: func() time.Time { return now }, skew: 2 * time.Minute, refresh: func(context.Context) (string, time.Time, error) {
+		calls.Add(1)
+		return "token", now.Add(lifetime), nil
+	}}
+	if _, err := authorizeRenewed(t, source); !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatalf("a token inside the serving margin was served: %v", err)
+	}
+	if source.failures != 1 || !source.retryAt.Equal(now.Add(time.Second)) {
+		t.Fatalf("failures=%d retryAt=%s, want one failure spaced by the backoff", source.failures, source.retryAt)
+	}
+	now = now.Add(time.Second)
+	lifetime = 40 * time.Second
+	usable := lifetime - proofGraceMargin
+	if got, err := authorizeRenewed(t, source); err != nil || got != "Bearer token" {
+		t.Fatalf("a 40s token = %q, %v", got, err)
+	}
+	if source.failures != 0 || !source.retryAt.Equal(now.Add(usable/2)) {
+		t.Fatalf("failures=%d retryAt=%s, want no failure and the next refresh half the usable life later", source.failures, source.retryAt)
+	}
+	// Reads continue every 100 ms for a simulated minute against a provider
+	// that always issues 40 s tokens: it is asked about once per half usable
+	// life, and every read is answered with a token.
+	start, before := now, calls.Load()
+	for now.Before(start.Add(time.Minute)) {
+		if _, err := authorizeRenewed(t, source); err != nil {
+			t.Fatalf("read at +%s: %v", now.Sub(start), err)
+		}
+		now = now.Add(100 * time.Millisecond)
+	}
+	if asked, limit := calls.Load()-before, int32(time.Minute/(usable/2))+1; asked > limit || asked < 2 {
+		t.Fatalf("a constant 40s provider was asked %d times in a minute, want 2..%d", asked, limit)
+	}
+}
+
 // authorizeRenewed asks source for a token once its renewal window has
 // begun: the call starts the background refresh, which is waited for, and
 // the answer is what the source then serves, without starting another.

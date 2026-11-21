@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	m "github.com/VersusControl/versus-incident/pkg/models"
 	"github.com/slack-go/slack"
 )
 
@@ -62,5 +63,14 @@ func bindProviderContext(provider core.AlertProvider, ctx context.Context) {
 		p.client = deliveryClient(p.client, ctx)
 	case *EmailProvider:
 		p.context = ctx
+	}
+}
+
+// setIdempotencyKey sends the incident's delivery ID, when it has one, as the
+// Idempotency-Key header of a webhook request. Every attempt to send one
+// notification carries the same key, so a receiver can drop a repeat.
+func setIdempotencyKey(request *http.Request, incident *m.Incident) {
+	if incident != nil && incident.DeliveryID != "" {
+		request.Header.Set("Idempotency-Key", incident.DeliveryID)
 	}
 }

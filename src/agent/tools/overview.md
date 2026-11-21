@@ -69,7 +69,7 @@ answers.
 | Tool | Card | What it returns |
 |---|---|---|
 | `get_aws_connection` | AWS | Each account's status, last check and sync freshness, denied services with the IAM actions that fix them, regions not enabled and sync gaps |
-| `get_aws_changes` | AWS | Who changed what in a window of up to 24 h, with error bursts, gaps and the likely cause of an alarm; it never says "No changes" over a gap. See [AWS Changes](../../in-development/aws-changes.md) |
+| `get_aws_changes` | AWS | Who changed what in a window of up to 24 h, with error bursts, gaps and the likely cause of an alarm; it never says "No changes" over a gap. See [AWS Changes](../aws/changes.md) |
 | `cost_breakdown` | AWS FinOps | Total, change, forecast and spend by service, account, account group, region or team |
 | `cost_drivers` | AWS FinOps | What moved the cost between two periods, by cause, with owners; the drivers add up to the change |
 | `cost_increases` | AWS FinOps | Detected increases with start day, monthly impact, owner and status |

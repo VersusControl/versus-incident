@@ -240,6 +240,7 @@ func crashFlapRecords(t *testing.T, status map[string]any, observed time.Time) [
 // the termination. That is all the journal may gain, whether the node clock
 // agrees with the Versus clock or runs two minutes ahead of it.
 func TestCrashFlappingWritesOneRowPerRealChange(t *testing.T) {
+	t.Parallel()
 	var dsn string
 	if os.Getenv("TEST_POSTGRES_DSN") != "" {
 		dsn = worstHistoryDatabase(t)
@@ -249,7 +250,13 @@ func TestCrashFlappingWritesOneRowPerRealChange(t *testing.T) {
 		skew time.Duration
 	}{{"node clock in step", 0}, {"node clock two minutes ahead", 2 * time.Minute}} {
 		t.Run(clock.name, func(t *testing.T) {
-			const blocks = 40
+			t.Parallel()
+			// The full run spans twenty hours of flaps, which crosses the
+			// Postgres hourly buckets; short mode keeps six hours.
+			blocks := 40
+			if testing.Short() {
+				blocks = 12
+			}
 			origin := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Second)
 			ids := map[string]bool{}
 			var stores []storage.EvidenceStore

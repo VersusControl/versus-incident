@@ -37,7 +37,14 @@ const ALLOW_DRILL = process.env.E2E_AWS_ALLOW_DRILL === "1";
 // Quickstart docs captures (end of file): a running server configured from
 // examples/quickstart/aws, run with --grep "quickstart docs".
 const QUICKSTART_DOCS = process.env.E2E_AWS_QUICKSTART_DOCS === "1";
-test.skip(!LIVE && !QUICKSTART_DOCS, "needs the oss-aws harness stack reading a real AWS account (E2E_AWS_LIVE=1)");
+// Feature guide captures (end of file): AWS_FINOPS_DOCS lists the shots
+// (overview, increase, savings, budgets, report) against any running stack
+// with cost data, for example the fakeaws browser stack of aws-changes.sh.
+const FINOPS_DOCS = (process.env.AWS_FINOPS_DOCS ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+// AWS_FINOPS_CAPTURE_SCALE=2 takes every capture at 2x (docs images, founder
+// 2026-11-19); unset keeps 1x.
+const SCALE = Number(process.env.AWS_FINOPS_CAPTURE_SCALE || "1");
+test.skip(!LIVE && !QUICKSTART_DOCS && FINOPS_DOCS.length === 0, "needs the oss-aws harness stack reading a real AWS account (E2E_AWS_LIVE=1)");
 
 const VIEWPORTS = [
   { name: "desktop", width: 1440, height: 900 },
@@ -131,6 +138,7 @@ const SAVING_TITLE_LEAKS: Array<[RegExp, string]> = [
 async function open(browser: Browser, viewport: Viewport, theme: Theme, url: string): Promise<Page> {
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height },
+    deviceScaleFactor: SCALE,
     colorScheme: theme,
   });
   contexts.push(context);
@@ -1444,4 +1452,171 @@ test.describe("quickstart docs", () => {
       await quickstartShot(page, "settings-account", privacy, theme);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Feature guide captures (AWS_FINOPS_DOCS, desktop 1440, dark): each shot is
+// taken after the state it shows is asserted, cropped to its card, and its
+// PNG size is checked against the CSS size x AWS_FINOPS_CAPTURE_SCALE.
+// ---------------------------------------------------------------------------
+
+function pngSize(file: string) {
+  const b = fs.readFileSync(file);
+  return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+}
+
+test("feature guide docs (desktop, dark)", async ({ browser }) => {
+  test.skip(FINOPS_DOCS.length === 0, "needs AWS_FINOPS_DOCS");
+  test.setTimeout(600_000);
+  const viewport = VIEWPORTS[0];
+  const theme: Theme = "dark";
+  const problems: string[] = [];
+  const files: Record<string, unknown> = {};
+  const page = await open(browser, viewport, theme, "/aws/finops");
+  // The first cost refresh runs once the account is confirmed.
+  await expect
+    .poll(async () => {
+      const s = await getJson<FinOpsSummaryView>(page, "/api/admin/aws/finops/summary");
+      return Boolean(s.enabled) && s.reason !== "no_cost_data" && Boolean(s.sync?.updated_at);
+    }, { timeout: 480_000, intervals: [5_000] })
+    .toBe(true);
+  const live = await liveState(page);
+  expect(live.on, "cost data on").toBe(true);
+  const main = page.locator("main");
+  // Grow the viewport to the scroll height of <main>, so element boxes are page coordinates.
+  const unroll = async () => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await main.first().evaluate((m) => m.scrollTo({ top: 0 }));
+    const extra = await page.evaluate(() => {
+      const m = document.querySelector("main");
+      return m ? Math.max(0, m.scrollHeight - m.clientHeight) : 0;
+    });
+    const height = viewport.height + extra;
+    if (extra > 0) await page.setViewportSize({ width: viewport.width, height });
+    await page.waitForTimeout(400);
+    return height;
+  };
+  const clipOf = async (locators: Locator[], height: number, pad = 12) => {
+    const boxes = [];
+    for (const l of locators) {
+      for (const one of await l.all()) {
+        const b = await one.boundingBox();
+        if (b && b.width > 0 && b.height > 0) boxes.push(b);
+      }
+    }
+    if (!boxes.length) throw new Error("nothing to crop");
+    const x0 = Math.max(0, Math.floor(Math.min(...boxes.map((b) => b.x)) - pad));
+    const y0 = Math.max(0, Math.floor(Math.min(...boxes.map((b) => b.y)) - pad));
+    const x1 = Math.min(viewport.width, Math.ceil(Math.max(...boxes.map((b) => b.x + b.width)) + pad));
+    const y1 = Math.min(height, Math.ceil(Math.max(...boxes.map((b) => b.y + b.height)) + pad));
+    return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+  };
+  const save = async (name: string, height: number, clip?: { x: number; y: number; width: number; height: number }) => {
+    expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), `${name}: no horizontal overflow`).toBe(false);
+    const text = await page.locator("body").innerText();
+    const leak = text.split("\n").find((l) => QS_FORBIDDEN.test(l));
+    expect(leak, `${name}: no host, port or test wording on screen`).toBeUndefined();
+    await expect(main.getByText(/^Loading/)).toHaveCount(0);
+    const out = capturePath("aws-finops", viewport.width, theme, `docs-${name}`);
+    await page.mouse.move(1, 1);
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: out, animations: "disabled", clip });
+    const size = pngSize(out);
+    const css = clip ?? { width: viewport.width, height };
+    if (size.width !== css.width * SCALE || size.height !== css.height * SCALE) problems.push(`${name}: ${size.width}x${size.height} px, want ${css.width * SCALE}x${css.height * SCALE} (CSS ${css.width}x${css.height} x ${SCALE})`);
+    files[name] = { out, size, css, scale: SCALE };
+  };
+  const loadPage = async () => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/aws/finops");
+    const s = live.summary;
+    const costLabel = s.period!.open ? `${s.period!.short} to date` : `${s.period!.short} cost`;
+    await expect(main.locator(`section[aria-label="${costLabel}"]`)).toBeVisible();
+    await expect(main.locator('section[aria-label^="Change"]')).toBeVisible();
+    await expect(main.locator('section[aria-label^="Forecast"]')).toBeVisible();
+    const bridge = main.locator('section[aria-labelledby="finops-bridge-title"]');
+    await expect(bridge.getByRole("heading", { name: "What moved the cost" })).toBeVisible();
+    await expect(bridge.getByText(/^Used (more|less): /).first()).toBeVisible();
+    await expect(main.getByRole("heading", { name: "Spend by service" })).toBeVisible();
+    await expect(main.getByRole("heading", { name: "Savings found" })).toBeVisible();
+    await expect(main.getByText(/^Loading/)).toHaveCount(0);
+  };
+  const notes: Record<string, unknown> = {};
+
+  if (FINOPS_DOCS.includes("overview")) {
+    await loadPage();
+    const height = await unroll();
+    notes.overview = { tiles: (await main.locator('section[aria-label^="Forecast"]').innerText()).replace(/\s+/g, " ") };
+    await save("overview", height);
+  }
+
+  if (FINOPS_DOCS.includes("savings")) {
+    await loadPage();
+    const height = await unroll();
+    const card = main.locator("section").filter({ has: page.getByRole("heading", { name: "Savings found" }) }).last();
+    expect((live.savings?.items ?? []).filter((i) => i.status !== "dismissed").length, "open savings").toBeGreaterThan(0);
+    await expect(card.getByText(/\/mo$/).first()).toBeVisible();
+    await save("savings", height, await clipOf([card], height));
+  }
+
+  if (FINOPS_DOCS.includes("budgets")) {
+    expect(live.summary.budget, "a whole-bill budget in the summary").toBeTruthy();
+    await loadPage();
+    const height = await unroll();
+    const fcTile = main.locator('section[aria-label^="Forecast"]');
+    await expect(fcTile.getByText(/^(Budget |Over budget by )/)).toBeVisible();
+    // The budget name and status sit behind the forecast ⓘ.
+    await fcTile.getByRole("button", { name: /^About Forecast/ }).click();
+    const note = page.locator('[role="note"]').first();
+    await expect(note).toBeVisible();
+    await expect(note).toContainText(`Budget ${live.summary.budget!.name}`);
+    await expect(note).toContainText(`(${live.summary.budget!.status_word})`);
+    notes.budgets = { note: (await note.innerText()).replace(/\s+/g, " ") };
+    await save("budgets", height, await clipOf([fcTile, note], height, 8)); // the tiles sit 12 px apart
+    await page.keyboard.press("Escape");
+  }
+
+  if (FINOPS_DOCS.includes("increase")) {
+    const items = live.increases?.items ?? [];
+    const id = (live.bridge?.rows ?? []).find((r) => r.increase_id)?.increase_id ?? items[0]?.id;
+    expect(id, "an increase to open").toBeTruthy();
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto(`/aws/finops/increases/${encodeURIComponent(id!)}`);
+    await expect(main.locator("h1").filter({ hasText: /went (up|down)|increase/i })).toBeVisible();
+    await expect(main.getByRole("heading", { name: "Why" })).toBeVisible();
+    const where = main.locator("section").filter({ has: page.getByRole("heading", { name: "Where the increase came from" }) }).last();
+    await expect(where).toBeVisible();
+    await expect(main.getByText(/^Loading/)).toHaveCount(0);
+    const detail = await getJson<FinOpsIncreaseDetailView>(page, `/api/admin/aws/finops/increases/${encodeURIComponent(id!)}`);
+    notes.increase = { id, status: detail.increase?.status, cause: detail.increase?.cause, suspect: detail.increase?.suspect_change?.state ?? null };
+    const height = await unroll();
+    // The increase itself, below the app header: breadcrumb, sentence, cards.
+    await save("increase", height, await clipOf([main.getByRole("navigation", { name: "Breadcrumb" }), main.locator("section.card")], height));
+  }
+
+  if (FINOPS_DOCS.includes("report")) {
+    const key = live.summary.period?.key ?? "mtd";
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto(`/aws/finops/report?period=${encodeURIComponent(key)}`);
+    const report = page.locator(".finops-report");
+    await expect(report.locator("h1")).toBeVisible();
+    await expect(report.locator('section[data-page="1"]')).toBeVisible();
+    await expect(report.locator('section[data-page="2"]')).toBeVisible();
+    await expect(report.locator('section[aria-label="What moved the cost"]')).toBeVisible();
+    await page.waitForTimeout(300);
+    const reportHeight = await page.evaluate(() => {
+      const r = document.querySelector(".finops-report");
+      let h = document.documentElement.scrollHeight;
+      for (let el: Element | null = r; el; el = el.parentElement) h = Math.max(h, (el as HTMLElement).scrollHeight);
+      return h;
+    });
+    const height = Math.max(viewport.height, reportHeight);
+    await page.setViewportSize({ width: viewport.width, height });
+    await page.waitForTimeout(400);
+    notes.report = { theme: await report.getAttribute("data-theme") };
+    await save("report", height, await clipOf([report.locator('section[data-page]')], height));
+  }
+
+  fs.writeFileSync(path.join(harnessResultsDir(), "finops-docs-captures.json"), JSON.stringify({ files, notes, problems }, null, 2));
+  expect(problems).toEqual([]);
 });

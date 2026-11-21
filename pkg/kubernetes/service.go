@@ -20,6 +20,7 @@ import (
 
 	kubeindex "github.com/VersusControl/versus-incident/pkg/kubernetes/index"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -321,8 +322,38 @@ func (service *Service) SetScrubber(scrubber Scrubber) {
 }
 
 // NewService constructs a scoped read-only Kubernetes application service.
-func NewService(client *Client, scope Scope, discoveryTTL time.Duration) *Service {
-	return newService(context.Background(), client, scope, discoveryTTL)
+func NewService(client *Client, scope Scope, discoveryTTL time.Duration, options ...ServiceOption) *Service {
+	service := newService(context.Background(), client, scope, discoveryTTL)
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+	return service
+}
+
+// ServiceOption adjusts a service at construction. Options exist for test
+// fixtures only; no configuration file, environment variable or route sets
+// one.
+type ServiceOption func(*Service)
+
+// WithCaptureCadenceDivisor runs background inventory and capture collection
+// divisor times faster than production, so a fixture cluster can show several
+// autonomous cycles in seconds: collection cadences are divided, and the
+// client's list rate is multiplied so a cycle's reads keep up. Staleness and
+// gap thresholds keep the production cadence. A divisor of one or less keeps
+// the production pace, which is also what a service built without this
+// option uses.
+func WithCaptureCadenceDivisor(divisor int) ServiceOption {
+	return func(service *Service) {
+		if divisor <= 1 {
+			return
+		}
+		service.cadenceDivisor = divisor
+		if service.client != nil {
+			service.client.indexLimiter = rate.NewLimiter(rate.Limit(productionIndexRate*float64(divisor)), productionIndexBurst)
+		}
+	}
 }
 
 // NewServiceWithObservationClock injects evidence-read time for deterministic

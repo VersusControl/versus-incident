@@ -141,27 +141,36 @@ func (service *Service) AgentSettings(ctx context.Context) (AgentSettings, error
 }
 
 func (service *Service) SaveAgentSettings(ctx context.Context, settings breaklogs.Settings) error {
+	_, err := service.SaveAgentSettingsChanges(ctx, settings)
+	return err
+}
+
+// SaveAgentSettingsChanges saves the settings and returns the names of the
+// settings that changed, compared between the stored state the save replaced
+// and the state it wrote (breaklogs.SettingsChanges). An empty list means the
+// save changed nothing.
+func (service *Service) SaveAgentSettingsChanges(ctx context.Context, settings breaklogs.Settings) ([]string, error) {
 	if err := service.validateCredential(ctx); err != nil {
-		return err
+		return nil, err
 	}
 	if settings.BreakLogs.Fields == nil {
 		settings.BreakLogs.Fields = map[string]breaklogs.Fields{}
 	}
 	if len(settings.Learning.Scope.Include) > 100 || len(settings.Learning.Scope.Exclude) > 100 || len(settings.BreakLogs.Fields) > 6 || len(settings.BreakLogs.LinkedSource) > 128 {
-		return ErrInvalidArguments
+		return nil, ErrInvalidArguments
 	}
 	if settings.BreakLogs.IngestDelay != nil && (*settings.BreakLogs.IngestDelay < 0 || *settings.BreakLogs.IngestDelay > 3600) {
-		return ErrInvalidArguments
+		return nil, ErrInvalidArguments
 	}
 	for _, namespace := range append(append([]string(nil), settings.Learning.Scope.Include...), settings.Learning.Scope.Exclude...) {
 		if !validPodLogName(namespace, 63, false) {
-			return ErrInvalidArguments
+			return nil, ErrInvalidArguments
 		}
 	}
 	for kind, fields := range settings.BreakLogs.Fields {
 		normalized, err := breaklogs.NormalizeFields(kind, fields)
 		if err != nil {
-			return ErrInvalidArguments
+			return nil, ErrInvalidArguments
 		}
 		settings.BreakLogs.Fields[kind] = normalized
 	}
@@ -172,16 +181,16 @@ func (service *Service) SaveAgentSettings(ctx context.Context, settings breaklog
 				found = true
 				fields, err := breaklogs.NormalizeFields(source.Type, settings.BreakLogs.Fields[source.Type])
 				if err != nil {
-					return ErrInvalidArguments
+					return nil, ErrInvalidArguments
 				}
 				if _, err := source.Build(fields); err != nil {
-					return ErrInvalidArguments
+					return nil, ErrInvalidArguments
 				}
 				settings.BreakLogs.Fields[source.Type] = fields
 			}
 		}
 		if !found {
-			return ErrInvalidArguments
+			return nil, ErrInvalidArguments
 		}
 	}
 	if settings.Learning.Scope.Include == nil {
@@ -195,13 +204,19 @@ func (service *Service) SaveAgentSettings(ctx context.Context, settings breaklog
 	}
 	provider, key := service.logSettingsStore()
 	clearLinkedCache()
-	return service.commitCredential(ctx, func() error {
+	var changes []string
+	err := service.commitCredential(ctx, func() error {
 		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
 			settings.Alerts = state.Settings.Alerts
+			changes = breaklogs.SettingsChanges(state.Settings, settings)
 			state.Settings = settings
 			return nil
 		})
 	})
+	if err != nil {
+		return nil, err
+	}
+	return changes, nil
 }
 
 type TestLinkRequest struct {

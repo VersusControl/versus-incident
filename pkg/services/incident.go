@@ -248,6 +248,22 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 		result.NotifyStatus = rec.NotifyStatus
 	}
 
+	// A claimed detection notification carries its delivery ID to every
+	// channel: in the template data, and as a header where the channel is a
+	// webhook. It is the same on every attempt to send this notification and
+	// is not stored on the incident.
+	if options.Detection != nil && incident.Content != nil {
+		if deliveryID := options.Detection.DeliveryID(); deliveryID != "" {
+			sendContent := make(map[string]interface{}, len(*incident.Content)+1)
+			for key, value := range *incident.Content {
+				sendContent[key] = value
+			}
+			sendContent["DeliveryID"] = deliveryID
+			incident.Content = &sendContent
+			incident.DeliveryID = deliveryID
+		}
+	}
+
 	// Fan out to every enabled channel. SendAllAlerts (unlike the
 	// legacy SendAlert) does NOT short-circuit on the first failure —
 	// a broken Slack must not silently mute Telegram or Email.
