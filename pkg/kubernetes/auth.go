@@ -86,12 +86,15 @@ func withTokenWait(ctx context.Context, limit time.Duration) context.Context {
 const tokenRefreshTimeout = 10 * time.Second
 
 type expiringBearerSource struct {
-	mu                sync.Mutex
-	refresh           func(context.Context) (string, time.Time, error)
-	now               func() time.Time
-	skew              time.Duration
-	header            string
-	expires           time.Time
+	mu      sync.Mutex
+	refresh func(context.Context) (string, time.Time, error)
+	now     func() time.Time
+	skew    time.Duration
+	header  string
+	expires time.Time
+	// renewWindow is how long before expires the current token is renewed,
+	// set from the token's lifetime when it is recorded.
+	renewWindow       time.Duration
 	principal         string
 	principalVerified bool
 	retryAt           time.Time
@@ -683,6 +686,16 @@ func (source *expiringBearerSource) Authorization(ctx context.Context) (string, 
 	return "", source.recordedErrorLocked()
 }
 
+// tokenRenewalWindow is how long before its expiry a token of lifetime is
+// renewed: half its lifetime, at least proofGraceMargin plus 15 seconds so a
+// renewal has time to finish while the token is still sent, and at most the
+// source's skew (never under proofGraceMargin). Tokens that live 15 minutes
+// or more renew at the skew, as cloud providers' tokens always have; a
+// 90-second token renews with 45 seconds left and is sent until 30 are left.
+func tokenRenewalWindow(skew, lifetime time.Duration) time.Duration {
+	return min(max(skew, proofGraceMargin), max(proofGraceMargin+15*time.Second, lifetime/2))
+}
+
 // servableLocked reports whether the current token may be sent: it was not
 // rejected and stays valid for proofGraceMargin, so transit time or a
 // cluster clock a little ahead cannot turn it into a rejection.
@@ -694,7 +707,10 @@ func (source *expiringBearerSource) servableLocked(now time.Time) bool {
 // missing or inside its renewal window, none is running, the backoff has
 // passed and the source is open.
 func (source *expiringBearerSource) startRefreshLocked(now time.Time) {
-	renewAt := max(source.skew, proofGraceMargin)
+	renewAt := source.renewWindow
+	if renewAt <= 0 {
+		renewAt = max(source.skew, proofGraceMargin)
+	}
 	if source.header != "" && now.Add(renewAt).Before(source.expires) {
 		return
 	}
@@ -732,16 +748,21 @@ func (source *expiringBearerSource) recordLocked(ctx context.Context, token stri
 			err = errors.New("kubernetes: credential provider returned an invalid token")
 		} else {
 			if now.Add(proofGraceMargin).Before(expires) {
-				source.header, source.expires = header, expires
+				window := tokenRenewalWindow(source.skew, expires.Sub(now))
+				source.header, source.expires, source.renewWindow = header, expires, window
 				source.current.Store(&expiringToken{header: header, expires: expires})
-			}
-			if now.Add(max(source.skew, proofGraceMargin)).Before(expires) {
 				source.retryAt, source.failures, source.unreachable = time.Time{}, 0, false
+				if !now.Add(window).Before(expires) {
+					// A token that lives no longer than its renewal window
+					// would start the next refresh at once; it is served,
+					// and the next refresh waits half its usable life.
+					source.retryAt = now.Add(max(time.Second, (expires.Sub(now)-proofGraceMargin)/2))
+				}
 				return
 			}
-			// A token that arrives already inside its renewal window would
-			// start the next refresh at once. It counts as an invalid answer
-			// from the provider, so the backoff spaces the next refresh.
+			// A token that cannot be sent even once, because it expires within
+			// the serving margin, is an invalid answer from the provider, so
+			// the backoff spaces the next refresh.
 			err = errors.New("kubernetes: credential provider returned a token that expires too soon")
 		}
 	}

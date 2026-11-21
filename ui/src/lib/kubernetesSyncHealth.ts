@@ -107,7 +107,15 @@ const failureReasons: Record<string, string> = {
   namespace_scope: "readable only in some namespaces",
   unsupported: "the cluster does not support this read",
   syncing: "it is still being listed",
+  authority_pending: "checking access to this resource type after a permission change",
 };
+
+/**
+ * Classes that mean the kind is on its way rather than broken: it is still being
+ * listed, or its data is held while access is checked again after a permission
+ * change. Neither ever counts as a failure.
+ */
+const preparingClasses = new Set(["syncing", "authority_pending"]);
 
 /** The phrase for a known failure class, or undefined for an unknown one. */
 export function knownFailureReason(failureClass?: string): string | undefined {
@@ -137,11 +145,12 @@ const served = (kind: KubernetesKindStatus) => !kind.absent;
  * with no failure class is still failing; it is the case where the index
  * cannot say why. A kind the cluster does not serve never fails, and neither
  * does one that is only waiting its turn: a pending or warming kind is on its
- * way, not broken, so it is checked before the partial flag.
+ * way, not broken, so it is checked before the partial flag. A kind held while
+ * its access is checked again after a permission change is on its way too.
  */
 export function kindFailed(kind: KubernetesKindStatus): boolean {
   if (!served(kind)) return false;
-  if (kind.error && kind.error !== "syncing") return true;
+  if (kind.error && !preparingClasses.has(kind.error)) return true;
   if (kind.state === "pending" || kind.state === "warming") return false;
   return kind.state === "error" || kind.state === "partial" || kind.partial;
 }
