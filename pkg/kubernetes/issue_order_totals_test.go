@@ -173,6 +173,7 @@ func historyTotalCrashEvent(position int, at, observed time.Time) kubechanges.Cr
 
 // history lists keep a bounded first-page total and mark it capped.
 func TestHistoryTotalsStayBoundedAndCapped(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 	at := now.Add(-30 * time.Minute)
 	service := issueHistoryService(t, storage.NewMemory())

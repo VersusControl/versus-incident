@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -236,9 +237,112 @@ func TestKubernetesBreakLogHTTPStoredPagesSettingsAndPermissions(t *testing.T) {
 			t.Errorf("%s %s audit=%+v want exactly one %s/%s", test.method, test.path, auditEvents, action, result)
 		}
 		encoded, _ := json.Marshal(auditEvents)
-		if strings.Contains(string(encoded), "SECRET_SOURCE") || strings.Contains(string(encoded), "learning") {
+		if strings.Contains(string(encoded), "SECRET_SOURCE") || strings.Contains(string(encoded), "missing") {
 			t.Errorf("audit contains payload: %s", encoded)
 		}
+		if result == middleware.AdminAuditSuccess && len(auditEvents) == 1 {
+			target := auditEvents[0].Target
+			if !settingsAuditTargetShape.MatchString(target) || strings.ContainsAny(target, `{"}`) {
+				t.Errorf("%s %s audit target echoes request text: %q", test.method, test.path, target)
+			}
+		}
+	}
+}
+
+// settingsAuditTargetShape is the only layout a settings-save audit target may
+// take: the resolved cluster label (or the unresolved placeholder), optionally
+// followed by the change summary.
+var settingsAuditTargetShape = regexp.MustCompile(`^kubernetes:cluster:([A-Za-z0-9._-]+|\(unresolved\))( .*)?$`)
+
+func TestKubernetesSettingsSaveAuditNamesClusterAndChanges(t *testing.T) {
+	gatewayAuth := middleware.GatewayAuthEnabled()
+	middleware.SetGatewayAuthEnabled(false)
+	t.Cleanup(func() { middleware.SetGatewayAuthEnabled(gatewayAuth) })
+	fixture, err := fakekube.NewServer(fakekube.Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(fixture)
+	defer server.Close()
+	client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: server.URL, AllowLoopbackHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "cluster-a"}, 0)
+	service.SetChangeStorage(storage.NewMemory())
+	defer service.StopCapture()
+	app := fiber.New(fiber.Config{Immutable: true})
+	app.Use(func(ctx *fiber.Ctx) error {
+		middleware.MarkAuthorized(ctx)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+		middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureSettingsWrite), ctx.Get("X-Write") != "deny")
+		return ctx.Next()
+	})
+	NewKubernetesAdminController(service).Register(app.Group("/api"))
+	var events []middleware.AdminAuditEvent
+	middleware.SetAdminAuditHook(func(_ *fiber.Ctx, event middleware.AdminAuditEvent) { events = append(events, event) })
+	t.Cleanup(func() { middleware.SetAdminAuditHook(nil) })
+	put := func(cluster, body, write string) (int, middleware.AdminAuditEvent) {
+		t.Helper()
+		events = nil
+		request := httptest.NewRequest(http.MethodPut, "/api/admin/kubernetes/agent-settings?cluster="+cluster, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Write", write)
+		response, err := app.Test(request, 10000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if len(events) != 1 {
+			t.Fatalf("PUT %s %s: want exactly one audit row, got %+v", cluster, body, events)
+		}
+		return response.StatusCode, events[0]
+	}
+	steps := []struct {
+		name, cluster, body, write string
+		status                     int
+		action, result, target     string
+	}{
+		{"toggle logs on", "cluster-a", `{"learning":{"logs":true}}`, "", 200, "kubernetes.agent-settings.changed", middleware.AdminAuditSuccess, "kubernetes:cluster:cluster-a learning.logs:false->true"},
+		{"repeat is a no-op", "cluster-a", `{"learning":{"logs":true}}`, "", 200, "kubernetes.agent-settings.changed", middleware.AdminAuditSuccess, "kubernetes:cluster:cluster-a no changes"},
+		{"scope change hides values", "cluster-a", `{"learning":{"logs":true,"scope":{"include":["payments-secret-ns"]}}}`, "", 200, "kubernetes.agent-settings.changed", middleware.AdminAuditSuccess, "kubernetes:cluster:cluster-a learning.scope:changed"},
+		{"several fields at once", "cluster-a", `{"learning":{"metrics":true,"traces":true,"scope":{"include":["payments-secret-ns"]}},"break_logs":{"ingest_delay":90}}`, "", 200, "kubernetes.agent-settings.changed", middleware.AdminAuditSuccess, "kubernetes:cluster:cluster-a learning.logs:true->false,learning.metrics:false->true,learning.traces:false->true,break_logs.ingest_delay:default->90"},
+		{"forbidden keeps rbac denied", "cluster-a", `{"learning":{"logs":false}}`, "deny", 403, "rbac.denied", middleware.AdminAuditDenied, "infrastructure:settings:write"},
+		{"unresolved cluster is not echoed", "attacker-chosen-cluster", `{"learning":{"logs":false}}`, "", 404, "kubernetes.agent-settings.changed", middleware.AdminAuditDenied, "kubernetes:cluster:(unresolved)"},
+		{"body cluster is not echoed", "cluster-a", `{"cluster":"attacker-chosen-cluster","learning":{"logs":false}}`, "", 400, "kubernetes.agent-settings.changed", middleware.AdminAuditDenied, "kubernetes:cluster:cluster-a"},
+		{"failed save names the cluster", "cluster-a", `{"break_logs":{"ingest_delay":-1}}`, "", 400, "kubernetes.agent-settings.changed", middleware.AdminAuditDenied, "kubernetes:cluster:cluster-a"},
+	}
+	for _, step := range steps {
+		status, event := put(step.cluster, step.body, step.write)
+		if status != step.status || event.Action != step.action || event.Result != step.result || event.Target != step.target {
+			t.Fatalf("%s: status=%d audit=%+v want status=%d %s/%s target=%q", step.name, status, event, step.status, step.action, step.result, step.target)
+		}
+		if strings.Contains(event.Target, "attacker") || strings.Contains(event.Target, "payments-secret-ns") {
+			t.Fatalf("%s: audit target echoes request text: %q", step.name, event.Target)
+		}
+	}
+}
+
+func TestKubernetesSettingsAuditTargetIsBounded(t *testing.T) {
+	service := kubernetes.NewService(nil, kubernetes.Scope{OrgID: "default", ClusterID: "prod east\n" + strings.Repeat("x", 300)}, 0)
+	changes := make([]string, 40)
+	for i := range changes {
+		changes[i] = "learning.logs:false->true"
+	}
+	target := kubernetesSettingsAuditTarget(service, changes, true)
+	if len(target) > maxSettingsAuditTarget || strings.Count(target, "learning.logs") != maxSettingsAuditChanges || !strings.HasSuffix(target, ",+8 more") {
+		t.Fatalf("unbounded target (%d bytes): %q", len(target), target)
+	}
+	cluster := strings.TrimPrefix(strings.SplitN(target, " ", 2)[0], "kubernetes:cluster:")
+	if len(cluster) != maxSettingsAuditCluster || !strings.HasPrefix(cluster, "prod_east_x") {
+		t.Fatalf("cluster id not bounded and sanitized: %q", cluster)
+	}
+	if got := kubernetesSettingsAuditTarget(nil, nil, false); got != "kubernetes:cluster:(unresolved)" {
+		t.Fatalf("nil service target=%q", got)
+	}
+	named := kubernetes.NewService(nil, kubernetes.Scope{OrgID: "default", ClusterID: "unresolved"}, 0)
+	if got := kubernetesSettingsAuditTarget(named, nil, false); got == kubernetesSettingsAuditTarget(nil, nil, false) {
+		t.Fatalf("a cluster named unresolved reads the same as no cluster: %q", got)
 	}
 }
 

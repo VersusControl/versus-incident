@@ -141,7 +141,9 @@ jobs:
           shards=""
           add_shard() { shards="${shards:+$shards,}\"$1\""; }
           skip_shard() { echo "::notice::Race shard $1: skipped, no changes in $2"; }
-          if on go-kubernetes; then add_shard kubernetes; else skip_shard kubernetes "pkg/kubernetes"; fi
+          # pkg/kubernetes runs as two shards: its slowest top-level tests, and
+          # everything else under pkg/kubernetes.
+          if on go-kubernetes; then add_shard kubernetes-slow; add_shard kubernetes; else skip_shard kubernetes-slow "pkg/kubernetes"; skip_shard kubernetes "pkg/kubernetes"; fi
           if on go-storage || on go-controllers; then add_shard storage-controllers; else skip_shard storage-controllers "pkg/storage, pkg/controllers, pkg/routes"; fi
           if on go-aws; then add_shard aws; else skip_shard aws "pkg/aws, pkg/awsauth, pkg/finops"; fi
           # pkg/routes runs under -race in the rest shard.
@@ -240,6 +242,14 @@ jobs:
   # finishes inside its timeout on a default hosted runner. The slowest
   # packages under -race get their own shard; "rest" is every other package.
   # Only the shards whose groups changed run.
+  #
+  # pkg/kubernetes is split by test name. "kubernetes-slow" runs only the
+  # top-level tests in RACE_SLOW_KUBERNETES_TESTS from the pkg/kubernetes
+  # package; "kubernetes" skips exactly those and runs everything else under
+  # pkg/kubernetes, so a new test lands there without a list change. Both use
+  # anchored patterns built from the same list, so each test runs in exactly
+  # one shard. Many of these tests wait on real timers rather than CPU, so the
+  # kubernetes shards raise -parallel above the runner's CPU count.
   race:
     name: Race (${{ matrix.shard }})
     needs: changes
@@ -252,6 +262,22 @@ jobs:
         shard: ${{ fromJSON(needs.changes.outputs.race_shards) }}
     env:
       GORACE: halt_on_error=1
+      # Exact top-level test names in package pkg/kubernetes, one per line.
+      RACE_SLOW_KUBERNETES_TESTS: |
+        TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica
+        TestWidenedGrantReachesReadyWithinTwoCycles
+        TestWidenedGrantStaysClusterWide
+        TestStableNamespaceGrantIsNotRecheckedEveryCycle
+        TestMixedRoleReachesFirstReadyWithANamespaceScopedKind
+        TestServedGatewayKindsStayListedWhileDiscoveryWalksManyGroups
+        TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends
+        TestFailingNamespaceIsNotReportedReadyThroughAnother
+        TestAutonomousMixedAuthorityFiniteCompletion
+        TestSteadyPermissionGapNeverFlapsTheClusterView
+        TestOverviewGraphFailsClosed
+        TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood
+        TestNamespaceOnlyRoleHoldsOneSyncReport
+        TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -275,8 +301,42 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
+          # Anchored alternation of the slow list: ^(A|B|...)$. Names hold
+          # only letters, digits and underscores, so none needs escaping.
+          slow_names=$(printf '%s\n' "${RACE_SLOW_KUBERNETES_TESTS:-}" | tr -d ' \t\r' | grep -v '^$' || true)
+          slow_pattern="^($(printf '%s\n' "$slow_names" | paste -sd '|' -))\$"
+          flags=()
           case "$SHARD" in
-            kubernetes) dirs="pkg/kubernetes" ;;
+            kubernetes-slow)
+              if [ ! -d pkg/kubernetes ]; then
+                echo "::notice::Race shard $SHARD: skipped, pkg/kubernetes is not in this branch"
+                exit 0
+              fi
+              if [ -z "$slow_names" ] || printf '%s\n' "$slow_names" | grep -qv '^Test[A-Za-z0-9_]*$'; then
+                echo "::error::RACE_SLOW_KUBERNETES_TESTS must list top-level test names, one per line"
+                exit 1
+              fi
+              # A stale name would leave its test in neither shard's intent;
+              # fail rather than run fewer tests than the list claims.
+              listed=$(go test -short -count=1 -list '.*' ./pkg/kubernetes | grep -E '^Test' || true)
+              stale=""
+              while IFS= read -r name; do
+                if ! printf '%s\n' "$listed" | grep -qxF "$name"; then
+                  stale="${stale:+$stale, }$name"
+                fi
+              done <<< "$slow_names"
+              if [ -n "$stale" ]; then
+                echo "::error::RACE_SLOW_KUBERNETES_TESTS names tests that do not exist in pkg/kubernetes: $stale"
+                exit 1
+              fi
+              go test -short -race -count=1 -timeout 13m -parallel 16 -run "$slow_pattern" ./pkg/kubernetes
+              exit 0
+              ;;
+            kubernetes)
+              dirs="pkg/kubernetes"
+              flags=(-parallel 16)
+              if [ -n "$slow_names" ]; then flags+=(-skip "$slow_pattern"); fi
+              ;;
             storage-controllers) dirs="pkg/storage pkg/controllers" ;;
             aws) dirs="pkg/aws pkg/awsauth pkg/finops" ;;
             rest) dirs="" ;;
@@ -313,7 +373,7 @@ jobs:
           fi
           # Word splitting of the package list is intended.
           # shellcheck disable=SC2086
-          go test -short -race -count=1 -timeout 13m $packages
+          go test -short -race -count=1 -timeout 13m "${flags[@]}" $packages
 
   # Helm chart checks: the chart version must follow the release version,
   # the committed one-file kubectl manifest must match a fresh render of the

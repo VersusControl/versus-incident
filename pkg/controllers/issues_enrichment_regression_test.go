@@ -141,9 +141,16 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "cluster", ClusterUID: "enrichment-physical"}
 	store := provider.(storage.EvidenceStore)
 	batch := storage.EvidenceBatch{ID: "capture:synthetic-enrichment-history", At: now, Epoch: "synthetic"}
-	for i := 0; i < 501; i++ {
-		namespace := "other"
-		if i == 500 {
+	// Each enriched issue reads one history window of at most historyWindowCap
+	// changes, limited to its own namespace and break time. Seeding one more
+	// than the cap inside the "other" namespace, at a time every current issue's
+	// window covers, overflows the window of each "other" issue, while the single
+	// "payments" change keeps that namespace's windows complete.
+	const historyWindowCap = 500
+	const truncatedNamespace = "other"
+	for i := 0; i <= historyWindowCap+1; i++ {
+		namespace := truncatedNamespace
+		if i == historyWindowCap+1 {
 			namespace = "payments"
 		}
 		change := kubechanges.Change{ID: fmt.Sprintf("synthetic-change-%03d", i), Cluster: "cluster", Kind: "Pod", Namespace: namespace, Name: "synthetic", UID: fmt.Sprintf("synthetic-history-%03d", i), Type: kubechanges.ImageChanged, At: now.Add(-time.Second)}
@@ -168,10 +175,12 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	history, err := store.QueryEvidence(t.Context(), scope, storage.EvidenceQuery{Type: "change", Since: now.Add(-time.Hour), Until: now.Add(time.Minute), Limit: 500})
+	history, err := store.QueryEvidence(t.Context(), scope, storage.EvidenceQuery{Type: "change", Namespace: truncatedNamespace, Since: now.Add(-time.Hour), Until: now.Add(time.Minute), Limit: historyWindowCap})
 	if err != nil || history.Next == "" {
-		t.Fatalf("successful bounded history must have continuation: next=%t err=%v", history.Next != "", err)
+		t.Fatalf("one namespace's history must overflow a single window: next=%t err=%v", history.Next != "", err)
 	}
+	// Only the first issues of a page are enriched with history.
+	const enrichedPerPage = 5
 	for _, limit := range []string{"5", "50", ""} {
 		t.Run("all-namespace-limit-"+limit, func(t *testing.T) {
 			path := base + "&include=changes"
@@ -196,10 +205,27 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 					t.Fatalf("a per-issue history cap leaked into a page-level partial: class=%s", partial.Class)
 				}
 			}
-			for _, issue := range page.Items[:min(5, len(page.Items))] {
-				if !issue.Partial || !issue.HistoryTruncated || issue.History == "complete" {
-					t.Fatalf("bounded enrichment did not warn on the affected issue: partial=%t truncated=%t history=%q", issue.Partial, issue.HistoryTruncated, issue.History)
+			truncated, complete := 0, 0
+			for position, issue := range page.Items {
+				switch {
+				case position >= enrichedPerPage:
+					if issue.HistoryTruncated {
+						t.Fatalf("issue %d is past the enriched issues but warns of truncated history: namespace=%s", position, issue.Root.Namespace)
+					}
+				case issue.Root.Namespace == truncatedNamespace:
+					if !issue.Partial || !issue.HistoryTruncated || issue.History == "complete" {
+						t.Fatalf("bounded enrichment did not warn on an issue whose window overflowed: namespace=%s partial=%t truncated=%t history=%q", issue.Root.Namespace, issue.Partial, issue.HistoryTruncated, issue.History)
+					}
+					truncated++
+				default:
+					if issue.HistoryTruncated {
+						t.Fatalf("another namespace's full window marked this issue truncated: namespace=%s history=%q", issue.Root.Namespace, issue.History)
+					}
+					complete++
 				}
+			}
+			if truncated == 0 || complete == 0 {
+				t.Fatalf("enriched issues must cover both an overflowing and a complete window: truncated=%d complete=%d", truncated, complete)
 			}
 			if limit == "5" && (len(page.Items) != 5 || page.Next == "") {
 				t.Fatal("enrichment changed current Issues page limit/continuation")
@@ -213,6 +239,11 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 	for _, partial := range selected.Partial {
 		if partial.ResourceID == "kubernetes.history" {
 			t.Fatalf("complete small selected history unavailable: class=%s", partial.Class)
+		}
+	}
+	for _, issue := range selected.Items {
+		if issue.HistoryTruncated {
+			t.Fatalf("selected namespace with a complete window warns of truncated history: namespace=%s", issue.Root.Namespace)
 		}
 	}
 	rootUID := ""
@@ -267,8 +298,23 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 			}
 		}
 	}
+	// The revocation becomes visible only after the background collector lists
+	// StatefulSet and DaemonSet again and publishes the result. A listing that
+	// starts after the denial is due within one collection cadence of it; the
+	// collector checks for due kinds every second; a cycle that finds a new
+	// denial skips its early publication and publishes after the optional-API
+	// stage, which starts reads for up to ten seconds. The settle margin covers
+	// the authority proof and the namespace stage of that cycle under the race
+	// detector. The deadline counts from the denial itself: the published
+	// attempt times can lag a cycle that is already listing.
+	const (
+		workloadCollectionCadence = 30 * time.Second
+		collectorTick             = time.Second
+		optionalStageWindow       = 10 * time.Second
+		cycleSettleMargin         = 15 * time.Second
+	)
 	denyProof.Store(true)
-	deadline = time.Now().Add(25 * time.Second)
+	deadline = time.Now().Add(workloadCollectionCadence + collectorTick + optionalStageWindow + cycleSettleMargin)
 	for {
 		_, _, _ = service.IndexSnapshot(t.Context(), "StatefulSet", "DaemonSet")
 		checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
@@ -280,7 +326,7 @@ func TestEnrichedIssuesHTTPTruncatedHistoryRemainsPartial(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("capture did not persist actual authority revocation")
+			t.Fatalf("capture did not persist actual authority revocation by one collection cycle: authority=%+v healthErr=%v statefulset=%s/%s daemonset=%s/%s", checkpoint.Authority, healthErr, health.Kinds["StatefulSet"].State, health.Kinds["StatefulSet"].Error, health.Kinds["DaemonSet"].State, health.Kinds["DaemonSet"].Error)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

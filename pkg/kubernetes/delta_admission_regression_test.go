@@ -88,42 +88,48 @@ func (service *Service) reservationFixturePage(ctx context.Context, query Timeli
 func TestTimelineFirstPagePollingDoesNotReserveEmptyOrSinglePages(t *testing.T) {
 	t.Parallel()
 	for _, scenario := range []string{"single-page", "syncing", "empty"} {
-		service, provider, store, scope, reads := timelineHistoryFixture(t)
-		now := time.Now().UTC()
-		if scenario != "empty" {
-			commitTimelineHistory(t, store, scope, storage.EvidenceBatch{ID: "polling", At: now, Epoch: "fixture", Records: []storage.EvidenceRecord{
-				timelineChangeRecord(Change{ID: "one", UID: "pod", Kind: "Pod", Name: "pod", Namespace: "shop", Type: kubechanges.Created, At: now.Add(-time.Minute)}),
-				timelineChangeRecord(Change{ID: "two", UID: "other", Kind: "Pod", Name: "other", Namespace: "shop", Type: kubechanges.Created, At: now.Add(-2 * time.Minute)}),
-			}})
-		} else {
-			commitTimelineHistory(t, store, scope, storage.EvidenceBatch{ID: "empty", At: now, Epoch: "fixture"})
-		}
-		seedInventory(t, service, nil)
-		if scenario == "syncing" {
-			service.changes.inventories[service.indexScope()].generation.View.Kinds = nil
-		}
-		query := TimelineQuery{Since: now.Add(-time.Hour), Until: now, Limit: 200}
-		before := reads.Load()
-		for i := 0; i < timelineSnapshotSlots+16; i++ {
-			query.Until = query.Until.Add(time.Nanosecond)
-			page, err := service.Timeline(t.Context(), query)
-			if err != nil || page.Next != "" {
-				t.Fatalf("poll %d scenario=%s: next=%q err=%v", i, scenario, page.Next, err)
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			service, provider, store, scope, reads := timelineHistoryFixture(t)
+			now := time.Now().UTC()
+			if scenario != "empty" {
+				commitTimelineHistory(t, store, scope, storage.EvidenceBatch{ID: "polling", At: now, Epoch: "fixture", Records: []storage.EvidenceRecord{
+					timelineChangeRecord(Change{ID: "one", UID: "pod", Kind: "Pod", Name: "pod", Namespace: "shop", Type: kubechanges.Created, At: now.Add(-time.Minute)}),
+					timelineChangeRecord(Change{ID: "two", UID: "other", Kind: "Pod", Name: "other", Namespace: "shop", Type: kubechanges.Created, At: now.Add(-2 * time.Minute)}),
+				}})
+			} else {
+				commitTimelineHistory(t, store, scope, storage.EvidenceBatch{ID: "empty", At: now, Epoch: "fixture"})
 			}
-			if scenario == "empty" && page.Total != 0 {
-				t.Fatal("empty polling fixture unexpectedly contains data")
+			seedInventory(t, service, nil)
+			if scenario == "syncing" {
+				service.changes.inventories[service.indexScope()].generation.View.Kinds = nil
 			}
-			if scenario != "empty" && (page.Total != 2 || len(page.Items) != 2) {
-				t.Fatal("polling lost committed history")
+			query := TimelineQuery{Since: now.Add(-time.Hour), Until: now, Limit: 200}
+			before := reads.Load()
+			// A poll that reserved a snapshot slot leaves the shared index
+			// non-empty, which the check after the loop catches; a few polls
+			// prove that without exhausting all the slots.
+			for i := 0; i < 16; i++ {
+				query.Until = query.Until.Add(time.Nanosecond)
+				page, err := service.Timeline(t.Context(), query)
+				if err != nil || page.Next != "" {
+					t.Fatalf("poll %d scenario=%s: next=%q err=%v", i, scenario, page.Next, err)
+				}
+				if scenario == "empty" && page.Total != 0 {
+					t.Fatal("empty polling fixture unexpectedly contains data")
+				}
+				if scenario != "empty" && (page.Total != 2 || len(page.Items) != 2) {
+					t.Fatal("polling lost committed history")
+				}
 			}
-		}
-		if reads.Load() != before {
-			t.Fatal("persisted polling called the cluster")
-		}
-		raw, err := provider.ReadBlob(service.timelineKey(0) + "/index")
-		if err != nil || len(raw) != 0 {
-			t.Fatalf("non-paginated polling reserved shared capacity: bytes=%d err=%v", len(raw), err)
-		}
+			if reads.Load() != before {
+				t.Fatal("persisted polling called the cluster")
+			}
+			raw, err := provider.ReadBlob(service.timelineKey(0) + "/index")
+			if err != nil || len(raw) != 0 {
+				t.Fatalf("non-paginated polling reserved shared capacity: bytes=%d err=%v", len(raw), err)
+			}
+		})
 	}
 }
 

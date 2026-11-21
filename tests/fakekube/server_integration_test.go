@@ -33,14 +33,23 @@ func TestMultiClusterFleetFixturesThroughSharedRegistry(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: id, CredentialID: "fixture-" + id}, 0)
+		service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: id, CredentialID: "fixture-" + id}, 0, kubernetes.WithCaptureCadenceDivisor(fixtureCadenceDivisor))
 		service.SetChangeStorage(provider)
 		entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: id, Provider: "generic"}, Service: service})
 	}
 	entries = append(entries, kubernetes.ClusterEntry{Info: kubernetes.ClusterInfo{ID: "unreachable", Provider: "generic"}, Err: errors.New("unreachable-fixture")})
 	registry := kubernetes.NewClusterRegistry(true, entries)
+	defer registry.Close()
+	// Reads answer from each cluster's inventory worker and never collect
+	// inline, so the workers run as they do at boot and the fleet is read once
+	// both clusters finished their first sync.
+	registry.StartCapture(t.Context())
 	ctx := core.WithCallerAuthorization(context.Background(), core.CallerAuthorization{Authenticated: true, Permissions: map[core.Permission]bool{core.PermissionInfrastructureView: true}})
-	summaries := registry.Summaries(ctx, "default", nil)
+	var summaries []kubernetes.ClusterSummary
+	waitFirstSync(t, "fleet first sync", func() bool {
+		summaries = registry.Summaries(ctx, "default", nil)
+		return len(summaries) == 3 && summaries[0].Sync.State != "syncing" && summaries[1].Sync.State != "syncing"
+	})
 	if len(summaries) != 3 || summaries[0].Health != "healthy" || summaries[1].Health != "healthy" || summaries[2].Health != "unreachable" || summaries[0].Nodes != 1 || summaries[1].Nodes != 2 || summaries[0].Pods != 2 || summaries[1].Pods != 3 {
 		t.Fatalf("fleet summaries: %+v", summaries)
 	}
@@ -77,9 +86,16 @@ func TestBadRolloutBackendContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster"}, 0)
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster"}, 0, kubernetes.WithCaptureCadenceDivisor(fixtureCadenceDivisor))
 	service.SetChangeStorage(storage.NewMemory())
-	page, err := service.Issues(t.Context(), kubernetes.IssueOptions{Broken: true, IncludeChanges: true, Limit: 2})
+	registry := kubernetes.NewServiceRegistry(service)
+	defer registry.Close()
+	registry.StartCapture(t.Context())
+	var page kubernetes.IssuePage
+	waitFirstSync(t, "bad rollout first sync", func() bool {
+		page, err = service.Issues(t.Context(), kubernetes.IssueOptions{Broken: true, IncludeChanges: true, Limit: 2})
+		return err != nil || page.Sync.State != "syncing"
+	})
 	if err != nil || page.Broken.Total != 3 || len(page.Items) != 2 || page.Next == "" {
 		t.Fatalf("page totals: %+v %v", page, err)
 	}
@@ -134,6 +150,28 @@ func TestBadRolloutBackendContract(t *testing.T) {
 	}
 }
 
+// fixtureCadenceDivisor runs background collection this many times faster
+// than production in tests that wait for autonomous cycles.
+const fixtureCadenceDivisor = 20
+
+// fixtureCadence is a production cadence at the fixture pace.
+func fixtureCadence(production time.Duration) time.Duration {
+	return production / fixtureCadenceDivisor
+}
+
+// waitFirstSync polls a read until the cluster's first inventory sync has
+// answered it. The bound only fails a sync that never finishes.
+func waitFirstSync(t *testing.T, describe string, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for !done() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", describe)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
 func TestContinuousCaptureIdleBreakAndShutdown(t *testing.T) {
 	server, err := NewServer(Config{Scenario: "bad-rollout-before"})
 	if err != nil {
@@ -145,7 +183,7 @@ func TestContinuousCaptureIdleBreakAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster", CredentialID: "fixture"}, 0)
+	service := kubernetes.NewService(client, kubernetes.Scope{ClusterID: "cluster", CredentialID: "fixture"}, 0, kubernetes.WithCaptureCadenceDivisor(fixtureCadenceDivisor))
 	service.SetChangeStorage(storage.NewMemory())
 	registry := kubernetes.NewServiceRegistry(service)
 	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Second)
@@ -154,9 +192,18 @@ func TestContinuousCaptureIdleBreakAndShutdown(t *testing.T) {
 	registry.StartCapture(ctx)
 	poll := time.NewTicker(50 * time.Millisecond)
 	defer poll.Stop()
+	// The first publication lists the core kinds and the rest follow, so
+	// the baseline is a capture cycle after every kind, ConfigMaps included,
+	// has been listed once: a change needs a prior listing to compare with.
+	var listed time.Time
+	waitFirstSync(t, "inventory to list every kind", func() bool {
+		overview, err := service.Overview(ctx)
+		listed = time.Now().UTC()
+		return err == nil && overview.Sync.State == "ready" && len(overview.Sync.Pending) == 0 && overview.Sync.PendingKinds == 0
+	})
 	var baseline time.Time
 	for baseline.IsZero() {
-		if status := service.CaptureStatus(); status.LastCycleAt != nil {
+		if status := service.CaptureStatus(); status.LastCycleAt != nil && status.LastCycleAt.After(listed) {
 			baseline = *status.LastCycleAt
 			break
 		}
@@ -169,39 +216,42 @@ func TestContinuousCaptureIdleBreakAndShutdown(t *testing.T) {
 	if err := seedBadRollout(server.store, time.Now().UTC().Truncate(time.Second).Add(4*time.Minute), true); err != nil {
 		t.Fatal(err)
 	}
-	for {
-		status := service.CaptureStatus()
-		if status.LastCycleAt != nil && status.LastCycleAt.Sub(baseline) >= 20*time.Second {
+	// ConfigMaps have the slowest capture cadence of the kinds changed here;
+	// two of their fixture cycles bound how long the idle capture may take
+	// to record both the config and the image change.
+	observedConfig, observedImage := false, false
+	deadline := time.Now().Add(2*fixtureCadence(5*time.Minute) + 5*time.Second)
+	for !observedConfig || !observedImage {
+		changes, err := service.Changes(ctx, kubernetes.ChangeQuery{Since: baseline, Limit: 500})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, change := range changes.Items {
+			if change.Source != "observed" {
+				continue
+			}
+			if change.Type == kubechanges.ConfigChanged && change.Name == "checkout-cfg" {
+				observedConfig = true
+			}
+			if change.Type == kubechanges.ImageChanged && change.Name == "checkout" {
+				observedImage = true
+			}
+		}
+		if observedConfig && observedImage {
 			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("idle observed config=%v image=%v", observedConfig, observedImage)
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatal("idle capture did not record the next cycle")
+			t.Fatal("idle capture did not record the changes")
 		case <-poll.C:
 		}
 	}
 	page, err := service.Issues(ctx, kubernetes.IssueOptions{Broken: true, IncludeChanges: true, RootUID: "deployment-checkout", Namespace: "shop"})
 	if err != nil || len(page.Items) != 1 || !page.Items[0].Broken || page.Items[0].History == "complete" {
 		t.Fatalf("idle break: %+v %v", page, err)
-	}
-	changes, err := service.Changes(ctx, kubernetes.ChangeQuery{Since: baseline, Limit: 500})
-	if err != nil {
-		t.Fatal(err)
-	}
-	observedConfig, observedImage := false, false
-	for _, change := range changes.Items {
-		if change.Source != "observed" {
-			continue
-		}
-		if change.Type == kubechanges.ConfigChanged && change.Name == "checkout-cfg" {
-			observedConfig = true
-		}
-		if change.Type == kubechanges.ImageChanged && change.Name == "checkout" {
-			observedImage = true
-		}
-	}
-	if !observedConfig || !observedImage {
-		t.Fatalf("idle observed config=%v image=%v", observedConfig, observedImage)
 	}
 	registry.Close()
 	if _, err := registry.ResolveCluster("default", "cluster"); !errors.Is(err, kubernetes.ErrClusterUnavailable) {
@@ -215,7 +265,10 @@ func TestContinuousCaptureIdleBreakAndShutdown(t *testing.T) {
 }
 
 func TestTimestampedPodLogFollowResumePreviousAndCancellation(t *testing.T) {
-	server, err := NewServer(Config{Scenario: "triage", Seed: 1})
+	// The resume below reads from a cursor, which the connector holds to its
+	// log read window, so the stream's lines are dated a minute ago.
+	logStart := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
+	server, err := NewServer(Config{Scenario: "triage", Seed: 1, LogStart: logStart})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +313,9 @@ func TestTimestampedPodLogFollowResumePreviousAndCancellation(t *testing.T) {
 		t.Fatalf("identical timestamped lines were lost: %#v", events[:2])
 	}
 	for _, event := range events {
-		if (event.Cursor != "") != (event.Sequence%32 == 0) || event.Container != "api" || event.Timestamp == "" {
+		// A follow checkpoints its first line, so a short tail can resume,
+		// and then every 32nd line.
+		if (event.Cursor != "") != (event.Sequence == 1 || event.Sequence%32 == 0) || event.Container != "api" || event.Timestamp == "" {
 			t.Fatalf("missing stream metadata: %#v", event)
 		}
 		for _, canary := range []string{"super-secret-value", "split-secret-value", "previous-secret-value", "synthetic-oversized-secret-value", "synthetic-record-padding"} {
@@ -275,7 +330,7 @@ func TestTimestampedPodLogFollowResumePreviousAndCancellation(t *testing.T) {
 	options.Cursor = events[31].Cursor
 	resumed := collectFollow(options, 3)
 	for index, event := range resumed {
-		if event.Ordinal != 1 || event.Timestamp != time.Date(2026, 1, 1, 0, 0, 28+index, 0, time.UTC).Format(time.RFC3339Nano) || event.ReplayUncertain {
+		if event.Ordinal != 1 || event.Timestamp != logStart.Add(time.Duration(28+index)*time.Second).Format(time.RFC3339Nano) || event.ReplayUncertain {
 			t.Fatalf("resume lost same-timestamp occurrence: %#v", resumed)
 		}
 	}
@@ -311,7 +366,7 @@ func TestTimestampedPodLogFollowResumePreviousAndCancellation(t *testing.T) {
 		if err != nil || response.StatusCode != http.StatusOK {
 			t.Fatalf("stream observation status=%d err=%v", response.StatusCode, err)
 		}
-		if len(counters) == 2 && counters[0].Requests == 2 && counters[0].Active == 0 && counters[0].Cancelled == 2 && counters[0].Chunks >= 13 && counters[0].SinceTime == "2025-12-31T23:59:59.999999999Z" && counters[1].Previous && counters[1].Requests == 1 && counters[1].Completed == 1 && counters[1].Active == 0 {
+		if len(counters) == 2 && counters[0].Requests == 2 && counters[0].Active == 0 && counters[0].Cancelled == 2 && counters[0].Chunks >= 13 && counters[0].SinceTime == logStart.Add(-time.Nanosecond).Format(time.RFC3339Nano) && counters[1].Previous && counters[1].Requests == 1 && counters[1].Completed == 1 && counters[1].Active == 0 {
 			break
 		}
 		select {
