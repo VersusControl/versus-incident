@@ -325,6 +325,7 @@ aws iam get-user --user-name versus-quickstart
 | Goal | How |
 | --- | --- |
 | Run Versus in production | Use role-based connect: Versus assumes a read-only IAM role, with no long-lived key. See [Connect your AWS account](/in-development/aws-harness-connect). |
-| Learn the FinOps page | [AWS FinOps Agent](/in-development/aws-finops-agent) |
+| Learn the FinOps page | [AWS FinOps](/agent/aws/finops) |
+| See who changed what, and which change started an alarm | [AWS Changes](/agent/aws/changes) |
 | Share a cost report | [Read your FinOps report](/in-development/aws-finops-report) |
 | See cost per team | [Tag your AWS cost for ownership](/in-development/aws-finops-tagging) |

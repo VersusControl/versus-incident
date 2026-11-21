@@ -7,6 +7,10 @@ on AWS.
 
 ![AWS Changes page: scope bar, summary card with a likely cause, activity grid, and the Changes and Compare cards side by side](../../docs/images/aws-changes-overview-dark.png)
 
+**Try it quickly:** [AWS Quickstart](/agent/aws/quickstart)
+
+**Full setup and every setting:** [Changes setup](/agent/aws/configuration#changes-setup)
+
 ## Read the page in 30 seconds
 
 | Part | What it tells you | What you do |
