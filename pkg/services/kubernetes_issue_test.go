@@ -3,7 +3,15 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -183,5 +191,120 @@ func TestKubernetesIssueUsesScopedEpisodeStore(t *testing.T) {
 		if org != "org-b" {
 			t.Fatal(spy.orgs)
 		}
+	}
+}
+
+// A sender that dies after the channel accepted its notification leaves the
+// claim to expire, and the next sender sends again. Both attempts carry the
+// same delivery ID, in the template data and as the webhook's
+// Idempotency-Key, so the receiver can drop the repeat. The ID is not stored
+// on the incident.
+func TestKubernetesIssueReplayCarriesTheDeliveryIDOfTheDeadSender(t *testing.T) {
+	loadAgentTestConfig(t)
+	cfg := config.GetConfig()
+	previousTeams, previousOnCall := cfg.Alert.MSTeams, cfg.OnCall
+	t.Cleanup(func() { cfg.Alert.MSTeams, cfg.OnCall = previousTeams, previousOnCall })
+	cfg.OnCall.Enable, cfg.OnCall.InitializedOnly = false, false
+	type delivery struct{ header, body string }
+	deliveries := make(chan delivery, 8)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		deliveries <- delivery{header: r.Header.Get("Idempotency-Key"), body: string(raw)}
+	}))
+	defer receiver.Close()
+	template := filepath.Join(t.TempDir(), "issue.tmpl")
+	if err := os.WriteFile(template, []byte(`{{.Workload}} delivery={{.DeliveryID}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Alert.MSTeams = config.MSTeamsConfig{Enable: true, PowerAutomateURL: receiver.URL, KubernetesIssueTemplatePath: template, TemplatePath: template}
+	old := store
+	memory := storage.NewMemory()
+	SetStorage(memory)
+	t.Cleanup(func() { SetStorage(old) })
+
+	a := kubernetes.IssueAlert{Cluster: "alpha", Namespace: "shop", WorkloadKind: "Deployment", Workload: "ambiguous", RootUID: "root", Rule: "pod.failed", RuleLabel: "has failed", Severity: "warning", BrokeAt: time.Now().Add(-time.Hour)}
+	// The dead sender claimed the notification a lease ago and never finished.
+	dead, err := memory.(storage.DetectionEpisodeStore).RecordDetectionOccurrence(storage.DetectionOccurrence{
+		Identity:  storage.DetectionIdentity{AgentKind: "kubernetes", Source: "kubernetes:alpha", Service: "shop/Deployment/ambiguous", SignalKind: "kubernetes_issue", ConditionKey: "pod.failed"},
+		Frequency: 1, Severity: "medium", ReceivedAt: time.Now().Add(-2 * storage.DefaultDetectionNotificationLease), ClaimLease: storage.DefaultDetectionNotificationLease,
+	})
+	if err != nil || dead.DeliveryID() == "" {
+		t.Fatalf("dead sender claim = %q, %v", dead.DeliveryID(), err)
+	}
+	outcome, err := CreateIncidentFromKubernetesIssue("default", a)
+	if err != nil || outcome.NotificationOutcome != "sent" || outcome.IncidentID != dead.IncidentID {
+		t.Fatalf("replay = %+v, %v", outcome, err)
+	}
+	got := <-deliveries
+	if got.header != dead.DeliveryID() || !strings.Contains(got.body, "delivery="+dead.DeliveryID()) {
+		t.Fatalf("replay delivery header=%q body=%s, want delivery ID %q", got.header, got.body, dead.DeliveryID())
+	}
+	again, err := CreateIncidentFromKubernetesIssue("default", a)
+	if err != nil || again.NotificationOutcome != "not_applicable" || len(deliveries) != 0 {
+		t.Fatalf("an unchanged break notified again: %+v, %v", again, err)
+	}
+	record, err := memory.GetIncident(dead.IncidentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, stored := record.Content["DeliveryID"]; stored {
+		t.Fatal("the delivery ID was stored on the incident")
+	}
+}
+
+// One break of one workload is one episode, whichever process reports it and
+// however its details drift between ticks: two senders reporting the same
+// break 50 times each notify once.
+func TestKubernetesIssueOneBreakIsOneEpisodeAcrossTicksAndSenders(t *testing.T) {
+	loadAgentTestConfig(t)
+	cfg := config.GetConfig()
+	previousOnCall := cfg.OnCall
+	t.Cleanup(func() { cfg.OnCall = previousOnCall })
+	cfg.OnCall.Enable, cfg.OnCall.InitializedOnly = false, false
+	backends := map[string]func(t *testing.T) storage.Provider{
+		"memory": func(*testing.T) storage.Provider { return storage.NewMemory() },
+		"file": func(t *testing.T) storage.Provider {
+			provider, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = provider.Close() })
+			return provider
+		},
+	}
+	for name, build := range backends {
+		t.Run(name, func(t *testing.T) {
+			old := store
+			SetStorage(build(t))
+			t.Cleanup(func() { SetStorage(old) })
+			brokeAt := time.Now().Add(-time.Minute).UTC()
+			var notified atomic.Int32
+			incidents := sync.Map{}
+			var senders sync.WaitGroup
+			for sender := range 2 {
+				senders.Add(1)
+				go func() {
+					defer senders.Done()
+					for tick := range 50 {
+						a := kubernetes.IssueAlert{OrgID: "default", Cluster: "alpha", Namespace: "shop", WorkloadKind: "Deployment", Workload: "api", RootUID: "root", Rule: "pod.crash_loop", RuleLabel: "is crash looping", Severity: "critical", Count: 1 + tick%3, Of: 3, BrokeAt: brokeAt, Evidence: []string{fmt.Sprintf("%d restarts", tick+sender)}}
+						outcome, err := CreateIncidentFromKubernetesIssue("default", a)
+						if err != nil {
+							t.Errorf("sender %d tick %d: %v", sender, tick, err)
+							return
+						}
+						incidents.Store(outcome.IncidentID, true)
+						if outcome.NotificationOutcome != "not_applicable" {
+							notified.Add(1)
+						}
+					}
+				}()
+			}
+			senders.Wait()
+			count := 0
+			incidents.Range(func(any, any) bool { count++; return true })
+			if notified.Load() != 1 || count != 1 {
+				t.Fatalf("one break notified %d times over %d incidents, want once over one", notified.Load(), count)
+			}
+		})
 	}
 }

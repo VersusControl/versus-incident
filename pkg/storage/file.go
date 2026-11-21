@@ -3,16 +3,20 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/utils"
@@ -38,6 +42,7 @@ type fileProvider struct {
 	evidenceMu    sync.Mutex
 	localEvidence *localEvidence
 	dir           string
+	root          *os.Root
 	maxIncidents  int
 
 	mu        sync.RWMutex
@@ -87,15 +92,31 @@ func NewFile(opts FileOptions) (Provider, error) {
 	if err := validateSecureStorageRoot(dir); err != nil {
 		return nil, fmt.Errorf("storage: validate data directory %s: %w", dir, err)
 	}
+	// The path to the data directory may pass through links, as macOS /tmp
+	// and /var and Kubernetes volume mounts (..data) do. It is resolved once
+	// here, and every blob is reached through a handle on the resolved directory.
+	resolved, err := filepath.Abs(dir)
+	if err == nil {
+		resolved, err = filepath.EvalSymlinks(resolved)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage: resolve data directory %s: %w", dir, err)
+	}
+	dir = resolved
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("storage: open data directory %s: %w", dir, err)
+	}
 	max := opts.MaxIncidents
 	if max <= 0 {
 		max = MaxIncidentsDefault
 	}
-	p := &fileProvider{sqlTables: newSQLiteTables(filepath.Join(dir, localTablesFile)), dir: dir, maxIncidents: max}
+	p := &fileProvider{sqlTables: newSQLiteTables(filepath.Join(dir, localTablesFile)), dir: dir, root: root, maxIncidents: max}
 	if _, err := os.Stat(filepath.Join(dir, localTablesFile)); err == nil {
 		// The tables are opened lazily, so only an existing database is
 		// checked here; a fresh deployment creates it with the current schema.
 		if err := p.checkTablesSchema(); err != nil {
+			_ = root.Close()
 			return nil, err
 		}
 	}
@@ -134,12 +155,143 @@ func (p *fileProvider) checkTablesSchema() error {
 // inside the data directory.
 var ErrInvalidBlobName = errors.New("storage: invalid blob name")
 
+// errBlobLink is a symbolic link, or another reparse point, where a blob file
+// should be.
+var errBlobLink = errors.New("storage: blob path is a link")
+
+// Every blob file is reached through p.root, a handle on the resolved data
+// directory: the kernel resolves each name inside it and refuses any path
+// that leaves it, also when a directory inside is swapped for a link while a
+// call runs. A link that stays inside is followed; a link at the blob file
+// itself is refused, so a blob is always a file the store wrote.
+
+// blobRel is the blob file of name relative to the data directory. The name
+// rules of blobPath apply.
+func (p *fileProvider) blobRel(name string) (string, error) {
+	target, err := p.blobPath(name)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(p.dir, target)
+	if err != nil {
+		return "", fmt.Errorf("%w: %q", ErrInvalidBlobName, name)
+	}
+	return rel, nil
+}
+
+// blobError reports a path the data directory handle refused, because it
+// leaves the directory or loops, or a link at the blob file, as
+// ErrInvalidBlobName; other errors pass through.
+func blobError(name string, err error) error {
+	if errors.Is(err, errBlobLink) || errors.Is(err, syscall.ELOOP) {
+		return fmt.Errorf("%w: %q", ErrInvalidBlobName, name)
+	}
+	// os.Root does not export its escape error; it is the innermost cause.
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if cause.Error() == "path escapes from parent" {
+			return fmt.Errorf("%w: %q", ErrInvalidBlobName, name)
+		}
+	}
+	return err
+}
+
+// refuseBlobLink answers errBlobLink when a link sits at rel. A missing file
+// is not an error.
+func (p *fileProvider) refuseBlobLink(rel string) error {
+	info, err := p.root.Lstat(rel)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if blobLinkMode(info.Mode()) {
+		return errBlobLink
+	}
+	return nil
+}
+
+// readBlobRel reads the blob file at rel. A missing file, or a missing
+// directory on the way, reads as fs.ErrNotExist.
+func (p *fileProvider) readBlobRel(rel string) ([]byte, error) {
+	if err := p.refuseBlobLink(rel); err != nil {
+		return nil, err
+	}
+	f, err := p.root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// writeBlobRel writes data to the blob file at rel atomically. Missing
+// directories are made inside the data directory. The data goes to a new
+// temp file under a fresh random name next to the blob, created exclusively
+// so nothing already there (a link of any kind) is opened, is synced, and is
+// renamed over the blob; on failure the temp file is removed.
+func (p *fileProvider) writeBlobRel(rel string, data []byte, mode os.FileMode) error {
+	if dir := filepath.Dir(rel); dir != "." {
+		if err := p.root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	if err := p.refuseBlobLink(rel); err != nil {
+		return err
+	}
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return err
+	}
+	tmp := filepath.Join(filepath.Dir(rel), "."+filepath.Base(rel)+"."+hex.EncodeToString(random[:])+".tmp")
+	f, err := p.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = p.root.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = p.root.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = p.root.Remove(tmp)
+		return err
+	}
+	if err := p.root.Rename(tmp, rel); err != nil {
+		_ = p.root.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// Blob names are bounded before any path work, so a crafted name costs
+// nothing. The longest names the stores write are under 200 bytes and 8
+// path elements: the alert record
+// kubernetes/agent-settings/<64 hex>.json.alert-window.<64 hex> (173 bytes),
+// the inventory data kubernetes/inventory/<id>/data/<owner>/<slot> (6
+// elements), ledger/<org>/runs/<run>/entries/<seq>.json (6 elements), each
+// with up to two more elements and the org ID when Enterprise prefixes
+// org/<org>/.
+const (
+	maxBlobNameBytes    = 1024
+	maxBlobNameElements = 16
+)
+
 // blobPath maps a blob name to its file under the data directory. Names may
-// nest with "/" (kubernetes/inventory/<key>), but a name that is empty,
-// absolute, holds a NUL or a ".." element, or otherwise resolves outside the
-// data directory is refused, so no name can reach a file the store does not
-// own.
+// nest with "/" (kubernetes/inventory/<key>), but a name that is empty, too
+// long or too deep, absolute, holds a NUL or a ".." element, or otherwise
+// resolves outside the data directory is refused, so no name can reach a
+// file the store does not own.
 func (p *fileProvider) blobPath(name string) (string, error) {
+	elements := strings.Count(name, "/") + strings.Count(name, `\`) + 1
+	if len(name) > maxBlobNameBytes || elements > maxBlobNameElements {
+		return "", fmt.Errorf("%w: %d bytes in %d elements", ErrInvalidBlobName, len(name), elements)
+	}
 	if name == "" || strings.ContainsRune(name, 0) || filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, `\`) || filepath.VolumeName(name) != "" {
 		return "", fmt.Errorf("%w: %q", ErrInvalidBlobName, name)
 	}
@@ -174,15 +326,18 @@ func (p *fileProvider) ReadBlob(name string) ([]byte, error) {
 		}
 		return data, nil
 	}
-	path, err := p.blobPath(name)
+	rel, err := p.blobRel(name)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := p.readBlobRel(rel)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
+		if err = blobError(name, err); errors.Is(err, ErrInvalidBlobName) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("storage: read blob %s: %w", name, err)
 	}
 	return data, nil
@@ -210,14 +365,14 @@ func (p *fileProvider) WriteBlob(name string, data []byte) error {
 		}
 		return nil
 	}
-	target, err := p.blobPath(name)
+	rel, err := p.blobRel(name)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("storage: mkdir blob dir: %w", err)
-	}
-	if err := writeFileAtomicSync(target, data, 0o644); err != nil {
+	if err := p.writeBlobRel(rel, data, 0o644); err != nil {
+		if err = blobError(name, err); errors.Is(err, ErrInvalidBlobName) {
+			return err
+		}
 		return fmt.Errorf("storage: write blob %s: %w", name, err)
 	}
 	return nil
@@ -287,18 +442,30 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 		}
 		return written, nil
 	}
-	target, err := p.blobPath(name)
+	target, err := p.blobRel(name)
 	if err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
+	if dir := filepath.Dir(target); dir != "." {
+		if err := p.root.MkdirAll(dir, 0o755); err != nil {
+			if err = blobError(name, err); errors.Is(err, ErrInvalidBlobName) {
+				return false, err
+			}
+			return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
+		}
 	}
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	// O_EXCL never opens anything already at the name, a link included.
+	f, err := p.root.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if errors.Is(err, os.ErrExist) {
+		if err := p.refuseBlobLink(target); err != nil {
+			return false, blobError(name, err)
+		}
 		return false, nil // key already present — caller re-reads via ReadBlob
 	}
 	if err != nil {
+		if err = blobError(name, err); errors.Is(err, ErrInvalidBlobName) {
+			return false, err
+		}
 		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
 	}
 	// We are the sole creator. Write + fsync so the bytes survive a crash,
@@ -306,16 +473,16 @@ func (p *fileProvider) CreateBlobIfAbsent(name string, data []byte) (bool, error
 	// file we created so a later create can retry cleanly.
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
-		_ = os.Remove(target)
+		_ = p.root.Remove(target)
 		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		_ = os.Remove(target)
+		_ = p.root.Remove(target)
 		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(target)
+		_ = p.root.Remove(target)
 		return false, fmt.Errorf("storage: create blob %s: %w", name, err)
 	}
 	return true, nil
@@ -349,14 +516,21 @@ func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []b
 		}
 		return swapped, nil
 	}
-	target, err := p.blobPath(name)
+	path, err := p.blobPath(name)
 	if err != nil {
 		return false, err
 	}
-	lock := fileBlobLock(target)
+	target, err := p.blobRel(name)
+	if err != nil {
+		return false, err
+	}
+	lock := fileBlobLock(path)
 	lock.Lock()
 	defer lock.Unlock()
-	current, err := os.ReadFile(target)
+	current, err := p.readBlobRel(target)
+	if invalid := blobError(name, err); errors.Is(invalid, ErrInvalidBlobName) {
+		return false, invalid
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		if expected != nil {
 			return false, nil
@@ -374,15 +548,18 @@ func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []b
 		if expected == nil {
 			return false, nil
 		}
-		if err := os.Remove(target); err != nil {
+		if err := p.root.Remove(target); err != nil {
+			if err = blobError(name, err); errors.Is(err, ErrInvalidBlobName) {
+				return false, err
+			}
 			return false, fmt.Errorf("storage: remove blob %s: %w", name, err)
 		}
 		return true, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return false, fmt.Errorf("storage: mkdir blob dir: %w", err)
-	}
-	if err := writeFileAtomicSync(target, replacement, 0o644); err != nil {
+	if err := p.writeBlobRel(target, replacement, 0o644); err != nil {
+		if err = blobError(name, err); errors.Is(err, ErrInvalidBlobName) {
+			return false, err
+		}
 		return false, fmt.Errorf("storage: compare-and-swap blob %s: %w", name, err)
 	}
 	return true, nil
@@ -392,8 +569,10 @@ func (p *fileProvider) CompareAndSwapBlob(name string, expected, replacement []b
 // name (the <DataDir>-relative path minus the ".json" suffix) begins with
 // prefix. The one-file-per-blob layout means a namespaced model-state name
 // like models/<org>/<agent>/<key> maps to a nested directory, so the walk
-// naturally enumerates a whole namespace. In-flight ".json.tmp" files from
-// an atomic write are skipped (they don't carry the ".json" suffix).
+// naturally enumerates a whole namespace. In-flight ".tmp" files from an
+// atomic write are skipped (they don't carry the ".json" suffix). The walk
+// and every read go through the data directory handle, so a directory
+// swapped for a link during the walk is never followed out of it.
 func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
 	if prefix == ModelStateNamespace || strings.HasPrefix(prefix, ModelStateNamespace+"/") {
 		out, err := listSecureModelStateBlobs(p.dir, prefix)
@@ -403,25 +582,34 @@ func (p *fileProvider) ListBlobs(prefix string) ([]Blob, error) {
 		return out, nil
 	}
 	var out []Blob
-	err := filepath.WalkDir(p.dir, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(p.root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// A directory that turned into a link leading out of the data
+			// directory while the walk ran holds no blob of this store.
+			if errors.Is(blobError(path, err), ErrInvalidBlobName) {
+				if d != nil && d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".json") {
+		// A link is not a blob this store wrote; it is never followed.
+		if d.IsDir() || d.Type()&fs.ModeSymlink != 0 || !strings.HasSuffix(path, ".json") {
 			return nil
 		}
-		rel, err := filepath.Rel(p.dir, path)
-		if err != nil {
-			return err
-		}
-		name := strings.TrimSuffix(filepath.ToSlash(rel), ".json")
+		rel := filepath.FromSlash(path)
+		name := strings.TrimSuffix(path, ".json")
 		if isLocalEvidenceKey(name) {
 			return nil
 		}
 		if !strings.HasPrefix(name, prefix) {
 			return nil
 		}
-		data, err := os.ReadFile(path)
+		data, err := p.readBlobRel(rel)
+		if errors.Is(blobError(name, err), ErrInvalidBlobName) || errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("storage: read blob %s: %w", name, err)
 		}
@@ -466,9 +654,17 @@ var (
 // (The rename itself is journaled by ext4/xfs; the tmp file's *data*
 // isn't unless we sync.)
 func writeFileAtomicSync(target string, data []byte, mode os.FileMode) error {
-	tmp := target + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	// The temp file is new, under a fresh random name next to the target and
+	// created exclusively, so nothing already there (a link of any kind) is
+	// opened or truncated.
+	f, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".*.tmp")
 	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
 		return err
 	}
 	// Cleanup the tmp file on any error path before rename.
@@ -927,10 +1123,12 @@ func (p *fileProvider) Close() error {
 	tablesErr := p.closeTables()
 	p.evidenceMu.Lock()
 	defer p.evidenceMu.Unlock()
+	var err error
 	if p.localEvidence != nil {
-		return errors.Join(p.localEvidence.db.Close(), tablesErr)
+		err = p.localEvidence.db.Close()
 	}
-	return tablesErr
+	// The data directory handle is closed after the store's last use.
+	return errors.Join(err, tablesErr, p.root.Close())
 }
 
 // ---------------------------------------------------------------------------

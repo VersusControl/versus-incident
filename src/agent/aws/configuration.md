@@ -382,7 +382,7 @@ accepted. The role ARN's partition must match the regions.
 
 ## Changes setup
 
-The [AWS Changes](/in-development/aws-changes) page shows who changed what in your
+The [AWS Changes](/agent/aws/changes) page shows who changed what in your
 accounts, and which change most likely started an alarm. It reads CloudTrail
 and only reads.
 

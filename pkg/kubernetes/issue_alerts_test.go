@@ -1163,8 +1163,8 @@ func TestIssueAlertsAfterUpgradeTheFirstCompleteCycleIsTheBaseline(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	earlier := []byte(fmt.Sprintf(`{"start":%q,"enabled_at":%q,"sent":3,"seen":{},"enriched":{},"suppressed":{},"rollup":false,"rollup_count":0,"rollup_severity":""}`,
-		time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339Nano), enabledAt.Format(time.RFC3339Nano)))
+	earlier := fmt.Appendf(nil, `{"start":%q,"enabled_at":%q,"sent":3,"seen":{},"enriched":{},"suppressed":{},"rollup":false,"rollup_count":0,"rollup_severity":""}`,
+		time.Now().UTC().Add(-2*time.Minute).Format(time.RFC3339Nano), enabledAt.Format(time.RFC3339Nano))
 	if err := provider.WriteBlob(settingsKey+".alert-window", earlier); err != nil {
 		t.Fatal(err)
 	}
@@ -1282,7 +1282,7 @@ func keepsHistoryWithoutAClusterUID(t *testing.T, s *Service) {
 	if s.evidenceStore() == nil {
 		t.Fatal("the fixture store keeps no history")
 	}
-	if _, known := s.alertClusterUID(t.Context()); known {
+	if _, known, err := s.alertClusterUID(t.Context()); known || err != nil {
 		t.Fatal("the fixture cluster already has a UID")
 	}
 }
@@ -1527,5 +1527,94 @@ func TestIssueAlertRecordForACraftedClusterUIDStaysInsideTheDataDirectory(t *tes
 	var shape map[string]json.RawMessage
 	if err := json.Unmarshal(after, &shape); err != nil || shape["settings"] == nil || shape["sent"] != nil || shape["seen"] != nil {
 		t.Fatalf("the settings blob was overwritten by an alert record: %s (before %s)", after, settingsBefore)
+	}
+}
+
+// scopeReadFailingStore serves a committed history scope for the cluster and,
+// while fail is set, answers every scope read with a store error, as a
+// database that is briefly unreachable does.
+type scopeReadFailingStore struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	uid  string
+	fail atomic.Bool
+}
+
+func (store *scopeReadFailingStore) FindEvidenceScope(_ context.Context, orgID, clusterID, _ string) (storage.EvidenceScope, error) {
+	if store.fail.Load() {
+		return storage.EvidenceScope{}, errors.New("dial tcp 127.0.0.1:5432: connection refused")
+	}
+	return storage.EvidenceScope{OrgID: orgID, ClusterID: clusterID, ClusterUID: store.uid}, nil
+}
+
+// A restart whose first cycles cannot read the history scope skips those
+// cycles instead of running on the cluster's unscoped record: that record
+// would admit again a break the UID record already admitted. The skipped
+// cycles warn once, and the break admitted before the restart stays quiet
+// once the store answers again, while a new break alerts.
+func TestIssueAlertsSkipACycleWhoseHistoryScopeCannotBeRead(t *testing.T) {
+	memory := storage.NewMemory()
+	provider := &scopeReadFailingStore{Provider: memory, BlobCAS: memory.(storage.BlobCAS), EvidenceStore: memory.(storage.EvidenceStore), uid: "uid-1"}
+	keepHistory := func(s *Service) {
+		s.changes.mu.Lock()
+		s.changes.evidenceEnabled = true
+		s.changes.mu.Unlock()
+	}
+	first, firstAlerts := issueAlertCaptureServiceOn(t, provider, "reader")
+	keepHistory(first)
+	if err := first.SaveIssueAlertSettings(t.Context(), true, "warning", "actor"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	at := time.Now().UTC()
+	runIssueAlertCaptureCycle(t, first, alertWorkloadSnapshot(alertWorkload{"checkout", "crash", at}))
+	if got := drainAlerts(firstAlerts); len(got) != 1 || len(got["checkout"]) == 0 {
+		t.Fatalf("first process alerts = %v, want checkout", got)
+	}
+	first.StopCapture()
+
+	lines := captureLogLines(t, "info")
+	restarted, alerts := issueAlertCaptureServiceOn(t, provider, "reader")
+	keepHistory(restarted)
+	provider.fail.Store(true)
+	ordersAt := time.Now().UTC()
+	for range 2 {
+		runIssueAlertCaptureCycle(t, restarted, alertWorkloadSnapshot(alertWorkload{"checkout", "crash", at}, alertWorkload{"orders", "crash", ordersAt}))
+	}
+	if got := drainAlerts(alerts); len(got) != 0 {
+		t.Fatalf("a cycle with an unreadable history scope alerted: %v", got)
+	}
+	_, settingsKey := restarted.logSettingsStore()
+	if raw, err := memory.ReadBlob(alertCheckpointKey(settingsKey, "")); err != nil || len(raw) != 0 {
+		t.Fatalf("a cycle with an unreadable history scope wrote the unscoped record: %q %v", raw, err)
+	}
+	warnings := 0
+	for _, line := range lines.all() {
+		if strings.Contains(line, `cluster "cluster" issue alerts paused (storage unavailable)`) && strings.Contains(line, "check that the storage backend is reachable") {
+			warnings++
+		} else if strings.Contains(line, "issue alert") {
+			t.Errorf("unexpected default-level line: %s", line)
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("store outage warnings = %d over two skipped cycles, want 1: %v", warnings, lines.all())
+	}
+
+	provider.fail.Store(false)
+	runIssueAlertCaptureCycle(t, restarted, alertWorkloadSnapshot(alertWorkload{"checkout", "crash", at}, alertWorkload{"orders", "crash", ordersAt}))
+	if got := drainAlerts(alerts); len(got["orders"]) == 0 {
+		t.Fatalf("alerts once the store answers = %v, want the new break", got)
+	}
+	// Both breaks are admitted once, under the UID record: the break admitted
+	// before the restart was not admitted again, and no unscoped record split
+	// the storm budget.
+	raw, err := memory.ReadBlob(alertCheckpointKey(settingsKey, "uid-1"))
+	var record issueAlertCheckpoint
+	if err != nil || json.Unmarshal(raw, &record) != nil || record.Sent != 2 || len(record.Seen) != 2 {
+		t.Fatalf("UID record after recovery sent=%d seen=%d err=%v, want two admissions", record.Sent, len(record.Seen), err)
+	}
+	if raw, err := memory.ReadBlob(alertCheckpointKey(settingsKey, "")); err != nil || len(raw) != 0 {
+		t.Fatalf("the unscoped record was written: %q %v", raw, err)
 	}
 }

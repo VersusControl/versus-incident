@@ -431,6 +431,28 @@ describe("Cluster sync health", () => {
     expect(syncFailureReport(undefined)).toEqual({});
     expect(syncFailureReport("bad gateway")).toEqual({});
   });
+
+  // B221 (P16): after a new material denial the server holds the kind as
+  // pending with its own class while the authority check runs. That is not a
+  // failure: the cluster is preparing, never failed or degraded, and the kind
+  // is not named as a sync problem with "the last sync attempt failed".
+  it("treats a kind waiting on an authority check as pending, not failing", () => {
+    const pending = kind({ state: "pending", error: "authority_pending" });
+    expect(kindFailed(pending)).toBe(false);
+    const health = reportSyncHealth({ state: "syncing", age_s: 4, partial: false, kinds: { Pod: pending, Node: kind() }, total_kinds: 2, ready_kinds: 1, failing_kinds: 0, pending_kinds: 1, truncated: false });
+    expect(health.state).toBe("preparing");
+    expect(health.problems).toEqual([]);
+    expect(kindFailureReason({ error: "authority_pending" })).toBe("checking access to this resource type after a permission change");
+  });
+
+  it("still reports a real failure on another kind while one kind waits on an authority check", () => {
+    const pending = kind({ state: "pending", error: "authority_pending" });
+    const dropped = kind({ state: "partial", partial: true, error: "record_rejected", skipped: 3 });
+    const health = reportSyncHealth({ state: "syncing", age_s: 4, partial: true, kinds: { Pod: pending, Secret: dropped }, total_kinds: 2, ready_kinds: 0, failing_kinds: 1, pending_kinds: 1, truncated: false });
+    expect(health.state).toBe("degraded");
+    expect(health.kinds).toEqual(["Secret"]);
+    expect(health.problems[0]).toMatchObject({ kind: "Secret", error: "record_rejected", reason: "some objects could not be indexed, everything else is current" });
+  });
 });
 
 it("prefers authoritative progress to an older overview progress envelope", () => {

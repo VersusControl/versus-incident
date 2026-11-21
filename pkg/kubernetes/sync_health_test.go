@@ -162,6 +162,60 @@ func TestSyncHealthPermissionGapDoesNotBlock(t *testing.T) {
 	}
 }
 
+// A kind the same identity read before and that is denied now waits on an
+// authority check. Until the check ends the cluster is not ready: the kind is
+// pending under its own class, not failing and not a steady permission gap,
+// while every other kind, a steady gap included, keeps its state.
+func TestSyncHealthWaitsOnAPendingAuthorityCheck(t *testing.T) {
+	now := time.Now().UTC()
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	kinds := fullySyncedKinds(now)
+	kinds["Secret"] = kubeindex.KindStatus{State: "error", Partial: true, Error: "forbidden", LastAttemptAt: now}
+	publishInventoryKinds(t, service, kinds, nil)
+	cache := service.changes.inventories[service.indexScope()]
+	questionInventoryAuthority(cache, inventoryQuestionedKinds{kinds: map[string]bool{"Pod": true}, scoped: map[string]map[string]bool{"shop": {"Deployment": true}}})
+
+	health, err := service.SyncHealth(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.State == "ready" || health.State == "error" || health.FailingKinds != 0 {
+		t.Fatalf("a pending authority check reported state=%s failing=%d", health.State, health.FailingKinds)
+	}
+	for _, kind := range []string{"Pod", "Deployment"} {
+		if entry := health.Kinds[kind]; entry.State != "pending" || entry.Error != authorityPendingClass || entry.Partial {
+			t.Fatalf("%s during the check = %+v", kind, entry)
+		}
+	}
+	if health.UnreadableKinds != 1 || health.Unreadable[0].Kind != "Secret" || health.Kinds["Node"].State != "ready" {
+		t.Fatalf("the check changed other kinds: unreadable=%+v node=%+v", health.Unreadable, health.Kinds["Node"])
+	}
+	// Readers still withhold the questioned kind's data while the check runs.
+	if generation, err := service.readInventory(t.Context()); err != nil || generation.View.Kinds["Pod"].Error != "forbidden" {
+		t.Fatalf("questioned kind served during the check: %+v %v", generation.View.Kinds["Pod"], err)
+	}
+
+	// The check ended: a failed cycle is reported as the failure it is.
+	cache.mu.Lock()
+	cache.failed, cache.failedClass = true, "forbidden"
+	cache.mu.Unlock()
+	failed, err := service.SyncHealth(t.Context())
+	if carried, ok := SyncHealthReport(err); ok {
+		failed = carried
+	}
+	if failed.Kinds["Pod"].Error == authorityPendingClass {
+		t.Fatalf("a failed cycle still reports the check as pending: %+v", failed.Kinds["Pod"])
+	}
+
+	// The next publication clears the question and the cluster is ready again.
+	cache.mu.Lock()
+	cache.failed, cache.failedClass, cache.authorityQuestioned = false, "", inventoryQuestionedKinds{}
+	cache.mu.Unlock()
+	if ready, err := service.SyncHealth(t.Context()); err != nil || ready.State != "ready" {
+		t.Fatalf("after the publication state=%s err=%v", ready.State, err)
+	}
+}
+
 // An invalid or revoked credential is not a missing permission. Reporting it as
 // a capability gap hides a dead connector behind a cluster that looks ready.
 func TestSyncHealthInvalidCredentialBlocks(t *testing.T) {

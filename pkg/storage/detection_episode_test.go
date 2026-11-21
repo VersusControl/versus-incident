@@ -2,9 +2,11 @@ package storage_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -480,6 +482,8 @@ func TestMemoryDetectionEpisodeContract(t *testing.T) {
 	runDetectionEpisodeFoldedSeverityClaimContract(t, provider)
 	runDetectionEpisodeResolvedIncidentRaceContract(t, provider)
 	runDetectionEpisodeSeverityPersistenceContract(t, provider)
+	runDetectionDeliveryIDContract(t, provider)
+	runDetectionSeverityRiseDeliveryContract(t, provider)
 }
 
 func TestFileDetectionEpisodeContractAndRestart(t *testing.T) {
@@ -494,6 +498,8 @@ func TestFileDetectionEpisodeContractAndRestart(t *testing.T) {
 	runDetectionEpisodeFoldedSeverityClaimContract(t, provider)
 	runDetectionEpisodeResolvedIncidentRaceContract(t, provider)
 	runDetectionEpisodeSeverityPersistenceContract(t, provider)
+	runDetectionDeliveryIDContract(t, provider)
+	runDetectionSeverityRiseDeliveryContract(t, provider)
 	if err := provider.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -530,6 +536,8 @@ func TestPostgresDetectionEpisodeContract(t *testing.T) {
 	runDetectionEpisodeFoldedSeverityClaimContract(t, provider)
 	runDetectionEpisodeResolvedIncidentRaceContract(t, provider)
 	runDetectionEpisodeSeverityPersistenceContract(t, provider)
+	runDetectionDeliveryIDContract(t, provider)
+	runDetectionSeverityRiseDeliveryContract(t, provider)
 }
 
 func TestPostgresDetectionEpisodeConcurrentOwnerAndRestart(t *testing.T) {
@@ -1101,5 +1109,200 @@ func TestPostgresConnectionPoolBounds(t *testing.T) {
 	}
 	if got := db.Stats().Idle; got > 5 {
 		t.Fatalf("idle connections=%d, want at most 5", got)
+	}
+}
+
+// runDetectionDeliveryIDContract checks that every attempt to send one
+// notification carries the same delivery ID: a replay after the claim
+// expired and a retry after a failed send keep it, and only the next
+// notification of the episode gets a new one.
+func runDetectionDeliveryIDContract(t *testing.T, provider storage.Provider) {
+	t.Helper()
+	store := provider.(storage.DetectionEpisodeStore)
+	base := time.Date(2026, 9, 5, 9, 0, 0, 0, time.UTC)
+	occurrence := storage.DetectionOccurrence{
+		Identity:  storage.DetectionIdentity{AgentKind: "kubernetes", Source: "kubernetes:alpha", Service: "shop/Deployment/api", SignalKind: "kubernetes_issue", ConditionKey: "pod.crash_loop"},
+		Frequency: 1, Severity: "medium", ReceivedAt: base, ClaimOwner: "writer-a", ClaimLease: time.Minute,
+	}
+	record := func(at time.Duration, severity string) storage.DetectionEpisodeDecision {
+		t.Helper()
+		occurrence.ReceivedAt, occurrence.Severity = base.Add(at), severity
+		decision, err := store.RecordDetectionOccurrence(occurrence)
+		if err != nil {
+			t.Fatalf("RecordDetectionOccurrence(+%s): %v", at, err)
+		}
+		return decision
+	}
+	complete := func(decision storage.DetectionEpisodeDecision, outcome string) {
+		t.Helper()
+		if err := store.CompleteDetectionNotification(storage.DetectionNotificationCompletion{EpisodeID: decision.EpisodeID, ClaimToken: decision.ClaimToken, Outcome: outcome, CompletedAt: decision.LastSeen}); err != nil {
+			t.Fatalf("CompleteDetectionNotification(%s): %v", outcome, err)
+		}
+	}
+
+	first := record(0, "medium")
+	want := first.EpisodeID + "-1"
+	if !first.NotificationClaimed || first.DeliveryID() != want {
+		t.Fatalf("first notification delivery ID = %q (claimed %t), want %q", first.DeliveryID(), first.NotificationClaimed, want)
+	}
+	if err := provider.SaveIncident(&storage.IncidentRecord{ID: first.IncidentID, CreatedAt: first.FirstSeen}); err != nil {
+		t.Fatalf("SaveIncident: %v", err)
+	}
+	// The sender died mid-send: the claim expires and another sender replays.
+	replay := record(2*time.Minute, "medium")
+	if !replay.NotificationClaimed || replay.ClaimToken == first.ClaimToken || replay.DeliveryID() != want {
+		t.Fatalf("replay after the claim expired = %q (claimed %t), want %q", replay.DeliveryID(), replay.NotificationClaimed, want)
+	}
+	// A send that failed outright is retried as the same notification.
+	complete(replay, "failed")
+	retry := record(3*time.Minute, "medium")
+	if !retry.NotificationClaimed || retry.DeliveryID() != want {
+		t.Fatalf("retry after a failed send = %q (claimed %t), want %q", retry.DeliveryID(), retry.NotificationClaimed, want)
+	}
+	complete(retry, "sent")
+	if quiet := record(4*time.Minute, "medium"); quiet.NotificationClaimed || quiet.DeliveryID() != "" {
+		t.Fatalf("a coalesced occurrence carries delivery ID %q", quiet.DeliveryID())
+	}
+
+	escalation := record(5*time.Minute, "high")
+	wantEscalation := first.EpisodeID + "-2"
+	if escalation.NotificationKind != storage.DetectionNotificationEscalation || escalation.DeliveryID() != wantEscalation {
+		t.Fatalf("escalation delivery ID = %q (%s), want %q", escalation.DeliveryID(), escalation.NotificationKind, wantEscalation)
+	}
+	if replayed := record(7*time.Minute, "high"); replayed.DeliveryID() != wantEscalation {
+		t.Fatalf("escalation replay delivery ID = %q, want %q", replayed.DeliveryID(), wantEscalation)
+	} else {
+		complete(replayed, "partial")
+	}
+	if next := record(8*time.Minute, "critical"); next.DeliveryID() != first.EpisodeID+"-3" {
+		t.Fatalf("second escalation delivery ID = %q, want %q", next.DeliveryID(), first.EpisodeID+"-3")
+	}
+}
+
+// An episode recorded by a release that kept no count of handled
+// notifications still numbers its next notification after the one it
+// already handled, so an escalation never reuses the first notification's ID.
+func TestFileDetectionDeliveryIDForAnEpisodeRecordedBeforeTheCount(t *testing.T) {
+	dir := t.TempDir()
+	provider, err := storage.NewFile(storage.FileOptions{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewFile: %v", err)
+	}
+	store := provider.(storage.DetectionEpisodeStore)
+	base := time.Date(2026, 9, 6, 9, 0, 0, 0, time.UTC)
+	occurrence := storage.DetectionOccurrence{
+		Identity:  storage.DetectionIdentity{AgentKind: "kubernetes", Source: "kubernetes:alpha", Service: "shop/Deployment/api", SignalKind: "kubernetes_issue", ConditionKey: "pod.failed"},
+		Frequency: 1, Severity: "medium", ReceivedAt: base, ClaimLease: time.Minute,
+	}
+	first, err := store.RecordDetectionOccurrence(occurrence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteDetectionNotification(storage.DetectionNotificationCompletion{EpisodeID: first.EpisodeID, ClaimToken: first.ClaimToken, Outcome: "sent", CompletedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SaveIncident(&storage.IncidentRecord{ID: first.IncidentID, CreatedAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "detection_episodes.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatal(err)
+	}
+	episodes, _ := state["episodes"].([]any)
+	if len(episodes) != 1 {
+		t.Fatalf("stored episodes = %d, want 1", len(episodes))
+	}
+	episode := episodes[0].(map[string]any)
+	if _, counted := episode["HandledNotifications"]; !counted {
+		t.Fatal("the handled notification count is not stored")
+	}
+	delete(episode, "HandledNotifications")
+	if raw, err = json.Marshal(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := storage.NewFile(storage.FileOptions{DataDir: dir})
+	if err != nil {
+		t.Fatalf("NewFile(restart): %v", err)
+	}
+	defer restarted.Close()
+	occurrence.Severity, occurrence.ReceivedAt = "critical", base.Add(time.Minute)
+	escalation, err := restarted.(storage.DetectionEpisodeStore).RecordDetectionOccurrence(occurrence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if escalation.NotificationKind != storage.DetectionNotificationEscalation || escalation.DeliveryID() != first.EpisodeID+"-2" {
+		t.Fatalf("escalation after the upgrade = %q (%s), want %q", escalation.DeliveryID(), escalation.NotificationKind, first.EpisodeID+"-2")
+	}
+}
+
+// runDetectionSeverityRiseDeliveryContract checks that a severity rise is
+// never sent under the delivery ID of an earlier attempt: a replay after the
+// claim expired, or a retry after a failed send, that carries a higher
+// severity is a new notification with the next number, so a receiver that
+// drops repeats still sees the rise. A replay at the same severity keeps the
+// ID.
+func runDetectionSeverityRiseDeliveryContract(t *testing.T, provider storage.Provider) {
+	t.Helper()
+	store := provider.(storage.DetectionEpisodeStore)
+	base := time.Date(2026, 9, 7, 9, 0, 0, 0, time.UTC)
+	occurrence := storage.DetectionOccurrence{
+		Identity:  storage.DetectionIdentity{AgentKind: "kubernetes", Source: "kubernetes:alpha", Service: "shop/Deployment/rising", SignalKind: "kubernetes_issue", ConditionKey: "pod.crash_loop"},
+		Frequency: 1, ClaimLease: time.Minute,
+	}
+	record := func(at time.Duration, severity string) storage.DetectionEpisodeDecision {
+		t.Helper()
+		occurrence.ReceivedAt, occurrence.Severity = base.Add(at), severity
+		decision, err := store.RecordDetectionOccurrence(occurrence)
+		if err != nil {
+			t.Fatalf("RecordDetectionOccurrence(+%s, %s): %v", at, severity, err)
+		}
+		return decision
+	}
+	complete := func(decision storage.DetectionEpisodeDecision, outcome string) {
+		t.Helper()
+		if err := store.CompleteDetectionNotification(storage.DetectionNotificationCompletion{EpisodeID: decision.EpisodeID, ClaimToken: decision.ClaimToken, Outcome: outcome, CompletedAt: decision.LastSeen}); err != nil {
+			t.Fatalf("CompleteDetectionNotification(%s): %v", outcome, err)
+		}
+	}
+	first := record(0, "medium")
+	if err := provider.SaveIncident(&storage.IncidentRecord{ID: first.IncidentID, CreatedAt: first.FirstSeen}); err != nil {
+		t.Fatal(err)
+	}
+	id := func(n int) string { return fmt.Sprintf("%s-%d", first.EpisodeID, n) }
+	if first.DeliveryID() != id(1) {
+		t.Fatalf("first = %q, want %q", first.DeliveryID(), id(1))
+	}
+	// The sender died; the severity rose before the replay.
+	replay := record(2*time.Minute, "high")
+	if !replay.NotificationClaimed || replay.DeliveryID() != id(2) {
+		t.Fatalf("replay at a higher severity = %q (claimed %t), want %q", replay.DeliveryID(), replay.NotificationClaimed, id(2))
+	}
+	// The replay failed; a retry at the same severity keeps its number.
+	complete(replay, "failed")
+	same := record(3*time.Minute, "high")
+	if same.DeliveryID() != id(2) {
+		t.Fatalf("retry at the same severity = %q, want %q", same.DeliveryID(), id(2))
+	}
+	// That retry failed too; the severity rose again before the next one.
+	complete(same, "failed")
+	rose := record(4*time.Minute, "critical")
+	if !rose.NotificationClaimed || rose.DeliveryID() != id(3) {
+		t.Fatalf("retry at a higher severity = %q (claimed %t), want %q", rose.DeliveryID(), rose.NotificationClaimed, id(3))
+	}
+	complete(rose, "sent")
+	if quiet := record(5*time.Minute, "critical"); quiet.NotificationClaimed {
+		t.Fatalf("a handled critical notified again as %q", quiet.DeliveryID())
 	}
 }
