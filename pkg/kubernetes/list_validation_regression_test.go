@@ -134,6 +134,11 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 			var deniedOnce sync.Once
 			invalidSeen := make(chan struct{})
 			var invalidOnce sync.Once
+			// The malformed Pod LIST is answered only after the test has
+			// taken its last-good baseline, so the order is fixed.
+			baselined := make(chan struct{})
+			var baselineOnce sync.Once
+			releaseMalformed := func() { baselineOnce.Do(func() { close(baselined) }) }
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api" {
 					catalogReads.Add(1)
@@ -152,6 +157,11 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 					}
 					invalidReads.Add(1)
 					invalidOnce.Do(func() { close(invalidSeen) })
+					select {
+					case <-baselined:
+					case <-r.Context().Done():
+						return
+					}
 					_, _ = w.Write([]byte(`{}`))
 					return
 				}
@@ -170,6 +180,8 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 				http.Error(w, "forbidden", 403)
 			}))
 			defer upstream.Close()
+			// Runs before the server closes, so a held Pod LIST never blocks it.
+			defer releaseMalformed()
 			client, err := NewClient(Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
 			if err != nil {
 				t.Fatal(err)
@@ -213,15 +225,6 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 				checkpoint, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
 				return err == nil && checkpoint.ID == stored.EvidenceBatch.ID && health().PendingKinds == 0
 			})
-			stored, record, err := readInventoryGeneration(provider, scope, "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			before, _ := json.Marshal(stored)
-			checkpoint, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
-			if err != nil {
-				t.Fatal(err)
-			}
 			catalogs := catalogReads.Load()
 			malformed.Store(true)
 			select {
@@ -229,6 +232,28 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 			case <-time.After(40 * time.Second):
 				t.Fatal("normal cached producer never executed malformed material LIST")
 			}
+			// Every LIST, publish and journal commit of the inventory runs on
+			// one worker goroutine, so the cycle before this one has published
+			// and committed before this Pod LIST is served, and the malformed
+			// cycle cannot publish until the fake answers it, which waits for
+			// the baseline below. A publish by the malformed cycle would carry
+			// error kinds. A baseline taken before the switch would blame a
+			// cycle already in flight for changing the last-good data.
+			stored, record, err := readInventoryGeneration(provider, scope, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for kind, state := range stored.View.Kinds {
+				if state.State != "ready" || state.Error != "" {
+					t.Fatalf("last-good generation before the malformed cycle holds %s as %s/%s", kind, state.State, state.Error)
+				}
+			}
+			before, _ := json.Marshal(stored)
+			checkpoint, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			releaseMalformed()
 			waitUntil(t, 8*time.Second, "failed current episode or incorrect checkpoint publication", func() bool {
 				current, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
 				return err == nil && current.ID != checkpoint.ID || health().State == "error"

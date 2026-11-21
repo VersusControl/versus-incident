@@ -571,6 +571,9 @@ func TestRejectedHistorySaveDoesNotStopCollection(t *testing.T) {
 		}
 	}
 	observed.rejecting = false
+	// The first save after the release is the one that must carry the gap;
+	// a slow test can see later saves land before it looks.
+	released := len(observed.saved)
 	observed.mu.Unlock()
 	service.recovery.mu.Lock()
 	credentialFailures := service.recovery.failures
@@ -583,13 +586,13 @@ func TestRejectedHistorySaveDoesNotStopCollection(t *testing.T) {
 	// gap, and clears the rejection.
 	waitUntil(t, 75*time.Second, "the next capture saved after the rejection", func() bool {
 		observed.mu.Lock()
-		saved := observed.saved[len(observed.saved)-1].ID != observed.first
+		saved := len(observed.saved) > released
 		observed.mu.Unlock()
 		return saved && historySaveCleared(t, service)
 	})
 	observed.mu.Lock()
 	defer observed.mu.Unlock()
-	recovered := observed.saved[len(observed.saved)-1]
+	recovered := observed.saved[released]
 	gap := false
 	for _, record := range recovered.Records {
 		gap = gap || record.Type == "coverage_gap" && !record.GapFrom.After(checkpoint.At)

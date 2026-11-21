@@ -246,10 +246,7 @@ jobs:
   # pkg/kubernetes is split by test name. "kubernetes-slow" runs only the
   # top-level tests in RACE_SLOW_KUBERNETES_TESTS from the pkg/kubernetes
   # package; "kubernetes" skips exactly those and runs everything else under
-  # pkg/kubernetes, so a new test lands there without a list change. Both use
-  # anchored patterns built from the same list, so each test runs in exactly
-  # one shard. Many of these tests wait on real timers rather than CPU, so the
-  # kubernetes shards raise -parallel above the runner's CPU count.
+  # pkg/kubernetes, so a new test lands there without a list change.
   race:
     name: Race (${{ matrix.shard }})
     needs: changes
@@ -312,7 +309,10 @@ jobs:
                 echo "::notice::Race shard $SHARD: skipped, pkg/kubernetes is not in this branch"
                 exit 0
               fi
-              if [ -z "$slow_names" ] || printf '%s\n' "$slow_names" | grep -qv '^Test[A-Za-z0-9_]*$'; then
+              # Here-strings, not pipes: grep -q stops reading at its first
+              # match, and with pipefail the writer's broken pipe would turn
+              # a match into a failure.
+              if [ -z "$slow_names" ] || grep -qv '^Test[A-Za-z0-9_]*$' <<< "$slow_names"; then
                 echo "::error::RACE_SLOW_KUBERNETES_TESTS must list top-level test names, one per line"
                 exit 1
               fi
@@ -321,7 +321,7 @@ jobs:
               listed=$(go test -short -count=1 -list '.*' ./pkg/kubernetes | grep -E '^Test' || true)
               stale=""
               while IFS= read -r name; do
-                if ! printf '%s\n' "$listed" | grep -qxF "$name"; then
+                if ! grep -qxF -- "$name" <<< "$listed"; then
                   stale="${stale:+$stale, }$name"
                 fi
               done <<< "$slow_names"
