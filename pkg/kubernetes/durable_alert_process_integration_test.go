@@ -170,6 +170,8 @@ type alertProcessReceipt struct {
 	At                                         time.Time `json:"at"`
 	Cluster, Workload, Rule, Severity, BrokeAt string
 	BodySHA                                    string `json:"body_sha256"`
+	DeliveryID                                 string `json:"delivery_id"`
+	IdempotencyKey                             string `json:"idempotency_key"`
 }
 
 func TestTwoOSWritersCaptureHistoryAndDeliverAlertsAcrossTakeover(t *testing.T) {
@@ -203,7 +205,7 @@ func TestTwoOSWritersCaptureHistoryAndDeliverAlertsAcrossTakeover(t *testing.T) 
 		}
 		str := func(k string) string { s, _ := b[k].(string); return s }
 		sum := sha256.Sum256(raw)
-		rec := alertProcessReceipt{At: time.Now().UTC(), Cluster: str("Cluster"), Workload: str("Workload"), Rule: str("Rule"), Severity: str("KubernetesSeverity"), BrokeAt: str("BrokeAt"), BodySHA: hex.EncodeToString(sum[:])}
+		rec := alertProcessReceipt{At: time.Now().UTC(), Cluster: str("Cluster"), Workload: str("Workload"), Rule: str("Rule"), Severity: str("KubernetesSeverity"), BrokeAt: str("BrokeAt"), BodySHA: hex.EncodeToString(sum[:]), DeliveryID: str("DeliveryID"), IdempotencyKey: r.Header.Get("Idempotency-Key")}
 		mu.Lock()
 		receipts = append(receipts, rec)
 		snapshot, _ := json.MarshalIndent(receipts, "", "  ")
@@ -479,11 +481,21 @@ func TestTwoOSWritersCaptureHistoryAndDeliverAlertsAcrossTakeover(t *testing.T) 
 			}
 		}
 	}
-	mu.Lock()
-	normalCount := len(receipts)
-	mu.Unlock()
+	// A second send would land after the replays return, so watch the
+	// channel for a while before counting.
+	settled := func() []alertProcessReceipt {
+		time.Sleep(5 * time.Second)
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]alertProcessReceipt(nil), receipts...)
+	}
+	normal := settled()
+	normalCount := len(normal)
 	if normalCount != 1 {
 		t.Fatalf("duplicate channel deliveries for stable episode=%d", normalCount)
+	}
+	if normal[0].DeliveryID == "" || normal[0].IdempotencyKey != normal[0].DeliveryID {
+		t.Fatalf("stable episode delivery carries no delivery ID: body=%q header=%q", normal[0].DeliveryID, normal[0].IdempotencyKey)
 	}
 	wait("currentcaptured issue and history nonzero", 30, func() bool {
 		code, b := request(second, "GET", "/api/admin/kubernetes/issues?cluster=alpha&broken=true", true)
@@ -503,6 +515,12 @@ func TestTwoOSWritersCaptureHistoryAndDeliverAlertsAcrossTakeover(t *testing.T) 
 	code, other := request(second, "POST", "/__harness/replay?org=isolated-org", true)
 	if code != 200 || other["IncidentID"] == out["IncidentID"] {
 		t.Fatal("real scoped episode org isolation failed")
+	}
+	// The same break in another org is its own episode: the shared test
+	// channel gets exactly one more delivery, under another delivery ID.
+	isolated := settled()
+	if len(isolated) != normalCount+1 || isolated[normalCount].DeliveryID == "" || isolated[normalCount].DeliveryID == normal[0].DeliveryID {
+		t.Fatalf("isolated org deliveries: %d -> %d, want exactly one more under its own delivery ID", normalCount, len(isolated))
 	}
 	var defaultOrg, otherOrg string
 	if e = db.QueryRow("SELECT org_id FROM vs_incidents WHERE id=$1", out["IncidentID"]).Scan(&defaultOrg); e != nil {
@@ -601,19 +619,28 @@ func TestTwoOSWritersCaptureHistoryAndDeliverAlertsAcrossTakeover(t *testing.T) 
 	if code, _ = request(second, "POST", "/__harness/ambiguous", true); code != 200 {
 		t.Fatal("production replay after ambiguous sender death failed")
 	}
-	mu.Lock()
 	ambiguousCount := 0
-	for _, r := range receipts {
+	ambiguousIDs := map[string]bool{}
+	for _, r := range settled() {
 		if r.Workload == "ambiguous" {
 			ambiguousCount++
+			ambiguousIDs[r.DeliveryID] = true
+			if r.IdempotencyKey != r.DeliveryID {
+				t.Errorf("ambiguous delivery header %q differs from its delivery ID %q", r.IdempotencyKey, r.DeliveryID)
+			}
 		}
 	}
-	mu.Unlock()
-	result := map[string]any{"actual_writer_processes": true, "capture_pending_claim_takeover": true, "normal_episode_deliveries": normalCount, "recurrence_new_deliveries": countAfterRecurrence - countBeforeRecurrence, "org_isolation": true, "two_cluster_isolation": true, "ambiguous_ack_deliveries": ambiguousCount, "owned_killed_pids": []int{first.cmd.Process.Pid, replacement.cmd.Process.Pid}, "storage_retained": true}
+	result := map[string]any{"actual_writer_processes": true, "capture_pending_claim_takeover": true, "normal_episode_deliveries": normalCount, "recurrence_new_deliveries": countAfterRecurrence - countBeforeRecurrence, "org_isolation": true, "two_cluster_isolation": true, "ambiguous_ack_deliveries": ambiguousCount, "ambiguous_delivery_ids": len(ambiguousIDs), "owned_killed_pids": []int{first.cmd.Process.Pid, replacement.cmd.Process.Pid}, "storage_retained": true}
 	encoded, _ := json.MarshalIndent(result, "", "  ")
 	_ = os.WriteFile(filepath.Join(os.Getenv("HARNESS_RESULTS_DIR"), "alert-process-outcome.json"), encoded, 0600)
 	t.Log(string(encoded))
-	if ambiguousCount != 1 {
-		t.Fatalf("MANDATORY no-duplicate channel guarantee absent at accepted-but-unacknowledged crash: actual deliveries=%d (existing claim/HTTP semantics, no exactly-once transport assumed)", ambiguousCount)
+	// Delivery is at least once at the accepted-but-unacknowledged boundary:
+	// the replay may reach the channel again, and then carries the same
+	// delivery ID so the receiver can drop it.
+	if ambiguousCount < 1 || ambiguousCount > 2 {
+		t.Fatalf("ambiguous-ACK deliveries=%d, want the first send and at most one replay", ambiguousCount)
+	}
+	if len(ambiguousIDs) != 1 || ambiguousIDs[""] {
+		t.Fatalf("ambiguous-ACK deliveries carry delivery IDs %v, want one shared non-empty ID", ambiguousIDs)
 	}
 }

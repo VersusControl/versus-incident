@@ -122,7 +122,9 @@ func (service *Service) SyncHealth(ctx context.Context) (SyncHealth, error) {
 	if at := service.recordedFirstReadyAt(); !at.IsZero() {
 		generation.FirstReadyAt = at
 	}
-	report := buildSyncHealth(syncHealthKinds(generation), generation.FirstReadyAt)
+	kinds := syncHealthKinds(generation)
+	markAuthorityPending(kinds, service.authorityPendingKinds())
+	report := buildSyncHealth(kinds, generation.FirstReadyAt)
 	if generation.FirstReadyAt.IsZero() {
 		report.Progress = service.coldSyncProgress()
 	}
@@ -132,6 +134,54 @@ func (service *Service) SyncHealth(ctx context.Context) (SyncHealth, error) {
 		report.NotCollected = kinds
 	}
 	return report, nil
+}
+
+// authorityPendingClass marks a kind whose listing was just denied although
+// the same identity read it before. Whether the identity lost its access or
+// only this kind is denied is not known until the authority check that
+// follows ends, so the kind is pending, never ready and never failing.
+const authorityPendingClass = "authority_pending"
+
+// authorityPendingKinds lists the kinds held back while an authority check
+// runs after a new denial: cluster-wide kinds, and kinds denied inside a
+// namespace. A failed cycle or an authority that could not be verified is
+// reported as such instead.
+func (service *Service) authorityPendingKinds() map[string]bool {
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	if cache == nil {
+		return nil
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if cache.failed || cache.authorityFailure != nil || cache.authorityQuestioned.empty() {
+		return nil
+	}
+	kinds := map[string]bool{}
+	for kind := range cache.authorityQuestioned.kinds {
+		kinds[kind] = true
+	}
+	for _, scoped := range cache.authorityQuestioned.scoped {
+		for kind := range scoped {
+			kinds[kind] = true
+		}
+	}
+	return kinds
+}
+
+// markAuthorityPending reports each kind waiting on an authority check as
+// pending with its own class, so the cluster is not called ready before the
+// check confirms access. Readers keep withholding the kind's data meanwhile.
+func markAuthorityPending(kinds map[string]kubeindex.KindStatus, pending map[string]bool) {
+	for kind := range pending {
+		state, ok := kinds[kind]
+		if !ok || state.Absent || state.CycleFailure {
+			continue
+		}
+		state.State, state.Partial, state.Error = "pending", false, authorityPendingClass
+		kinds[kind] = state
+	}
 }
 
 // syncHealthFailure reports a health read that could not reach the cluster while

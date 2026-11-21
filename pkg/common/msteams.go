@@ -64,7 +64,13 @@ func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	resp, err := client.Post(m.powerAutomateURL, "application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest(http.MethodPost, m.powerAutomateURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	setIdempotencyKey(req, i)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}

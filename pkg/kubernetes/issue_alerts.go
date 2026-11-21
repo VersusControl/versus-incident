@@ -169,17 +169,30 @@ func alertCheckpointKey(settingsKey, clusterUID string) string {
 // alertClusterUID resolves the cluster UID the alert record is bound to. It
 // reads the committed history scope, never the cluster. ok is false while a
 // cluster that keeps history has not established its UID, which may be for
-// good when the identity cannot list Namespaces.
-func (service *Service) alertClusterUID(ctx context.Context) (uid string, ok bool) {
+// good when the identity cannot list Namespaces. A store that cannot be read
+// returns its error instead: the UID may well be established, and the
+// unscoped record would then admit again a break the UID record already
+// admitted.
+func (service *Service) alertClusterUID(ctx context.Context) (uid string, ok bool, err error) {
 	store := service.evidenceStore()
 	if store == nil {
-		return "", true
+		return "", true, nil
 	}
 	scope, err := service.storedHistoryScope(storage.EvidenceReadContext(ctx), store)
-	if err != nil || scope.OrgID != service.scope.OrgID || scope.ClusterID != service.scope.ClusterID || scope.ClusterUID == "" {
-		return "", false
+	if isHistoryStoreError(err) {
+		return "", false, err
 	}
-	return scope.ClusterUID, true
+	if err != nil || scope.OrgID != service.scope.OrgID || scope.ClusterID != service.scope.ClusterID || scope.ClusterUID == "" {
+		return "", false, nil
+	}
+	return scope.ClusterUID, true, nil
+}
+
+// isHistoryStoreError reports a history store that could not be read, as
+// opposed to a history that is not established or a scope that does not
+// belong to this cluster.
+func isHistoryStoreError(err error) bool {
+	return errors.Is(err, errHistoryUnavailable) || errors.Is(err, errHistoryTimeout) || errors.Is(err, errHistoryUpgrading)
 }
 
 // readAlertCheckpoint returns the stored record under key, or nil when there
@@ -466,6 +479,8 @@ func (service *Service) logIssueAlertDelivery(err error) {
 		problems().Clear(key, "kubernetes: cluster %q issue alerts delivered again", service.scope.ClusterID)
 	case errors.Is(err, context.Canceled) || errors.Is(err, kubechanges.ErrLeaseLost) || service.identity.ctx.Err() != nil:
 		logging.Debugf("kubernetes: issue alert run for cluster %q ended early", service.scope.ClusterID)
+	case isHistoryStoreError(err):
+		problems().Fail(slog.LevelWarn, key, "storage unavailable", "kubernetes: cluster %q issue alerts paused (storage unavailable); they resume on the next cycle the history store answers; check that the storage backend is reachable", service.scope.ClusterID)
 	default:
 		cause := "delivery failed"
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -515,7 +530,11 @@ func (service *Service) emitIssueAlertCycle(ctx context.Context, items []kubebre
 	// the UID arrives and has no record yet, the unscoped record carries over,
 	// so open breaks are neither baselined again nor alerted again. A window
 	// already bound to a UID keeps it while the scope cannot be read.
-	clusterUID, known := service.alertClusterUID(ctx)
+	clusterUID, known, err := service.alertClusterUID(ctx)
+	if err != nil {
+		logging.Debugf("kubernetes: cluster %q issue alert run skipped: history scope unreadable; retrying next cycle", service.scope.ClusterID)
+		return err
+	}
 	_, settingsKey := service.logSettingsStore()
 	unscoped := alertCheckpointKey(settingsKey, "")
 	if known || window.key == "" {

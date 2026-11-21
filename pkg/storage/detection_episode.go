@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -100,6 +101,40 @@ type DetectionEpisodeDecision struct {
 	NotificationKind        DetectionNotificationKind
 	ClaimToken              string
 	ClaimExpiresAt          time.Time
+	// NotificationSequence numbers the claimed notification within its
+	// episode: 1 for the first, one more for each notification that came to
+	// an end before it. A replay of a notification whose claim expired, or a
+	// retry after a send that failed, keeps the number, so DeliveryID is the
+	// same on every attempt and a receiver can drop the repeat.
+	NotificationSequence int64
+}
+
+// DeliveryID names one notification of an episode across every attempt to
+// send it. It is empty for a decision that claimed no notification.
+func (decision DetectionEpisodeDecision) DeliveryID() string {
+	if !decision.NotificationClaimed || decision.EpisodeID == "" || decision.NotificationSequence <= 0 {
+		return ""
+	}
+	return decision.EpisodeID + "-" + strconv.FormatInt(decision.NotificationSequence, 10)
+}
+
+// supersededBySeverity reports a claim whose severity rose above the earlier,
+// unfinished attempt of the same notification: a replay after the claim
+// expired, or a retry after a send that failed. The earlier attempt may have
+// reached the receiver, so the rise is sent as a new notification with its
+// own number; a receiver that drops repeats still sees it.
+func supersededBySeverity(attempted, observed string) bool {
+	return attempted != "" && detectionSeverityHigher(observed, attempted)
+}
+
+// nextNotificationSequence is the sequence of a notification claimed after
+// handled notifications came to an end. An episode recorded before the count
+// was kept has handled its first notification when it has a handled severity.
+func nextNotificationSequence(handled int64, handledSeverity string) int64 {
+	if handled <= 0 && handledSeverity != "" {
+		handled = 1
+	}
+	return max(handled, 0) + 1
 }
 
 type DetectionNotificationCompletion struct {

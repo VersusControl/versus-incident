@@ -513,7 +513,7 @@ func TestProofOfADifferentPrincipalRetiresAtOnce(t *testing.T) {
 			fixture.settle()
 			if pastBound {
 				fixture.clock.advance(expires.Sub(fixture.clock.Now()))
-				if err := fixture.read(); proofCode(err) != "proof_unreachable" && proofCode(err) != "proof_unreachable" {
+				if err := fixture.read(); proofCode(err) != "proof_unreachable" {
 					t.Fatalf("read past the bound = %v", err)
 				}
 				// The read retried the proof; it ends before the identity
@@ -550,9 +550,9 @@ func TestANewerCandidateDoesNotMoveTheBound(t *testing.T) {
 	}
 	expires := fixture.service.identity.servingExpires
 	fixture.cluster.setReview(reviewDown(http.StatusServiceUnavailable))
-	// The first candidate lives three minutes, so the source renews again
-	// inside the grace window.
-	fixture.lifetime.Store(int64(3 * time.Minute))
+	// The first candidate lives two minutes, so the source renews it at
+	// half its life, inside the grace window.
+	fixture.lifetime.Store(int64(2 * time.Minute))
 	fixture.renew()
 	if err := fixture.read(); err != nil {
 		t.Fatal(err)
@@ -895,7 +895,7 @@ func TestProofLogsAndErrorsCarryNoSecretValues(t *testing.T) {
 	texts := append(logs.all(), failure.Error(), DiagnoseError(failure).Message, DiagnoseError(failure).Action, status)
 	secrets := []string{"token-value-", "principal-value-", "uid-value-", "assertion-for-"}
 	for n := int64(1); n <= fixture.issued.Load(); n++ {
-		digest := sha256.Sum256([]byte(fmt.Sprintf("Bearer token-value-%04d", n)))
+		digest := sha256.Sum256(fmt.Appendf(nil, "Bearer token-value-%04d", n))
 		secrets = append(secrets, hex.EncodeToString(digest[:])[:16])
 	}
 	for _, text := range texts {
