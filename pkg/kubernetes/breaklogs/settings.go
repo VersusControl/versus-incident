@@ -6,6 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"maps"
+	"slices"
+	"strconv"
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -134,4 +137,46 @@ func UpdateSettings(provider storage.Provider, key string, update func(*Settings
 		}
 	}
 	return ErrInvalid
+}
+
+// SettingsChanges names the settings an admin save changed, for the audit
+// trail. Booleans and the ingest delay show their before and after values;
+// namespace scope lists, the linked source and field mappings are reported as
+// "changed" only, because their values are operator text that does not belong
+// in an audit row. Alerts are owned by a separate route and are not compared.
+// The order is fixed so two identical saves produce the same summary.
+func SettingsChanges(before, after Settings) []string {
+	changes := []string{}
+	for _, flag := range []struct {
+		name          string
+		before, after bool
+	}{
+		{"learning.logs", before.Learning.Logs, after.Learning.Logs},
+		{"learning.metrics", before.Learning.Metrics, after.Learning.Metrics},
+		{"learning.traces", before.Learning.Traces, after.Learning.Traces},
+	} {
+		if flag.before != flag.after {
+			changes = append(changes, flag.name+":"+strconv.FormatBool(flag.before)+"->"+strconv.FormatBool(flag.after))
+		}
+	}
+	if !slices.Equal(before.Learning.Scope.Include, after.Learning.Scope.Include) || !slices.Equal(before.Learning.Scope.Exclude, after.Learning.Scope.Exclude) {
+		changes = append(changes, "learning.scope:changed")
+	}
+	if before.BreakLogs.LinkedSource != after.BreakLogs.LinkedSource {
+		changes = append(changes, "break_logs.linked_source:changed")
+	}
+	if !maps.Equal(before.BreakLogs.Fields, after.BreakLogs.Fields) {
+		changes = append(changes, "break_logs.fields:changed")
+	}
+	if delay := ingestDelayLabel(before.BreakLogs.IngestDelay); delay != ingestDelayLabel(after.BreakLogs.IngestDelay) {
+		changes = append(changes, "break_logs.ingest_delay:"+delay+"->"+ingestDelayLabel(after.BreakLogs.IngestDelay))
+	}
+	return changes
+}
+
+func ingestDelayLabel(delay *int) string {
+	if delay == nil {
+		return "default"
+	}
+	return strconv.Itoa(*delay)
 }

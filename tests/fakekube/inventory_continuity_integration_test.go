@@ -287,7 +287,7 @@ func startContinuityProcess(t *testing.T, cluster *continuityCluster, provider s
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := kubernetes.NewService(client, scope, time.Minute)
+	service := kubernetes.NewService(client, scope, time.Minute, kubernetes.WithCaptureCadenceDivisor(fixtureCadenceDivisor))
 	service.SetChangeStorage(provider)
 	service.SetScrubber(continuityScrubber{})
 	registry := kubernetes.NewServiceRegistry(service)

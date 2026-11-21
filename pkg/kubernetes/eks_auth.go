@@ -101,10 +101,12 @@ func newEKSCredentialSourceWithSTSFactory(options AuthOptions, newSTS eksSTSFact
 }
 
 func nativeAWSCredentialProvider(region string, profile map[string]string, profileFound bool, newSTS eksSTSFactory) (aws.CredentialsProvider, error) {
-	return nativeAWSCredentialProviderWithHTTP(region, profile, profileFound, newSTS, fixedCredentialHTTPClient())
+	return nativeAWSCredentialProviderWithHTTP(region, profile, profileFound, newSTS, fixedCredentialHTTPClient(), nil)
 }
 
-func nativeAWSCredentialProviderWithHTTP(region string, profile map[string]string, profileFound bool, newSTS eksSTSFactory, httpClient aws.HTTPClient) (aws.CredentialsProvider, error) {
+// A nil retryer keeps the SDK's own retries for the container and instance
+// metadata endpoints.
+func nativeAWSCredentialProviderWithHTTP(region string, profile map[string]string, profileFound bool, newSTS eksSTSFactory, httpClient aws.HTTPClient, retryer aws.Retryer) (aws.CredentialsProvider, error) {
 	accessKey, secretKey := os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY")
 	if accessKey != "" || secretKey != "" || os.Getenv("AWS_SESSION_TOKEN") != "" {
 		if accessKey == "" || secretKey == "" {
@@ -147,6 +149,9 @@ func nativeAWSCredentialProviderWithHTTP(region string, profile map[string]strin
 		}
 		provider := endpointcreds.New(endpoint, func(options *endpointcreds.Options) {
 			options.HTTPClient = httpClient
+			if retryer != nil {
+				options.Retryer = retryer
+			}
 			if tokenFile != "" {
 				options.AuthorizationTokenProvider = endpointcreds.TokenProviderFunc(func() (string, error) {
 					data, err := readSecureBoundedFile(tokenFile, maxTokenBytes)
@@ -169,6 +174,7 @@ func nativeAWSCredentialProviderWithHTTP(region string, profile map[string]strin
 		HTTPClient:        httpClient,
 		ClientEnableState: imds.ClientEnabled,
 		EnableFallback:    aws.FalseTernary,
+		Retryer:           retryer,
 	})
 	provider := ec2rolecreds.New(func(options *ec2rolecreds.Options) { options.Client = imdsClient })
 	return aws.NewCredentialsCache(provider), nil

@@ -415,7 +415,9 @@ func TestEKSIRSAContainerAndIMDSRenewSessionsAndRecoverProviderOutage(t *testing
 				}
 				return &http.Response{StatusCode: status, Header: http.Header{"X-Aws-Ec2-Metadata-Token-Ttl-Seconds": []string{"21600"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
 			})
-			provider, err := nativeAWSCredentialProviderWithHTTP("us-east-1", nil, false, func(string, aws.CredentialsProvider) eksSTSAPI { return fixture }, &http.Client{Transport: transport})
+			// The outage is reported the same with or without the SDK's
+			// retries; they only add backoff time to the test.
+			provider, err := nativeAWSCredentialProviderWithHTTP("us-east-1", nil, false, func(string, aws.CredentialsProvider) eksSTSAPI { return fixture }, &http.Client{Transport: transport}, aws.NopRetryer{})
 			if err != nil {
 				t.Fatal(err)
 			}

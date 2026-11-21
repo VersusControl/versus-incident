@@ -99,7 +99,7 @@ func TestSwappedCredentialThatReadsNothingStillRunsTheProof(t *testing.T) {
 	cluster.force(nil)
 	select {
 	case <-started:
-	case <-time.After(10 * time.Second):
+	case <-time.After(scaledTimeout(10 * time.Second)):
 		t.Fatal("a new credential that read nothing did not start an authority proof")
 	}
 	ctx := t.Context()
@@ -179,7 +179,7 @@ func TestSwappedCredentialThatReadsNothingWithholdsOldRecordsBeforeTheProof(t *t
 	case <-scoped:
 	case <-proof:
 		t.Fatal("the proof started before the namespace stage the test holds")
-	case <-time.After(10 * time.Second):
+	case <-time.After(scaledTimeout(10 * time.Second)):
 		t.Fatal("collection never reached its namespace stage")
 	}
 	for i := 0; i < 20; i++ {

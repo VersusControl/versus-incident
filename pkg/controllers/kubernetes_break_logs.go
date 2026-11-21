@@ -16,6 +16,22 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+const kubernetesSettingsChangesKey = "versus.kubernetes.settings.changes"
+
+// Bounds for the settings-save audit target. The change names come from a
+// fixed vocabulary, so the caps only guard against a future vocabulary growing
+// past what an audit row should carry.
+const (
+	maxSettingsAuditChanges = 32
+	maxSettingsAuditCluster = 128
+	maxSettingsAuditTarget  = 1024
+)
+
+// unresolvedSettingsAuditCluster stands in for the cluster when the server
+// resolved none. Parentheses never survive auditSafeClusterID, so the
+// placeholder cannot be mistaken for a configured cluster.
+const unresolvedSettingsAuditCluster = "(unresolved)"
+
 func auditKubernetesSettings(ctx *fiber.Ctx) error {
 	path := routingPath(ctx)
 	put := ctx.Method() == fiber.MethodPut && path == "/api/admin/kubernetes/agent-settings"
@@ -35,11 +51,67 @@ func auditKubernetesSettings(ctx *fiber.Ctx) error {
 		action = "rbac.denied"
 	} else if !put {
 		return err
-	} else if status < fiber.StatusBadRequest {
-		result = middleware.AdminAuditSuccess
+	} else {
+		if status < fiber.StatusBadRequest {
+			result = middleware.AdminAuditSuccess
+		}
+		changes, saved := ctx.Locals(kubernetesSettingsChangesKey).([]string)
+		target = kubernetesSettingsAuditTarget(requestKubernetesService(ctx), changes, saved)
 	}
 	middleware.RecordAdminAudit(ctx, action, target, result)
 	return err
+}
+
+// kubernetesSettingsAuditTarget names the cluster a settings save was applied
+// to and the settings it changed. The cluster comes only from the service the
+// server resolved for the request, never from the query or body, so a cluster
+// string the server did not resolve is never echoed. A save that never reached
+// storage names the cluster alone; a save that was written lists its changes
+// even if reading the settings back afterwards failed.
+func kubernetesSettingsAuditTarget(service *kubernetes.Service, changes []string, saved bool) string {
+	cluster := unresolvedSettingsAuditCluster
+	if service != nil {
+		if id := auditSafeClusterID(service.Scope().ClusterID); id != "" {
+			cluster = id
+		}
+	}
+	target := "kubernetes:cluster:" + cluster
+	if !saved {
+		return target
+	}
+	if len(changes) == 0 {
+		return target + " no changes"
+	}
+	more := 0
+	if len(changes) > maxSettingsAuditChanges {
+		more = len(changes) - maxSettingsAuditChanges
+		changes = changes[:maxSettingsAuditChanges]
+	}
+	target += " " + strings.Join(changes, ",")
+	if more > 0 {
+		target += ",+" + strconv.Itoa(more) + " more"
+	}
+	if len(target) > maxSettingsAuditTarget {
+		target = target[:maxSettingsAuditTarget]
+	}
+	return target
+}
+
+// auditSafeClusterID keeps a configured cluster ID to a bounded run of plain
+// identifier characters so it cannot break the audit target's layout. The
+// result is a readable label, not a unique key: IDs such as "a/b" and "a_b"
+// read the same in the audit target.
+func auditSafeClusterID(id string) string {
+	if len(id) > maxSettingsAuditCluster {
+		id = id[:maxSettingsAuditCluster]
+	}
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			return r
+		}
+		return '_'
+	}, id)
 }
 
 func (controller *KubernetesAdminController) requireSettingsWrite(ctx *fiber.Ctx) error {
@@ -151,9 +223,11 @@ func (controller *KubernetesAdminController) saveAgentSettings(ctx *fiber.Ctx) e
 	if err := decodeKubernetesSettings(ctx, &settings); err != nil {
 		return writeKubernetes(ctx, nil, err)
 	}
-	if err := requestKubernetesService(ctx).SaveAgentSettings(ctx.UserContext(), settings); err != nil {
+	changes, err := requestKubernetesService(ctx).SaveAgentSettingsChanges(ctx.UserContext(), settings)
+	if err != nil {
 		return writeKubernetes(ctx, nil, err)
 	}
+	ctx.Locals(kubernetesSettingsChangesKey, changes)
 	return controller.agentSettings(ctx)
 }
 

@@ -796,7 +796,9 @@ func TestStreamWithoutHistoryReportsSyncStateCalmly(t *testing.T) {
 	ctx := t.Context()
 	pacer := &StreamSyncPacer{}
 	sent := 0
-	deadline := time.Now().Add(10 * time.Second)
+	// Thirty polls are enough to tell a calm stream from one that sends an
+	// event on every poll.
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		commit, err := cluster.service.CommitStatus(ctx)
 		if err != nil || commit.History != HistoryOffNamespaceAccess {
@@ -811,8 +813,10 @@ func TestStreamWithoutHistoryReportsSyncStateCalmly(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if sent == 0 || sent > 3 {
-		t.Fatalf("the stream sent %d sync events in 10 s of polls", sent)
+	// The keep-alive is longer than the window, so a calm stream sends only
+	// its first event.
+	if sent != 1 {
+		t.Fatalf("the stream sent %d sync events in 3 s of polls", sent)
 	}
 }
 

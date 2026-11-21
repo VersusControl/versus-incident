@@ -17,10 +17,12 @@ import (
 // restart adds exactly one status row and one termination row.
 func TestStableCrashLoopIsOneJournalRowPerRestart(t *testing.T) {
 	t.Parallel()
-	const (
-		polls        = 1000
-		restartEvery = 250
-	)
+	// Short mode keeps four restarts, the same number of states, over fewer
+	// polls.
+	polls, restartEvery := 1000, 250
+	if testing.Short() {
+		polls, restartEvery = 200, 50
+	}
 	provider := storage.NewMemory()
 	t.Cleanup(func() { _ = provider.Close() })
 	store := provider.(storage.EvidenceStore)
