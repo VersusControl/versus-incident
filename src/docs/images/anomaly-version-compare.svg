@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="404" viewBox="0 0 760 404" style="max-width:100%;height:auto" role="img" aria-label="During a rollout, request latency of the old ReplicaSet v1 and the new ReplicaSet v2 are drawn as two distributions; v2 is shifted right, its median 50 percent higher; all 40 samples are ranked together, the v1 samples fill the low end, the v2 samples fill the high end and a few mix in the middle, so the Mann-Whitney U test finds v2 ranks higher, significant at 1 percent with a shift of 25 percent or more, which makes it a regression; checks run at 5, 10, 20 and 30 minutes and give one finding per rollout; a new error template, ERROR charge failed: timeout after some milliseconds, is seen only on new Pods at error level with 5 lines or more; if the rollout has not finished 30 minutes after the first new Pod is Ready it is reported once as stalled">
+  <title>Version comparison during a rollout</title>
+  <desc>Two latency distributions, old v1 and new v2 shifted right, with a ranked strip of all samples where v2 fills the high ranks for the Mann-Whitney U test, a callout for an error template seen only in v2, and a note on stalled rollouts</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f14{font-size:14px}.f15{font-size:15px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}.end{text-anchor:end}
+      .v1{fill:#FFFFFF;stroke:#000000;stroke-width:1.5}
+      .v2{fill:#BACFE3;stroke:#000000;stroke-width:1.5}
+      .accS{fill:none;stroke:#E8590C}
+    </style>
+    <marker id="ao" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#E8590C"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="404" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">Version comparison during a rollout</text>
+  <text x="24" y="56" class="f13 sec">New Pods are compared with old Pods from the first minutes, no history needed</text>
+
+  <!-- legend -->
+  <rect class="v2" x="320" y="86" width="16" height="10"/>
+  <text x="344" y="95" class="f12">v2: new ReplicaSet</text>
+  <path d="M320 112H336" fill="none" stroke="#000000" stroke-width="2" stroke-dasharray="5 3"/>
+  <text x="344" y="116" class="f12">v1: old ReplicaSet</text>
+
+  <!-- distributions -->
+  <path d="M118,250 C184,250 190,140 238,140 C286,140 292,250 358,250" fill="#BACFE3" stroke="#000000" stroke-width="2"/>
+  <path d="M72,250 C127,250 132,120 172,120 C212,120 217,250 272,250" fill="none" stroke="#000000" stroke-width="2" stroke-dasharray="6 4"/>
+
+  <!-- median shift -->
+  <path d="M172 116V100M238 136V100" fill="none" stroke="#9AA9B6" stroke-width="1.5" stroke-dasharray="3 3"/>
+  <path d="M176 104H233" class="accS" stroke-width="2.5" marker-end="url(#ao)"/>
+  <text x="205" y="94" class="f12 b nm mid">median +50%</text>
+
+  <!-- axis -->
+  <path d="M40 250H480M40 250V256M150 250V256M260 250V256M370 250V256M480 250V256" fill="none" stroke="#000000" stroke-width="1.5"/>
+  <text x="40" y="268" class="f12 sec mid">0</text>
+  <text x="150" y="268" class="f12 sec mid">100 ms</text>
+  <text x="260" y="268" class="f12 sec mid">200 ms</text>
+  <text x="370" y="268" class="f12 sec mid">300 ms</text>
+  <text x="480" y="268" class="f12 sec mid">400 ms</text>
+  <text x="480" y="286" class="f12 sec end">request latency</text>
+
+  <!-- rank strip: v1 fills the low ranks, v2 the high ranks, a few mix in the middle -->
+  <text x="40" y="306" class="f12 sec">all 40 samples ranked together, lowest to highest</text>
+  <text x="34" y="322" class="f11 sec end">low</text>
+  <text x="484" y="322" class="f11 sec">high</text>
+  <g class="v1">
+    <rect x="40" y="314" width="9" height="9"/><rect x="51" y="314" width="9" height="9"/><rect x="62" y="314" width="9" height="9"/><rect x="73" y="314" width="9" height="9"/><rect x="84" y="314" width="9" height="9"/>
+    <rect x="95" y="314" width="9" height="9"/><rect x="106" y="314" width="9" height="9"/><rect x="117" y="314" width="9" height="9"/><rect x="128" y="314" width="9" height="9"/><rect x="139" y="314" width="9" height="9"/>
+    <rect x="161" y="314" width="9" height="9"/><rect x="172" y="314" width="9" height="9"/><rect x="183" y="314" width="9" height="9"/><rect x="194" y="314" width="9" height="9"/>
+    <rect x="216" y="314" width="9" height="9"/><rect x="249" y="314" width="9" height="9"/><rect x="271" y="314" width="9" height="9"/><rect x="282" y="314" width="9" height="9"/>
+    <rect x="315" y="314" width="9" height="9"/><rect x="370" y="314" width="9" height="9"/>
+  </g>
+  <g class="v2">
+    <rect x="150" y="314" width="9" height="9"/><rect x="205" y="314" width="9" height="9"/><rect x="227" y="314" width="9" height="9"/><rect x="238" y="314" width="9" height="9"/>
+    <rect x="260" y="314" width="9" height="9"/><rect x="293" y="314" width="9" height="9"/><rect x="304" y="314" width="9" height="9"/>
+    <rect x="326" y="314" width="9" height="9"/><rect x="337" y="314" width="9" height="9"/><rect x="348" y="314" width="9" height="9"/><rect x="359" y="314" width="9" height="9"/>
+    <rect x="381" y="314" width="9" height="9"/><rect x="392" y="314" width="9" height="9"/><rect x="403" y="314" width="9" height="9"/><rect x="414" y="314" width="9" height="9"/>
+    <rect x="425" y="314" width="9" height="9"/><rect x="436" y="314" width="9" height="9"/><rect x="447" y="314" width="9" height="9"/><rect x="458" y="314" width="9" height="9"/><rect x="469" y="314" width="9" height="9"/>
+  </g>
+
+  <text x="40" y="346" class="f14"><tspan class="b nm">Mann-Whitney U:</tspan> v2 ranks higher</text>
+  <text x="40" y="366" class="f12 sec">significant at 1% and shifted by 25% or more: a regression</text>
+  <text x="40" y="384" class="f12 sec">checked at 5, 10, 20 and 30 minutes, one finding per rollout</text>
+
+  <!-- new template -->
+  <rect x="520" y="84" width="220" height="168" rx="12" class="accS" stroke-width="2"/>
+  <text x="536" y="106" class="zone">ONLY IN V2</text>
+  <text x="536" y="128" class="f15 b nm">New error template</text>
+  <rect x="536" y="140" width="188" height="54" rx="8" fill="#F7F9FB" stroke="#D8E0E8" stroke-width="1.5"/>
+  <text x="546" y="161" class="c f11">ERROR charge failed:</text>
+  <text x="546" y="180" class="c f11">timeout after &lt;*&gt; ms</text>
+  <text x="536" y="218" class="f12 sec">seen on new Pods only</text>
+  <text x="536" y="236" class="f12 sec">error level, 5 lines or more</text>
+
+  <!-- stalled -->
+  <rect x="520" y="272" width="220" height="110" rx="12" fill="#FFFFFF" stroke="#9AA9B6" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="536" y="294" class="zone">IF IT STALLS</text>
+  <text x="536" y="316" class="f14 b nm">Rollout stalled</text>
+  <text x="536" y="336" class="f12 sec">not finished 30 min after</text>
+  <text x="536" y="352" class="f12 sec">the first new Pod is Ready:</text>
+  <text x="536" y="368" class="f12 sec">reported once</text>
+</svg>

@@ -81,6 +81,8 @@ fixture rejects every other value, including a missing one, with
 | `cost-new-untagged-db` | `awsfix.CostNewUntaggedDB`: a full September, then an untagged database instance from Oct 20 |
 | `cost-unavailable` | `cost-nat-spike.json`; every Cost Explorer call answers `AccessDeniedException: User not enabled for cost explorer access` |
 
+| `estate-hub-spoke` | Four accounts of one organization in a hub-and-spoke landing zone, each linked to the others from one side only (see "Estate scenario" below). Only the four estate accounts get these answers; any other caller gets the ordinary fixture |
+
 CloudTrail `EventId`s are unique per account and Region (the fixture ID plus `-<account>-<region>`), as real ones are, so two accounts or Regions never share a stored row. The global stream reads us-east-1 and sees the us-east-1 IDs. Events added with `AddLateEvent` keep their ID as given.
 
 ### Collector world
@@ -96,6 +98,104 @@ unencrypted), CloudFront, Route 53, IAM roles and a CloudTrail history that
 serve the probe calls from the world too; the probe scenarios keep their
 one-item probe pages and use the world only for collector-only calls.
 `SetClock` pins the time events and alarms are relative to.
+
+### Estate scenario
+
+`estate-hub-spoke` answers the cross-account, identity, findings and
+service-status calls (`EstateOperations()` lists them) for four accounts of
+organization `o-a1b2c3d4e5`. Sign as an account with `X-FakeAWS-Account` or
+a session token holding its ID.
+
+| Account | ID | Holds |
+|---|---|---|
+| Hub | `123400000001` | the transit gateway and its RAM share to the landing-zone organizational units, the internet-facing load balancer, a CloudFront distribution, Lambda concurrency quota 10, an expired certificate. No credential report (`ReportNotPresent`) |
+| Workloads | `123400000002` | an internal load balancer with pod-IP targets (one failing), service-account, pinned GitHub and deleted-principal role trusts, old access keys in the credential report, deprecated Lambda runtimes, two EKS insights not passing, a bucket policy naming the data account |
+| Shared services | `123400000003` | every DNS zone (aliases into the other accounts, a private zone associated with their VPCs), ECR repositories with organization and account grants, an unpinned GitHub trust, a GuardDuty attack sequence, Inspector findings, RDS failover and recovery events |
+| Data | `123400000004` | a network load balancer, a target group with nothing healthy and one with no load balancer, a KMS key policy naming workloads, an ExternalId trust to a vendor and an organization-condition trust |
+
+Outside accounts named by policies: `123400000090` (management, from
+`DescribeOrganization`), `123400000091` (security tooling), `555500006666`
+(vendor, ExternalId) and `555500007777` (unknown; a peering, a zone VPC and
+a role trust). Everything regional lives in `eu-south-2`; `eu-west-1` holds a
+GuardDuty detector and the Security Hub aggregator; `us-east-1` holds the
+CloudFront certificate and no detector.
+
+Forms the scenario serves on purpose, because real AWS returns them. They
+were checked against responses recorded from a real four-account estate:
+
+- Route 53 names end with a dot; a wildcard label is `\052` and can be an
+  alias; an alias to an application load balancer usually has the
+  `dualstack.` prefix but not always, an alias to a network load balancer
+  never; A and AAAA repeat the same alias; most aliases do not evaluate
+  target health; a CNAME value has no trailing dot; a private zone lists VPC
+  IDs and Regions, never the owning account; every zone carries a
+  `Features` element (empty on a private zone).
+- IAM policy documents in query answers are URL-encoded. Statement, Action,
+  principal and condition values appear both as a single value and as a
+  list. A deleted principal is its unique ID: a role (`AROA…`) inside a
+  list, or a user (`AIDA…`) alone in a statement repeated with `"Sid":""`. A
+  service-account trust can list several subjects with no `aud`; a service
+  trust can carry `aws:SourceAccount` and `ArnEquals` `aws:SourceArn`. A role
+  never used has an empty `<RoleLastUsed/>`; a tag can have an empty value.
+- The credential report uses `<root_account>`, `not_supported`,
+  `no_information` and `N/A`; its cells are RFC 3339 with a `Z`, while
+  `GeneratedTime` is ordinary ISO 8601. The root password is enabled; a
+  deactivated key keeps its last-used date. A report never generated answers
+  `410 ReportNotPresent` with no message.
+- S3 returns a bucket policy as a raw JSON body; KMS and ECR return policy
+  text indented, with newlines. Condition keys vary in case
+  (`AWS:SourceArn`, `aws:sourceArn`). A key policy grants `"AWS":"*"` under
+  `kms:CallerAccount`, which is not public. KMS adds `CurrentKeyMaterialId`.
+- Security Hub has consolidated control findings off: a finding ID names the
+  standard subscription, so one failing control on one resource is two
+  findings when two standards include it. The same findings (same `Id`,
+  `Region` = origin) are served from the home Region and again from the
+  aggregation Region; other Regions answer `InvalidAccessException`.
+  `ListFindingAggregators` names the aggregation Region from any Region.
+- GuardDuty attack sequences have `resource.resourceType` `AttackSequence`
+  and no details, `associatedAttackSequenceArn` equal to their own `arn`, a
+  sequence `uid` that is not an ARN, resources typed `EKS_CLUSTER`,
+  `EC2_INSTANCE` and `CONTAINER`, and process indicators as JSON strings.
+- Every `DescribeTargetHealth` entry carries an `AdministrativeOverride`
+  block; IP targets are pod addresses; a group with no target answers an
+  empty list. A network load balancer's target group is TCP with no matcher.
+- An EKS cluster with no issue has no `health` element.
+- A spoke sees the hub's transit gateway without its tags, and only its own
+  attachment. RAM associates the transit share with organizational units;
+  only the owner sees a share's `tags` and `resourceShareConfiguration`.
+- `DescribeRegions` lists enabled Regions (the home Region is `opted-in`);
+  `AllRegions=true` adds the `not-opted-in` ones.
+- "Not configured" and "denied" are answers: `NoSuchBucketPolicy`,
+  `RepositoryPolicyNotFoundException`, a function with no URL
+  (`ResourceNotFoundException`), function URL reads denied for most
+  functions (`EstateDeniedFunctionURLs`) with Lambda's
+  `Unable to determine service/operation name to be authorized`,
+  Organizations listing denied, Inspector not enabled, an empty detector
+  list, no Access Analyzer.
+
+Known simplifications vs real AWS:
+
+- Field order, rarely used optional fields and most error messages may
+  differ from a live answer; only the messages above were checked.
+- Paging is served only by GuardDuty `ListFindings` (`maxResults`) and
+  Security Hub `GetFindings` (`MaxResults`); every other list fits one page.
+  Filters are honoured only for the Security Hub `Id`, the Inspector string
+  filters (`findingType`, `findingStatus`, `severity`, `exploitAvailable`,
+  `fixAvailable`), the RAM resource owner and the target group of
+  `DescribeTargetHealth`; every other filter is ignored.
+- One cluster, one workload VPC and a handful of resources per account, not
+  the hundreds a real account holds; a real attack sequence names about a
+  hundred signals, this one two.
+- No real sample exists for Inspector findings, the Inspector "not enabled"
+  answer, Access Analyzer, a readable function URL, an image-packaged Lambda
+  function or a `ListFindings` last page; those follow the documented shapes.
+- Timestamps are written in each protocol's wire form (epoch seconds for
+  JSON services, ISO 8601 for XML and the REST-JSON services that use it),
+  relative to the fixture clock (`SetClock`) and truncated to the hour.
+  Non-UTC offsets do not occur, and only RAM adds milliseconds.
+- Tags come only where a shape needs them (`DescribeTags` and the tagging
+  API are not answered by this scenario).
+- Every account gets the same Regions; there is no per-account opt-in.
 
 ### Pointing the server binary at the fixture
 

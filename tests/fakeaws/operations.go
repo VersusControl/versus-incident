@@ -14,6 +14,9 @@ func (s *Server) writeOperation(writer http.ResponseWriter, request awsRequest) 
 	if s.writeCostOperation(writer, request) {
 		return
 	}
+	if s.writeEstateOperation(writer, request) {
+		return
+	}
 	if s.writeWorldOperation(writer, request) {
 		return
 	}

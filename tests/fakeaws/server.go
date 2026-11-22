@@ -303,6 +303,9 @@ type awsRequest struct {
 	scenario string
 	method   string
 	body     []byte
+	// target is the X-Amz-Target prefix (before the last dot), which names
+	// the JSON service when the request is not signed.
+	target string
 }
 
 func (r awsRequest) operation() string {
@@ -397,6 +400,7 @@ func parseRequest(request *http.Request, body []byte) awsRequest {
 		parsed.protocol = protocolJSON
 		if index := strings.LastIndex(target, "."); index >= 0 {
 			parsed.action = target[index+1:]
+			parsed.target = target[:index]
 			if parsed.service == "" {
 				parsed.service = targetService(target[:index])
 			}

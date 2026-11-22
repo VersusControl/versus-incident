@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="278" viewBox="0 0 760 278" style="max-width:100%;height:auto" role="img" aria-label="Four steps from switch on to alerting: step 1, turn on the learning toggle for a cluster in the UI on day 0; step 2, the first grace, 24 hours by default, learning while nothing is sent; step 3, shadow, where new layers start and you review their findings, until you enable alerts for the layer; step 4, alerting, where layers with alerts on notify in detect mode from then on; underneath, a band reads detection never stops: every layer runs and every finding is stored, in every mode">
+  <title>From switch on to alerting</title>
+  <desc>A timeline of four steps, turn it on, first grace, shadow and alerting, above a band that shows detection never stops and every finding is stored in every mode</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .f12{font-size:12px}.f13{font-size:13px}.f14{font-size:14px}.f16{font-size:16px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+      .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="278" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">From switch on to alerting</text>
+  <text x="24" y="56" class="f13 sec">Grace and shadow change only what is sent; learning and detection run the whole time</text>
+
+  <!-- steps -->
+  <rect class="blk" x="20" y="84" width="162" height="96" rx="12"/>
+  <text x="101" y="106" class="zone mid">STEP 1</text>
+  <text x="101" y="128" class="f16 b nm mid">Turn it on</text>
+  <text x="101" y="150" class="f12 sec mid">learning toggle for</text>
+  <text x="101" y="167" class="f12 sec mid">a cluster, in the UI</text>
+
+  <rect class="blk" x="206" y="84" width="162" height="96" rx="12"/>
+  <text x="287" y="106" class="zone mid">STEP 2</text>
+  <text x="287" y="128" class="f16 b nm mid">First grace</text>
+  <text x="287" y="150" class="f12 sec mid">24 h by default</text>
+  <text x="287" y="167" class="f12 sec mid">learning, nothing sent</text>
+
+  <rect class="blk" x="392" y="84" width="162" height="96" rx="12"/>
+  <text x="473" y="106" class="zone mid">STEP 3</text>
+  <text x="473" y="128" class="f16 b nm mid">Shadow</text>
+  <text x="473" y="150" class="f12 sec mid">new layers start here</text>
+  <text x="473" y="167" class="f12 sec mid">you review findings</text>
+
+  <rect class="sub" x="578" y="84" width="162" height="96" rx="12"/>
+  <text x="659" y="106" class="zone mid">STEP 4</text>
+  <text x="659" y="128" class="f16 b nm mid">Alerting</text>
+  <text x="659" y="150" class="f12 nm mid">layers with alerts on</text>
+  <text x="659" y="167" class="f12 nm mid">notify in detect mode</text>
+
+  <!-- when -->
+  <text x="101" y="200" class="f12 sec mid">day 0</text>
+  <text x="287" y="200" class="f12 sec mid">first 24 h</text>
+  <text x="473" y="200" class="f12 sec mid">until you enable alerts for the layer</text>
+  <text x="659" y="200" class="f12 sec mid">from then on</text>
+
+  <!-- never stops -->
+  <polygon points="20,212 712,212 740,234 712,256 20,256" fill="#BACFE3" stroke="#000000" stroke-width="2" stroke-linejoin="round"/>
+  <text x="366" y="230" class="f14 b nm mid">Detection never stops</text>
+  <text x="366" y="247" class="f12 nm mid">every layer runs and every finding is stored, in every mode</text>
+
+  <!-- flows -->
+  <path class="flow" d="M186 132H201" marker-end="url(#a)"/>
+  <path class="flow" d="M372 132H387" marker-end="url(#a)"/>
+  <path class="flow" d="M558 132H573" marker-end="url(#a)"/>
+</svg>

@@ -128,3 +128,4 @@
 - In Development
   - [AWS Harness](/in-development/aws-harness)
   - [AWS FinOps Agent](/in-development/aws-finops-agent)
+  - [Kubernetes Anomaly Detection](/in-development/kubernetes-anomaly-detection)
