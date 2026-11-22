@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="384" viewBox="0 0 760 384" style="max-width:100%;height:auto" role="img" aria-label="Nine Pods from four workloads on node-3 are flagged in the same minute, with CPU high, errors up or restarted; the same workloads on node-1 and node-2 are not flagged; grouping by node, zone or workload turns the nine small findings into one incident, node-3: 9 Pods affected, instead of nine alerts, one per Pod">
+  <title>Grouping findings into one incident</title>
+  <desc>Nine flagged Pods on node-3, while the same workloads on other nodes are healthy, collapse through grouping into one incident for the node instead of nine separate alerts</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f15{font-size:15px}.f16{font-size:16px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
+      .panel{fill:#F2F5F8}
+      .accT{fill:#FDE7D8;stroke:#E8590C;stroke-width:1.5}
+      .ghost{fill:#FFFFFF;stroke:#9AA9B6;stroke-width:1.5;stroke-dasharray:4 3}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="384" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">Grouping: one cause, one incident</text>
+  <text x="24" y="56" class="f13 sec">Pods flagged together on one node are reported once, for the node</text>
+
+  <!-- node-3 -->
+  <rect class="panel" x="20" y="80" width="288" height="196" rx="12"/>
+  <text x="34" y="100" class="zone">NODE-3</text>
+
+  <rect class="accT" x="34" y="112" width="80" height="44" rx="8"/>
+  <text x="74" y="131" class="c f11 mid">checkout-1</text>
+  <text x="74" y="147" class="f11 sec mid">CPU high</text>
+  <rect class="accT" x="124" y="112" width="80" height="44" rx="8"/>
+  <text x="164" y="131" class="c f11 mid">checkout-2</text>
+  <text x="164" y="147" class="f11 sec mid">errors up</text>
+  <rect class="accT" x="214" y="112" width="80" height="44" rx="8"/>
+  <text x="254" y="131" class="c f11 mid">cart-1</text>
+  <text x="254" y="147" class="f11 sec mid">CPU high</text>
+
+  <rect class="accT" x="34" y="164" width="80" height="44" rx="8"/>
+  <text x="74" y="183" class="c f11 mid">cart-2</text>
+  <text x="74" y="199" class="f11 sec mid">restarted</text>
+  <rect class="accT" x="124" y="164" width="80" height="44" rx="8"/>
+  <text x="164" y="183" class="c f11 mid">cart-3</text>
+  <text x="164" y="199" class="f11 sec mid">CPU high</text>
+  <rect class="accT" x="214" y="164" width="80" height="44" rx="8"/>
+  <text x="254" y="183" class="c f11 mid">search-1</text>
+  <text x="254" y="199" class="f11 sec mid">errors up</text>
+
+  <rect class="accT" x="34" y="216" width="80" height="44" rx="8"/>
+  <text x="74" y="235" class="c f11 mid">search-2</text>
+  <text x="74" y="251" class="f11 sec mid">CPU high</text>
+  <rect class="accT" x="124" y="216" width="80" height="44" rx="8"/>
+  <text x="164" y="235" class="c f11 mid">api-1</text>
+  <text x="164" y="251" class="f11 sec mid">restarted</text>
+  <rect class="accT" x="214" y="216" width="80" height="44" rx="8"/>
+  <text x="254" y="235" class="c f11 mid">api-2</text>
+  <text x="254" y="251" class="f11 sec mid">CPU high</text>
+
+  <!-- other nodes -->
+  <rect class="panel" x="20" y="292" width="138" height="72" rx="12"/>
+  <text x="34" y="312" class="zone">NODE-1</text>
+  <text x="34" y="334" class="f12 sec">same workloads</text>
+  <text x="34" y="350" class="f12 sec">not flagged</text>
+
+  <rect class="panel" x="170" y="292" width="138" height="72" rx="12"/>
+  <text x="184" y="312" class="zone">NODE-2</text>
+  <text x="184" y="334" class="f12 sec">same workloads</text>
+  <text x="184" y="350" class="f12 sec">not flagged</text>
+
+  <!-- group -->
+  <rect class="sub" x="340" y="137" width="140" height="82" rx="12"/>
+  <text x="410" y="165" class="f16 b nm mid">Group</text>
+  <text x="410" y="185" class="f12 nm mid">same node, zone</text>
+  <text x="410" y="201" class="f12 nm mid">or workload</text>
+
+  <!-- incident -->
+  <rect class="sub" x="520" y="124" width="220" height="100" rx="12"/>
+  <text x="536" y="146" class="zone">ONE INCIDENT</text>
+  <text x="536" y="170" class="f15 b nm">node-3: 9 Pods affected</text>
+  <text x="536" y="190" class="f12 nm">4 workloads on one node</text>
+  <text x="536" y="206" class="f12 nm">their Pods elsewhere are fine</text>
+
+  <!-- instead of -->
+  <text x="520" y="262" class="zone">INSTEAD OF</text>
+  <rect class="ghost" x="520" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="545" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="570" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="595" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="620" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="645" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="670" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="695" y="272" width="20" height="28" rx="4"/>
+  <rect class="ghost" x="720" y="272" width="20" height="28" rx="4"/>
+  <text x="520" y="318" class="f12 sec">nine alerts, one per Pod</text>
+
+  <!-- flows -->
+  <path class="flow" d="M312 178H335" marker-end="url(#a)"/>
+  <path class="flow" d="M484 178H515" marker-end="url(#a)"/>
+</svg>

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="356" viewBox="0 0 760 356" style="max-width:100%;height:auto" role="img" aria-label="One week of CPU per replica, Monday to Sunday, drawn over a shaded expected band learned for each hour of the week; the band is high in the afternoon, low at night and lower on the weekend; on Wednesday at 04:00 the value jumps to a level that is normal in the afternoon but far above the band for that hour, and it is flagged as an anomaly; on Friday at 04:00 a quiet night dip stays inside the band and is not flagged">
+  <title>Learned baseline by hour of the week</title>
+  <desc>A week long time series with an expected band that rises by day, falls at night and is lower at the weekend; a 04:00 spike outside the band is marked as an anomaly, while a quiet night dip inside the band is not flagged</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .f12{font-size:12px}.f13{font-size:13px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .acc{fill:#E8590C}
+      .accS{fill:none;stroke:#E8590C}
+    </style>
+  </defs>
+
+  <rect width="760" height="356" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">Learned baseline: normal depends on the hour</text>
+  <text x="24" y="56" class="f13 sec">A moving average for each hour of the week, so 04:00 is compared with other nights, not with noon</text>
+
+  <!-- legend -->
+  <rect x="70" y="78" width="22" height="12" fill="#BACFE3" fill-opacity="0.6"/>
+  <text x="100" y="88" class="f12">expected band, learned for each hour of the week</text>
+  <path d="M440 84H462" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="470" y="88" class="f12">CPU per replica</text>
+
+  <!-- expected band -->
+  <polygon fill="#BACFE3" fill-opacity="0.6" points="70,232.8 85.7,247.2 101.4,196.8 117.1,146.4 132.9,132 148.6,182.4 164.3,232.8 180,247.2 195.7,196.8 211.4,146.4 227.1,132 242.9,182.4 258.6,232.8 274.3,247.2 290,196.8 305.7,146.4 321.4,132 337.1,182.4 352.9,232.8 368.6,247.2 384.3,196.8 400,146.4 415.7,132 431.4,182.4 447.1,232.8 462.9,247.2 478.6,196.8 494.3,146.4 510,132 525.7,182.4 541.4,250.8 557.1,259.2 572.9,229.8 588.6,200.4 604.3,192 620,221.4 635.7,250.8 651.4,259.2 667.1,229.8 682.9,200.4 698.6,192 714.3,221.4 730,232.8 730,275.2 714.3,267.6 698.6,248 682.9,253.6 667.1,273.2 651.4,292.8 635.7,287.2 620,267.6 604.3,248 588.6,253.6 572.9,273.2 557.1,292.8 541.4,287.2 525.7,241.6 510,208 494.3,217.6 478.6,251.2 462.9,284.8 447.1,275.2 431.4,241.6 415.7,208 400,217.6 384.3,251.2 368.6,284.8 352.9,275.2 337.1,241.6 321.4,208 305.7,217.6 290,251.2 274.3,284.8 258.6,275.2 242.9,241.6 227.1,208 211.4,217.6 195.7,251.2 180,284.8 164.3,275.2 148.6,241.6 132.9,208 117.1,217.6 101.4,251.2 85.7,284.8 70,275.2"/>
+
+  <!-- actual -->
+  <polyline fill="none" stroke="#000000" stroke-width="2" stroke-linejoin="round" points="70,258 85.7,263 101.4,230 117.1,174 132.9,175 148.6,208 164.3,249 180,270 195.7,217 211.4,188 227.1,164 242.9,217 258.6,257 274.3,180 290,229 305.7,178 321.4,166 337.1,214 352.9,251 368.6,268 384.3,221 400,186 415.7,172 431.4,209 447.1,256 462.9,268 478.6,228 494.3,180 510,176 525.7,210 541.4,266 557.1,279 572.9,246 588.6,232 604.3,216 620,247 635.7,272 651.4,273 667.1,255 682.9,222 698.6,224 714.3,241 730,255"/>
+
+  <!-- axis -->
+  <path d="M70 320H730M70 320V326M164.3 320V326M258.6 320V326M352.9 320V326M447.1 320V326M541.4 320V326M635.7 320V326M730 320V326" fill="none" stroke="#000000" stroke-width="1.5"/>
+  <text x="117.1" y="340" class="f12 sec mid">Mon</text>
+  <text x="211.4" y="340" class="f12 sec mid">Tue</text>
+  <text x="305.7" y="340" class="f12 sec mid">Wed</text>
+  <text x="400" y="340" class="f12 sec mid">Thu</text>
+  <text x="494.3" y="340" class="f12 sec mid">Fri</text>
+  <text x="588.6" y="340" class="f12 sec mid">Sat</text>
+  <text x="682.9" y="340" class="f12 sec mid">Sun</text>
+
+  <!-- anomaly -->
+  <text x="274" y="110" class="f13 b nm mid">Wed 04:00: outside the band, an anomaly</text>
+  <path d="M274.3 115V170" class="accS" stroke-width="1.5"/>
+  <circle cx="274.3" cy="180" r="6" class="acc" stroke="#000000" stroke-width="2"/>
+
+  <!-- quiet night -->
+  <circle cx="462.9" cy="268" r="6" fill="#FFFFFF" stroke="#000000" stroke-width="1.5"/>
+  <path d="M462.9 278V297" fill="none" stroke="#000000" stroke-width="1.5"/>
+  <text x="463" y="308" class="f12 sec mid">quiet night: inside the band, not flagged</text>
+</svg>

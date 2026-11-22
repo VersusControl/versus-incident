@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="390" viewBox="0 0 760 390" style="max-width:100%;height:auto" role="img" aria-label="Eight replicas of one workload and one version, measured at the same minute, plotted by CPU per Pod; seven sit close together around a median of 100 millicores, inside a shaded band of median plus or minus k times the median absolute deviation; pod-7 sits far outside at 400 millicores, four times its siblings, and is flagged after staying outside the band for 3 ticks">
+  <title>Sibling comparison with median and MAD</title>
+  <desc>Replicas of one workload shown as dots on a CPU axis, with the median line and a shaded median plus or minus k times MAD band; pod-7 is outside the band at four times its siblings and is highlighted</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f12{font-size:12px}.f13{font-size:13px}.f15{font-size:15px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}.end{text-anchor:end}
+      .guide{fill:none;stroke:#C3CED8;stroke-width:1}
+      .sib{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+      .acc{fill:#E8590C}
+      .accT{fill:#FDE7D8;stroke:#E8590C}
+      .accS{fill:none;stroke:#E8590C}
+    </style>
+  </defs>
+
+  <rect width="760" height="390" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">Sibling comparison: one Pod against its replicas</text>
+  <text x="24" y="56" class="f13 sec">Same workload, same version, same minute: a Pod far from the median is flagged</text>
+
+  <!-- band and median -->
+  <text x="240" y="80" class="f12 sec mid">median ± k × MAD</text>
+  <path d="M180 92V86H300V92" fill="none" stroke="#5B6B78" stroke-width="1.5"/>
+  <rect x="180" y="96" width="120" height="222" fill="#BACFE3" fill-opacity="0.5"/>
+  <path d="M240 96V318" fill="none" stroke="#000000" stroke-width="2"/>
+
+  <!-- row guides -->
+  <path class="guide" d="M114 110H225"/>
+  <path class="guide" d="M114 138H232"/>
+  <path class="guide" d="M114 166H229"/>
+  <path class="guide" d="M114 194H239"/>
+  <path class="guide" d="M114 222H221"/>
+  <path class="guide" d="M114 250H236"/>
+  <path class="guide" d="M114 278H588"/>
+  <path class="guide" d="M114 306H230"/>
+
+  <!-- labels -->
+  <text x="104" y="114" class="c f12 end">pod-1</text>
+  <text x="104" y="142" class="c f12 end">pod-2</text>
+  <text x="104" y="170" class="c f12 end">pod-3</text>
+  <text x="104" y="198" class="c f12 end">pod-4</text>
+  <text x="104" y="226" class="c f12 end">pod-5</text>
+  <text x="104" y="254" class="c f12 end">pod-6</text>
+  <text x="104" y="282" class="c f12 b end">pod-7</text>
+  <text x="104" y="310" class="c f12 end">pod-8</text>
+
+  <!-- dots -->
+  <circle class="sib" cx="234" cy="110" r="6"/>
+  <circle class="sib" cx="241.2" cy="138" r="6"/>
+  <circle class="sib" cx="237.6" cy="166" r="6"/>
+  <circle class="sib" cx="248.4" cy="194" r="6"/>
+  <circle class="sib" cx="230.4" cy="222" r="6"/>
+  <circle class="sib" cx="244.8" cy="250" r="6"/>
+  <circle class="sib" cx="238.8" cy="306" r="6"/>
+  <circle cx="600" cy="278" r="9" class="acc" stroke="#000000" stroke-width="2.5"/>
+
+  <!-- axis -->
+  <path d="M120 330H720M120 330V336M240 330V336M360 330V336M480 330V336M600 330V336M720 330V336" fill="none" stroke="#000000" stroke-width="1.5"/>
+  <text x="120" y="352" class="f12 sec mid">0</text>
+  <text x="240" y="352" class="f12 sec mid">100m</text>
+  <text x="360" y="352" class="f12 sec mid">200m</text>
+  <text x="480" y="352" class="f12 sec mid">300m</text>
+  <text x="600" y="352" class="f12 sec mid">400m</text>
+  <text x="720" y="352" class="f12 sec mid">500m</text>
+  <text x="240" y="368" class="f12 b nm mid">median</text>
+  <text x="720" y="372" class="f12 sec end">CPU per Pod, millicores</text>
+
+  <!-- callout -->
+  <rect x="500" y="136" width="240" height="84" rx="12" class="accT" stroke-width="2"/>
+  <text x="620" y="162" class="f15 b nm mid">pod-7 is 4× its siblings</text>
+  <text x="620" y="182" class="f12 sec mid">400m while the median is 100m</text>
+  <text x="620" y="200" class="f12 sec mid">outside the band for 3 ticks</text>
+  <path d="M600 224V265" class="accS" stroke-width="1.5"/>
+</svg>
