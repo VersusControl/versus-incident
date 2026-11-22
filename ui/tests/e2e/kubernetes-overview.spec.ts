@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { openApp, signInWithGatewaySecret } from "./helpers";
-import { captureDir, capturePath, harnessRuntimeStateDir } from "./support/capture";
+import { HARNESS_DIR_MISSING, captureDir, capturePath, harnessDir, harnessPath, harnessRuntimeStateDir } from "./support/capture";
 import type { KubernetesAgentSettings, KubernetesBreakLogPage, KubernetesClusters, KubernetesCrashEvent, KubernetesCrashPage, KubernetesGraph, KubernetesIssue, KubernetesOverview, KubernetesResourcePage, KubernetesTopPage, KubernetesTraffic, KubernetesUsage, RbacMe, SSOSession } from "../../src/lib/api";
 
 type StreamCounter = { path: string; container: string; previous: boolean; follow: boolean; requests: number; active: number; cancelled: number; completed: number; disconnected: number; unavailable: number; chunks: number; since_time?: string };
@@ -53,7 +53,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
     let browserFixture: unknown;
 
     test.beforeAll(async () => {
-      const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+      test.skip(!harnessDir(), HARNESS_DIR_MISSING);
       const state = harnessRuntimeStateDir();
       contract = JSON.parse(fs.readFileSync(path.join(state, "licensed-kubernetes.json"), "utf8"));
       expect(contract.configured, "a completed real Enterprise bootstrap is required").toBe(true);
@@ -61,7 +61,7 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 1000 }, { name: 
       expect(contract.identities.map((identity) => identity.id).sort()).toEqual(["all", "deny", "east", "non-mfa", "viewer", "west"]);
       const browserFile = process.env.HARNESS_KUBERNETES_BROWSER_FILE;
       if (!browserFile) throw new Error("HARNESS_KUBERNETES_BROWSER_FILE must point to the private mode-0600 browser fixture");
-      helper = await import(pathToFileURL(path.join(root, "plans/harness-run/tests/enterprise/licensed-keycloak-browser.mjs")).href) as LicensedBrowserHelper;
+      helper = await import(pathToFileURL(harnessPath("tests", "enterprise", "licensed-keycloak-browser.mjs")).href) as LicensedBrowserHelper;
       browserFixture = await helper.loadBrowserFixture(browserFile);
     });
 
@@ -540,13 +540,13 @@ test.beforeEach(async ({ request }, testInfo) => {
   const timelineCapture = testInfo.title === "captures populated timeline";
   const trafficCapture = testInfo.title === "captures populated traffic";
   if (!timelineCapture && !trafficCapture) return;
+  test.skip(!harnessDir(), HARNESS_DIR_MISSING);
   test.setTimeout(240_000);
-  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
   const state = harnessRuntimeStateDir();
   const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 19443);
   const prometheusPort = Number(process.env.HARNESS_PROMETHEUS_PORT || 19090);
   const pushgatewayPort = Number(process.env.HARNESS_PUSHGATEWAY_PORT || 19091);
-  const api = (endpoint: string) => JSON.parse(execFileSync(path.join(root, "plans/harness-run/harness.sh"), ["api", "enterprise", "GET", endpoint], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  const api = (endpoint: string) => JSON.parse(execFileSync(harnessPath("harness.sh"), ["api", "enterprise", "GET", endpoint], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   const fake = async (endpoint: string, body?: unknown): Promise<string> => new Promise((resolve, reject) => {
     const call = https.request(`https://localhost:${fakePort}${endpoint}`, { method: body ? "POST" : "GET", ca: fs.readFileSync(path.join(state, "fakekube/ca.crt")), headers: body ? { "Content-Type": "application/json" } : {} }, (response) => {
       let text = "";
@@ -557,7 +557,7 @@ test.beforeEach(async ({ request }, testInfo) => {
     call.end(body ? JSON.stringify(body) : undefined);
   });
   const timeline = async () => {
-    const creations = JSON.parse(fs.readFileSync(path.join(root, "plans/harness-run/config/k8s/populated-changes.json"), "utf8"));
+    const creations = JSON.parse(fs.readFileSync(harnessPath("config", "k8s", "populated-changes.json"), "utf8"));
     expect(creations.map((creation: { name: string }) => creation.name)).toEqual(["checkout-api", "checkout-web", "checkout-worker"]);
     await expect.poll(() => {
       api("/api/admin/kubernetes/overview");
@@ -2493,11 +2493,11 @@ test.describe("Pod log streaming fixtures", () => {
         warning_reasons: [{ reason: "FailedScheduling", count: 8 }, { reason: "Other", count: 4 }],
       };
     }
-    const k12aMatrix = testInfo.title.startsWith("Break timeline K12a crash evidence");
+    const crashMatrix = testInfo.title.startsWith("Break timeline crash evidence five-break matrix");
     const journalFixture = testInfo.title.startsWith("Break timeline captured journal fixture");
     let journalContinuationFailed = false;
     if (journalFixture) roots[0].evidence!.partial = true;
-    if (k12aMatrix) {
+    if (crashMatrix) {
       roots.splice(0, roots.length,
         { ...roots[0], root: { kind: "Deployment", namespace: "nodes", name: "nodes-api", uid: "checkout-uid" }, rule: "pod.crash_loop", severity: "critical", count: 2, of: 3, changes: [{ change: { id: "nodes-cfg", cluster: "fixture", kind: "ConfigMap", namespace: "nodes", name: "nodes-cfg", uid: "nodes-cfg-uid", type: "config_changed", at: at(7) }, relation: "used_by", lead_seconds: 120 }], evidence: {
           partial: true, restarts: 44, from: at(35), to: at(1),
@@ -2654,7 +2654,7 @@ test.describe("Pod log streaming fixtures", () => {
         if (denialEdge && !rootLookup) items = items.map((issue) => issue.root.uid === "checkout-uid" ? { ...issue, history: undefined, rebuilt: undefined, changes: undefined, evidence: undefined } : issue);
         const adverseSync = syncEdge && (syncEdge[1] === "overview" ? !rootLookup : rootLookup);
         const sync = adverseSync ? { state: syncEdge[2] === "partial" ? "ready" : syncEdge[2], age_s: 4, partial: syncEdge[2] === "partial" } : { state: "ready", age_s: 4, partial: diagnostics };
-        return route.fulfill({ json: { items, totals: k12aMatrix ? { critical: 4, warning: 2 } : { critical: 2, warning: 2 }, broken: k12aMatrix ? { total: 5, by_severity: { critical: 4, warning: 1 } } : { total: 3, by_severity: { critical: 2, warning: 1 } }, ...(paged && !url.searchParams.get("cursor") ? { next: "issues-next" } : {}), truncated: false, partial_failures: failures, sync } });
+        return route.fulfill({ json: { items, totals: crashMatrix ? { critical: 4, warning: 2 } : { critical: 2, warning: 2 }, broken: crashMatrix ? { total: 5, by_severity: { critical: 4, warning: 1 } } : { total: 3, by_severity: { critical: 2, warning: 1 } }, ...(paged && !url.searchParams.get("cursor") ? { next: "issues-next" } : {}), truncated: false, partial_failures: failures, sync } });
       }
       if (breakTimeline && pathname === "/api/admin/kubernetes/changes") {
         const cursor = url.searchParams.get("cursor");
@@ -4271,7 +4271,7 @@ test.describe("Pod log streaming fixtures", () => {
       await testInfo.attach("journal-fixture-provenance", { body: JSON.stringify({ classification: "F: synthetic API-intercepted UI fixture; not live backend integration", viewport, pages: [50, 50, 5], continuationRetry: true }), contentType: "application/json" });
     });
 
-    test(`Break timeline K12a crash evidence five-break matrix and markers ${viewport.name}`, async ({ page }) => {
+    test(`Break timeline crash evidence five-break matrix and markers ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.emulateMedia({ colorScheme: "dark" });
       const errors: string[] = [];
@@ -4336,7 +4336,7 @@ test.describe("Pod log streaming fixtures", () => {
         await expect(nodesRow.getByText("CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
         await expect(nodesRow.getByText("Init CrashLoopBackOff on 1 pod", { exact: true })).toBeVisible();
         await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
-        await captureBreakState(page, "k12a-fixture-overview-mobile-expanded.png", "dark");
+        await captureBreakState(page, "crash-evidence-fixture-overview-mobile-expanded.png", "dark");
         await page.keyboard.press("Space");
         await expect(nodesRow.getByRole("button", { name: "+3 more evidence for nodes-api", exact: true })).toHaveAttribute("aria-expanded", "false");
         await expect(nodesRow.getByText("Node MemoryPressure on 3 pods", { exact: true })).not.toBeVisible();
@@ -4350,7 +4350,7 @@ test.describe("Pod log streaming fixtures", () => {
       for (const row of [nodesRow, configRow, schedRow, evictRow, batchRow]) {
         expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       }
-      await captureBreakState(page, `k12a-fixture-overview-${viewport.name}.png`, "dark");
+      await captureBreakState(page, `crash-evidence-fixture-overview-${viewport.name}.png`, "dark");
 
       await page.getByRole("tab", { name: "Issues", exact: true }).click();
       const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
@@ -4368,7 +4368,7 @@ test.describe("Pod log streaming fixtures", () => {
       await expect(issueNodes.getByRole("button", { name: "Collapse nodes-api", exact: true })).toHaveAttribute("aria-expanded", "true");
       await expect(issueNodes.getByText("Node MemoryPressure on 3 pods", { exact: true })).toBeVisible();
       expect(await issueNodes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-      await captureBreakState(page, `k12a-fixture-issues-${viewport.name}.png`, "dark");
+      await captureBreakState(page, `crash-evidence-fixture-issues-${viewport.name}.png`, "dark");
       if (viewport.name === "mobile") {
         await issues.getByRole("combobox", { name: "Issue severity", exact: true }).selectOption("critical");
         await expect(issueNodes.getByRole("button", { name: "+3 more evidence for nodes-api", exact: true })).toHaveAttribute("aria-expanded", "false");
@@ -4394,7 +4394,7 @@ test.describe("Pod log streaming fixtures", () => {
       await expect(details).toContainText("not proof of SIGKILL");
       await expect(details).toContainText("Init container api: Error, exit 1, signal 31");
       await expect(details).not.toContainText("·");
-      await captureBreakState(page, `k12a-fixture-timeline-${viewport.name}.png`, "dark");
+      await captureBreakState(page, `crash-evidence-fixture-timeline-${viewport.name}.png`, "dark");
       await page.keyboard.press("Escape");
       await expect(details).toHaveCount(0);
       await expect(crashLabel).toBeFocused();
@@ -5710,7 +5710,7 @@ test.describe("Kubernetes overview", () => {
   });
 });
 
-test.describe("Live K12a crash evidence acceptance", () => {
+test.describe("Live crash evidence acceptance", () => {
   test.skip(process.env.E2E_CRASH_EVIDENCE !== "1", "requires the live crash-evidence fakekube scenario");
 
   for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
@@ -5810,7 +5810,7 @@ test.describe("Live K12a crash evidence acceptance", () => {
       for (const row of [nodesRow, batchRow, configRow, evictRow, probeRow]) {
         expect(await row.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       }
-      await captureLive(`live-k12a-overview-${viewport.name}.png`);
+      await captureLive(`live-crash-evidence-overview-${viewport.name}.png`);
 
       await timeline.getByRole("button", { name: /1 more/ }).click();
       const issues = page.getByRole("region", { name: "Kubernetes issues", exact: true });
@@ -5837,7 +5837,7 @@ test.describe("Live K12a crash evidence acceptance", () => {
       await expect(issues).not.toContainText("·");
       expect(await issueNodes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await issueSched.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-      await captureLive(`live-k12a-issues-${viewport.name}.png`);
+      await captureLive(`live-crash-evidence-issues-${viewport.name}.png`);
 
       const journalResponse = page.waitForResponse((response) => {
         const url = new URL(response.url());
@@ -5868,23 +5868,23 @@ test.describe("Live K12a crash evidence acceptance", () => {
         if (event!.signal) await expect(details).toContainText(`signal ${event!.signal}`);
         await expect(details).toContainText(`${event!.restart_count} lifetime restarts`);
         await expect(details).not.toContainText("·");
-        await captureLive(`live-k12a-timeline-${event!.init ? "init" : "oom"}-${viewport.name}.png`);
+        await captureLive(`live-crash-evidence-timeline-${event!.init ? "init" : "oom"}-${viewport.name}.png`);
         await page.keyboard.press("Escape");
         await expect(details).toHaveCount(0);
         await expect(marker).toBeFocused();
       }
       expect(errors).toEqual([]);
-      await testInfo.attach("k12a-live-broken-roots", { body: JSON.stringify(brokenPage.items.map((item) => ({ root: `${item.root.namespace}/${item.root.name}`, rule: item.rule, count: item.count, of: item.of, broke_at_source: item.broke_at_source, evidence: item.evidence }))), contentType: "application/json" });
+      await testInfo.attach("live-crash-evidence-broken-roots", { body: JSON.stringify(brokenPage.items.map((item) => ({ root: `${item.root.namespace}/${item.root.name}`, rule: item.rule, count: item.count, of: item.of, broke_at_source: item.broke_at_source, evidence: item.evidence }))), contentType: "application/json" });
     });
   }
 });
 
 test.describe("Live Break timeline logs and Agent tab acceptance", () => {
   test.skip(process.env.E2E_KUBERNETES_BREAK_LOGS_LIVE !== "1", "requires the live break-logs harness stack");
-  const namespace = "k13vis";
-  const rootUID = "k13vis-checkout";
-  const rsUID = "k13vis-checkout-rs";
-  const podUID = "k13vis-checkout-pod";
+  const namespace = "break-visual";
+  const rootUID = "break-visual-checkout";
+  const rsUID = "break-visual-checkout-rs";
+  const podUID = "break-visual-checkout-pod";
   const podName = "vis-checkout-6c8d4-x2k4q";
   const logPath = `/api/v1/namespaces/${namespace}/pods/${podName}/log`;
   let brokeAt = "";
@@ -5925,20 +5925,20 @@ test.describe("Live Break timeline logs and Agent tab acceptance", () => {
     windowFrom = iso(firstTermMs - 200_000);
     const firstLines = Array.from({ length: 12 }, (_, index) => ({
       at: iso(firstTermMs - 200_000 + index * 10_000),
-      text: index === 2 ? "ERROR payment client timeout password=k13-capture-canary-value" : index % 3 === 0 ? `ERROR payment client timeout attempt ${index}` : `INFO starting worker pool ${index}`,
+      text: index === 2 ? "ERROR payment client timeout password=visual-capture-canary-value" : index % 3 === 0 ? `ERROR payment client timeout attempt ${index}` : `INFO starting worker pool ${index}`,
     }));
     await upstream("/_fake/mutate", { operation: "upsert", resource: "namespaces", namespace: "", name: namespace, object: { kind: "Namespace", metadata: {} } });
     await upstream("/_fake/mutate", {
       operation: "upsert", resource: "deployments", namespace, name: "vis-checkout",
-      object: { apiVersion: "apps/v1", kind: "Deployment", metadata: { name: "vis-checkout", namespace, uid: rootUID, generation: 1, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" } }, spec: { replicas: 1, selector: { matchLabels: { app: "vis-checkout" } }, template: { spec: { containers: [{ name: "api", image: "example.invalid/k13:v1" }] } } }, status: { observedGeneration: 1, replicas: 1, readyReplicas: 1, availableReplicas: 1, updatedReplicas: 1 } },
+      object: { apiVersion: "apps/v1", kind: "Deployment", metadata: { name: "vis-checkout", namespace, uid: rootUID, generation: 1, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" } }, spec: { replicas: 1, selector: { matchLabels: { app: "vis-checkout" } }, template: { spec: { containers: [{ name: "api", image: "example.invalid/visual:v1" }] } } }, status: { observedGeneration: 1, replicas: 1, readyReplicas: 1, availableReplicas: 1, updatedReplicas: 1 } },
     });
     await upstream("/_fake/mutate", {
       operation: "upsert", resource: "replicasets", namespace, name: "vis-checkout-6c8d4",
-      object: { apiVersion: "apps/v1", kind: "ReplicaSet", metadata: { name: "vis-checkout-6c8d4", namespace, uid: rsUID, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" }, annotations: { "deployment.kubernetes.io/revision": "1" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "vis-checkout", uid: rootUID, controller: true }] }, spec: { replicas: 1, template: { spec: { containers: [{ name: "api", image: "example.invalid/k13:v1" }] } } }, status: { replicas: 1, readyReplicas: 1 } },
+      object: { apiVersion: "apps/v1", kind: "ReplicaSet", metadata: { name: "vis-checkout-6c8d4", namespace, uid: rsUID, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" }, annotations: { "deployment.kubernetes.io/revision": "1" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "vis-checkout", uid: rootUID, controller: true }] }, spec: { replicas: 1, template: { spec: { containers: [{ name: "api", image: "example.invalid/visual:v1" }] } } }, status: { replicas: 1, readyReplicas: 1 } },
     });
     const podObject = (restarts: number, terminatedAt: number | null) => ({
       apiVersion: "v1", kind: "Pod", metadata: { name: podName, namespace, uid: podUID, creationTimestamp: iso(start - 1_800_000), labels: { app: "vis-checkout" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "vis-checkout-6c8d4", uid: rsUID, controller: true }] },
-      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/k13:v1" }] },
+      spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/visual:v1" }] },
       status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: brokeAt }], containerStatuses: [{ name: "api", ready: false, restartCount: restarts, state: { waiting: { reason: "CrashLoopBackOff" } }, ...(terminatedAt ? { lastState: { terminated: { reason: "OOMKilled", exitCode: 137, finishedAt: iso(terminatedAt) } } } : {}) }] },
     });
     await upstream("/_fake/mutate", { operation: "upsert", resource: "pods", namespace, name: podName, object: podObject(0, null) });
@@ -6001,7 +6001,7 @@ test.describe("Live Break timeline logs and Agent tab acceptance", () => {
       const viewer = logs.getByRole("log");
       await expect(viewer).toContainText("payment client timeout");
       await expect(viewer).toContainText("<REDACTED:password>");
-      await expect(viewer).not.toContainText("k13-capture-canary-value");
+      await expect(viewer).not.toContainText("visual-capture-canary-value");
       await expect(logs.getByText("Captured at break").first()).toBeVisible();
       await logs.scrollIntoViewIfNeeded();
       await logs.getByRole("button", { name: "Log coverage tip" }).click();
@@ -6044,8 +6044,9 @@ test.describe("Live Break timeline logs and Agent tab acceptance", () => {
   }
 });
 
-test.describe("Live K13 and K15 worst-case user acceptance", () => {
-  test.skip(process.env.E2E_K13_K15_LIVE !== "1", "requires the live K13/K15 user-acceptance stack and local receiver");
+test.describe("Live break timeline and issue alerts worst-case user acceptance", () => {
+  test.skip(process.env.E2E_LIVE_BREAK_ALERTS !== "1", "requires the live break-alerts user-acceptance stack and local receiver");
+  test.skip(!harnessDir(), HARNESS_DIR_MISSING);
 
   test("executes 100% real-user UI journey: default off, Warning enable, HA handoff, crash/restarts/deleted Pod/gaps, Timeline/Agent failure & Loki fill, incident/Ack/partial/on-call outcomes, deep links, disable, reload and mobile", async ({ page }, testInfo) => {
     test.setTimeout(480_000);
@@ -6066,7 +6067,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28643);
     const lokiPort = Number(process.env.HARNESS_LOKI_PORT || 28610);
     const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
-    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes/kubernetes-ha.sh");
+    const haScript = harnessPath("tests", "kubernetes", "kubernetes-ha.sh");
     const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
 
     const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
@@ -6109,7 +6110,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
 
     const second = (ms: number) => Math.floor(ms / 1000) * 1000;
     const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
-    const ns = "k13k15";
+    const ns = "break-alerts";
 
     await receiver("/_clear", "POST");
     await upstream("/_fake/mutate", { operation: "upsert", resource: "namespaces", namespace: "", name: ns, object: { kind: "Namespace", metadata: {} } });
@@ -6130,7 +6131,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       object: {
         apiVersion: "v1", kind: "Pod",
         metadata: { name: "preexisting-api-pod-0", namespace: ns, uid: "preexisting-pod-0", creationTimestamp: iso(preBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "preexisting-api", uid: "preexisting-root", controller: true }] },
-        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/pre:v1" }] },
+        spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/pre:v1" }] },
         status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(preBreakMs) }], containerStatuses: [{ name: "api", ready: false, restartCount: 4, state: { waiting: { reason: "CrashLoopBackOff", message: "preexisting-canary-msg" } } }] },
       },
     });
@@ -6154,11 +6155,11 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     await expect(channelDocs).toHaveAttribute("rel", "noopener noreferrer");
     await expect(issues.getByText("No alert channel is on", { exact: true })).toHaveCount(0);
     await expect(issues.getByText("Set public_host to add Timeline and agent links", { exact: true })).toHaveCount(0);
-    await captureBreakState(page, "live-k15-alerts-off-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+    await captureBreakState(page, "live-issue-alerts-off-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
 
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await captureBreakState(page, "live-k15-alerts-off-mobile.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+    await captureBreakState(page, "live-issue-alerts-off-mobile.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
     await page.setViewportSize({ width: 1440, height: 1000 });
 
     // Confirm zero notifications while off.
@@ -6179,14 +6180,14 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     await expect(criticalBtn).toHaveAttribute("aria-pressed", "true");
     await expect(warningBtn).toHaveAttribute("aria-pressed", "false");
     await expect(issues.getByText("Critical sends critical issues only", { exact: true })).toBeVisible();
-    await captureBreakState(page, "live-k15-alerts-critical-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+    await captureBreakState(page, "live-issue-alerts-critical-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
 
     await warningBtn.click();
     await expect(page.getByText("Alert level saved.", { exact: true })).toBeVisible();
     await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
     await expect(criticalBtn).toHaveAttribute("aria-pressed", "false");
     await expect(issues.getByText("Warning sends warning and critical issues", { exact: true })).toBeVisible();
-    await captureBreakState(page, "live-k15-alerts-warning-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+    await captureBreakState(page, "live-issue-alerts-warning-desktop.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
 
     await page.setViewportSize({ width: 390, height: 844 });
     const mobileAlertGeometry = await issues.evaluate(() => {
@@ -6203,7 +6204,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       };
     });
     expect(mobileAlertGeometry).toEqual({ wrapped: true, equalButtons: true, noOverflow: true });
-    await captureBreakState(page, "live-k15-alerts-warning-mobile.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
+    await captureBreakState(page, "live-issue-alerts-warning-mobile.png", "dark", "L: live OSS + fakekube + local SMTP/Lark/MSTeams/ServiceNow stack");
     await page.setViewportSize({ width: 1440, height: 1000 });
 
     // Reload to prove persistence.
@@ -6224,13 +6225,13 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     await expect(warningBtn).toHaveAttribute("aria-pressed", "true");
 
     // Seed healthy Deployment checkout + ReplicaSets + Pods BEFORE enabling alerts so their owner chain is indexed.
-    const rootUID = "k13k15-checkout";
-    const rsV41UID = "k13k15-checkout-rs-v41";
-    const rsV42UID = "k13k15-checkout-rs-v42";
+    const rootUID = "break-alerts-checkout";
+    const rsV41UID = "break-alerts-checkout-rs-v41";
+    const rsV42UID = "break-alerts-checkout-rs-v42";
     const crashPodName = "checkout-6c8d4-x2k4q";
-    const crashPodUID = "k13k15-checkout-crash-pod";
+    const crashPodUID = "break-alerts-checkout-crash-pod";
     const delPodName = "checkout-6c8d4-d3e4f";
-    const delPodUID = "k13k15-checkout-del-pod";
+    const delPodUID = "break-alerts-checkout-del-pod";
     const crashLogPath = `/api/v1/namespaces/${ns}/pods/${crashPodName}/log`;
     const delLogPath = `/api/v1/namespaces/${ns}/pods/${delPodName}/log`;
     const seedMs = second(Date.now());
@@ -6243,7 +6244,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     const makeCheckoutPod = (name: string, uid: string, restarts: number, termMs: number | null, brokeAtStr: string, reason = "OOMKilled", exitCode = 137) => ({
       apiVersion: "v1", kind: "Pod",
       metadata: { name, namespace: ns, uid, creationTimestamp: iso(seedMs - 240_000), labels: { app: "checkout" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "checkout-6c8d4", uid: rsV42UID, controller: true }] },
-      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/checkout:v42" }] },
+      spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/checkout:v42" }] },
       status: {
         phase: "Running",
         conditions: [{ type: "Ready", status: restarts > 0 ? "False" : "True", lastTransitionTime: brokeAtStr }],
@@ -6280,7 +6281,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "deployments", namespace: ns, name: "payments-worker",
       object: {
         apiVersion: "apps/v1", kind: "Deployment",
-        metadata: { name: "payments-worker", namespace: ns, uid: "k13k15-payments-worker", generation: 1, creationTimestamp: iso(seedMs - 600_000), labels: { app: "payments-worker" } },
+        metadata: { name: "payments-worker", namespace: ns, uid: "break-alerts-payments-worker", generation: 1, creationTimestamp: iso(seedMs - 600_000), labels: { app: "payments-worker" } },
         spec: { replicas: 2, selector: { matchLabels: { app: "payments-worker" } }, template: { spec: { containers: [{ name: "worker", image: "example.invalid/payments:v1" }] } } },
         status: { observedGeneration: 1, replicas: 2, readyReplicas: 2, availableReplicas: 2, updatedReplicas: 2 },
       },
@@ -6289,8 +6290,8 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "pods", namespace: ns, name: "payments-worker-pod-0",
       object: {
         apiVersion: "v1", kind: "Pod",
-        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "k13k15-payments-pod-0", creationTimestamp: iso(seedMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "k13k15-payments-worker", controller: true }] },
-        spec: { nodeName: "k13-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
+        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "break-alerts-payments-pod-0", creationTimestamp: iso(seedMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "break-alerts-payments-worker", controller: true }] },
+        spec: { nodeName: "break-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
         status: { phase: "Running", conditions: [{ type: "Ready", status: "True", lastTransitionTime: iso(seedMs - 600_000) }], containerStatuses: [{ name: "worker", ready: true, restartCount: 0, state: { running: { startedAt: iso(seedMs - 600_000) } } }] },
       },
     });
@@ -6316,7 +6317,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     const crashFirstLines = Array.from({ length: 12 }, (_, index) => ({
       at: iso(firstTermMs - 180_000 + index * 10_000),
       text: index === 2
-        ? "ERROR payment client timeout Authorization: Bearer k13-live-secret-canary"
+        ? "ERROR payment client timeout Authorization: Bearer live-secret-canary"
         : index % 3 === 0
           ? `ERROR payment client timeout attempt ${index}`
           : `INFO starting checkout worker pool ${index}`,
@@ -6351,7 +6352,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     expect(warningEmail.body).toContain("Exit 137 OOMKilled");
     expect(warningEmail.body).toContain("Changes before the break");
     expect(warningEmail.body).toContain("Image changed");
-    expect(warningEmail.body).not.toContain("k13-live-secret-canary");
+    expect(warningEmail.body).not.toContain("live-secret-canary");
     expect(warningEmail.body).not.toContain("raw-termination-canary-msg");
     expect(warningEmail.body).not.toContain("payment client timeout");
     expect(warningEmail.body).not.toContain("&amp;amp;");
@@ -6474,8 +6475,8 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "pods", namespace: ns, name: "payments-worker-pod-0",
       object: {
         apiVersion: "v1", kind: "Pod",
-        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "k13k15-payments-pod-0", creationTimestamp: iso(partialBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "k13k15-payments-worker", controller: true }] },
-        spec: { nodeName: "k13-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
+        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "break-alerts-payments-pod-0", creationTimestamp: iso(partialBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "break-alerts-payments-worker", controller: true }] },
+        spec: { nodeName: "break-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
         status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(partialBreakMs) }], containerStatuses: [{ name: "worker", ready: false, restartCount: 5, state: { waiting: { reason: "CrashLoopBackOff" } }, lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(partialBreakMs) } } }] },
       },
     });
@@ -6483,7 +6484,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "deployments", namespace: ns, name: "payments-worker",
       object: {
         apiVersion: "apps/v1", kind: "Deployment",
-        metadata: { name: "payments-worker", namespace: ns, uid: "k13k15-payments-worker", generation: 1, creationTimestamp: iso(partialBreakMs - 600_000), labels: { app: "payments-worker" } },
+        metadata: { name: "payments-worker", namespace: ns, uid: "break-alerts-payments-worker", generation: 1, creationTimestamp: iso(partialBreakMs - 600_000), labels: { app: "payments-worker" } },
         spec: { replicas: 2, selector: { matchLabels: { app: "payments-worker" } }, template: { spec: { containers: [{ name: "worker", image: "example.invalid/payments:v1" }] } } },
         status: { observedGeneration: 1, replicas: 2, readyReplicas: 0, availableReplicas: 0, updatedReplicas: 2 },
       },
@@ -6514,7 +6515,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     expect(paymentsDetail.notify_status).toBe("partial");
     expect(paymentsDetail.notify_error).toMatch(/MS Teams API returned 500/i);
 
-    // 8. Navigate via the delivered TimelineURL deep link and drive K13 Timeline + Logs at break + Agent tab in the UI.
+    // 8. Navigate via the delivered TimelineURL deep link and drive the break Timeline + Logs at break + Agent tab in the UI.
     await expect.poll(() => {
       const rows = JSON.parse(haControl("rows")) as Array<{ snapshot: { break_logs?: { snapshots?: Array<{ pod_uid: string }> } } }>;
       const snaps = rows.flatMap((r) => r.snapshot.break_logs?.snapshots ?? []);
@@ -6537,19 +6538,19 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     await expect(viewer).toContainText("payment client timeout");
     await expect(viewer).toContainText("deleted replica retry");
     await expect(viewer).toContainText("<REDACTED");
-    await expect(viewer).not.toContainText("k13-live-secret-canary");
+    await expect(viewer).not.toContainText("live-secret-canary");
     await expect(logs.getByText("Captured at break").first()).toBeVisible();
 
     await logs.scrollIntoViewIfNeeded();
     await logs.getByRole("button", { name: "Log coverage tip" }).click();
     await expect(logs.getByText(/The container restarted more than once since the break/)).toBeVisible();
     await expect(logs.getByRole("link", { name: "Link a source in Agent tab" })).toBeVisible();
-    await captureBreakState(page, "live-k13-k15-timeline-desktop.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+    await captureBreakState(page, "live-break-timeline-desktop.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
 
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await expect(page.getByRole("toolbar", { name: "Break log actions" })).toBeInViewport();
-    await captureBreakState(page, "live-k13-k15-timeline-mobile.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+    await captureBreakState(page, "live-break-timeline-mobile.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
     await page.setViewportSize({ width: 1440, height: 1000 });
 
     // Exercise crash marker popover -> Logs before crash & Open live logs drawer in UI.
@@ -6654,7 +6655,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "deployments", namespace: ns, name: "post-disable-api",
       object: {
         apiVersion: "apps/v1", kind: "Deployment",
-        metadata: { name: "post-disable-api", namespace: ns, uid: "k13k15-post-disable", generation: 1, creationTimestamp: iso(postDisableMs - 600_000), labels: { app: "post-disable-api" } },
+        metadata: { name: "post-disable-api", namespace: ns, uid: "break-alerts-post-disable", generation: 1, creationTimestamp: iso(postDisableMs - 600_000), labels: { app: "post-disable-api" } },
         spec: { replicas: 2, selector: { matchLabels: { app: "post-disable-api" } }, template: { spec: { containers: [{ name: "api", image: "example.invalid/post:v1" }] } } },
         status: { observedGeneration: 1, replicas: 2, readyReplicas: 0, availableReplicas: 0, updatedReplicas: 2 },
       },
@@ -6663,8 +6664,8 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "pods", namespace: ns, name: "post-disable-pod-0",
       object: {
         apiVersion: "v1", kind: "Pod",
-        metadata: { name: "post-disable-pod-0", namespace: ns, uid: "k13k15-post-disable-pod-0", creationTimestamp: iso(postDisableMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "post-disable-api", uid: "k13k15-post-disable", controller: true }] },
-        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/post:v1" }] },
+        metadata: { name: "post-disable-pod-0", namespace: ns, uid: "break-alerts-post-disable-pod-0", creationTimestamp: iso(postDisableMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "post-disable-api", uid: "break-alerts-post-disable", controller: true }] },
+        spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/post:v1" }] },
         status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(postDisableMs) }], containerStatuses: [{ name: "api", ready: false, restartCount: 3, state: { waiting: { reason: "CrashLoopBackOff" } }, lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(postDisableMs) } } }] },
       },
     });
@@ -6684,7 +6685,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     expect(finalReceipts.servicenow[0].hasBasicAuth).toBe(true);
     expect(finalReceipts.servicenow[0].table).toBe("incident");
     expect(errors).toEqual([]);
-    await testInfo.attach("live-k13-k15-receipts", { body: JSON.stringify(finalReceipts, null, 2), contentType: "application/json" });
+    await testInfo.attach("live-break-alerts-receipts", { body: JSON.stringify(finalReceipts, null, 2), contentType: "application/json" });
   });
 
   test("verifies concurrent partial and stale-ready owner chain, partial channel delivery UI, Kubernetes vs log-pattern incident detail, and mobile timeline caption and handles", async ({ page }, testInfo) => {
@@ -6698,7 +6699,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     const state = harnessRuntimeStateDir();
     const fakePort = Number(process.env.HARNESS_FAKEKUBE_PORT || 28643);
     const receiverPort = Number(process.env.HARNESS_RECEIVER_HTTP_PORT || 28690);
-    const haScript = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../plans/harness-run/tests/kubernetes/kubernetes-ha.sh");
+    const haScript = harnessPath("tests", "kubernetes", "kubernetes-ha.sh");
     const ca = fs.readFileSync(path.join(state, "fakekube/ca.crt"));
 
     const upstream = (endpoint: string, body?: unknown) => new Promise<unknown>((resolve, reject) => {
@@ -6740,7 +6741,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
 
     const second = (ms: number) => Math.floor(ms / 1000) * 1000;
     const iso = (ms: number) => new Date(ms).toISOString().replace(".000Z", "Z");
-    const ns = "k13k15";
+    const ns = "break-alerts";
 
     await receiver("/_clear", "POST");
     await upstream("/_fake/mutate", { operation: "upsert", resource: "namespaces", namespace: "", name: ns, object: { kind: "Namespace", metadata: {} } });
@@ -6760,7 +6761,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       object: {
         apiVersion: "v1", kind: "Pod",
         metadata: { name: "preexisting-api-pod-0", namespace: ns, uid: "preexisting-pod-0", creationTimestamp: iso(preBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "preexisting-api", uid: "preexisting-root", controller: true }] },
-        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/pre:v1" }] },
+        spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/pre:v1" }] },
         status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(preBreakMs) }], containerStatuses: [{ name: "api", ready: false, restartCount: 4, state: { waiting: { reason: "CrashLoopBackOff", message: "preexisting-canary-msg" } } }] },
       },
     });
@@ -6791,13 +6792,13 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
 
     // 2. Concurrent partial owner chain + ready-but-stale owner snapshot:
     // Hold ReplicaSet list reads in fakekube while creating Deployment checkout, ReplicaSets, and crashing Pods (ownerReferences -> ReplicaSet checkout-6c8d4).
-    const rootUID = "k13k15-checkout";
-    const rsV41UID = "k13k15-checkout-rs-v41";
-    const rsV42UID = "k13k15-checkout-rs-v42";
+    const rootUID = "break-alerts-checkout";
+    const rsV41UID = "break-alerts-checkout-rs-v41";
+    const rsV42UID = "break-alerts-checkout-rs-v42";
     const crashPodName = "checkout-6c8d4-x2k4q";
-    const crashPodUID = "k13k15-checkout-crash-pod";
+    const crashPodUID = "break-alerts-checkout-crash-pod";
     const delPodName = "checkout-6c8d4-d3e4f";
-    const delPodUID = "k13k15-checkout-del-pod";
+    const delPodUID = "break-alerts-checkout-del-pod";
     const crashLogPath = `/api/v1/namespaces/${ns}/pods/${crashPodName}/log`;
     const delLogPath = `/api/v1/namespaces/${ns}/pods/${delPodName}/log`;
 
@@ -6817,7 +6818,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     const makeCheckoutPod = (name: string, uid: string, restarts: number, termMs: number | null, brokeAtStr: string, reason = "OOMKilled", exitCode = 137) => ({
       apiVersion: "v1", kind: "Pod",
       metadata: { name, namespace: ns, uid, creationTimestamp: iso(seedMs - 240_000), labels: { app: "checkout" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "checkout-6c8d4", uid: rsV42UID, controller: true }] },
-      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/checkout:v42" }] },
+      spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/checkout:v42" }] },
       status: {
         phase: "Running",
         conditions: [{ type: "Ready", status: restarts > 0 ? "False" : "True", lastTransitionTime: brokeAtStr }],
@@ -6871,8 +6872,8 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "pods", namespace: ns, name: "orphan-rs-pod-0",
       object: {
         apiVersion: "v1", kind: "Pod",
-        metadata: { name: "orphan-rs-pod-0", namespace: ns, uid: "k13k15-orphan-rs-pod-0", creationTimestamp: iso(seedMs - 240_000), labels: { app: "orphan-rs" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "missing-rs", uid: "k13k15-missing-rs", controller: true }] },
-        spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/orphan:v1" }] },
+        metadata: { name: "orphan-rs-pod-0", namespace: ns, uid: "break-alerts-orphan-rs-pod-0", creationTimestamp: iso(seedMs - 240_000), labels: { app: "orphan-rs" }, ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "missing-rs", uid: "break-alerts-missing-rs", controller: true }] },
+        spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/orphan:v1" }] },
         status: {
           phase: "Running",
           conditions: [{ type: "Ready", status: "False", lastTransitionTime: brokeAtISO }],
@@ -6948,7 +6949,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     const k8sLinksNav = page.getByRole("navigation", { name: "Kubernetes issue links", exact: true });
     const detailTimelineLink = k8sLinksNav.getByRole("link", { name: "Timeline", exact: true });
     const detailAgentLink = k8sLinksNav.getByRole("link", { name: "Agent", exact: true });
-    await expect(detailTimelineLink).toHaveAttribute("href", /\/agent\/kubernetes\?.*root_uid=k13k15-checkout.*view=timeline/);
+    await expect(detailTimelineLink).toHaveAttribute("href", /\/agent\/kubernetes\?.*root_uid=break-alerts-checkout.*view=timeline/);
     await expect(detailAgentLink).toHaveAttribute("href", /\/agent\/chat\?.*issue=pod\.crash_loop.*provider=kubernetes/);
     await expect(page.getByText("Rule", { exact: true })).toBeVisible();
     await expect(page.getByText("kubernetes:pod.crash_loop", { exact: true })).toBeVisible();
@@ -6968,7 +6969,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "deployments", namespace: ns, name: "payments-worker",
       object: {
         apiVersion: "apps/v1", kind: "Deployment",
-        metadata: { name: "payments-worker", namespace: ns, uid: "k13k15-payments-worker", generation: 1, creationTimestamp: iso(partialBreakMs - 600_000), labels: { app: "payments-worker" } },
+        metadata: { name: "payments-worker", namespace: ns, uid: "break-alerts-payments-worker", generation: 1, creationTimestamp: iso(partialBreakMs - 600_000), labels: { app: "payments-worker" } },
         spec: { replicas: 2, selector: { matchLabels: { app: "payments-worker" } }, template: { spec: { containers: [{ name: "worker", image: "example.invalid/payments:v1" }] } } },
         status: { observedGeneration: 1, replicas: 2, readyReplicas: 0, availableReplicas: 0, updatedReplicas: 2 },
       },
@@ -6977,8 +6978,8 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
       operation: "upsert", resource: "pods", namespace: ns, name: "payments-worker-pod-0",
       object: {
         apiVersion: "v1", kind: "Pod",
-        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "k13k15-payments-pod-0", creationTimestamp: iso(partialBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "k13k15-payments-worker", controller: true }] },
-        spec: { nodeName: "k13-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
+        metadata: { name: "payments-worker-pod-0", namespace: ns, uid: "break-alerts-payments-pod-0", creationTimestamp: iso(partialBreakMs - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "payments-worker", uid: "break-alerts-payments-worker", controller: true }] },
+        spec: { nodeName: "break-node", containers: [{ name: "worker", image: "example.invalid/payments:v1" }] },
         status: { phase: "Running", conditions: [{ type: "Ready", status: "False", lastTransitionTime: iso(partialBreakMs) }], containerStatuses: [{ name: "worker", ready: false, restartCount: 5, state: { waiting: { reason: "CrashLoopBackOff" } }, lastState: { terminated: { reason: "Error", exitCode: 1, finishedAt: iso(partialBreakMs) } } }] },
       },
     });
@@ -7100,7 +7101,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     await logs.scrollIntoViewIfNeeded();
     await logs.getByRole("button", { name: "Log coverage tip" }).click();
     await expect(logs.getByText(/The container restarted more than once since the break/)).toBeVisible();
-    await captureBreakState(page, "live-k13-k15-timeline-desktop.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+    await captureBreakState(page, "live-break-timeline-desktop.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
 
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -7149,7 +7150,7 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
     };
 
     const centeredBounds = await verifyMobileCaptionBounds();
-    await captureBreakState(page, "live-k13-k15-timeline-mobile.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
+    await captureBreakState(page, "live-break-timeline-mobile.png", "dark", "L: live OSS + fakekube + Postgres + Loki + Elasticsearch stack");
 
     // Push log window bracket to the right edge of the chart on mobile 390x844 and verify caption + both slider handles remain accessible.
     const chartUntil = Date.parse((await chart.getAttribute("data-until"))!);
@@ -7189,8 +7190,8 @@ test.describe("Live K13 and K15 worst-case user acceptance", () => {
   });
 });
 
-test.describe("Live Enterprise K15 user and receiver acceptance", () => {
-  test.skip(process.env.E2E_K15_ENTERPRISE_LIVE !== "1", "requires the live licensed Enterprise fakekube stack and local receiver");
+test.describe("Live Enterprise issue alerts user and receiver acceptance", () => {
+  test.skip(process.env.E2E_LIVE_ENTERPRISE_ALERTS !== "1", "requires the live licensed Enterprise fakekube stack and local receiver");
 
   test("verifies unauthenticated deep-link login return, UI alert enable, custom-channel diversion, critical priority floor and on-call paging", async ({ page }, testInfo) => {
     test.setTimeout(480_000);
@@ -7306,7 +7307,7 @@ test.describe("Live Enterprise K15 user and receiver acceptance", () => {
     const podObj = (broken: boolean, brokeMs: number) => ({
       apiVersion: "v1", kind: "Pod",
       metadata: { name: podName, namespace: ns, uid: "ent-checkout-pod-uid", creationTimestamp: iso(Date.now() - 600_000), ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: wName, uid: rootUID, controller: true }] },
-      spec: { nodeName: "k13-node", containers: [{ name: "api", image: "example.invalid/ent:v1" }] },
+      spec: { nodeName: "break-node", containers: [{ name: "api", image: "example.invalid/ent:v1" }] },
       status: {
         phase: "Running",
         conditions: [{ type: "Ready", status: broken ? "False" : "True", lastTransitionTime: iso(brokeMs) }],
@@ -7390,7 +7391,7 @@ test.describe("Live Enterprise K15 user and receiver acceptance", () => {
     await page.request.put("/enterprise/api/alert-fatigue/config", { headers: { Origin: origin }, data: { enabled: false, pending_review: false } });
     await page.request.put("/api/admin/kubernetes/issue-alerts?cluster=fakekube", { headers: { Origin: origin }, data: { enabled: false, level: "critical" } });
     expect(errors).toEqual([]);
-    await testInfo.attach("live-enterprise-k15-receipts", { body: JSON.stringify(entFinal, null, 2), contentType: "application/json" });
+    await testInfo.attach("live-enterprise-issue-alerts-receipts", { body: JSON.stringify(entFinal, null, 2), contentType: "application/json" });
   });
 });
 
@@ -7869,7 +7870,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(podLogOutput).toContainText("resumed after reconnect at");
     await expect(podLogOutput).toContainText("payment client timeout after 5 s (ledger)");
     await expect(detail.getByRole("alert")).toHaveCount(0);
-    await captureBreakState(page, "k14-fixture-pod-overview-desktop-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-pod-overview-desktop-dark.png", "dark");
 
     // Mobile 390x844 Pod Overview: verify 3x2 non-overflowing tab grid and visible container chips outside More
     await page.setViewportSize({ width: 390, height: 844 });
@@ -7881,7 +7882,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(containerGroup).toBeVisible();
     await tabs.scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await captureBreakState(page, "k14-fixture-pod-overview-mobile-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-pod-overview-mobile-dark.png", "dark");
     await page.setViewportSize({ width: 1440, height: 1000 });
 
     // Switch to Logs tab via "Open full logs →": verify shared session (no extra stream read)
@@ -7890,7 +7891,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
     expect(podStreamReadCount).toBe(readsBeforeFullLogs);
     await expect(podLogOutput).toContainText("GET /cart 200 18 ms");
-    await captureBreakState(page, "k14-fixture-pod-logs-desktop-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-pod-logs-desktop-dark.png", "dark");
 
     // Events tab: occurrence counts (All 13, Warnings 9, Normal 4), histogram, reason groups, source component/host
     await tabs.getByRole("tab", { name: "Events", exact: true }).click();
@@ -7900,7 +7901,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(eventsRegion.getByRole("button", { name: "Normal 4", exact: true })).toBeVisible();
     await expect(eventsRegion.getByRole("img", { name: "Event histogram: warnings red, normal gray", exact: true })).toBeVisible();
     await expect(eventsRegion).toContainText("kubelet node-a");
-    await captureBreakState(page, "k14-fixture-pod-events-desktop-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-pod-events-desktop-dark.png", "dark");
 
     // YAML tab: Projected, read-only badge, Outline, Fold all / Unfold all, Find in YAML unfolding ancestor, redaction, zero-time stripped
     await tabs.getByRole("tab", { name: "YAML", exact: true }).click();
@@ -7918,7 +7919,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await yamlRegion.getByRole("button", { name: "Next match", exact: true }).click();
     await expect(yamlRegion).toContainText("10.42.1.17");
     await yamlRegion.getByRole("button", { name: "Unfold all", exact: true }).click();
-    await captureBreakState(page, "k14-fixture-pod-yaml-desktop-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-pod-yaml-desktop-dark.png", "dark");
 
     // Timeline tab: 1h/6h/24h, lane, field diff tokens (checkout:v41 → checkout:v42), crash item -> View logs before crash
     await tabs.getByRole("tab", { name: "Timeline", exact: true }).click();
@@ -7928,7 +7929,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(timelineRegion).toContainText("checkout:v42");
     await expect(timelineRegion).toContainText("Crash history starts");
     await expect(timelineRegion).toContainText("Partial history; capture gaps or bounded results may omit events in this range.");
-    await captureBreakState(page, "k14-fixture-pod-timeline-desktop-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-pod-timeline-desktop-dark.png", "dark");
 
     await timelineRegion.getByRole("button", { name: "View logs before crash", exact: true }).click();
     await expect(tabs.getByRole("tab", { name: "Logs", exact: true })).toHaveAttribute("aria-selected", "true");
@@ -7941,7 +7942,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(relatedRegion.getByLabel("Relationship map", { exact: true })).toContainText("DEPLOYMENT");
     await expect(relatedRegion.getByLabel("Relationship map", { exact: true })).toContainText("REPLICASET");
     await expect(relatedRegion).toContainText("content not shown");
-    await captureBreakState(page, "k14-fixture-pod-related-desktop-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-pod-related-desktop-dark.png", "dark");
 
     // Navigate to Deployment checkout via Related -> Map button
     await relatedRegion.getByLabel("Relationship map", { exact: true }).getByRole("button", { name: "Open Deployment checkout", exact: true }).click();
@@ -7966,7 +7967,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     const podSelect = detail.getByLabel("Log pod", { exact: true });
     await expect(podSelect.locator("option").first()).toHaveText("All pods (first 20)");
     await expect(podSelect.locator('option[value="pod-uid-24"]')).toHaveText("checkout-pod-24 (not in all pods)");
-    await captureBreakState(page, "k14-fixture-deployment-logs-desktop-dark.png", "dark");
+    await captureBreakState(page, "resource-detail-fixture-deployment-logs-desktop-dark.png", "dark");
 
     // Select extra Pod #24 and verify "All pods (first 20)" and "(not in all pods)" remain intact!
     await podSelect.selectOption("pod-uid-24");
@@ -7977,7 +7978,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
   });
 
 
-  test("captures and verifies all 12 K14 SVG-comparable frames plus CrashJournal R1 and Agent learning bottom disabled", async ({ page, context }, testInfo) => {
+  test("captures and verifies all 12 resource detail SVG-comparable frames plus CrashJournal and Agent learning bottom disabled", async ({ page, context }, testInfo) => {
     test.setTimeout(180_000);
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const pageErrors: string[] = [];
@@ -8313,29 +8314,29 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(detail.getByLabel("CPU metric tile", { exact: true })).toContainText("412m");
     await expect(detail.getByLabel("Memory metric tile", { exact: true })).toContainText("389 MiB");
     await expect(detail.getByLabel("Pod log output")).toContainText("GET /cart 200 18 ms");
-    await assertCleanAndSave("k14-pod-overview-1440-dark-full.png");
-    await assertCleanAndSave("k14-pod-overview-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-pod-overview-1440-dark-full.png");
+    await assertCleanAndSave("resource-detail-pod-overview-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
     await expect(detail.getByRole("group", { name: "Container instance" })).toBeVisible();
     await expect(detail.getByRole("button", { name: "Errors 1", exact: true })).toBeVisible();
-    await assertCleanAndSave("k14-pod-logs-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-pod-logs-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     await tabs.getByRole("tab", { name: "Events", exact: true }).click();
     await expect(detail.getByRole("region", { name: "Object-scoped events", exact: true })).toContainText("BackOff");
-    await assertCleanAndSave("k14-pod-events-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-pod-events-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     await tabs.getByRole("tab", { name: "YAML", exact: true }).click();
     await expect(detail.getByRole("region", { name: "Projected YAML", exact: true })).toContainText("apiVersion: v1");
-    await assertCleanAndSave("k14-pod-yaml-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-pod-yaml-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     await tabs.getByRole("tab", { name: "Related", exact: true }).click();
     await expect(detail.getByRole("region", { name: "Related resources", exact: true })).toContainText("Scales Deployment checkout");
-    await assertCleanAndSave("k14-pod-related-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-pod-related-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     await tabs.getByRole("tab", { name: "Timeline", exact: true }).click();
     await expect(detail.getByRole("region", { name: "Resource change history", exact: true })).toContainText("checkout:v41");
-    await assertCleanAndSave("k14-pod-timeline-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-pod-timeline-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     // Light sanity on Pod Overview
     await tabs.getByRole("tab", { name: "Overview", exact: true }).click();
@@ -8344,7 +8345,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
       localStorage.setItem("versus.theme", "light");
       document.documentElement.setAttribute("data-theme", "light");
     });
-    await assertCleanAndSave("k14-pod-overview-840-light-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-pod-overview-840-light-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
     await page.emulateMedia({ colorScheme: "dark" });
     await page.evaluate(() => {
       localStorage.setItem("versus.theme", "dark");
@@ -8356,31 +8357,31 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(detail.getByRole("button", { name: "Pause logs", exact: true })).toBeVisible();
     await expect(detail.getByRole("button", { name: "Search log lines", exact: true })).toBeVisible();
     await expect(detail.getByRole("button", { name: "Expand logs", exact: true })).toBeVisible();
-    await assertCleanAndSave("k14-pod-overview-390-dark-mobile.png");
+    await assertCleanAndSave("resource-detail-pod-overview-390-dark-mobile.png");
 
     // 2. Deployment Overview & Logs at 1440x900 (840x900 drawer) and 390x844
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/agent/kubernetes?r=apps~v1~deployments/shop/checkout");
     await expect(detail.getByRole("heading", { name: "Deployment shop/checkout", exact: true })).toBeVisible();
     await expect(detail.getByLabel("Workload log output")).toContainText("checkout-7d9f8c-x2k4q");
-    await assertCleanAndSave("k14-deployment-overview-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-deployment-overview-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
     await expect(detail.getByLabel("Workload log output")).toContainText("logs not available: forbidden");
-    await assertCleanAndSave("k14-deployment-logs-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-deployment-logs-840-dark-drawer.png", { x: 600, y: 0, width: 840, height: 900 });
 
     await page.setViewportSize({ width: 390, height: 844 });
     await tabs.getByRole("tab", { name: "Overview", exact: true }).click();
     await expect(detail.getByLabel("Workload log output")).toContainText("checkout-7d9f8c-x2k4q");
-    await assertCleanAndSave("k14-deployment-overview-390-dark-mobile.png");
+    await assertCleanAndSave("resource-detail-deployment-overview-390-dark-mobile.png");
 
     await tabs.getByRole("tab", { name: "Logs", exact: true }).click();
     await expect(detail.getByLabel("Workload log output")).toContainText("checkout-7d9f8c-x2k4q");
-    await assertCleanAndSave("k14-deployment-logs-390-dark-mobile.png");
+    await assertCleanAndSave("resource-detail-deployment-logs-390-dark-mobile.png");
 
     await detail.getByRole("button", { name: "More", exact: true }).click();
     await expect(detail.getByRole("group", { name: "Additional log controls", exact: true })).toBeVisible();
-    await assertCleanAndSave("k14-deployment-logs-390-dark-more-open.png");
+    await assertCleanAndSave("resource-detail-deployment-logs-390-dark-more-open.png");
 
     // 3. StatefulSet Previous logs at 1440x900 (840x900 drawer)
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -8389,7 +8390,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await detail.getByLabel("Previous logs", { exact: true }).check();
     await expect(detail.getByText("Previous logs (not followed)", { exact: true })).toBeVisible();
     await expect(detail.getByLabel("Workload log output")).toContainText("replaying wal segment 41");
-    await assertCleanAndSave("k14-statefulset-logs-840-dark-previous.png", { x: 600, y: 0, width: 840, height: 900 });
+    await assertCleanAndSave("resource-detail-statefulset-logs-840-dark-previous.png", { x: 600, y: 0, width: 840, height: 900 });
 
     // 4. CrashJournal on Timeline tab (verifying R1 neutral summary when baseline limitations present)
     await page.goto("/agent/kubernetes?view=timeline");
@@ -8398,7 +8399,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(crashJournal).toContainText("2 observations · Polling may miss crashes between checks.");
     await expect(crashJournal).not.toContainText("Partial history; crashes may be missing.");
     await crashJournal.scrollIntoViewIfNeeded();
-    await assertCleanAndSave("k14-crash-journal-1440-dark-timeline.png");
+    await assertCleanAndSave("resource-detail-crash-journal-1440-dark-timeline.png");
 
     // 5. Agent tab (verifying log capture without byte/line limits + Agent learning at bottom with disabled switches and disabled Edit scope)
     await page.goto("/agent/kubernetes?view=agent");
@@ -8412,7 +8413,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(learningRegion.getByRole("switch", { name: "Traces learning", exact: true })).toBeDisabled();
     await expect(learningRegion.getByRole("button", { name: "Edit scope", exact: true })).toBeDisabled();
     await learningRegion.scrollIntoViewIfNeeded();
-    await assertCleanAndSave("k14-agent-tab-1440-dark-settings.png");
+    await assertCleanAndSave("resource-detail-agent-tab-1440-dark-settings.png");
 
     if (process.env.HARNESS_RESULTS_DIR) {
       fs.writeFileSync(
@@ -8420,7 +8421,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
         JSON.stringify(captures, null, 2),
       );
     }
-    await testInfo.attach("k14-svg-captures", { body: JSON.stringify(captures, null, 2), contentType: "application/json" });
+    await testInfo.attach("resource-detail-svg-captures", { body: JSON.stringify(captures, null, 2), contentType: "application/json" });
   });
 
   test("live stack Deployment and StatefulSet All pods streaming, tabs, and V1-V8 regressions desktop and mobile", async ({ page, context }, testInfo) => {
@@ -8685,12 +8686,12 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     }
     await expect(wlOutput).not.toContainText("checkout-unowned-same-label");
     expect(checkoutStreamRequests).toHaveLength(1);
-    await captureBreakState(page, "k14-live-deployment-overview-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Overview compact All pods stream");
+    await captureBreakState(page, "resource-detail-live-deployment-overview-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Overview compact All pods stream");
 
     // Mobile 390x844 Deployment Overview compact card
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await captureBreakState(page, "k14-live-deployment-overview-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Overview mobile 390x844");
+    await captureBreakState(page, "resource-detail-live-deployment-overview-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Overview mobile 390x844");
     await page.setViewportSize({ width: 1440, height: 1000 });
 
     // Switch to Logs tab via "Open full logs →" and verify NO second stream request is opened!
@@ -8712,7 +8713,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
       "checkout-8b6c9d-a6v2n",
       "checkout-8b6c9d-b8r3s",
     ]);
-    await captureBreakState(page, "k14-live-deployment-logs-all-pods-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Logs All pods across old and new ReplicaSets");
+    await captureBreakState(page, "resource-detail-live-deployment-logs-all-pods-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Logs All pods across old and new ReplicaSets");
 
     // Mobile 390x844 Deployment Logs with More menu collapsed and expanded
     await page.setViewportSize({ width: 390, height: 844 });
@@ -8720,11 +8721,11 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await expect(moreBtn).toBeVisible();
     await expect(moreBtn).toHaveAttribute("aria-expanded", "false");
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await captureBreakState(page, "k14-live-deployment-logs-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Logs mobile 390x844");
+    await captureBreakState(page, "resource-detail-live-deployment-logs-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Logs mobile 390x844");
     await moreBtn.click();
     await expect(moreBtn).toHaveAttribute("aria-expanded", "true");
     await expect(detail.getByRole("group", { name: "Additional log controls", exact: true })).toBeVisible();
-    await captureBreakState(page, "k14-live-deployment-logs-more-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Logs mobile More menu expanded");
+    await captureBreakState(page, "resource-detail-live-deployment-logs-more-mobile-dark.png", "dark", "L: live OSS + fakekube Deployment Logs mobile More menu expanded");
     await moreBtn.click();
     await page.setViewportSize({ width: 1440, height: 1000 });
 
@@ -8796,7 +8797,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
     await page.waitForTimeout(6200);
     await expect(wlOutput.locator("[data-log-key]").filter({ hasText: "logs not available:" })).toHaveCount(1);
     await expect(wlOutput).not.toContainText("reconnected at");
-    await captureBreakState(page, "k14-live-deployment-previous-forbidden-inline-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Previous logs with one forbidden Pod inline row");
+    await captureBreakState(page, "resource-detail-live-deployment-previous-forbidden-inline-desktop-dark.png", "dark", "L: live OSS + fakekube Deployment Previous logs with one forbidden Pod inline row");
     await detail.getByLabel("Previous logs").uncheck();
     await expect(wlOutput).toContainText("fakekube follow line", { timeout: 20_000 });
 
@@ -8841,7 +8842,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
       const counters = await streamCounters();
       return counters.filter((c) => c.path.startsWith("/api/v1/namespaces/shop/pods/ledger-")).reduce((sum, c) => sum + c.active, 0);
     }, { timeout: 15_000 }).toBe(0);
-    await captureBreakState(page, "k14-live-statefulset-previous-logs-desktop-dark.png", "dark", "L: live OSS + fakekube StatefulSet Previous logs finite read");
+    await captureBreakState(page, "resource-detail-live-statefulset-previous-logs-desktop-dark.png", "dark", "L: live OSS + fakekube StatefulSet Previous logs finite read");
 
     // Light theme visual parity check on StatefulSet drawer
     await page.emulateMedia({ colorScheme: "light" });
@@ -8849,7 +8850,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
       localStorage.setItem("versus.theme", "light");
       document.documentElement.setAttribute("data-theme", "light");
     });
-    await captureBreakState(page, "k14-live-statefulset-previous-logs-desktop-light.png", "light", "L: live OSS + fakekube StatefulSet Previous logs light theme");
+    await captureBreakState(page, "resource-detail-live-statefulset-previous-logs-desktop-light.png", "light", "L: live OSS + fakekube StatefulSet Previous logs light theme");
     await page.emulateMedia({ colorScheme: "dark" });
     await page.evaluate(() => {
       localStorage.setItem("versus.theme", "dark");
@@ -8897,7 +8898,7 @@ test.describe("Resource detail drawer and workload log streaming acceptance", ()
       return counters.reduce((sum, c) => sum + c.active, 0);
     }, { timeout: 15_000 }).toBe(0);
     expect(errors).toEqual([]);
-    await testInfo.attach("k14-live-upstream-counters", { body: JSON.stringify(await streamCounters(), null, 2), contentType: "application/json" });
+    await testInfo.attach("resource-detail-live-upstream-counters", { body: JSON.stringify(await streamCounters(), null, 2), contentType: "application/json" });
   });
 });
 
@@ -9112,7 +9113,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
 // Quickstart documentation captures against a real in-cluster install (Helm,
 // no values, gateway-secret sign-in). Opt-in: E2E_KUBERNETES_QUICKSTART_DOCS=
 // "preparing" right after the pod is ready (first sync), or "overview" once the
-// first sync is done. Workloads: plans/harness-run/config/k8s/workloads/docs-showcase.
+// first sync is done. Workloads: the harness's docs-showcase workload set.
 const quickstartDocs = process.env.E2E_KUBERNETES_QUICKSTART_DOCS ?? "";
 test.describe("Kubernetes quickstart documentation", () => {
   test.skip(!["preparing", "overview"].includes(quickstartDocs), "opt-in real in-cluster quickstart capture");

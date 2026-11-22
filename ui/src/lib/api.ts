@@ -3131,6 +3131,17 @@ export interface KubernetesBreakLogPage {
   containers?: Array<{ name: string; init?: boolean; main?: boolean }>;
 }
 
+/**
+ * The server refused a history page link because the list it pointed into
+ * was replaced. Other 400s are request faults and are never retried as page 1.
+ */
+function historyCursorExpired(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 400) return false;
+  const body = error.body !== null && typeof error.body === "object" ? error.body as Record<string, unknown> : undefined;
+  const payload = body?.error !== null && typeof body?.error === "object" ? body.error as Record<string, unknown> : body;
+  return payload?.code === "cursor_expired";
+}
+
 export function createKubernetesApi(cluster?: string) {
   const request: typeof unscopedRequest = (path, options) => unscopedRequest(kubernetesClusterPath(path, cluster), options);
   async function historyPage<T extends { items: unknown[]; next?: string; gaps?: unknown[] }>(path: string, original: URLSearchParams, signal?: AbortSignal, pageMode?: "single"): Promise<T> {
@@ -3142,13 +3153,18 @@ export function createKubernetesApi(cluster?: string) {
     const gaps: unknown[] = [];
     let firstPage: T | undefined;
     let restarted = false;
+    // A page the caller asked for by link stays the caller's to restart: the
+    // pager must learn the link expired, or it would label page 1 as a later
+    // page. Only a link this read followed past empty pages from the first
+    // page is restarted here, since the caller is on page 1 either way.
+    const fromFirstPage = !original.has("cursor");
     for (let page = 0; ; page++) {
       signal?.throwIfAborted();
       let result: T;
       try {
         result = await request<T>(`${path}?${query}`, { signal });
       } catch (error) {
-        if (!(error instanceof ApiError) || error.status !== 400 || !query.has("cursor") || restarted) throw error;
+        if (!fromFirstPage || !historyCursorExpired(error) || !query.has("cursor") || restarted) throw error;
         // File pruning expires a query position, never the retained store.
         query.delete("cursor");
         seen.clear();
@@ -3560,8 +3576,22 @@ export interface AwsServiceSync {
   units_done: number;
   units_total: number;
   last_good_at: string | null;
-  /** Named gaps: throttled | denied | not_checked | not_enabled. */
-  gaps: string[];
+  /**
+   * Named gaps, as reason words (throttled | denied | not_checked |
+   * capped | …) or as gaps carrying the counts of a capped read.
+   */
+  gaps: Array<string | AwsGap>;
+}
+
+/**
+ * One gap in an AWS read. A capped gap counts the items a per-item detail
+ * read covered: `seen` were read; `total` is how many exist, or absent/0
+ * when the read stopped before it could know.
+ */
+export interface AwsGap {
+  reason: string;
+  seen?: number;
+  total?: number;
 }
 
 export interface AwsAccountSync {

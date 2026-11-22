@@ -23,7 +23,7 @@ import (
 )
 
 // awsRoutes is every route the AWS surface serves: the connector settings,
-// the Changes page and FinOps. GET routes also answer HEAD.
+// the Changes page, the coverage page and FinOps. GET routes also answer HEAD.
 var awsRoutes = []string{
 	"GET /api/admin/aws/settings",
 	"PUT /api/admin/aws/settings/options",
@@ -42,6 +42,10 @@ var awsRoutes = []string{
 	"GET /api/admin/aws/changes/compare",
 	"GET /api/admin/aws/changes/preferences",
 	"PUT /api/admin/aws/changes/preferences",
+	"GET /api/admin/aws/coverage/",
+	"GET /api/admin/aws/accounts/labels/",
+	"PUT /api/admin/aws/accounts/labels/:id",
+	"DELETE /api/admin/aws/accounts/labels/:id",
 	"GET /api/admin/aws/finops/summary",
 	"GET /api/admin/aws/finops/bridge",
 	"GET /api/admin/aws/finops/trend",
@@ -114,7 +118,7 @@ func TestMountRegistersTheAWSRouteSet(t *testing.T) {
 }
 
 // TestMountKeepsEachRouteMiddlewareChain: every route, middleware groups
-// included, carries the same handler chain as the three admin controllers
+// included, carries the same handler chain as the admin controllers
 // registered on their own, the way the binary mounted them before.
 func TestMountKeepsEachRouteMiddlewareChain(t *testing.T) {
 	chains := func(app *fiber.App) []string {
@@ -128,6 +132,8 @@ func TestMountKeepsEachRouteMiddlewareChain(t *testing.T) {
 	direct := fiber.New()
 	controllers.NewAWSSettingsController(nil).Register(direct.Group("/api"))
 	controllers.NewAWSChangesController(nil).WithPreferences(nil).Register(direct.Group("/api"))
+	controllers.NewAWSCoverageController(nil, nil).Register(direct.Group("/api"))
+	controllers.NewAWSAccountLabelsController(nil, tenancy.DefaultOrgScope()).Register(direct.Group("/api"))
 	controllers.NewAWSFinOpsController(nil).Register(direct.Group("/api"))
 	mounted := fiber.New()
 	mountForTest(t, mounted, Deps{})

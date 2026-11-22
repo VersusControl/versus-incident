@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/health"
+	healthtypes "github.com/aws/aws-sdk-go-v2/service/health/types"
 	"github.com/aws/smithy-go"
 
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
@@ -126,5 +129,81 @@ func TestThrottlingIsRecognisedOnEveryProtocol(t *testing.T) {
 		if report.ErrorCode != codeThrottledWord {
 			t.Errorf("%s throttle recorded as %q", entry.service, report.ErrorCode)
 		}
+	}
+}
+
+// AWS answers some reads with an error code that only means a setting is
+// not set. Those are answers, never gaps; a denial in any spelling is a
+// denial, never a feature that is off.
+func TestNotSetAnswersAndDenialVariants(t *testing.T) {
+	for _, code := range []string{"NoSuchBucketPolicy", "NoSuchPublicAccessBlockConfiguration", "NoSuchTagSet",
+		"NoSuchEntity", "RepositoryPolicyNotFoundException", "ReportNotPresent"} {
+		if !notSetAnswer(&smithy.GenericAPIError{Code: code}) {
+			t.Errorf("%s is not read as not set", code)
+		}
+	}
+	for _, code := range []string{"AccessDenied", "NoSuchBucket", "ServerSideEncryptionConfigurationNotFoundError", ""} {
+		if notSetAnswer(&smithy.GenericAPIError{Code: code}) {
+			t.Errorf("%s is read as not set", code)
+		}
+	}
+	if notSetAnswer(nil) {
+		t.Error("a nil error is read as not set")
+	}
+	for _, code := range []string{"AccessDenied", "AccessDeniedException", "AccessDeniedFault", "AccessDeniedForDependencyException"} {
+		if got := errorCode(&smithy.GenericAPIError{Code: code}); got != CodeDenied || model.GapReasonForCode(got) != model.GapDenied {
+			t.Errorf("%s = %s, want denied", code, got)
+		}
+	}
+}
+
+// Failed calls of one per-item operation are one gap naming how many items
+// were read, not one gap per call; a capped read keeps its own counts.
+func TestDetailGapsMergeIntoOnePerOperation(t *testing.T) {
+	c := &call{unit: model.Unit{Account: productionAccount, Region: testRegion, Service: "sqs"}}
+	denied := &smithy.GenericAPIError{Code: "AccessDeniedException"}
+	var gaps []model.Gap
+	for index := range 35 {
+		c.tried("GetQueueAttributes")
+		if index < 7 {
+			gaps = append(gaps, c.detailGap("GetQueueAttributes", denied))
+		}
+	}
+	gaps = append(gaps, c.detailGap("ListEventSourceMappings", denied))
+	gaps = append(gaps, c.capGap("GetQueueAttributes", 35, 0), c.capGap("GetQueueAttributes", 35, 0))
+	merged := c.mergeDetailGaps(gaps)
+	if len(merged) != 3 {
+		t.Fatalf("merged = %+v", merged)
+	}
+	if got := merged[0]; got.Operation != "GetQueueAttributes" || got.Reason != model.GapDenied || got.Seen != 28 || got.Total != 35 {
+		t.Fatalf("partial denial = %+v, want 28 of 35", got)
+	}
+	if got := merged[1]; got.Operation != "ListEventSourceMappings" || got.Seen != 0 || got.Total != 0 {
+		t.Fatalf("single call = %+v, want no counts", got)
+	}
+	if got := merged[2]; got.Reason != model.GapCapped || got.Outcome() != model.OutcomeCapped || got.Seen != 35 || got.Total != 0 {
+		t.Fatalf("capped = %+v, want more than 35", got)
+	}
+	if got := c.capGap("DescribeTargetHealth", 100, 140); got.Reason != model.GapCapped || got.Seen != 100 || got.Total != 140 {
+		t.Fatalf("capped with a known total = %+v", got)
+	}
+	if got := c.capGap("DescribeTargetHealth", 100, 40); got.Total != 0 {
+		t.Fatalf("a total below what was read = %+v, want unknown", got)
+	}
+}
+
+// Only the first page of AWS Health events is read; when another page
+// exists the number of events is not known, so a cap names no total.
+func TestHealthEventTotalIsUnknownWithMorePages(t *testing.T) {
+	events := make([]healthtypes.Event, 25)
+	if got := healthEventTotal(&health.DescribeEventsOutput{Events: events}); got != 25 {
+		t.Fatalf("last page total = %d, want 25", got)
+	}
+	if got := healthEventTotal(&health.DescribeEventsOutput{Events: events, NextToken: aws.String("more")}); got != 0 {
+		t.Fatalf("total with more pages = %d, want unknown", got)
+	}
+	c := &call{unit: model.Unit{Account: productionAccount, Region: model.GlobalRegion, Service: "aws-health"}}
+	if gap := c.capGap("DescribeAffectedEntities", maxHealthEvents, healthEventTotal(&health.DescribeEventsOutput{Events: events, NextToken: aws.String("more")})); gap.Seen != maxHealthEvents || gap.Total != 0 {
+		t.Fatalf("health cap = %+v, want more than %d", gap, maxHealthEvents)
 	}
 }

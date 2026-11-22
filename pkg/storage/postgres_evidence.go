@@ -187,6 +187,12 @@ func (p *postgresProvider) commitEvidencePart(parent context.Context, key string
 		}
 		// Mark the save in progress and remember the highest sequence it
 		// wrote, which a later attempt that re-offers this part cannot see.
+		// A save abandoned after this part (rejected, lease lost or timed
+		// out) leaves both behind on purpose. Its rows already moved the
+		// scope's event counters, which readers pinned to the older
+		// checkpoint must not use, so the marker stays until the next final
+		// transaction covers those rows; clearing it earlier would count rows
+		// no reader can list.
 		if _, err = tx.ExecContext(ctx, `UPDATE kubernetes_evidence_scopes SET checkpoint=jsonb_set(jsonb_set(checkpoint,'{saving}',to_jsonb($2::text)),'{saving_high}',to_jsonb(GREATEST(COALESCE((checkpoint->>'saving_high')::bigint,0),$3::bigint))) WHERE scope_key=$1`, key, batch.ID, int64(written.High)); err != nil {
 			return err
 		}
@@ -313,6 +319,10 @@ func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key strin
 			return err
 		}
 		// Readers pin to this sequence: it covers every part of the capture.
+		// It also adopts the parts of an earlier save that was abandoned:
+		// they are real observed changes, journal sequences only grow, and a
+		// re-offered change matches its stored row by event and content, so
+		// they become history here, each once, rather than being fenced out.
 		state.Checkpoint.HighSequence = max(state.Checkpoint.HighSequence, state.Checkpoint.SavingHigh, savedHigh, written.High)
 		state.Checkpoint.Saving, state.Checkpoint.SavingHigh = "", 0
 		if err = writeOccurrenceVersions(ctx, tx, key, state); err != nil {

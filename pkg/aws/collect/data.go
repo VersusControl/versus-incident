@@ -147,11 +147,12 @@ func collectSQS(ctx context.Context, c *call) (result, error) {
 		resource.Attributes = map[string]string{model.AttrID: name}
 		if index >= maxQueueDetails {
 			if index == maxQueueDetails {
-				out.gaps = append(out.gaps, c.capGap("GetQueueAttributes"))
+				out.gaps = append(out.gaps, c.capGap("GetQueueAttributes", maxQueueDetails, len(urls)))
 			}
 			out.resources = append(out.resources, resource)
 			continue
 		}
+		c.tried("GetQueueAttributes")
 		attributes, err := api.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{QueueUrl: aws.String(url), AttributeNames: queueAttributes})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("GetQueueAttributes", err))
@@ -264,9 +265,10 @@ func collectEventBridge(ctx context.Context, c *call) (result, error) {
 	}
 	for index := range out.resources {
 		if index >= maxRuleTargets {
-			out.gaps = append(out.gaps, c.capGap("ListTargetsByRule"))
+			out.gaps = append(out.gaps, c.capGap("ListTargetsByRule", maxRuleTargets, len(out.resources)))
 			break
 		}
+		c.tried("ListTargetsByRule")
 		targets, err := api.ListTargetsByRule(ctx, &eventbridge.ListTargetsByRuleInput{Rule: aws.String(out.resources[index].Name), Limit: aws.Int32(100)})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("ListTargetsByRule", err))

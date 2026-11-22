@@ -389,3 +389,63 @@ func TestSyncAgreesWithInventoryWhileALicensedUnitIsPending(t *testing.T) {
 		}
 	})
 }
+
+// A bucket policy entry is stored beside its bucket, not as a resource:
+// listings, unit counts and Compare leave it out; only a topology reader
+// that asks for policy entries sees it.
+func TestPolicyEntriesAreNotResources(t *testing.T) {
+	fixture := newFeedFixture(t, scopeOf(region))
+	policyUnit := model.Unit{Account: account, Region: model.GlobalRegion, Service: model.PolicyEntryService}
+	if _, err := fixture.store.Commit(model.Unit{Account: account, Region: region, Service: "ec2"}, candidate("i-1")); err != nil {
+		t.Fatal(err)
+	}
+	from := fixture.clock.Now()
+	fixture.clock.Advance(3 * time.Hour)
+	entry := model.Resource{ARN: "arn:aws:s3:::exports#policy", Service: model.PolicyEntryService, Type: model.ResourcePolicyType,
+		Account: account, Region: region, Name: "exports", Attributes: map[string]string{model.AttrSubject: "arn:aws:s3:::exports"},
+		Relations: []model.Relation{{Type: model.RelationMayAccess, Kind: model.RelationKindMayAccess, Target: "123400000004", Access: model.AccessRead}}}
+	if _, err := fixture.store.Commit(policyUnit, Candidate{Resources: []model.Resource{entry}}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := fixture.store.Resources(context.Background(), Query{Account: account})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, resource := range listed.Resources {
+		if resource.Type == model.ResourcePolicyType {
+			t.Fatalf("listing carries %s", resource.ARN)
+		}
+	}
+	for _, unit := range listed.Units {
+		if unit.Unit.Service == model.PolicyEntryService && unit.Count != 0 {
+			t.Fatalf("policy unit count = %d", unit.Count)
+		}
+	}
+	withEntries, err := fixture.store.Resources(context.Background(), Query{Account: account, PolicyEntries: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, resource := range withEntries.Resources {
+		found = found || resource.ARN == entry.ARN
+	}
+	if !found {
+		t.Fatal("a topology read does not see the policy entry")
+	}
+	answer, err := fixture.feed.Compare(context.Background(), CompareRequest{From: from.Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range append(answer.Added, answer.Removed...) {
+		if strings.Contains(item.ResourceARN, "#policy") {
+			t.Fatalf("compare lists the policy entry: %+v", item)
+		}
+	}
+	// The policy unit's history starts after From, which would make any
+	// other unit partial; it is not named.
+	for _, partial := range answer.Partial {
+		if partial.Service == model.PolicyEntryService {
+			t.Fatalf("compare names the policy unit as partial: %+v", partial)
+		}
+	}
+}

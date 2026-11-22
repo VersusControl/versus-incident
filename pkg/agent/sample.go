@@ -5,8 +5,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
-// Per-pattern redacted raw-sample store (see
-// plans/productization/sre/pattern-raw-sample-store-design.md).
+// Per-pattern redacted raw-sample store.
 //
 // Every learned pattern/signal keeps a bounded ring of the most recent
 // POST-REDACTION examples it was learned from, so an operator can see what the

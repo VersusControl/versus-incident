@@ -206,7 +206,7 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 				}
 				return report
 			}
-			waitUntil(t, 20*time.Second, "initial complete current data", func() bool { report := health(); return report.State == "ready" && report.PendingKinds == 0 })
+			eventually(t, "initial complete current data", func() bool { report := health(); return report.State == "ready" && report.PendingKinds == 0 })
 			since := time.Now().UTC().Add(-time.Hour)
 			initial, err := service.Issues(t.Context(), IssueOptions{Since: since, Until: time.Now().UTC()})
 			if err != nil || len(initial.Items) == 0 {
@@ -217,7 +217,7 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 			store := provider.(storage.EvidenceStore)
 			// A fully ready inventory can publish just before its journal
 			// receipt. Fence the baseline on the same captured generation.
-			waitUntil(t, 8*time.Second, "complete inventory journal publication", func() bool {
+			eventually(t, "complete inventory journal publication", func() bool {
 				stored, _, err := readInventoryGeneration(provider, scope, "")
 				if err != nil || stored.EvidenceBatch == nil {
 					return false
@@ -227,11 +227,7 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 			})
 			catalogs := catalogReads.Load()
 			malformed.Store(true)
-			select {
-			case <-invalidSeen:
-			case <-time.After(40 * time.Second):
-				t.Fatal("normal cached producer never executed malformed material LIST")
-			}
+			waitFor(t, invalidSeen, "normal cached producer never executed malformed material LIST")
 			// Every LIST, publish and journal commit of the inventory runs on
 			// one worker goroutine, so the cycle before this one has published
 			// and committed before this Pod LIST is served, and the malformed
@@ -254,7 +250,7 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 				t.Fatal(err)
 			}
 			releaseMalformed()
-			waitUntil(t, 8*time.Second, "failed current episode or incorrect checkpoint publication", func() bool {
+			eventually(t, "failed current episode or incorrect checkpoint publication", func() bool {
 				current, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
 				return err == nil && current.ID != checkpoint.ID || health().State == "error"
 			})
@@ -283,7 +279,7 @@ func TestAutonomousMalformedListAfterMaterialDenialRetainsDataAndHistory(t *test
 				t.Fatal("test bypassed actual cached material denial or changed authority scope")
 			}
 			malformed.Store(false)
-			waitUntil(t, 15*time.Second, "valid current LIST recovery", func() bool {
+			eventually(t, "valid current LIST recovery", func() bool {
 				current, err := store.EvidenceCheckpoint(t.Context(), evidenceScope)
 				if err != nil || current.ID == checkpoint.ID || health().State != "ready" {
 					return false

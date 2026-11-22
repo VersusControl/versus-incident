@@ -1,15 +1,16 @@
 import { useState } from "react";
 import clsx from "clsx";
-import { AlertTriangle, CheckCircle2, Clock, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleDashed, Clock, Loader2 } from "lucide-react";
 import type { AwsAccountSync } from "@/lib/api";
 import { syncProgress, type SyncWordKind } from "@/lib/awsSettings";
 
 // The live first sync of a newly connected account: services fill in one by
-// one (Ready / Loading / Waiting), "N of M ready", and a gap is named in
+// one (Ready / Read / Loading / Waiting), "N of M ready", and a gap is named in
 // words. A service with nothing yet shows a word, never a zero count.
 
 const ICON: Record<SyncWordKind, typeof CheckCircle2> = {
   ready: CheckCircle2,
+  read: CircleDashed,
   loading: Loader2,
   waiting: Clock,
   failed: AlertTriangle,
@@ -17,6 +18,7 @@ const ICON: Record<SyncWordKind, typeof CheckCircle2> = {
 
 const TONE: Record<SyncWordKind, string> = {
   ready: "text-sev-ok",
+  read: "text-ink-200",
   loading: "text-ink-200",
   waiting: "text-ink-300",
   failed: "text-sev-warn",

@@ -9,6 +9,7 @@ import { fmtClockOrDay } from "@/lib/awsChanges";
 import { awsErrorText } from "@/lib/api";
 import type {
   AwsAccountSync,
+  AwsGap,
   AwsAccount,
   AwsAccountStatus,
   AwsApiUse,
@@ -510,13 +511,14 @@ export function accountStatusWords(
 
 // ---------- First sync ----------
 
-export type SyncWordKind = "ready" | "loading" | "waiting" | "failed";
+/** `read`: synced, but some data was not read, so the row is neutral, not green. */
+export type SyncWordKind = "ready" | "read" | "loading" | "waiting" | "failed";
 
 export interface SyncServiceRow {
   service: string;
   label: string;
   kind: SyncWordKind;
-  /** Ready / Loading / Waiting / Failed. */
+  /** Ready / Read / Loading / Waiting / Failed. */
   word: string;
   /** "2 of 3 regions" while loading; never "0 of N". */
   detail?: string;
@@ -538,11 +540,39 @@ const GAP_WORDS: Record<string, string> = {
   not_checked: "Not checked",
   not_enabled: "Not enabled",
   not_on_plan: SERVICE_STATUS_LABELS.not_on_plan,
+  capped: "Not all read",
   [NOT_IN_REGION_CODE]: NOT_IN_REGION_WORDS,
 };
 
-export function gapWords(reason: string): string {
+/** A usable item count: a finite number above zero, else 0. */
+function itemCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * A gap in words. A capped read with both counts reads "28 of 35 read";
+ * with the total unknown, "more than 28, not all read"; with nothing read
+ * counted, "Not all read" (never a zero count).
+ */
+export function gapWords(gap: string | AwsGap): string {
+  const reason = typeof gap === "string" ? gap : gap.reason;
+  if (reason === "capped" && typeof gap !== "string") {
+    const seen = itemCount(gap.seen);
+    const total = itemCount(gap.total);
+    // A total below what was read is not a real total; the server drops it too.
+    if (seen > 0 && total >= seen) return `${seen} of ${total} read`;
+    if (seen > 0) return `more than ${seen}, not all read`;
+  }
   return GAP_WORDS[reason] ?? reason.replace(/_/g, " ");
+}
+
+// Gaps that leave data unread: a synced service carrying one is never
+// shown as a green Ready. A service with no endpoint in a Region, or a
+// Region not enabled, has nothing to read there, so it stays Ready.
+const UNREAD_GAPS = new Set(["capped", "not_checked", "throttled", "denied", "not_on_plan"]);
+
+function gapReason(gap: string | AwsGap): string {
+  return typeof gap === "string" ? gap : gap.reason;
 }
 
 /** The first sync is running: show progress and poll fast. */
@@ -569,16 +599,22 @@ export function syncProgress(sync: AwsAccountSync, peakTotal = 0): SyncProgress 
     if (sv.state === "failed" || sv.state === "partial") {
       return { service: sv.service, label, kind: "failed", word: gaps[0] ?? "Failed", gaps: gaps.slice(gaps[0] ? 1 : 0) };
     }
-    if (sv.state === "ok") return { service: sv.service, label, kind: "ready", word: "Ready", gaps };
+    if (sv.state === "ok") {
+      if (sv.gaps.some((g) => UNREAD_GAPS.has(gapReason(g)))) {
+        return { service: sv.service, label, kind: "read", word: "Read", gaps };
+      }
+      return { service: sv.service, label, kind: "ready", word: "Ready", gaps };
+    }
     if (sv.units_done > 0 && sv.units_done < sv.units_total) {
       return { service: sv.service, label, kind: "loading", word: "Loading", detail: `${sv.units_done} of ${sv.units_total} regions`, gaps };
     }
     if (sv.state === "syncing") return { service: sv.service, label, kind: "loading", word: "Loading", gaps };
     return { service: sv.service, label, kind: "waiting", word: "Waiting", gaps };
   });
-  const order: Record<SyncWordKind, number> = { ready: 0, failed: 1, loading: 2, waiting: 3 };
+  const order: Record<SyncWordKind, number> = { ready: 0, read: 1, failed: 2, loading: 3, waiting: 4 };
   rows.sort((a, b) => order[a.kind] - order[b.kind] || a.label.localeCompare(b.label));
-  const ready = rows.filter((r) => r.kind === "ready").length;
+  // A Read service has finished its sync, so it counts toward "N of M ready".
+  const ready = rows.filter((r) => r.kind === "ready" || r.kind === "read").length;
   const total = Math.max(rows.length, peakTotal);
   // Nothing listed yet is a wait, never "0 of 0".
   return { ready, total, rows, label: total === 0 ? "Waiting" : `${ready} of ${total} ready` };

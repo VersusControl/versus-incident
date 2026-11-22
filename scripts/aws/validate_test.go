@@ -62,29 +62,32 @@ var roleOnlyActions = []string{
 	"resource-explorer-2:Search",
 }
 
-// fixActionSet is every fix action in the code: the service catalog entries
-// and the collector units outside the catalog (fixActions in pkg/aws/collect).
+// fixActionSet is every service-level fix action in the code: the service
+// catalog entries and the collector units outside the catalog.
 func fixActionSet(t *testing.T) map[string]bool {
 	t.Helper()
 
-	set := map[string]bool{}
-	for _, service := range catalog.Services() {
-		for _, action := range service.FixActions {
-			set[action] = true
-		}
-	}
-	for _, action := range collectorFixActions(t) {
-		set[action] = true
+	set := toSet(catalog.UnitFixActions())
+	if len(set) == 0 {
+		t.Fatal("the catalog names no fix actions")
 	}
 	return set
 }
 
 // expectedAllowActions is the metadata-only allow list. It is derived, not
-// written out: every fix action in the code plus roleOnlyActions.
+// written out: every service-level fix action, every detail-call fix action
+// those do not already cover, and roleOnlyActions. The coverage page's Copy
+// fix pastes a detail-call action, so the shipped policy must grant it.
 func expectedAllowActions(t *testing.T) []string {
 	t.Helper()
 
 	set := fixActionSet(t)
+	base := toSet(keys(set))
+	for _, action := range catalog.OperationFixActions() {
+		if !allowedBy(base, action) {
+			set[action] = true
+		}
+	}
 	for _, action := range roleOnlyActions {
 		set[action] = true
 	}
@@ -2068,35 +2071,6 @@ func collectorActions(t *testing.T) map[string]bool {
 	return actions
 }
 
-// collectorFixActions returns the IAM actions named in fixActions in the
-// collector package: the fix text for collector units outside the catalog.
-func collectorFixActions(t *testing.T) []string {
-	t.Helper()
-
-	var out []string
-	for _, file := range parseCollectorFiles(t) {
-		for _, decl := range file.Decls {
-			function, ok := decl.(*ast.FuncDecl)
-			if !ok || function.Name.Name != "fixActions" || function.Body == nil {
-				continue
-			}
-			ast.Inspect(function.Body, func(node ast.Node) bool {
-				literal, ok := node.(*ast.BasicLit)
-				if ok && literal.Kind == token.STRING {
-					if value := strings.Trim(literal.Value, "`\""); strings.Contains(value, ":") {
-						out = append(out, value)
-					}
-				}
-				return true
-			})
-		}
-	}
-	if len(out) == 0 {
-		t.Fatal("found no fixActions IAM actions in the collector package")
-	}
-	return out
-}
-
 // iamMatch reports whether an IAM action pattern with * wildcards matches an
 // action. IAM compares action names case-insensitively.
 func iamMatch(pattern, action string) bool {
@@ -2166,6 +2140,41 @@ func TestReaderAllowsEveryCollectorAndProbeCall(t *testing.T) {
 		}
 		if allowedBy(parsed.deny, action) {
 			t.Errorf("%s is called by the collectors or probes but explicitly denied", action)
+		}
+	}
+}
+
+// TestDetailCallFixesAreRealCallsAndGranted: every action a coverage row's
+// Copy fix can name is one the collectors really call, and the template,
+// the Terraform module and the CLI policy all grant it.
+func TestDetailCallFixesAreRealCallsAndGranted(t *testing.T) {
+	called := collectorActions(t)
+	parsed := parseTemplate(t)
+	mainTF := readArtifact(t, terraformDir, "main.tf")
+	sources := map[string]map[string]bool{
+		templateFile:                     parsed.allow,
+		terraformDir + "/metadata_reads": toSet(quotedActions(t, blockBody(t, mainTF, `data "aws_iam_policy_document" "metadata_reads"`))),
+	}
+	for _, statement := range readCLIPolicy(t, "permissions-policy.json").Statement {
+		if statement.Sid == "MetadataReads" {
+			sources["cli/permissions-policy.json"] = toSet(statement.Action)
+		}
+	}
+	actions := catalog.OperationFixActions()
+	if len(actions) < 10 {
+		t.Fatalf("catalog names %d detail-call fix actions; expected every detail call", len(actions))
+	}
+	for _, action := range actions {
+		if !called[action] {
+			t.Errorf("fix action %s is not an action the collectors call", action)
+		}
+		for source, allow := range sources {
+			if !allowedBy(allow, action) {
+				t.Errorf("%s does not grant %s, which a coverage fix names", source, action)
+			}
+		}
+		if allowedBy(parsed.deny, action) {
+			t.Errorf("fix action %s is explicitly denied", action)
 		}
 	}
 }

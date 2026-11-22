@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 // ---------------------------------------------------------------------------
 // Shared helpers for the versus-incident SPA browser e2e. Everything
 // environment-specific (the base URL, credentials) comes from env, loaded by
-// playwright.config.ts or set by `plans/harness-run/harness.sh e2e ui` — never
+// playwright.config.ts or set by the local test harness (`harness.sh e2e ui`) — never
 // hardcoded here.
 //
 // Auth model: OSS exchanges `X-Gateway-Secret` once for an HttpOnly session
@@ -31,8 +31,8 @@ export const env = {
   baseURL: process.env.E2E_BASE_URL ?? "http://localhost:8080",
   // The OSS single-admin gateway secret (== the server's GATEWAY_SECRET).
   gatewaySecret: process.env.E2E_GATEWAY_SECRET ?? "",
-  // Enterprise built-in admin, captured by harness-run from the boot banner:
-  // E2E_ADMIN_* from `harness.sh e2e ui`, or the HARNESS_ADMIN_ENV file.
+  // Enterprise built-in admin, captured by the local test harness from the
+  // boot banner: E2E_ADMIN_* from `harness.sh e2e ui`, or the HARNESS_ADMIN_ENV file.
   adminUsername: process.env.E2E_ADMIN_USERNAME || fileAdmin.user || "admin",
   adminPassword: process.env.E2E_ADMIN_PASSWORD || fileAdmin.pass,
   licensed: process.env.E2E_LICENSED === "1" || fileAdmin.pass !== "",
@@ -51,7 +51,7 @@ export async function signInWithGatewaySecret(page: Page): Promise<void> {
     if (!env.adminPassword) {
       throw new Error(
         "E2E_ADMIN_PASSWORD or HARNESS_ADMIN_ENV is required for an Enterprise build — run the suite " +
-          "through `plans/harness-run/harness.sh e2e ui`, which sets it from the boot banner.",
+          "through the local test harness (`harness.sh e2e ui`), which sets it from the boot banner.",
       );
     }
     await page.getByTestId("local-login-username").fill(env.adminUsername);
@@ -61,7 +61,7 @@ export async function signInWithGatewaySecret(page: Page): Promise<void> {
     if (!env.gatewaySecret) {
       throw new Error(
         "E2E_GATEWAY_SECRET is required — run the suite through " +
-          "`plans/harness-run/harness.sh e2e ui`, or set it in tests/e2e/.env.",
+          "the local test harness (`harness.sh e2e ui`), or set it in tests/e2e/.env.",
       );
     }
     await secretField.fill(env.gatewaySecret);
@@ -81,7 +81,7 @@ export async function openApp(page: Page, path = "/now"): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Locators for the three surfaces under test. The Front-End landed the stable
-// `data-testid` hooks requested in qa-defects/QA-043.md, so these locators now
+// `data-testid` hooks, so these locators now
 // anchor to durable testids instead of copy/DOM-coupled selectors. Centralised
 // here so a future testid rename is a one-line change and the specs stay put.
 // ---------------------------------------------------------------------------

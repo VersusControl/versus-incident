@@ -6,13 +6,13 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { env, openApp } from "./helpers";
-import { captureDir, capturePath } from "./support/capture";
+import { HARNESS_DIR_MISSING, captureDir, capturePath, harnessDir, harnessPath } from "./support/capture";
 import type { AgentApproval, ChatSession, ChatSessionSummary, KubernetesChangesPage } from "../../src/lib/api";
 
 // Runs against the harness kind cluster:
-//   plans/harness-run/harness.sh up oss-kind
-//   plans/harness-run/harness.sh e2e ui kubernetes-real-cluster.spec.ts --project=chromium
-// Fixtures live in plans/harness-run/config/k8s/fixtures.yaml.
+//   harness.sh up oss-kind
+//   harness.sh e2e ui kubernetes-real-cluster.spec.ts --project=chromium
+// The fixtures are the harness kind cluster's reusable workload manifests.
 
 const screenshotDir = process.env.E2E_KUBERNETES_CAPTURE_DIR
   ? path.resolve(process.env.E2E_KUBERNETES_CAPTURE_DIR)
@@ -737,7 +737,8 @@ const upgradeTest = test.extend<{ upgradeFixture: UpgradeFixture }>({
     const stateDir = process.env.E2E_UPGRADE_STATE_DIR;
     const project = process.env.E2E_UPGRADE_PROJECT;
     if (!stateDir || !path.isAbsolute(stateDir) || !project?.includes("upgrade")) throw new Error("Isolated upgrade state directory and project required");
-    const script = path.join(workspace, "plans/harness-run/tests/upgrade/oss-to-enterprise-upgrade.sh");
+    test.skip(!harnessDir(), HARNESS_DIR_MISSING);
+    const script = harnessPath("tests", "upgrade", "oss-to-enterprise-upgrade.sh");
     const harnessEnv: Record<string, string | undefined> = { ...process.env, HARNESS_STATE_DIR: stateDir, HARNESS_PROJECT: project };
     const enterprisePort = harnessEnv.HARNESS_ENTERPRISE_PORT;
     if (!enterprisePort || !/^\d+$/.test(enterprisePort) || Number(enterprisePort) < 1 || Number(enterprisePort) > 65535) throw new Error("Harness Enterprise published port required");
@@ -822,7 +823,7 @@ async function apiText(page: Page, url: string) {
 }
 
 test.describe("Kubernetes on the harness kind cluster", () => {
-  test.skip(backend !== "kind" && backend !== "real", "requires plans/harness-run/harness.sh up oss-kind (or enterprise-kind)");
+  test.skip(backend !== "kind" && backend !== "real", "requires the harness kind cluster (harness.sh up oss-kind or enterprise-kind)");
   test.setTimeout(180_000);
 
   for (const workload of [
@@ -3689,6 +3690,7 @@ test.describe("Read-only external cluster acceptance", () => {
   });
 
   test("verifies read-only namespace recent-center root windows and published restart", async ({ browser }) => {
+    test.skip(!harnessDir(), HARNESS_DIR_MISSING);
     test.setTimeout(300_000);
     expect(env.baseURL).toBe("http://127.0.0.1:28080");
     const context = await browser.newContext({ baseURL: env.baseURL, viewport: { width: 1440, height: 900 }, colorScheme: "dark" });
@@ -3775,7 +3777,7 @@ test.describe("Read-only external cluster acceptance", () => {
       await openApp(page, "/agent/kubernetes");
       // The authorized fresh-start handle creates one new run-owned volume;
       // the already attached browser and old volumes are retained.
-      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/tests/kubernetes/eks-readonly.sh"), "--start"], {
+      await execute("/bin/bash", [harnessPath("tests", "kubernetes", "eks-readonly.sh"), "--start"], {
         timeout: 180_000,
         env: { ...process.env, HARNESS_EKS_FRESH_DATA: "1", HARNESS_EKS_BROWSER_HANDOFF: "1", HARNESS_EKS_SOURCE_RECEIPT: process.env.HARNESS_EKS_SOURCE_RECEIPT },
       });
@@ -3963,7 +3965,7 @@ test.describe("Read-only external cluster acceptance", () => {
           .finally(() => { sampling = false; });
       }, 250);
       restartStarted = true;
-      await execute("/bin/bash", [path.join(workspace, "plans/harness-run/tests/kubernetes/eks-readonly.sh"), "--restart"], { timeout: 60_000 });
+      await execute("/bin/bash", [harnessPath("tests", "kubernetes", "eks-readonly.sh"), "--restart"], { timeout: 60_000 });
       restartCompleted = true;
       await expect.poll(async () => {
         try { return (await context.request.get("/healthz", { timeout: 3000 })).status(); } catch { return 0; }
@@ -4008,7 +4010,7 @@ test.describe("Read-only external cluster acceptance", () => {
 // every tab record anything that appears or disappears. Every failure state, a
 // raw error code, a console error or a 4xx/5xx is a violation with its time.
 //   run.sh exec <task> visual --k8s kind -- \
-//     bash plans/harness-run/tests/kubernetes/kubernetes-overview-watch.sh <profile> [minutes]
+//     bash "$HARNESS_DIR"/tests/kubernetes/kubernetes-overview-watch.sh <profile> [minutes]
 test.describe("Kubernetes Overview watched over time on the harness kind cluster", () => {
   const minutes = Number(process.env.E2E_KUBERNETES_WATCH_MINUTES || 0);
   const expectedUnreadable = (process.env.E2E_KUBERNETES_WATCH_UNREADABLE ?? "").split(",").map((kind) => kind.trim()).filter(Boolean).sort();

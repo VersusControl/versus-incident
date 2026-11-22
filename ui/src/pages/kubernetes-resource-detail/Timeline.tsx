@@ -7,7 +7,7 @@ import { useCursorPagination } from "@/lib/pagination";
 import { incompleteKubernetesSnapshot } from "@/lib/kubernetesContinuity";
 import { clock } from "@/lib/kubernetesResourcePresentation";
 import { counted } from "@/lib/kubernetesEvidence";
-import { useKubernetesCluster, useKubernetesFirstReady, useKubernetesQuery } from "@/lib/useKubernetesCluster";
+import { useKubernetesCluster, useKubernetesFirstReady, useKubernetesQuery, useKubernetesCursorReset } from "@/lib/useKubernetesCluster";
 import { failureWarnings } from "../kubernetesWarningItems";
 import { KubernetesHistoryOffNotice } from "@/components/KubernetesAccessNotices";
 import { historyOffFor, useKubernetesNamespaceAccess } from "@/lib/kubernetesNamespaceAccess";
@@ -52,6 +52,9 @@ export function ResourceTimeline({
     retry: false,
     refetchInterval: (query) => query.state.data?.sync.state === "syncing" ? 1000 : false,
   });
+  // An expired page link returns to page 1 instead of showing page 1's
+  // history under a later page number.
+  useKubernetesCursorReset(paging, timeline);
   const access = useKubernetesNamespaceAccess();
   const historyIsOff = historyOffFor(access, timeline.data, timeline.error);
   const data = timeline.data;

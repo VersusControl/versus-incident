@@ -7,6 +7,7 @@
 package model
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,16 @@ import (
 // GlobalRegion is the region label for services that have one endpoint for
 // the whole account (S3 listing, CloudFront, Route 53, IAM, AWS Health).
 const GlobalRegion = "global"
+
+// ResourcePolicyType is the type of a policy entry: the grants of one
+// resource's policy, stored beside the resource (as "<ARN>#policy") rather
+// than on it, because they are read on another cadence. It is not a
+// resource of its own, so listings, counts and compares leave it out.
+const ResourcePolicyType = "resource-policy"
+
+// PolicyEntryService is the unit that holds only policy entries: bucket
+// policies.
+const PolicyEntryService = "s3-policy"
 
 // RedactedValue replaces a tag value whose key is not on the allowlist. The
 // key stays visible so a reader can still see which tags exist.
@@ -77,13 +88,111 @@ const (
 	RelationContains RelationType = "contains"
 	// RelationTriggeredBy links a function to an event source that invokes it.
 	RelationTriggeredBy RelationType = "triggered_by"
+	// RelationAttachedToTransit links a transit gateway attachment to the
+	// transit gateway it attaches to, and to the network it attaches.
+	RelationAttachedToTransit RelationType = "attached_to_transit"
+	// RelationSharedVia links a resource share to an account, organization
+	// or organizational unit it is shared with.
+	RelationSharedVia RelationType = "shared_via"
+	// RelationAliasOf links a DNS record to the load balancer or
+	// distribution host name it points at.
+	RelationAliasOf RelationType = "alias_of"
+	// RelationTrusts links a role to a principal its trust policy lets
+	// assume it.
+	RelationTrusts RelationType = "trusts"
+	// RelationMayAccess links a resource to a principal its resource policy
+	// grants access.
+	RelationMayAccess RelationType = "may_access"
 )
 
+// RelationKind says how a relation is known.
+type RelationKind string
+
+const (
+	// RelationConfigured is a relation AWS states in configuration: a
+	// listener's target group, a DNS alias, an attachment. A relation
+	// stored before kinds existed reads as configured.
+	RelationConfigured RelationKind = "configured"
+	// RelationKindMayAccess is a relation a policy allows: a role trust or a
+	// resource policy grant. It says what is permitted, not what happens.
+	RelationKindMayAccess RelationKind = "may_access"
+	// RelationInferred is a relation matched by a name or an address: a
+	// CNAME whose host name is a load balancer's.
+	RelationInferred RelationKind = "inferred"
+)
+
+// Access classes a policy grant is reduced to.
+const (
+	AccessRead  = "read"
+	AccessWrite = "write"
+	AccessAdmin = "admin"
+)
+
+// Relation targets that are not ARNs. A target may also be a bare 12-digit
+// account ID, an ARN in another account, or a DNS host name.
+const (
+	// OrgTargetPrefix starts a target naming a whole AWS Organization:
+	// "org:o-a1b2c3d4e5".
+	OrgTargetPrefix = "org:"
+	// AnyPrincipal is the target of a grant to every principal.
+	AnyPrincipal = "*"
+)
+
+// OrgTarget is the relation target that names an organization.
+func OrgTarget(id string) string { return OrgTargetPrefix + id }
+
 // Relation is one typed edge. Target is an ARN when one can be built, else
-// the provider identifier the configuration names.
+// the provider identifier the configuration names: an account ID, an
+// organization (OrgTarget), or a host name. Kind says how the relation is
+// known and Source names the AWS operation it was read from. A policy grant
+// carries its access class and resource pattern; Count is how many grants
+// the one relation stands for when wide grants were collapsed.
 type Relation struct {
-	Type   RelationType `json:"type"`
-	Target string       `json:"target"`
+	Type    RelationType `json:"type"`
+	Target  string       `json:"target"`
+	Kind    RelationKind `json:"kind,omitempty"`
+	Source  string       `json:"source,omitempty"`
+	Access  string       `json:"access,omitempty"`
+	Pattern string       `json:"pattern,omitempty"`
+	Count   int          `json:"count,omitempty"`
+}
+
+// UnmarshalJSON reads a relation; one stored before kinds existed has no
+// kind and reads as configured.
+func (relation *Relation) UnmarshalJSON(data []byte) error {
+	type plain Relation
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*relation = Relation(decoded)
+	if relation.Kind == "" {
+		relation.Kind = RelationConfigured
+	}
+	return nil
+}
+
+// relationKey is what makes two relations the same link: the source and
+// the count are merged, not compared.
+type relationKey struct {
+	kind            RelationType
+	target          string
+	how             RelationKind
+	access, pattern string
+}
+
+func (relation Relation) key() relationKey {
+	return relationKey{relation.Type, relation.Target, relation.Kind, relation.Access, relation.Pattern}
+}
+
+// NormalizeDNSName is the form host names are matched in: lower case, no
+// trailing dot, and no "dualstack." prefix, which Route 53 adds to an alias
+// of a load balancer. "DualStack.Web-1.us-east-1.elb.amazonaws.com." and
+// "web-1.us-east-1.elb.amazonaws.com" are the same name.
+func NormalizeDNSName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	name = strings.TrimSuffix(name, ".")
+	return strings.TrimPrefix(name, "dualstack.")
 }
 
 // Resource is one normalized AWS resource. Tags carry every key; values are
@@ -128,6 +237,17 @@ const (
 	AttrBucketRegion  = "bucket_region"
 	AttrApplicationID = "application_id"
 	AttrResourceID    = "physical_id"
+	// AttrOrganizationID and AttrManagementAccount are the organization an
+	// account belongs to and its management account, the only organization
+	// facts a member account can read.
+	AttrOrganizationID    = "organization_id"
+	AttrManagementAccount = "management_account"
+	// AttrOwnerAccount is the account that owns a resource another account
+	// can see: a shared transit gateway, a received resource share.
+	AttrOwnerAccount = "owner_account"
+	// AttrSubject is the ARN of the resource a resource-policy entry
+	// describes.
+	AttrSubject = "subject"
 )
 
 var allowedAttributes = map[string]bool{
@@ -135,7 +255,8 @@ var allowedAttributes = map[string]bool{
 	AttrRuntime: true, AttrScheme: true, AttrTaskDef: true, AttrDesired: true,
 	AttrRunning: true, AttrDNSName: true, AttrRollout: true, AttrPublicIP: true,
 	AttrStackName: true, AttrBucketRegion: true, AttrApplicationID: true,
-	AttrResourceID: true,
+	AttrResourceID: true, AttrOrganizationID: true, AttrManagementAccount: true,
+	AttrOwnerAccount: true, AttrSubject: true,
 }
 
 // AllowedAttribute reports whether key is part of the closed attribute set.
@@ -259,7 +380,52 @@ const (
 	// GapNotOnPlan means the account's support plan does not offer the
 	// service (AWS Health on Basic support).
 	GapNotOnPlan GapReason = "not_on_plan"
+	// GapCapped means a per-cycle fan-out cap stopped the read: Seen were
+	// read and the rest were not. With Total unknown the count reads as
+	// "more than Seen".
+	GapCapped GapReason = "capped"
 )
+
+// ReadOutcome is how a read ended, as the coverage view groups it. Every
+// gap reason maps to exactly one outcome. A "not set" answer (no bucket
+// policy, no tag set) is a successful read and never a gap, so it has no
+// outcome here.
+type ReadOutcome string
+
+const (
+	// OutcomeNotRead is a read that has no answer: denied, throttled, not
+	// on the support plan, or not checked. It is a gap.
+	OutcomeNotRead ReadOutcome = "not_read"
+	// OutcomeCapped is a read stopped by a per-cycle cap. It is a gap.
+	OutcomeCapped ReadOutcome = "capped"
+	// OutcomeOffInAWS is a feature the account has not turned on (a
+	// detector, an analyzer, a log). It is the account's choice, not a gap.
+	OutcomeOffInAWS ReadOutcome = "off_in_aws"
+	// OutcomeNotOffered is a service with no endpoint in the Region. There
+	// is nothing to read, so it is not a gap.
+	OutcomeNotOffered ReadOutcome = "not_offered"
+)
+
+// OutcomeForReason maps a gap reason onto its read outcome. An unknown
+// reason reads as not read, never as clear.
+func OutcomeForReason(reason GapReason) ReadOutcome {
+	switch reason {
+	case GapCapped:
+		return OutcomeCapped
+	case GapNotEnabled:
+		return OutcomeOffInAWS
+	case GapNotInRegion:
+		return OutcomeNotOffered
+	default:
+		return OutcomeNotRead
+	}
+}
+
+// IsGap reports whether an outcome leaves data missing: only not read and
+// capped do.
+func (outcome ReadOutcome) IsGap() bool {
+	return outcome == OutcomeNotRead || outcome == OutcomeCapped
+}
 
 // Gap is one named hole in a view: the unit (or one detail call inside it)
 // that has no current answer, why, and the last time it had one.
@@ -270,7 +436,16 @@ type Gap struct {
 	Reason     GapReason `json:"reason"`
 	Operation  string    `json:"operation,omitempty"`
 	LastGoodAt time.Time `json:"last_good_at,omitzero"`
+	// Seen and Total count the items a per-item detail call covered: Seen
+	// were read, Total were attempted or known ("28 of 35 functions"). A
+	// capped gap with Total zero means more than Seen exist. Both are zero
+	// for a single call.
+	Seen  int `json:"seen,omitempty"`
+	Total int `json:"total,omitempty"`
 }
+
+// Outcome is the read outcome the gap's reason maps to.
+func (gap Gap) Outcome() ReadOutcome { return OutcomeForReason(gap.Reason) }
 
 // SyncStatus is the state of one unit.
 type SyncStatus string
@@ -355,20 +530,46 @@ func Sanitize(resource Resource) Resource {
 		out.Tags = nil
 	}
 	if len(resource.Relations) > 0 {
-		seen := make(map[Relation]bool, len(resource.Relations))
+		seen := make(map[relationKey]int, len(resource.Relations))
 		relations := make([]Relation, 0, len(resource.Relations))
 		for _, relation := range resource.Relations {
-			if relation.Target == "" || seen[relation] {
+			if relation.Target == "" {
 				continue
 			}
-			seen[relation] = true
+			if relation.Kind == "" {
+				relation.Kind = RelationConfigured
+			}
+			if relation.Count < 0 {
+				relation.Count = 0
+			}
+			if index, ok := seen[relation.key()]; ok {
+				// The same link read twice (an A and an AAAA alias, two
+				// statements granting the same) stays one link: the larger
+				// count and the first source in sort order win, so the
+				// result does not depend on read order.
+				kept := &relations[index]
+				kept.Count = max(kept.Count, relation.Count)
+				if kept.Source == "" || (relation.Source != "" && relation.Source < kept.Source) {
+					kept.Source = relation.Source
+				}
+				continue
+			}
+			seen[relation.key()] = len(relations)
 			relations = append(relations, relation)
 		}
 		sort.Slice(relations, func(left, right int) bool {
-			if relations[left].Type != relations[right].Type {
-				return relations[left].Type < relations[right].Type
+			a, b := relations[left], relations[right]
+			switch {
+			case a.Type != b.Type:
+				return a.Type < b.Type
+			case a.Target != b.Target:
+				return a.Target < b.Target
+			case a.Kind != b.Kind:
+				return a.Kind < b.Kind
+			case a.Access != b.Access:
+				return a.Access < b.Access
 			}
-			return relations[left].Target < relations[right].Target
+			return a.Pattern < b.Pattern
 		})
 		out.Relations = relations
 		if len(out.Relations) == 0 {

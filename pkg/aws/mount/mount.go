@@ -94,7 +94,8 @@ type Mounted struct {
 // deps.Store is discovered for these optional capabilities; a provider that
 // lacks one degrades that feature exactly as the file backend does:
 // storage.AWSInventoryStore, storage.AWSChangeFeedStore,
-// storage.AWSUnitHistoryStore, storage.AWSRetentionSweeper,
+// storage.AWSUnitHistoryStore, storage.AWSAccountLabelStore,
+// storage.AWSRetentionSweeper,
 // storage.FinOpsStore, storage.FinOpsSavingDecisionStore,
 // storage.FinOpsSavingDecisionSubjects, storage.FinOpsRollupStore,
 // storage.SessionLocker (the change-pair and cost refresh locks),
@@ -117,6 +118,8 @@ func Mount(deps Deps) (*Mounted, error) {
 	mounted.storageRetention = deps.CostStorageRetentionMonths
 	agent.ConfigureAWS(func() *awssettings.Service { return mounted.Settings })
 	mounted.Changes = mountChanges(deps, mounted)
+	mountCoverage(deps, mounted)
+	mountAccountLabels(deps)
 	cost, backend, err := mountFinOps(deps, mounted)
 	if err != nil {
 		return nil, err
@@ -311,6 +314,32 @@ func mountChanges(deps Deps, mounted *Mounted) *awssnapshot.ChangeFeed {
 	// from the same change list as the page.
 	agent.ConfigureAWSChanges(changeListFor(current, feed))
 	return feed
+}
+
+// mountCoverage mounts the read-only coverage route over the snapshot
+// store. The expected accounts and their Regions come from settings at
+// request time, by the same Region rule the collectors read with.
+func mountCoverage(deps Deps, mounted *Mounted) {
+	current := liveAWS(deps.Config)
+	settingsStore := awssettings.NewStore(deps.Store, deps.Scope)
+	controllers.NewAWSCoverageController(mounted.Snapshots, func(context.Context) ([]awssnapshot.ScopeAccount, bool, error) {
+		conn := current()
+		if !conn.Enable {
+			return nil, false, nil
+		}
+		expected, _, err := coverageScope(settingsStore, deps.Scope.Write, conn, time.Now)
+		return expected, true, err
+	}).Register(deps.Router)
+}
+
+// mountAccountLabels mounts the account label routes over the provider's
+// label store. A provider without one answers reads with enabled=false.
+func mountAccountLabels(deps Deps) {
+	var store storage.AWSAccountLabelStore
+	if labels, ok := storage.AWSAccountLabelsOf(deps.Store); ok {
+		store = labels
+	}
+	controllers.NewAWSAccountLabelsController(store, deps.Scope).Register(deps.Router)
 }
 
 // CostOptions maps the connector configuration onto one cost refresh's

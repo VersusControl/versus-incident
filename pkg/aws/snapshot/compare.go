@@ -175,7 +175,9 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	missing := map[string]bool{}
 	seenPair := map[string]bool{}
 	for _, unit := range history {
-		if unit.Unit.Service == ChangeService {
+		// Policy entries are not resources, so their unit never limits or
+		// is named in a compare.
+		if unit.Unit.Service == ChangeService || unit.Unit.Service == model.PolicyEntryService {
 			continue
 		}
 		if scoped && !inScope[pairKey(unit.Unit.Account, unit.Unit.Region)] {
@@ -277,7 +279,7 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	named := map[string]bool{}
 	for _, gap := range append(append([]model.Gap(nil), before.Gaps...), after.Gaps...) {
 		key := unitKey(gap.Account, gap.Region, gap.Service)
-		if scoped && !inScope[pairKey(gap.Account, gap.Region)] || named[key] || missing[key] || gap.Service != "" && !serviceInFilter(request.Services, gap.Service) {
+		if gap.Service == model.PolicyEntryService || scoped && !inScope[pairKey(gap.Account, gap.Region)] || named[key] || missing[key] || gap.Service != "" && !serviceInFilter(request.Services, gap.Service) {
 			continue
 		}
 		named[key] = true

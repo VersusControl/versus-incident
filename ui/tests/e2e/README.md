@@ -21,14 +21,11 @@ recently-shipped UI surfaces:
 | `playwright.config.ts` | Config — base URL, timeouts, headless/headful. Does **not** start a server. |
 | `.env.example` | Required env — copy to `.env` (gitignored) and fill. |
 
-### Selectors + logged testid gaps
+### Selectors
 
-None of these surfaces carry a stable `data-testid` today, so the specs
-use the best available stable hooks (the primary-nav landmark, visible
-labels/roles, and the existing `#rs-send-time` id). QA does **not** edit product
-code to add hooks — the exact `data-testid`s requested from the Front-End are
-logged in [`../../../../plans/productization/global/qa-defects/QA-043.md`](../../../../plans/productization/global/qa-defects/QA-043.md).
-When those land, only `helpers.ts` needs updating; the specs stay put.
+The surfaces under test carry stable `data-testid` hooks, and the specs anchor
+to them through the locators in `helpers.ts`. A testid rename is a one-line
+change there; the specs stay put.
 
 ## Auth model
 
@@ -38,18 +35,18 @@ session cookie, so reload tests reuse the session:
 - **OSS** shows the gateway-secret form. `E2E_GATEWAY_SECRET` must equal the
   server's `GATEWAY_SECRET`.
 - **Licensed Enterprise** shows the local-admin form (`local-login-*`). It uses
-  `E2E_ADMIN_USERNAME` / `E2E_ADMIN_PASSWORD`, which harness-run captures from
+  `E2E_ADMIN_USERNAME` / `E2E_ADMIN_PASSWORD`, which the local test harness captures from
   the first-boot banner. The gateway secret is retired in Enterprise.
 
 ## Bring up an instance and run
 
-Use the QA harness. It builds the app (and its embedded SPA) from local source
+Use the local test harness (`harness.sh`). It builds the app (and its embedded SPA) from local source
 and passes the base URL and the right credentials to Playwright:
 
 ```sh
-plans/harness-run/harness.sh up oss                     # or enterprise-prometheus, enterprise-tempo, …
-plans/harness-run/harness.sh e2e ui <spec> --project=chromium --reporter=list
-plans/harness-run/harness.sh down
+harness.sh up oss                     # or enterprise-prometheus, enterprise-tempo, …
+harness.sh e2e ui <spec> --project=chromium --reporter=list
+harness.sh down
 ```
 
 Without the harness, build `ui/dist`, run `GATEWAY_SECRET=<secret> go run ./cmd`

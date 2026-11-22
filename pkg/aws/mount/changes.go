@@ -2,6 +2,7 @@ package mount
 
 import (
 	"errors"
+	"time"
 
 	awstools "github.com/VersusControl/versus-incident/pkg/agent/ai/tools/aws"
 	awscollect "github.com/VersusControl/versus-incident/pkg/aws/collect"
@@ -28,6 +29,54 @@ func changeListFor(current func() c.AWSConnectorConfig, feed *awssnapshot.Change
 // found denied or not on its plan, and any account-level outage from its
 // saved health.
 func changeScope(store *awssettings.Store, org string, conn c.AWSConnectorConfig) ([]awssnapshot.ScopeAccount, bool, error) {
+	return scopeAccounts(store, org, conn, changeRegions)
+}
+
+// changeRegions is the Changes page's Region rule: the selected Regions,
+// or the ones the health check found enabled, less those AWS reports as
+// not enabled.
+func changeRegions(account awssettings.AccountRecord, health awssettings.HealthRecord) (regions, notEnabled []string) {
+	regions = account.Regions
+	if len(regions) == 0 {
+		for _, region := range health.Regions {
+			if region.Enabled {
+				regions = append(regions, region.Region)
+			}
+		}
+	}
+	return readableRegions(regions, health.NotEnabledRegions(regions))
+}
+
+// coverageScope lists the accounts the coverage page expects, each with the
+// Regions the collectors really read (settings.CollectRegions), so a unit
+// read in a Region whose opt-in status went stale stays in scope.
+func coverageScope(store *awssettings.Store, org string, conn c.AWSConnectorConfig, now func() time.Time) ([]awssnapshot.ScopeAccount, bool, error) {
+	return scopeAccounts(store, org, conn, func(account awssettings.AccountRecord, health awssettings.HealthRecord) ([]string, []string) {
+		regions, off := awssettings.CollectRegions(account, health, now().UTC())
+		return readableRegions(regions, off)
+	})
+}
+
+// readableRegions splits regions into the ones to read and the ones off.
+func readableRegions(regions, off []string) ([]string, []string) {
+	skip := make(map[string]bool, len(off))
+	for _, region := range off {
+		skip[region] = true
+	}
+	var readable []string
+	for _, region := range regions {
+		if !skip[region] {
+			readable = append(readable, region)
+		}
+	}
+	return readable, off
+}
+
+// scopeAccounts lists every connected account with the Regions regionsFor
+// gives it, the services its last probe found denied or not on its plan,
+// and any account-level outage from its saved health.
+func scopeAccounts(store *awssettings.Store, org string, conn c.AWSConnectorConfig,
+	regionsFor func(awssettings.AccountRecord, awssettings.HealthRecord) (regions, notEnabled []string)) ([]awssnapshot.ScopeAccount, bool, error) {
 	stored, err := store.ListAccounts(org)
 	if err != nil {
 		return nil, false, err
@@ -39,27 +88,7 @@ func changeScope(store *awssettings.Store, org string, conn c.AWSConnectorConfig
 			return nil, false, err
 		}
 		entry := awssnapshot.ScopeAccount{Account: account.AccountID, Name: account.DisplayName}
-		regions := account.Regions
-		if len(regions) == 0 {
-			for _, region := range health.Regions {
-				if region.Enabled {
-					regions = append(regions, region.Region)
-				}
-			}
-		}
-		// Selected regions AWS reports as not enabled are listed as such,
-		// never read and never quiet; a region whose state is unknown is
-		// still expected to be read.
-		entry.NotEnabled = health.NotEnabledRegions(regions)
-		notEnabled := make(map[string]bool, len(entry.NotEnabled))
-		for _, region := range entry.NotEnabled {
-			notEnabled[region] = true
-		}
-		for _, region := range regions {
-			if !notEnabled[region] {
-				entry.Regions = append(entry.Regions, region)
-			}
-		}
+		entry.Regions, entry.NotEnabled = regionsFor(account, health)
 		if len(health.ProbeResults) > 0 {
 			counts := awssettings.CountResults(health.ProbeResults)
 			entry.DeniedServices, entry.NotOnPlanServices = counts.DeniedServices, counts.NotOnPlanServices

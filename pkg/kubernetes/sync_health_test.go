@@ -958,8 +958,7 @@ func TestSyncHealthFirstReadySurvivesRestartWithTheWorkerRunning(t *testing.T) {
 	t.Cleanup(cancel)
 	go restarted.inventoryWorker(ctx, cache)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	for wait := polling(t, "the restarted process never read the cluster's first ready moment"); ; wait.next() {
 		health, err := restarted.SyncHealth(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -972,10 +971,6 @@ func TestSyncHealthFirstReadySurvivesRestartWithTheWorkerRunning(t *testing.T) {
 		if health.State == "ready" && health.FirstReadyAt.Equal(stamped) {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the restarted process never read the cluster's first ready moment: %+v", health)
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -1484,7 +1479,7 @@ func TestSyncHealthOneFailingKindIsPartialNotAClusterError(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			kinds := fullySyncedKinds(now)
 			test.with(kinds)
-			health := buildSyncHealth(kinds, time.Time{})
+			health := buildSyncHealth(kinds, time.Time{}, time.Time{})
 			if health.State != test.want || !health.Partial {
 				t.Fatalf("state = %q partial=%t, want %q: failing=%+v", health.State, health.Partial, test.want, health.Failing)
 			}

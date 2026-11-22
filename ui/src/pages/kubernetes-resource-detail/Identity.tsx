@@ -33,7 +33,7 @@ export function ResourceHeader({
           <span className="block text-2xs font-normal uppercase tracking-wide text-ink-400">
             {resource.kind}
           </span>
-          <span className="resource-name block break-all">{resource.name}</span>
+          <span className="resource-name block break-all" title={resource.name}>{resource.name}</span>
         </span>
       </span>
       <span className="resource-status flex flex-wrap items-center gap-2 text-2xs font-normal">

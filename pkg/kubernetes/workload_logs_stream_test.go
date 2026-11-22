@@ -272,29 +272,17 @@ func TestWorkloadIdleAuthorizationRevokesAllReads(t *testing.T) {
 	go func() {
 		done <- service.StreamWorkloadLogs(ctx, WorkloadLogStreamOptions{Kind: "Deployment", Name: "api", Namespace: "shop", UID: "root"}, func(WorkloadLogStreamEvent) error { return nil })
 	}()
-	deadline := time.Now().Add(3 * time.Second)
-	for opened.Load() != 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if opened.Load() != 2 {
-		t.Fatal("workers did not open")
-	}
+	eventually(t, "both workers to open", func() bool { return opened.Load() == 2 })
 	revoked.Store(true)
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(scaledTimeout(hangGuard)):
 		t.Fatal("idle authorization did not cancel fan-in")
 	}
-	deadline = time.Now().Add(time.Second)
-	for closed.Load() != 2 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if closed.Load() != 2 {
-		t.Fatal("revoked upstream read survived")
-	}
+	eventually(t, "both revoked upstream reads to close", func() bool { return closed.Load() == 2 })
 }
 
 func TestLogReadBudgetSharedWithPodAndWorkload(t *testing.T) {
@@ -351,20 +339,10 @@ func TestWorkloadBackpressureWaitIsCanceledAndJoinsWorker(t *testing.T) {
 	defer session.Close()
 	session.queue = make(chan workloadSourceMessage, 1)
 	session.startWorkers()
-	deadline := time.Now().Add(time.Second)
-	for len(session.queue) != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if len(session.queue) != 1 {
-		t.Fatal("test did not fill bounded queue")
-	}
+	eventually(t, "the workers to fill the bounded queue", func() bool { return len(session.queue) == 1 })
 	session.cancel()
 	for _, worker := range session.workers {
-		select {
-		case <-worker.done:
-		case <-time.After(time.Second):
-			t.Fatal("backpressured worker survived viewer end")
-		}
+		waitFor(t, worker.done, "backpressured worker survived viewer end")
 	}
 }
 

@@ -50,6 +50,9 @@ type Query struct {
 	App     string
 	ARN     string
 	AsOf    time.Time
+	// PolicyEntries includes the policy entries (model.ResourcePolicyType)
+	// a topology reader joins; every other reader leaves them out.
+	PolicyEntries bool
 }
 
 // UnitStatus is one unit's answer to a query: its sync state and the
@@ -120,6 +123,10 @@ func statusAt(unit storage.AWSUnitStatus, asOf time.Time) (UnitStatus, []model.G
 		status.CommittedAt = generation.CommittedAt
 		status.VerifiedAt = generation.VerifiedAt
 		status.Count = generation.Count
+		if status.Unit.Service == model.PolicyEntryService {
+			// A policy entry is not a resource.
+			status.Count = 0
+		}
 		status.HasData = true
 	}
 	var gaps []model.Gap
@@ -388,6 +395,9 @@ func matchUnit(query Query, unit model.Unit) bool {
 }
 
 func matchResource(query Query, resource model.Resource) bool {
+	if resource.Type == model.ResourcePolicyType && !query.PolicyEntries {
+		return false
+	}
 	if query.Region != "" && resource.Region != query.Region {
 		return false
 	}

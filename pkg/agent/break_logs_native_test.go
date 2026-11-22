@@ -61,7 +61,7 @@ func TestBreakLogAdaptersNativeHarnessBackends(t *testing.T) {
 			}
 			defer connection.Close()
 			for _, line := range lines {
-				encoded, _ := json.Marshal(map[string]any{"version": "1.1", "host": "k13-native", "short_message": line.Text, "timestamp": float64(line.At.UnixMilli()) / 1000, "_kubernetes_namespace_name": namespace, "_kubernetes_pod_name": pod, "_kubernetes_container_name": "api"})
+				encoded, _ := json.Marshal(map[string]any{"version": "1.1", "host": "break-logs-native", "short_message": line.Text, "timestamp": float64(line.At.UnixMilli()) / 1000, "_kubernetes_namespace_name": namespace, "_kubernetes_pod_name": pod, "_kubernetes_container_name": "api"})
 				if _, err := connection.Write(encoded); err != nil {
 					t.Fatal(err)
 				}
@@ -78,7 +78,7 @@ func TestBreakLogAdaptersNativeHarnessBackends(t *testing.T) {
 			post(t, os.Getenv("K13_NATIVE_SPLUNK_HEC")+"/services/collector/event", map[string]string{"Authorization": "Splunk " + os.Getenv("SPLUNK_HEC_TOKEN")}, body.Bytes())
 		}},
 		{"signoz", "K13_NATIVE_SIGNOZ_URL", func(address string) config.AgentSourceConfig {
-			return config.AgentSourceConfig{Name: "native-signoz", Type: "signoz", Enable: true, Signoz: config.AgentSignozSourceConfig{Address: address, APIKey: os.Getenv("SIGNOZ_API_KEY"), AllowLoopback: true, Query: "service.name = 'k13-native'"}}
+			return config.AgentSourceConfig{Name: "native-signoz", Type: "signoz", Enable: true, Signoz: config.AgentSignozSourceConfig{Address: address, APIKey: os.Getenv("SIGNOZ_API_KEY"), AllowLoopback: true, Query: "service.name = 'break-logs-native'"}}
 		}, func(t *testing.T, namespace, pod string, lines []breaklogs.LinkedLine) {
 			attribute := func(key, value string) map[string]any {
 				return map[string]any{"key": key, "value": map[string]string{"stringValue": value}}
@@ -87,7 +87,7 @@ func TestBreakLogAdaptersNativeHarnessBackends(t *testing.T) {
 			for _, line := range lines {
 				records = append(records, map[string]any{"timeUnixNano": strconv.FormatInt(line.At.UnixNano(), 10), "severityText": "INFO", "body": map[string]string{"stringValue": line.Text}})
 			}
-			encoded, _ := json.Marshal(map[string]any{"resourceLogs": []any{map[string]any{"resource": map[string]any{"attributes": []any{attribute("service.name", "k13-native"), attribute("k8s.namespace.name", namespace), attribute("k8s.pod.name", pod), attribute("k8s.container.name", "api")}}, "scopeLogs": []any{map[string]any{"logRecords": records}}}}})
+			encoded, _ := json.Marshal(map[string]any{"resourceLogs": []any{map[string]any{"resource": map[string]any{"attributes": []any{attribute("service.name", "break-logs-native"), attribute("k8s.namespace.name", namespace), attribute("k8s.pod.name", pod), attribute("k8s.container.name", "api")}}, "scopeLogs": []any{map[string]any{"logRecords": records}}}}})
 			post(t, os.Getenv("K13_NATIVE_SIGNOZ_OTLP")+"/v1/logs", nil, encoded)
 		}},
 	} {
@@ -104,7 +104,7 @@ func TestBreakLogAdaptersNativeHarnessBackends(t *testing.T) {
 			for index := range 5 {
 				text := fmt.Sprintf("INFO native %s line %d", provider.kind, index)
 				if index == 2 {
-					text = "ERROR native refused token=k13-native-canary-value"
+					text = "ERROR native refused token=break-logs-native-canary-value"
 				}
 				lines = append(lines, breaklogs.LinkedLine{At: now.Add(time.Duration(index-120) * time.Second), Text: text})
 			}
@@ -140,7 +140,7 @@ func TestBreakLogAdaptersNativeHarnessBackends(t *testing.T) {
 					t.Fatalf("pods=%v lines=%d truncated=%v err=%v", pods, len(result.Lines), result.Truncated, err)
 				}
 				for _, line := range result.Lines {
-					if line.Pod != pod || line.At.Before(query.From) || line.At.After(query.To) || strings.Contains(line.Text, "k13-native-canary-value") {
+					if line.Pod != pod || line.At.Before(query.From) || line.At.After(query.To) || strings.Contains(line.Text, "break-logs-native-canary-value") {
 						t.Fatalf("unscoped or unscrubbed line: %+v", line)
 					}
 				}
@@ -435,7 +435,7 @@ func TestBreakLogAdaptersNativeHarnessBackends(t *testing.T) {
 							t.Fatal(err)
 						}
 						for _, value := range rows {
-							message := map[string]any{"version": "1.1", "host": "k13-native", "short_message": value["message"], "timestamp": float64(value["at"].(time.Time).UnixMilli()) / 1000, "_kubernetes_namespace_name": namespace}
+							message := map[string]any{"version": "1.1", "host": "break-logs-native", "short_message": value["message"], "timestamp": float64(value["at"].(time.Time).UnixMilli()) / 1000, "_kubernetes_namespace_name": namespace}
 							for _, key := range []string{podKey, containerKey} {
 								if field, ok := value[key]; ok {
 									message["_"+key] = field

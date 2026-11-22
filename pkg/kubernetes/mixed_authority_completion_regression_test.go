@@ -91,6 +91,13 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				var mu sync.Mutex
 				deniedKinds, scopeCalls := map[string]bool{}, map[string]int{}
 				var lastNamespace, lastKind string
+				// Scoped LISTs in arrival order. The producer walks namespaces in
+				// sorted order and kinds in core-first order, once per cycle. One
+				// restart is tolerated: a cycle that fails part-way may walk again
+				// from the first namespace and first kind. A retry inside a walk,
+				// a walk out of order or a second restart fails the test.
+				var scopedOrder, heldOrder []string
+				var heldFreshGlobal int32
 				var firstOnce, tailOnce atomic.Bool
 				firstSeen, firstRelease := make(chan struct{}), make(chan struct{})
 				tailSeen, tailRelease := make(chan struct{}), make(chan struct{})
@@ -109,16 +116,20 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					}
 					bulk := r.URL.Query().Get("limit") != "" && r.URL.Query().Get("limit") != "1"
 					current := phase.Load()
+					// The producer reads namespaces for every kind whose latest
+					// cluster-wide LIST was denied. Under load a paced kind may not
+					// be listed again after the whole denial, so it stays denied
+					// from that phase; count denials from both denying phases.
+					if (current == 1 || current == 2) && ns == "" && bulk && kind != "" && kind != "Node" && kind != "Namespace" {
+						mu.Lock()
+						deniedKinds[kind] = true
+						mu.Unlock()
+					}
 					if current == 1 {
 						http.Error(w, "forbidden", http.StatusForbidden)
 						return
 					}
 					if (current == 2 || current == 3 && incomplete) && ns == "" && kind != "" && r.URL.Query().Get("limit") != "" {
-						if current == 2 && bulk && kind != "Node" && kind != "Namespace" {
-							mu.Lock()
-							deniedKinds[kind] = true
-							mu.Unlock()
-						}
 						http.Error(w, "forbidden", http.StatusForbidden)
 						return
 					}
@@ -133,11 +144,18 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 						}
 						mu.Lock()
 						if freshGlobal.Load() == 0 {
-							scopeCalls[ns+"/"+kind]++
+							key := ns + "/" + kind
+							scopeCalls[key]++
+							scopedOrder = append(scopedOrder, key)
 						}
 						last := ns == lastNamespace && kind == lastKind
+						holdTail := last && tailOnce.CompareAndSwap(false, true)
+						if holdTail {
+							heldOrder = append([]string(nil), scopedOrder...)
+							heldFreshGlobal = freshGlobal.Load()
+						}
 						mu.Unlock()
-						if last && tailOnce.CompareAndSwap(false, true) {
+						if holdTail {
 							close(tailSeen)
 							select {
 							case <-tailRelease:
@@ -159,7 +177,13 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					fixture.ServeHTTP(w, r)
 				}))
 				defer upstream.Close()
-				client, err := NewClient(Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true})
+				// The test holds the first and the last scoped LIST open while it
+				// inspects state. Under load that inspection can outlast the
+				// default 10s request timeout; the held LIST then times out, the
+				// producer lists the pair again and the run sees a second walk and
+				// no released tail. Use the longest request timeout the client
+				// accepts so only the test decides when a held LIST ends.
+				client, err := NewClient(Config{Endpoint: upstream.URL, AllowLoopbackHTTP: true, Timeout: time.Minute})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -184,7 +208,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					}
 					return r
 				}
-				waitUntil(t, 30*time.Second, "initial complete capture", func() bool {
+				eventually(t, "initial complete capture", func() bool {
 					r := health()
 					return r.State == "ready" && r.PendingKinds == 0 && !r.FirstReadyAt.IsZero()
 				})
@@ -195,7 +219,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					t.Fatalf("baseline captured history: %d %v", len(history.Items), err)
 				}
 				phase.Store(1)
-				waitUntil(t, 55*time.Second, "natural current whole-authority failure", func() bool {
+				eventually(t, "natural current whole-authority failure", func() bool {
 					r := health()
 					return r.State == "error" && r.Kinds["Pod"].CycleFailure && r.Kinds["Pod"].Error == "forbidden"
 				})
@@ -284,27 +308,70 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				if (!errors.Is(err, ErrInventoryNotReady) && !errors.Is(err, ErrForbidden)) || len(workloads.Items) != 0 {
 					t.Fatalf("held tail allowed protected access: %d %v", len(workloads.Items), err)
 				}
+				// The walk that reached the held tail lists each subscribed
+				// namespace and denied kind exactly once, in producer order, and
+				// nothing else. At most one earlier walk, cut short by a failed
+				// cycle, may precede it; every walk starts at the first namespace
+				// and first kind and only moves forward. Nothing is listed while
+				// the tail is held.
 				mu.Lock()
-				calls := 0
-				for _, n := range scopeCalls {
-					calls += n
-				}
-				for _, ns := range namespaces {
-					for _, kind := range kinds {
-						if n := scopeCalls[ns+"/"+kind]; n != 1 {
-							t.Errorf("finite traversal pair %s/%s: got %d LISTs, want 1", ns, kind, n)
-						}
+				rank := map[string]int{}
+				for i, ns := range namespaces {
+					for j, kind := range kinds {
+						rank[ns+"/"+kind] = i*len(kinds) + j
 					}
 				}
-				mu.Unlock()
-				if calls != len(namespaces)*len(kinds) || freshGlobal.Load() != 0 {
-					t.Fatalf("fallback operation contract: got=%d expected=%d*%d freshGlobal=%d", calls, len(namespaces), len(kinds), freshGlobal.Load())
+				var walkStarts []int
+				contract := heldFreshGlobal == 0 && len(scopedOrder) == len(heldOrder)
+				for i, key := range heldOrder {
+					r, known := rank[key]
+					contract = contract && known
+					if i == 0 || r <= rank[heldOrder[i-1]] {
+						walkStarts = append(walkStarts, i)
+						contract = contract && r == 0
+					}
 				}
-				t.Logf("held finite traversal: namespaces=%d deniedKinds=%d LISTs=%d; no fresh complete global LIST exists yet", len(namespaces), len(kinds), calls)
+				var heldWalk []string
+				if len(walkStarts) > 0 {
+					heldWalk = heldOrder[walkStarts[len(walkStarts)-1]:]
+				}
+				contract = contract && len(walkStarts) >= 1 && len(walkStarts) <= 2 && len(heldWalk) == len(rank)
+				for i, key := range heldWalk {
+					contract = contract && rank[key] == i
+				}
+				calls, total := len(heldWalk), len(scopedOrder)
+				if !contract {
+					heldCount := map[string]int{}
+					keys := map[string]bool{}
+					for _, key := range heldWalk {
+						heldCount[key]++
+					}
+					for key := range rank {
+						keys[key] = true
+					}
+					for key := range scopeCalls {
+						keys[key] = true
+					}
+					sorted := make([]string, 0, len(keys))
+					for key := range keys {
+						sorted = append(sorted, key)
+					}
+					sort.Strings(sorted)
+					for _, key := range sorted {
+						_, known := rank[key]
+						t.Logf("scoped LISTs %s: heldWalk=%d allWalks=%d expected=%t", key, heldCount[key], scopeCalls[key], known)
+					}
+					t.Logf("walk start offsets in %d LISTs up to the held tail: %v", len(heldOrder), walkStarts)
+				}
+				mu.Unlock()
+				if !contract {
+					t.Fatalf("fallback operation contract: heldWalk=%d expected=%d*%d walks=%d (max 2) LISTsAtTail=%d allLISTs=%d freshGlobalAtTail=%d", calls, len(namespaces), len(kinds), len(walkStarts), len(heldOrder), total, heldFreshGlobal)
+				}
+				t.Logf("held finite traversal: namespaces=%d deniedKinds=%d LISTs=%d walks=%d; no fresh complete global LIST exists yet", len(namespaces), len(kinds), calls, len(walkStarts))
 				releasedAt := time.Now().UTC()
 				releaseTail()
 				if incomplete {
-					waitUntil(t, 12*time.Second, "invalid final LIST uncertainty admission", func() bool {
+					eventually(t, "invalid final LIST uncertainty admission", func() bool {
 						_, err := service.Workloads(t.Context(), WorkloadListOptions{})
 						return invalidFinal.Load() > 0 && (errors.Is(err, ErrInventoryNotReady) || errors.Is(err, ErrForbidden))
 					})
@@ -317,7 +384,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				}
 				// Only autonomous collection may satisfy this. No due-time edit,
 				// cache invalidation, wake send or protected recovery read occurs here.
-				waitUntil(t, 80*time.Second, "finite tail and natural fresh global completion", func() bool {
+				eventuallyWithin(t, 80*time.Second, "finite tail and natural fresh global completion", func() bool {
 					r := health()
 					if r.State != "ready" || r.PendingKinds != 0 || r.FailingKinds != 0 || freshGlobal.Load() == 0 {
 						return false
@@ -330,7 +397,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					}
 					return true
 				})
-				waitUntil(t, 12*time.Second, "new current capture journal", func() bool {
+				eventually(t, "new current capture journal", func() bool {
 					cp, err := observed.EvidenceCheckpoint(t.Context(), evidenceScope)
 					return err == nil && cp.ID != checkpoint.ID && cp.At.After(checkpoint.At)
 				})

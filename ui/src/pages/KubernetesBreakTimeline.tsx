@@ -7,7 +7,7 @@ import { ApiError, type KubernetesChange, type KubernetesChangesPage, type Kuber
 import { counted, crashDetail, evidencePills, historyCount, terminationKey, warningSummary } from "@/lib/kubernetesEvidence";
 import { useBrokenIssues, useKubernetesCluster, useKubernetesCrashes, useKubernetesQuery } from "@/lib/useKubernetesCluster";
 import { KubernetesWarnings } from "./KubernetesWarnings";
-import { issueWarnings, timelineWarnings } from "./kubernetesWarningItems";
+import { breakHistoryUnavailable, issueWarnings, timelineWarnings } from "./kubernetesWarningItems";
 import "./KubernetesResourceTimeline.css";
 import { BreakLogRateStrip, LogWindowBracket } from "./KubernetesBreakLogs";
 import { useBreakLogs } from "@/lib/useKubernetesBreakLogs";
@@ -26,6 +26,26 @@ function breakRule(issue: KubernetesIssue) {
 
 function clock(value?: string) {
   return value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleTimeString([], { hour12: false }) : "Time unavailable";
+}
+
+const savedHistoryUnavailable = "Saved break history is temporarily unavailable; the break time is retried on the next refresh.";
+
+/**
+ * When the row's issue broke (or was first seen). A row without a usable time
+ * says the time is unknown and why. Only a page that reports its saved break
+ * history unavailable names that reason: a row can be partial for other causes
+ * (truncated history, kinds this identity cannot read), which say nothing
+ * about saved history.
+ */
+function IssueRowTime({ issue, historyUnavailable }: { issue: KubernetesIssue; historyUnavailable: boolean }) {
+  const value = issue.broken ? issue.broke_at : issue.first_seen;
+  const known = Boolean(value && Number.isFinite(Date.parse(value)));
+  const savedHistoryMissing = historyUnavailable && Boolean(issue.partial);
+  const reason = savedHistoryMissing ? savedHistoryUnavailable : issue.broken ? "The cluster did not report when this broke." : "The cluster did not report when this was first seen.";
+  return <>
+    <span className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-ink-300" title={known ? undefined : reason}><Clock size={12} aria-hidden="true" />{known ? <>{issue.broken ? "Broke" : "First seen"} <time dateTime={value}>{clock(value)}</time></> : issue.broken ? "Break time unknown" : "First seen time unknown"}</span>
+    {!known && savedHistoryMissing && <span data-row-reason className="text-2xs text-ink-300" title={savedHistoryUnavailable}>Saved history unavailable</span>}
+  </>;
 }
 
 function range(from?: string, to?: string) {
@@ -325,7 +345,7 @@ export function BreakRow({ issue, resource, onSelectResource, collapsed = false,
         <span className="pill text-2xs text-ink-300">{issue.root.kind}</span>
         <button type="button" data-issue-subject disabled={!resource} onClick={() => resource && onSelectResource(resource)} className="min-w-0 max-w-full truncate text-left text-xs font-semibold text-link" title={`${issue.root.namespace ? `${issue.root.namespace}/` : ""}${issue.root.name}`} aria-label={`Open resource ${issue.root.name}`}>{issue.root.namespace ? `${issue.root.namespace}/` : ""}{issue.root.name}</button>
       </div>
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-ink-300"><span title={breakRule(issue)} aria-label={breakRule(issue)}>{issue.rule === "workload.rollout_stalled" ? <><span className="sm:hidden">Rollout stalled</span><span className="hidden sm:inline">{breakRule(issue)}</span></> : breakRule(issue)}</span><span>{issue.count}{issue.of ? ` of ${issue.of}` : ""} {issue.broken ? `${issue.root.kind === "Node" ? "node" : "pod"}${(issue.of || issue.count) === 1 ? "" : "s"} affected` : "affected"}</span><span className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-ink-400"><Clock size={12} aria-hidden="true" />{issue.broken ? "Broke" : "First seen"} {clock(issue.broken ? issue.broke_at : issue.first_seen)}</span></div>
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-ink-300"><span title={breakRule(issue)} aria-label={breakRule(issue)}>{issue.rule === "workload.rollout_stalled" ? <><span className="sm:hidden">Rollout stalled</span><span className="hidden sm:inline">{breakRule(issue)}</span></> : breakRule(issue)}</span><span>{issue.count}{issue.of ? ` of ${issue.of}` : ""} {issue.broken ? `${issue.root.kind === "Node" ? "node" : "pod"}${(issue.of || issue.count) === 1 ? "" : "s"} affected` : "affected"}</span><IssueRowTime issue={issue} historyUnavailable={breakHistoryUnavailable(sourceFailures)} /></div>
       <div className="ml-auto flex shrink-0 items-center gap-1">
         {resource && <ResourceLogsButton resource={resource} onSelect={onSelectResource} label={issue.root.name} />}
         <button type="button" data-row-action className={rowButton} aria-label={`Timeline for ${issue.root.name}`} title="Timeline" onClick={timeline}><History size={14} aria-hidden="true" /><span className="hidden sm:inline">Timeline</span></button>

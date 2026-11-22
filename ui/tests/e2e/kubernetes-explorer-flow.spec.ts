@@ -4,7 +4,7 @@ import * as https from "node:https";
 import { openApp } from "./helpers";
 import { capturePath } from "./support/capture";
 
-const mode = process.env.E2E_K17_MODE || "fakekube";
+const mode = process.env.E2E_EXPLORER_FLOW_MODE || "fakekube";
 const secondaryBaseURL = process.env.E2E_SECONDARY_BASE_URL || "";
 const fakekubeURL = process.env.E2E_FAKEKUBE_URL || "";
 const fakekubeCA = process.env.E2E_FAKEKUBE_CA || "";
@@ -251,7 +251,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
     }, { timeout: 30_000, intervals: [300, 500] }).not.toBeNull();
 
     // Verify Listing resources step shows initial counts before Pods finish.
-    // K18 renders each count as its own chip, so the separator-free chips and
+    // The first-sync steps render each count as its own chip, so the separator-free chips and
     // the comma-joined group name are asserted instead of a dotted phrase.
     const initialSteps = firstPage.getByRole("list", { name: "First sync steps", exact: true });
     await expect(initialSteps).toBeVisible();
@@ -328,7 +328,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
       await tabs.nth(0).click(); // Overview
       await expect(panel).toBeVisible();
 
-      await saveCapture(page, "k17-preparing-cluster", vp.width, theme, "syncing");
+      await saveCapture(page, "kubernetes-explorer-preparing-cluster", vp.width, theme, "syncing");
     }
 
     // 2. Release statefulsets hold (keeping configmaps held) so core generation publishes and Preparing panel closes
@@ -351,7 +351,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
       expect(pendingClass).toContain("text-ink-400");
       expect(pendingClass).not.toMatch(/warn|critical|sev-/);
 
-      await saveCapture(page, "k17-pending-note", vp.width, theme, "core-published");
+      await saveCapture(page, "kubernetes-explorer-pending-note", vp.width, theme, "core-published");
     }
 
     // Verify Issues tab during core-published phase counts pending-only as ready and shows "Evidence loading" note when expanded
@@ -423,7 +423,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
 
         const cpuCard = page.locator("section.card", { has: page.getByRole("heading", { name: "CPU capacity", exact: true }) });
         await cpuCard.scrollIntoViewIfNeeded();
-        await saveCapture(page, "k17-overview-capacity", vp.width, theme, "allocatable");
+        await saveCapture(page, "kubernetes-explorer-overview-capacity", vp.width, theme, "allocatable");
 
         // --- 2. Secondary cluster: Node-forbidden copy "Needs node read access (list nodes)" including ellipsis/hover at 390 ---
         const secContext = await browser.newContext({ baseURL: secondaryBaseURL, viewport: { width: vp.width, height: vp.height } });
@@ -471,7 +471,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
             expect(ddStyles.truncated).toBe(true);
           }
         }
-        await saveCapture(secPage, "k17-overview-capacity", vp.width, theme, "node-forbidden");
+        await saveCapture(secPage, "kubernetes-explorer-overview-capacity", vp.width, theme, "node-forbidden");
         await secContext.close();
 
         // --- 3. Issues row: Timeline and Investigate same size, all row text vertically centred ---
@@ -563,7 +563,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         }
         expect(rowGeometry.maxLineCenterDelta).toBeLessThanOrEqual(2);
 
-        await saveCapture(page, "k17-issues-row", vp.width, theme, "aligned");
+        await saveCapture(page, "kubernetes-explorer-issues-row", vp.width, theme, "aligned");
 
         // --- 4. Timeline list: Range 15m/1h/6h/24h keeps previous rows + spinner on range control, and Breaks only toggle (URL breaks=1) ---
         await tabs.nth(3).click();
@@ -591,7 +591,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         expect(await timelineList.getByRole("listitem").count()).toBeGreaterThan(0);
         expect(await timelineList.evaluate((el) => (el as HTMLElement).dataset.qaKeepInstance)).toBe("timeline-list-1");
 
-        await saveCapture(page, "k17-timeline-range", vp.width, theme, "loading");
+        await saveCapture(page, "kubernetes-explorer-timeline-range", vp.width, theme, "loading");
 
         await timelineRangeGate.release();
         await page.unroute("**/api/admin/kubernetes/timeline?*", timelineRangeGate.handler);
@@ -624,7 +624,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         await expect(timelineList.getByRole("button", { name: "Open change details" })).toHaveCount(0);
         await expect(timelineList.getByRole("link", { name: "Open crash details" })).toHaveCount(0);
 
-        await saveCapture(page, "k17-timeline-breaks-only", vp.width, theme, "active");
+        await saveCapture(page, "kubernetes-explorer-timeline-breaks-only", vp.width, theme, "active");
 
         // --- 5. Break detail first open (no layout jump), filter bar, range change, container dropdown, and side panel ---
         // Hold break-logs request so we can capture & measure before data arrives, then release and compare after data arrives
@@ -693,7 +693,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         expect(beforeBoxes.spinnerLeftOfAsk).toBe(true);
         expect(Math.abs(beforeBoxes.pane.height - beforeBoxes.side.height)).toBeLessThanOrEqual(1);
 
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "before-data");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "before-data");
 
         // Release break-logs barrier so data arrives
         await breakLogsGate.release();
@@ -737,7 +737,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         expect(Math.abs(afterBoxes.ask.width - beforeBoxes.ask.width)).toBeLessThanOrEqual(1);
         expect(Math.abs(afterBoxes.ask.height - beforeBoxes.ask.height)).toBeLessThanOrEqual(1);
 
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "after-data");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "after-data");
 
         // Break detail range change: keeps chart and logs mounted, dims chart area, shows spinner on range control
         const detailChartArea = timelineSection.locator("[data-timeline-chart-area]");
@@ -755,7 +755,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         await expect(timelineSection.getByLabel("Loading related root change history")).toHaveCount(0);
         expect(await detailChartArea.evaluate((el) => (el as HTMLElement).dataset.qaDetailChart)).toBe("kept");
 
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "range-loading");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "range-loading");
 
         await detailChangesGate.release();
         await page.unroute("**/api/admin/kubernetes/changes?*", detailChangesGate.handler);
@@ -801,7 +801,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         expect(sideScrollInfo.overflowY).toBe("auto");
         expect(sideScrollInfo.scrollHeight).toBeGreaterThan(sideScrollInfo.clientHeight);
 
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "side-panel-expanded");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "side-panel-expanded");
 
         // Container dropdown defaults to main container ("app") and switches to "istio-proxy" and "All containers"
         const containerSelect = breakLogsSection.getByRole("combobox", { name: "Log container", exact: true });
@@ -814,7 +814,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         await containerSelect.selectOption("istio-proxy");
         await expect(breakLogsSection.getByText("Container:", { exact: true })).toBeVisible();
         await expect(logPane).toContainText("envoy upstream connect reset before headers from local app container", { timeout: 15_000 });
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "container-switched");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "container-switched");
 
         await containerSelect.selectOption("*");
         await expect(logPane).toContainText("upstream payments timeout after 5000 ms", { timeout: 15_000 });
@@ -892,7 +892,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         await expect(drawer.getByRole("button", { name: "Open Secret common-secrets", exact: true })).toBeVisible();
 
         await verifyRelationshipMapGeometry(relationshipSvg);
-        await saveCapture(page, "k17-related-map", vp.width, theme, "deployment");
+        await saveCapture(page, "kubernetes-explorer-related-map", vp.width, theme, "deployment");
 
         // Also open Pod app-00000-rs-00 (3-node ownership chain + multi-row dependency grid) and verify no line crosses a box
         await drawer.getByRole("button", { name: "Open Pod app-00000-rs-00", exact: true }).first().click();
@@ -902,7 +902,7 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
         await expect(drawer.getByRole("button", { name: "Open Deployment app-00000", exact: true }).first()).toBeVisible();
 
         await verifyRelationshipMapGeometry(relationshipSvg);
-        await saveCapture(page, "k17-related-map", vp.width, theme, "pod");
+        await saveCapture(page, "kubernetes-explorer-related-map", vp.width, theme, "pod");
 
         await drawer.getByRole("button", { name: "Close panel", exact: true }).click();
         await expect(drawer).toHaveCount(0);
@@ -935,13 +935,13 @@ test.describe("Kubernetes explorer flow and first-sync experience", () => {
   });
 });
 
-test.describe("K17 delta recheck for QA-189 and QA-190", () => {
+test.describe("Explorer flow recheck: timeline filter bar and break detail", () => {
   test.skip(mode !== "recheck", "runs in isolated recheck mode");
   test.setTimeout(240_000);
 
   for (const vp of viewports) {
     for (const theme of themes) {
-      test(`QA-189 and QA-190 delta recheck at ${vp.width}px (${theme})`, async ({ browser }) => {
+      test(`Timeline filter bar and break detail recheck at ${vp.width}px (${theme})`, async ({ browser }) => {
         const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
         const page = await context.newPage();
         const pageErrors: string[] = [];
@@ -949,7 +949,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
 
         await applyTheme(page, theme);
 
-        // --- 1. QA-189: Deep links for Timeline+Breaks only and Workloads+Resource drawer ---
+        // --- 1. Deep links for Timeline+Breaks only and Workloads+Resource drawer ---
         await openApp(page, "/agent/kubernetes?view=timeline&breaks=1");
         await expect.poll(async () => {
           const res = await page.request.get("/api/admin/kubernetes/overview");
@@ -973,7 +973,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         await deepLinkDrawer.getByRole("button", { name: "Close panel", exact: true }).click();
         await expect(deepLinkDrawer).toHaveCount(0);
 
-        // --- 2. QA-189: Tab-bar navigation, resource drawer open/close, and Back/Forward history ---
+        // --- 2. Tab-bar navigation, resource drawer open/close, and Back/Forward history ---
         await openApp(page, "/agent/kubernetes");
         await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible({ timeout: 20_000 });
         await expect(viewTabs.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
@@ -1001,7 +1001,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
 
         await drawer.getByRole("button", { name: "Close panel", exact: true }).click();
         // Closing from a non-overview drawer tab (tab=logs) must close the drawer and drop ?r= and ?tab=.
-        // No retry click here: a single close that re-opens the drawer is exactly the QA-189 regression.
+        // No retry click here: a single close that re-opens the drawer is exactly the drawer regression this guards.
         await expect.poll(async () => {
           const params = new URL(page.url()).searchParams;
           return (await drawer.count()) === 0 && !params.has("r") && !params.has("tab");
@@ -1037,7 +1037,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         await expect(drawer).toHaveCount(0, { timeout: 5_000 });
         await expect(page).not.toHaveURL(/[?&]r=/);
 
-        // --- 3. QA-189: Issues-row Timeline button and Investigate button ---
+        // --- 3. Issues-row Timeline button and Investigate button ---
         await viewTabs.getByRole("tab", { name: "Issues", exact: true }).click();
         await expect(page).toHaveURL(/view=issues/);
         const issueSection = page.getByRole("region", { name: "Kubernetes issues", exact: true });
@@ -1087,7 +1087,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         const breaksOnlyTab = eventToggle.getByRole("tab", { name: "Breaks only", exact: true });
         await breaksOnlyTab.click();
 
-        // QA-189 core assertion: URL keeps view=timeline&breaks=1 and Timeline tab stays active
+        // Core assertion: URL keeps view=timeline&breaks=1 and Timeline tab stays active
         await expect(page).toHaveURL(/view=timeline/);
         await expect(page).toHaveURL(/breaks=1/);
         const timelineBreaksParams = new URL(page.url()).searchParams;
@@ -1099,9 +1099,9 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         await expect(timelineList.getByRole("link", { name: "Open break details" }).first()).toBeVisible({ timeout: 15_000 });
         await expect(timelineList.getByRole("button", { name: "Open change details" })).toHaveCount(0);
 
-        await saveCapture(page, "k17-timeline-breaks-only", vp.width, theme, "active");
+        await saveCapture(page, "kubernetes-explorer-timeline-breaks-only", vp.width, theme, "active");
 
-        // --- 4. QA-190: Break detail pane and side-panel edges don't move between loading and loaded; filter row is fixed height and scrolls sideways ---
+        // --- 4. Break detail pane and side-panel edges don't move between loading and loaded; filter row is fixed height and scrolls sideways ---
         const breakLogsGate = createRouteBarrier();
         await page.route("**/api/admin/kubernetes/break-logs?*", breakLogsGate.handler);
 
@@ -1166,7 +1166,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         expect(Math.abs(beforeBoxes.filters.height - 56)).toBeLessThanOrEqual(1);
         expect(Math.abs(beforeBoxes.pane.height - beforeBoxes.side.height)).toBeLessThanOrEqual(1);
 
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "before-data");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "before-data");
 
         await breakLogsGate.release();
         await page.unroute("**/api/admin/kubernetes/break-logs?*", breakLogsGate.handler);
@@ -1250,9 +1250,9 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         expect(Math.abs(afterBoxes.ask.width - beforeBoxes.ask.width)).toBeLessThanOrEqual(1);
         expect(Math.abs(afterBoxes.ask.height - beforeBoxes.ask.height)).toBeLessThanOrEqual(1);
 
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "after-data");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "after-data");
 
-        // Re-capture the remaining k17-break-detail states so all published break-detail finals reflect the fixed-height filter bar
+        // Re-capture the remaining break-detail states so all published break-detail finals reflect the fixed-height filter bar
         const detailChartArea = timelineSection.locator("[data-timeline-chart-area]");
         const detailRangeGroup = timelineSection.getByRole("group", { name: "Timeline window", exact: true });
         const detailChangesGate = createRouteBarrier();
@@ -1262,7 +1262,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         await detailChangesGate.hit;
         await expect(detailRangeGroup).toHaveAttribute("aria-busy", "true");
         await expect(detailChartArea).toHaveClass(/opacity-60/);
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "range-loading");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "range-loading");
 
         await detailChangesGate.release();
         await page.unroute("**/api/admin/kubernetes/changes?*", detailChangesGate.handler);
@@ -1275,12 +1275,12 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
         const topMessagesRegion = sidePanel.getByRole("region", { name: "Top messages", exact: true });
         await topMessagesRegion.getByRole("button", { name: "Show all (9)", exact: true }).click();
         await expect(topMessagesRegion.getByRole("listitem")).toHaveCount(9);
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "side-panel-expanded");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "side-panel-expanded");
 
         const containerSelect = breakLogsSection.getByRole("combobox", { name: "Log container", exact: true });
         await containerSelect.selectOption("istio-proxy");
         await expect(logPane).toContainText("envoy upstream connect reset before headers from local app container", { timeout: 15_000 });
-        await saveCapture(page, "k17-break-detail", vp.width, theme, "container-switched");
+        await saveCapture(page, "kubernetes-explorer-break-detail", vp.width, theme, "container-switched");
 
         expect(pageErrors).toEqual([]);
         await context.close();
@@ -1289,7 +1289,7 @@ test.describe("K17 delta recheck for QA-189 and QA-190", () => {
   }
 });
 
-test.describe("QA-189 drawer close from every drawer tab and stream stability", () => {
+test.describe("Drawer close from every drawer tab and stream stability", () => {
   test.skip(mode !== "fakekube", "runs in isolated fakekube mode");
   test.setTimeout(300_000);
 
@@ -1392,10 +1392,10 @@ test.describe("QA-189 drawer close from every drawer tab and stream stability", 
         if (vp.width === 1440 && theme === "dark") {
           await openApp(page, "/agent/kubernetes?view=resources&r=apps~v1~deployments/load-0000/app-00000&tab=logs");
           await expect(drawer).toBeVisible({ timeout: 20_000 });
-          await saveCapture(page, "k17-drawer-close", vp.width, theme, "open-logs");
+          await saveCapture(page, "kubernetes-explorer-drawer-close", vp.width, theme, "open-logs");
           await drawer.getByRole("button", { name: "Close panel", exact: true }).click();
           await expect(drawer).toHaveCount(0, { timeout: 5_000 });
-          await saveCapture(page, "k17-drawer-close", vp.width, theme, "closed");
+          await saveCapture(page, "kubernetes-explorer-drawer-close", vp.width, theme, "closed");
         }
 
         expect(pageErrors).toEqual([]);

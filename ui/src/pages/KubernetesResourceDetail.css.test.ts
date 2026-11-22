@@ -61,7 +61,7 @@ describe("Log header layout contract", () => {
     expect(css).not.toMatch(/resource-log-slot[^{]*\{[^}]*height: 272px/);
   });
 
-  // QA-209: the compact body is a fixed 128px box, and the slot around it used
+  // The compact body is a fixed 128px box, and the slot around it used
   // to be the one item a cramped Overview column shrank — which pushed the body
   // and the footer outside the card at 1440 and 1024. The compact slot is sized
   // by its content at every width, so nothing can be laid out below the card.
@@ -198,5 +198,22 @@ describe("Log header layout contract", () => {
     // A lower-weight selector in the media block never wins: the animated rule is
     // more specific, so the dot keeps pulsing for a reader who asked it not to.
     expect(weight(selector)).toBeGreaterThanOrEqual(weight(animated.selector));
+  });
+});
+
+describe("Resource drawer title at phone width", () => {
+  it("reserves the header actions' width so a long name never runs under them", () => {
+    const at = css.indexOf("@media (max-width: 639px) {\n  [data-resource-detail] {");
+    expect(at, "the mobile drawer rules are declared").toBeGreaterThan(-1);
+    const mobile = css.slice(at, css.indexOf("\n}\n", at));
+    const identity = mobile.slice(mobile.indexOf("[data-resource-detail] .resource-identity {"));
+    const reserve = Number(identity.match(/--resource-actions-reserve:\s*(\d+)px/)?.[1]);
+    // Investigate (40px) + gap (4px) + Close (28px) + the 10px inset, less the
+    // heading's own 16px right padding, plus breathing room.
+    expect(reserve).toBeGreaterThanOrEqual(72);
+    expect(identity.slice(0, identity.indexOf("}"))).toContain("padding-right: var(--resource-actions-reserve)");
+    // The status pills sit below the actions and take that width back.
+    const status = mobile.slice(mobile.indexOf("[data-resource-detail] .resource-status {"));
+    expect(status.slice(0, status.indexOf("}"))).toContain("margin: 4px calc(-1 * var(--resource-actions-reserve)) 0 0");
   });
 });

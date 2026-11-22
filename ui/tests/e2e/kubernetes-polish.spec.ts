@@ -4,7 +4,7 @@ import * as https from "node:https";
 import { openApp } from "./helpers";
 import { capturePath } from "./support/capture";
 
-const mode = process.env.E2E_K16_MODE || "fakekube";
+const mode = process.env.E2E_POLISH_MODE || "fakekube";
 const secondaryBaseURL = process.env.E2E_SECONDARY_BASE_URL || "";
 const fakekubeURL = process.env.E2E_FAKEKUBE_URL || "";
 const fakekubeCA = process.env.E2E_FAKEKUBE_CA || "";
@@ -61,7 +61,7 @@ async function verifyThemeAndQuietPage(page: Page, theme: "light" | "dark") {
   const bodyText = await page.locator("body").innerText();
   expect(bodyText).not.toMatch(/Session expired|Sign in to continue|Unhandled Runtime Error/i);
   for (const pattern of deletedWarningPatterns) {
-    expect(bodyText, `Forbidden K16 §3 string matched: ${pattern}`).not.toMatch(pattern);
+    expect(bodyText, `Removed warning copy matched: ${pattern}`).not.toMatch(pattern);
   }
 }
 
@@ -95,7 +95,7 @@ const themes = ["dark", "light"] as const;
 // KubernetesExplorerViews.tsx); indexed extras may add more.
 const alwaysListedTopologyKinds = ["Namespace", "Node", "Ingress", "Gateway", "HTTPRoute", "Service", "Deployment", "ReplicaSet", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod", "HorizontalPodAutoscaler", "ConfigMap", "Secret", "PersistentVolumeClaim", "Event"];
 
-test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
+test.describe("Kubernetes UI polish fakekube scale and states", () => {
   test.skip(mode !== "fakekube", "runs in fakekube scale mode");
   test.setTimeout(240_000);
 
@@ -116,7 +116,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(page.getByRole("status", { name: /^Cluster sync preparing/ })).toBeVisible();
         // Pending kinds during the first sync are not a coverage gap.
         await expect(page.getByRole("button", { name: "Resource coverage", exact: true })).toHaveCount(0);
-        await saveCapture(page, "k16-first-load", vp.width, theme, "syncing");
+        await saveCapture(page, "kubernetes-polish-first-load", vp.width, theme, "syncing");
         await context.close();
       }
     }
@@ -126,7 +126,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
 
   for (const vp of viewports) {
     for (const theme of themes) {
-      test(`U1-U6b, U8-U13, V1-V3 acceptance ${vp.width} ${theme}`, async ({ browser }) => {
+      test(`Polish acceptance at scale ${vp.width} ${theme}`, async ({ browser }) => {
         await callFakekube("/_fake/list-holds", { resource: "pods", hold: false, remaining: 0 });
         const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
         const page = await context.newPage();
@@ -148,7 +148,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible({ timeout: 30_000 });
         await expect(page.getByRole("region", { name: "Preparing your cluster", exact: true })).toHaveCount(0);
 
-        // U11: Tab order has Workloads second
+        // Tab order has Workloads second
         const tabs = page.getByRole("tablist", { name: "Kubernetes views", exact: true }).getByRole("tab");
         await expect(tabs).toHaveText([
           "Overview",
@@ -163,11 +163,11 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
           "Agent",
         ]);
 
-        // U1/U2/V3: At most 1 CoverageMarker on Overview (aggregated into TopBar, never duplicated in TimelineCard or BreakRow)
+        // At most 1 CoverageMarker on Overview (aggregated into TopBar, never duplicated in TimelineCard or BreakRow)
         expect(await page.getByRole("button", { name: "Resource coverage", exact: true }).count()).toBeLessThanOrEqual(1);
         await expect(page.getByRole("region", { name: "Break timeline", exact: true }).getByRole("button", { name: "Resource coverage", exact: true })).toHaveCount(0);
 
-        // U5: Overview Topology card two-column grid, 27 Namespaces, 800 ReplicaSets, 600 Pods, every kind reported, no overlap
+        // Overview Topology card two-column grid, 27 Namespaces, 800 ReplicaSets, 600 Pods, every kind reported, no overlap
         const overviewTopo = page.getByRole("region", { name: "Overview topology", exact: true });
         await overviewTopo.scrollIntoViewIfNeeded();
         await expect(overviewTopo).toBeVisible();
@@ -221,9 +221,9 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(topoLayout.values["ReplicaSet"]).toBe("800");
         const missingKinds = alwaysListedTopologyKinds.filter((kind) => topoLayout.values[kind] === undefined);
         expect(missingKinds, "every kind must be listed as reported").toEqual([]);
-        await saveCapture(page, "k16-overview", vp.width, theme, "complete-scale");
+        await saveCapture(page, "kubernetes-polish-overview", vp.width, theme, "complete-scale");
 
-        // U8 & U11: Navigate to Workloads (second tab), verify NamespaceSelect keyboard/search & free-text rejection
+        // Navigate to Workloads (second tab), verify NamespaceSelect keyboard/search & free-text rejection
         await tabs.nth(1).click();
         await expect(page).toHaveURL(/view=resources/);
         const workloadNs = page.getByRole("combobox", { name: "Workload namespace", exact: true });
@@ -234,7 +234,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(workloadListbox.getByRole("option")).toHaveCount(28); // All namespaces + kube-system + 26 load-0000..load-0025
         const allOptions = await workloadListbox.getByRole("option").allTextContents();
         expect(allOptions[0]).toBe("All namespaces");
-        await saveCapture(page, "k16-namespace-select", vp.width, theme, "open");
+        await saveCapture(page, "kubernetes-polish-namespace-select", vp.width, theme, "open");
 
         // Search and select via keyboard
         await workloadNs.fill("load-0001");
@@ -248,7 +248,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await page.keyboard.press("Escape");
         await expect(workloadNs).toHaveValue("load-0001");
 
-        // U6, U6b, V1, U13: Open long-named workload in load-0001
+        // Open long-named workload in load-0001
         const longName = "vikki-mobile-dev-checkout-orchestrator-canary-long-workload-v2";
         await page.getByRole("textbox", { name: "Resource name", exact: true }).fill("vikki-mobile-dev");
         await page.getByRole("button", { name: new RegExp(longName) }).first().click();
@@ -256,12 +256,12 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(drawer).toBeVisible();
         await expect(drawer).toContainText(longName);
 
-        // U6b: Workload Uptime tile omits container badge
+        // Workload Uptime tile omits container badge
         const workloadUptime = drawer.getByLabel("Uptime metric tile", { exact: true });
         await expect(workloadUptime).toBeVisible();
         await expect(workloadUptime.locator(".metric-container-label")).toHaveCount(0);
 
-        // U6 & V1: CPU and memory usage chart has two-row header (row 1: title + legend, row 2: range buttons + since opened) with no overlap
+        // CPU and memory usage chart has two-row header (row 1: title + legend, row 2: range buttons + since opened) with no overlap
         if (vp.name === "mobile") {
           await drawer.getByRole("button", { name: /CPU usage history/i }).click();
         }
@@ -283,20 +283,20 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(chartHeaderGeometry.captionPosition).toBe("static");
         expect(chartHeaderGeometry.overlapsVertically).toBe(false);
         expect(chartHeaderGeometry.rangeText).toContain("since opened");
-        await saveCapture(page, "k16-workload-metrics", vp.width, theme, "long-name");
+        await saveCapture(page, "kubernetes-polish-workload-metrics", vp.width, theme, "long-name");
 
-        // U13: Resource detail Timeline tab for empty history shows single short line "No changes or crashes in this range." and zero coverage markers
+        // Resource detail Timeline tab for empty history shows single short line "No changes or crashes in this range." and zero coverage markers
         await openDrawerTab(page, drawer, "timeline", "Timeline");
         const resourceHistory = drawer.getByRole("region", { name: "Resource change history", exact: true });
         await expect(resourceHistory).toBeVisible();
         await expect(resourceHistory.getByText("No changes or crashes in this range.", { exact: true })).toBeVisible();
         expect(await resourceHistory.getByRole("button", { name: "Resource coverage", exact: true }).count()).toBeLessThanOrEqual(1);
-        await saveCapture(page, "k16-resource-timeline", vp.width, theme, "empty");
+        await saveCapture(page, "kubernetes-polish-resource-timeline", vp.width, theme, "empty");
 
         await drawer.getByRole("button", { name: "Close panel", exact: true }).click();
         await expect(drawer).toHaveCount(0);
 
-        // Switch Workload namespace to load-0000 to inspect app-00000 (U12 Related & Pod U6b/V2)
+        // Switch Workload namespace to load-0000 to inspect app-00000 (Related tab and Pod detail)
         await page.getByRole("textbox", { name: "Resource name", exact: true }).fill("");
         await workloadNs.focus();
         await workloadNs.fill("load-0000");
@@ -307,7 +307,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(appDrawer).toBeVisible();
         await expect(appDrawer).toContainText("app-00000");
 
-        // U12: Related tab shows actual connected children/owners/Service/Ingress/HPA/ConfigMap/Secret/PVC/SA/Node and excludes all 10 sibling Deployments sharing common-secrets
+        // Related tab shows actual connected children/owners/Service/Ingress/HPA/ConfigMap/Secret/PVC/SA/Node and excludes all 10 sibling Deployments sharing common-secrets
         await openDrawerTab(page, appDrawer, "related", "Related");
         await expect(appDrawer.getByRole("button", { name: "Open Secret common-secrets", exact: true })).toBeVisible({ timeout: 20_000 });
         for (const expectedBtn of [
@@ -324,9 +324,9 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         const relatedText = await appDrawer.innerText();
         expect(relatedText).toContain("app-00000-sa");
         expect(relatedText).not.toContain("sibling-shared-secret-");
-        await saveCapture(page, "k16-resource-related", vp.width, theme, "directed");
+        await saveCapture(page, "kubernetes-polish-resource-related", vp.width, theme, "directed");
 
-        // U6b & V2: Open Pod app-00000-rs-00 from Related tab and verify Pod Uptime container badge ellipsis + no clipping at 1440 & 390
+        // Open Pod app-00000-rs-00 from Related tab and verify Pod Uptime container badge ellipsis + no clipping at 1440 & 390
         await appDrawer.getByRole("button", { name: "Open Pod app-00000-rs-00", exact: true }).click();
         const podDrawer = page.getByRole("dialog", { name: "Details panel" });
         await expect(podDrawer).toBeVisible();
@@ -353,10 +353,10 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(uptimeGeometry.badgeOverlapsH3).toBe(false);
         expect(uptimeGeometry.badgeOverflowX).toBe("ellipsis");
         expect(uptimeGeometry.sinceClipped).toBe(false);
-        await saveCapture(page, "k16-pod-uptime", vp.width, theme, "long-container");
+        await saveCapture(page, "kubernetes-polish-pod-uptime", vp.width, theme, "long-container");
         await podDrawer.getByRole("button", { name: "Close panel", exact: true }).click();
 
-        // U8 & U9: Issues tab -> NamespaceSelect + Alert on new issues disabled when no channel is enabled
+        // Issues tab -> NamespaceSelect + Alert on new issues disabled when no channel is enabled
         await tabs.nth(2).click();
         await expect(page).toHaveURL(/view=issues/);
         const issueSection = page.getByRole("region", { name: "Kubernetes issues", exact: true });
@@ -367,9 +367,9 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(issueSection.getByText("No alert channel is on", { exact: true })).toBeVisible();
         await expect(issueSection.getByRole("link", { name: "Channel settings" })).toHaveAttribute("href", "https://docs.versusincident.com/#/agent/channels");
         await expect(issueSection.getByRole("combobox", { name: "Issue namespace", exact: true })).toBeVisible();
-        await saveCapture(page, "k16-issues-alerts", vp.width, theme, "no-channel");
+        await saveCapture(page, "kubernetes-polish-issues-alerts", vp.width, theme, "no-channel");
 
-        // U4 & U10: Timeline tab -> virtualised list of breaks and changes, smooth paging, selection -> detail chart & Logs at break & CrashJournal
+        // Timeline tab -> virtualised list of breaks and changes, smooth paging, selection -> detail chart & Logs at break & CrashJournal
         await tabs.nth(3).click();
         await expect(page).toHaveURL(/view=timeline/);
         const timelineSection = page.getByRole("region", { name: "Kubernetes change timeline", exact: true });
@@ -389,9 +389,9 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await page.keyboard.press("Enter");
         await expect(timelineNs).toHaveValue("load-0000");
         await expect(timelineList.getByRole("listitem").first()).toBeVisible({ timeout: 30_000 });
-        await saveCapture(page, "k16-timeline-list", vp.width, theme, "populated");
+        await saveCapture(page, "kubernetes-polish-timeline-list", vp.width, theme, "populated");
 
-        // U4 paging: click Next page on Timeline pages and verify smooth transition
+        // Timeline paging: click Next page on Timeline pages and verify smooth transition
         const changePager = timelineSection.getByRole("navigation", { name: "Timeline pages", exact: true });
         const nextBtn = changePager.getByRole("button", { name: "Next page", exact: true });
         await expect(nextBtn).toBeEnabled();
@@ -401,7 +401,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await changePager.getByRole("button", { name: "Previous page", exact: true }).click();
         await expect(changePager.getByText(/^Page 1( \/ \S+)?$/)).toBeVisible();
 
-        // U4 detail & deep link + U10 Captured crash evidence: select break/crash for app-00000
+        // Timeline detail, deep link and captured crash evidence: select break/crash for app-00000
         await timelineList.evaluate((el) => { el.scrollTop = 0; });
         const breakOrCrashLink = timelineList.getByRole("link", { name: /Open (break|crash) details/ }).first();
         await breakOrCrashLink.click({ force: true });
@@ -411,7 +411,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await expect(timelineSection.getByRole("region", { name: "Logs at break", exact: true })).toBeVisible();
         await expect(timelineSection.getByRole("group", { name: "Container log mode", exact: true }).getByRole("button")).toHaveText(["Merged", "Previous container", "Current"]);
 
-        // U10: Captured crash evidence header "N crashes" + 2-line Capture details
+        // Captured crash evidence header "N crashes" + 2-line Capture details
         const crashJournal = timelineSection.getByRole("region", { name: "Captured crash evidence", exact: true });
         await expect(crashJournal).toBeVisible();
         await expect(crashJournal.locator("header")).toContainText(/\d+ crashes\b/);
@@ -422,9 +422,9 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(coverageLines).toHaveLength(2);
         expect(coverageLines[0]).toMatch(/^Window:/);
         expect(coverageLines[1]).toMatch(/^Capture started:/);
-        await saveCapture(page, "k16-timeline-detail", vp.width, theme, "selected");
+        await saveCapture(page, "kubernetes-polish-timeline-detail", vp.width, theme, "selected");
 
-        // U8 Traffic namespace dropdown
+        // Traffic namespace dropdown
         await tabs.nth(8).click();
         await expect(page).toHaveURL(/view=traffic/);
         await expect(page.getByRole("combobox", { name: "Traffic namespace", exact: true })).toBeVisible();
@@ -436,7 +436,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
       // The permission-limited instance is independent of the scale cluster, so
       // its checks run on their own and a scale-cluster failure cannot hide them.
       test(`coverage marker, omission note and alert tip on a permission-limited cluster ${vp.width} ${theme}`, async ({ browser }) => {
-        // Secondary instance checks (U1, U2, V3 CoverageMarker on refused kinds + U9 missing public_host with channel enabled + U13 incomplete marker)
+        // Secondary instance checks (CoverageMarker on refused kinds, missing public_host with a channel enabled, incomplete marker)
         const secContext = await browser.newContext({ baseURL: secondaryBaseURL, viewport: { width: vp.width, height: vp.height } });
         const secPage = await secContext.newPage();
         await applyTheme(secPage, theme);
@@ -461,7 +461,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(secReported.map((label) => label.trim())).not.toContain("Node");
         expect(secReported.map((label) => label.trim())).not.toContain("Secret");
         await secTopo.getByText(/^\+\d+ kinds not reported$/).scrollIntoViewIfNeeded();
-        await saveCapture(secPage, "k16-limited-topology", vp.width, theme, "kinds-not-reported");
+        await saveCapture(secPage, "kubernetes-polish-limited-topology", vp.width, theme, "kinds-not-reported");
         await secPage.evaluate(() => window.scrollTo(0, 0));
         // The app shell scrolls an inner container; reset every scrolled element so the capture starts at the page top.
         await secPage.evaluate(() => {
@@ -470,13 +470,13 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
           });
         });
         await expect(secPage.getByRole("region", { name: "Cluster health", exact: true })).toBeInViewport();
-        await saveCapture(secPage, "k16-limited-overview", vp.width, theme, "cluster-health");
+        await saveCapture(secPage, "kubernetes-polish-limited-overview", vp.width, theme, "cluster-health");
 
-        // V3 & U2: At most ONE CoverageMarker on Overview
+        // At most ONE CoverageMarker on Overview
         const overviewMarkers = secPage.getByRole("button", { name: "Resource coverage", exact: true });
         await expect(overviewMarkers).toHaveCount(1);
 
-        // U1: Hover/focus CoverageMarker -> popover below tab bar, max-width 320, plain copy "Some data is incomplete" + affected kinds
+        // Hover/focus CoverageMarker -> popover below tab bar, max-width 320, plain copy "Some data is incomplete" + affected kinds
         await overviewMarkers.first().click();
         const coveragePopover = secPage.getByRole("region", { name: "Resource coverage details", exact: true });
         await expect(coveragePopover).toBeVisible();
@@ -496,11 +496,11 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         expect(popoverPlacement.popTop).toBeGreaterThanOrEqual(popoverPlacement.tabsBottom);
         expect(popoverPlacement.popWidth).toBeLessThanOrEqual(321);
         expect(popoverPlacement.popRight).toBeLessThanOrEqual(popoverPlacement.viewportWidth);
-        await saveCapture(secPage, "k16-coverage-popover", vp.width, theme, "open");
+        await saveCapture(secPage, "kubernetes-polish-coverage-popover", vp.width, theme, "open");
         await secPage.keyboard.press("Escape");
         await expect(coveragePopover).toHaveCount(0);
 
-        // U9 (D3) & R4 on Secondary Issues tab: missing public_host shows tip, channel enabled allows turning ON and OFF
+        // Secondary Issues tab: missing public_host shows tip, channel enabled allows turning ON and OFF
         const secTabs = secPage.getByRole("tablist", { name: "Kubernetes views", exact: true }).getByRole("tab");
         await secTabs.nth(2).click();
         const secIssues = secPage.getByRole("region", { name: "Kubernetes issues", exact: true });
@@ -512,7 +512,7 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
         await secSwitch.click();
         await expect(secSwitch).toHaveAttribute("aria-checked", "true");
         await expect(secIssues.getByRole("group", { name: "Issue alert level", exact: true })).toBeVisible();
-        await saveCapture(secPage, "k16-issues-alerts", vp.width, theme, "missing-public-host-enabled");
+        await saveCapture(secPage, "kubernetes-polish-issues-alerts", vp.width, theme, "missing-public-host-enabled");
         await secSwitch.click();
         await expect(secSwitch).toHaveAttribute("aria-checked", "false");
 
@@ -522,13 +522,13 @@ test.describe("Kubernetes UI polish K16 fakekube scale and states", () => {
   }
 });
 
-test.describe("Kubernetes UI polish K16 real kind live logs (U7) and Related (U12)", () => {
+test.describe("Kubernetes UI polish real kind live logs and Related", () => {
   test.skip(mode !== "kind", "runs in real kind mode");
   test.setTimeout(240_000);
 
   for (const vp of viewports) {
     for (const theme of themes) {
-      test(`U7 Current -> Previous -> Current live kind logs ${vp.width} ${theme}`, async ({ browser }) => {
+      test(`Current -> Previous -> Current live kind logs ${vp.width} ${theme}`, async ({ browser }) => {
         const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
         const page = await context.newPage();
         const pageErrors: string[] = [];
@@ -575,10 +575,10 @@ test.describe("Kubernetes UI polish K16 real kind live logs (U7) and Related (U1
         const previousBtn = instanceGroup.getByRole("button", { name: "Previous logs", exact: true });
         await expect(currentBtn).toHaveAttribute("aria-pressed", "true");
         await expect(previousBtn).toHaveAttribute("aria-pressed", "false");
-        // Following is automatic in K22; the status pill names the live read.
+        // Following is automatic; the status pill names the live read.
         const statusPill = logsRegion.getByLabel("Log connection status", { exact: true });
         await expect(statusPill).toHaveText("Live");
-        await saveCapture(page, "k16-kind-logs", vp.width, theme, "current");
+        await saveCapture(page, "kubernetes-polish-kind-logs", vp.width, theme, "current");
 
         // Switch to Previous logs on real kind cluster
         await previousBtn.click();
@@ -586,7 +586,7 @@ test.describe("Kubernetes UI polish K16 real kind live logs (U7) and Related (U1
         await expect(currentBtn).toHaveAttribute("aria-pressed", "false");
         await expect(statusPill).toHaveText("Previous");
         await expect(logOutput).toContainText("previous-container-fatal", { timeout: 30_000 });
-        await saveCapture(page, "k16-kind-logs", vp.width, theme, "previous");
+        await saveCapture(page, "kubernetes-polish-kind-logs", vp.width, theme, "previous");
 
         // Switch back to Current logs with one click and confirm live stream resumes
         await currentBtn.click();
@@ -594,7 +594,7 @@ test.describe("Kubernetes UI polish K16 real kind live logs (U7) and Related (U1
         await expect(previousBtn).toHaveAttribute("aria-pressed", "false");
         await expect(statusPill).toHaveText("Live", { timeout: 30_000 });
         await expect(logOutput).toContainText("current-live-stream", { timeout: 30_000 });
-        await saveCapture(page, "k16-kind-logs", vp.width, theme, "returned-current");
+        await saveCapture(page, "kubernetes-polish-kind-logs", vp.width, theme, "returned-current");
 
         expect(pageErrors).toEqual([]);
         await context.close();

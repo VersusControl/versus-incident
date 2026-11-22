@@ -84,10 +84,13 @@ var regionalHosts = map[string]string{
 	"ecs":            "ecs",
 	"eks":            "eks",
 	"elasticache":    "elasticache",
+	"ecr":            "api.ecr",
 	"elbv2":          "elasticloadbalancing",
 	"events":         "events",
 	"kinesis":        "kinesis",
+	"kms":            "kms",
 	"lambda":         "lambda",
+	"ram":            "ram",
 	"rds":            "rds",
 	"s3":             "s3",
 	"sfn":            "states",
@@ -101,8 +104,10 @@ var globalHosts = map[string]string{
 	"cloudfront": "cloudfront.amazonaws.com",
 	"health":     "health.us-east-1.amazonaws.com",
 	"iam":        "iam.amazonaws.com",
-	"route53":    "route53.amazonaws.com",
-	"s3-global":  "s3.amazonaws.com",
+	// Organizations has one endpoint, in us-east-1.
+	"organizations": "organizations.us-east-1.amazonaws.com",
+	"route53":       "route53.amazonaws.com",
+	"s3-global":     "s3.amazonaws.com",
 }
 
 // env carries one account's credentials, transport and shared limiter into a
@@ -289,6 +294,12 @@ func errorCode(err error) string {
 		case "RequestTimeout", "RequestTimeoutException":
 			return awsauth.ErrTimeout.Error()
 		}
+		// Every AccessDenied variant (AccessDeniedFault, an organization's
+		// AccessDeniedForDependencyException) is a denial, never a feature
+		// that is off.
+		if strings.HasPrefix(apiError.ErrorCode(), "AccessDenied") {
+			return CodeDenied
+		}
 	}
 	if awsauth.ServiceNotInRegion(err) {
 		return CodeNotInRegion
@@ -326,6 +337,25 @@ func credentialsRejected(err error) bool {
 	}
 	return false
 }
+
+// notSetCodes are the answers AWS gives when a setting simply is not set:
+// no bucket policy, no public access block, no tag set, no such role, no
+// repository policy, a credential report not generated yet, no
+// organization. Each is a read
+// that succeeded and found nothing, never a gap and never a denial.
+var notSetCodes = map[string]bool{
+	"NoSuchBucketPolicy":                   true,
+	"NoSuchPublicAccessBlockConfiguration": true,
+	"NoSuchTagSet":                         true,
+	"NoSuchEntity":                         true,
+	"RepositoryPolicyNotFoundException":    true,
+	"ReportNotPresent":                     true,
+	// The account is in no organization.
+	"AWSOrganizationsNotInUseException": true,
+}
+
+// notSetAnswer reports whether err is AWS saying a setting is not set.
+func notSetAnswer(err error) bool { return err != nil && notSetCodes[apiErrorCode(err)] }
 
 // apiErrorCode returns the provider error code without its message, for the
 // few "not configured" answers that are data rather than failures.

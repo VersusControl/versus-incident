@@ -41,18 +41,18 @@ func TestRegistryRenewsTwentyEpochsWithoutBrowserOrResolveRequests(t *testing.T)
 		return token, expires, err
 	}
 	cluster := fleet.add("rotating", fixture, credential, 0)
-	fleet.startWithin(time.Second)
+	fleet.start()
 	current := func() *Service {
 		fleet.registry.mu.Lock()
 		defer fleet.registry.mu.Unlock()
 		return fleet.registry.entries[0].Service
 	}
-	waitUntil(t, 10*time.Second, "initial autonomous publication", func() bool {
+	eventually(t, "initial autonomous publication", func() bool {
 		s := current()
 		generation, ok := publishedGeneration(fleet.view, s.ActiveScope())
 		return ok && len(podNames(generation)) > 0
 	})
-	waitUntil(t, 5*time.Second, "first complete publication", func() bool { return !current().recordedFirstReadyAt().IsZero() })
+	eventually(t, "first complete publication", func() bool { return !current().recordedFirstReadyAt().IsZero() })
 	first := current()
 	for epoch := 1; epoch <= 20; epoch++ {
 		previous := current()
@@ -60,7 +60,7 @@ func TestRegistryRenewsTwentyEpochsWithoutBrowserOrResolveRequests(t *testing.T)
 		next := credential.expires.Add(-credential.skew)
 		credential.mu.Unlock()
 		clock.Store(next.UnixNano())
-		waitUntil(t, 10*time.Second, "autonomous successor publication", func() bool {
+		eventually(t, "autonomous successor publication", func() bool {
 			service := current()
 			if service.identity == previous.identity {
 				return false
@@ -173,7 +173,9 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 	registry := NewServiceRegistry(service)
 	registry.StartCapture(t.Context())
 	defer registry.Close()
-	waitUntil(t, 10*time.Second, "initial publication", func() bool {
+	// Every wait below polls for the state it names and returns as soon as
+	// it holds; the budgets only bound a hung run on a loaded machine.
+	eventually(t, "initial publication", func() bool {
 		service.changes.mu.Lock()
 		cache := service.changes.inventories[service.indexScope()]
 		service.changes.mu.Unlock()
@@ -185,11 +187,14 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 		return cache.generation.Revision != ""
 	})
 	fail.Store(true)
-	waitUntil(t, 5*time.Second, "outage cooldown", func() bool { return time.Now().Before(service.recovery.deadline()) })
+	// A recorded failure sets a retry time, and only a publication clears
+	// it. Waiting for the cooldown to be in the future instead could miss a
+	// one-second first cooldown on a loaded machine.
+	eventually(t, "outage cooldown", func() bool { return !service.recovery.deadline().IsZero() })
 	if service.identity.ctx.Err() != nil {
 		t.Fatal("transient provider outage retired accepted credential material")
 	}
-	waitUntil(t, 5*time.Second, "failed collection recorded", func() bool {
+	eventually(t, "failed collection recorded", func() bool {
 		service.changes.mu.Lock()
 		cache := service.changes.inventories[service.indexScope()]
 		service.changes.mu.Unlock()
@@ -200,18 +205,32 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 		defer cache.mu.RUnlock()
 		return cache.failed
 	})
-	before := calls.Load()
-	deadline := service.recovery.deadline()
-	for i := 0; i < 100; i++ {
-		if _, err := registry.ResolveCluster("org", "cluster"); err == nil {
-			t.Fatal("outage served a successful warming response")
+	// Request traffic inside one cooldown must neither call the credential
+	// source nor move the retry time. The supervisor itself retries when a
+	// cooldown ends, so a measurement that outlives its cooldown proves
+	// nothing and is taken again inside the next, longer one.
+	var before int32
+	eventually(t, "request traffic measured inside one cooldown", func() bool {
+		deadline := service.recovery.deadline()
+		before = calls.Load()
+		if !time.Now().Before(deadline) {
+			return false
 		}
-	}
-	if calls.Load() != before || !service.recovery.deadline().Equal(deadline) {
-		t.Fatal("request traffic bypassed cooldown")
-	}
+		for i := 0; i < 100; i++ {
+			if _, err := registry.ResolveCluster("org", "cluster"); err == nil {
+				t.Fatal("outage served a successful warming response")
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if calls.Load() != before || !service.recovery.deadline().Equal(deadline) {
+			t.Fatal("request traffic bypassed cooldown")
+		}
+		return true
+	})
 	fail.Store(false)
-	waitUntil(t, 10*time.Second, "autonomous provider recovery", func() bool {
+	eventually(t, "autonomous provider recovery", func() bool {
 		registry.mu.Lock()
 		fresh := registry.entries[0].Service
 		registry.mu.Unlock()
@@ -260,7 +279,7 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 	}
 	fleet := newBootFleet(t, "org", storage.NewMemory(), "sequence")
 	cluster := fleet.add("cluster", fixture, source, 0)
-	fleet.startWithin(time.Second)
+	fleet.start()
 	current := func() *Service {
 		fleet.registry.mu.Lock()
 		defer fleet.registry.mu.Unlock()
@@ -274,12 +293,12 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 		issues, err := service.Issues(t.Context(), IssueOptions{Broken: true})
 		return err == nil && issues.Broken.Total == 1 && len(issues.Items) > 0
 	}
-	waitUntil(t, 10*time.Second, "nonzero broken workload and capacity publication", func() bool { return assertPublished(current()) })
-	waitUntil(t, 5*time.Second, "first complete publication before renewal", func() bool { return !current().recordedFirstReadyAt().IsZero() })
+	eventually(t, "nonzero broken workload and capacity publication", func() bool { return assertPublished(current()) })
+	eventually(t, "first complete publication before renewal", func() bool { return !current().recordedFirstReadyAt().IsZero() })
 	before := current()
 	firstReady := before.recordedFirstReadyAt()
 	clock.Add(int64(13 * time.Minute))
-	waitUntil(t, 10*time.Second, "native renewal recollection without browser requests", func() bool {
+	eventually(t, "native renewal recollection without browser requests", func() bool {
 		fresh := current()
 		if fresh.identity == before.identity {
 			return false
@@ -288,7 +307,7 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 		return ok && len(podNames(generation)) == 1
 	})
 	renewed := current()
-	waitUntil(t, 5*time.Second, "renewed snapshot bodies", func() bool { return assertPublished(renewed) })
+	eventually(t, "renewed snapshot bodies", func() bool { return assertPublished(renewed) })
 	if _, err := before.Overview(t.Context()); err == nil {
 		t.Fatal("retired credential returned protected inventory")
 	}
@@ -307,7 +326,7 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 	if _, err := renewed.Overview(t.Context()); err == nil {
 		t.Fatal("credential outage returned a successful zero-filled snapshot")
 	}
-	waitUntil(t, 8*time.Second, "provider outage after rejected bearer", func() bool { return signingCalls.Load() >= 3 })
+	eventually(t, "provider outage after rejected bearer", func() bool { return signingCalls.Load() >= 3 })
 	count := signingCalls.Load()
 	for i := 0; i < 100; i++ {
 		_, _ = fleet.registry.ResolveCluster("org", cluster.id)
@@ -318,7 +337,7 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 	fail.Store(false)
 	acceptMint.Store(true)
 	clock.Add(int64(2 * time.Second))
-	waitUntil(t, 12*time.Second, "autonomous post-outage publication", func() bool {
+	eventually(t, "autonomous post-outage publication", func() bool {
 		fresh := current()
 		if fresh.identity == renewed.identity {
 			return false
@@ -327,7 +346,7 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 		return ok && len(podNames(generation)) == 1
 	})
 	recovered := current()
-	waitUntil(t, 5*time.Second, "recovered nonzero snapshot bodies", func() bool { return assertPublished(recovered) })
+	eventually(t, "recovered nonzero snapshot bodies", func() bool { return assertPublished(recovered) })
 	if !firstReady.IsZero() && !recovered.recordedFirstReadyAt().Equal(firstReady) {
 		t.Fatal("recovery reopened first publication")
 	}
@@ -349,11 +368,11 @@ func TestRegistryRestartsExitedProducerWithoutRetiringAuthorizedSnapshot(t *test
 	fleet := newBootFleet(t, "org", storage.NewMemory(), "worker-restart")
 	fixture := newFakeCluster(t, "synthetic", "api")
 	fleet.add("cluster", fixture, staticCredential(t, "synthetic"), 0)
-	fleet.startWithin(time.Second)
+	fleet.start()
 	fleet.registry.mu.Lock()
 	service := fleet.registry.entries[0].Service
 	fleet.registry.mu.Unlock()
-	waitUntil(t, 8*time.Second, "initial committed inventory", func() bool {
+	eventually(t, "initial committed inventory", func() bool {
 		generation, ok := publishedGeneration(fleet.view, service.ActiveScope())
 		return ok && len(podNames(generation)) == 1
 	})
@@ -365,7 +384,7 @@ func TestRegistryRestartsExitedProducerWithoutRetiringAuthorizedSnapshot(t *test
 	service.changes.mu.Unlock()
 	cancel()
 	<-done
-	waitUntil(t, 5*time.Second, "same-scope autonomous producer restart", func() bool {
+	eventually(t, "same-scope autonomous producer restart", func() bool {
 		overview, err := service.Overview(t.Context())
 		if err != nil || overview.Pods != 1 || overview.Nodes != 1 {
 			t.Fatal("worker exit wiped an authorized committed snapshot")
@@ -627,7 +646,7 @@ func TestCloudTokenTransportFailureAtBootIsRetriedUntilTheClusterConnects(t *tes
 	logs := captureLogLines(t, "info")
 	endpoint := newBootTokenEndpoint(t, 2, false)
 	registry, _ := startBootCluster(t, endpoint)
-	waitUntil(t, 30*time.Second, "publication after the token endpoint answers", func() bool { return bootClusterPublished(registry) })
+	eventually(t, "publication after the token endpoint answers", func() bool { return bootClusterPublished(registry) })
 	if got := endpoint.requests.Load(); got <= 2 {
 		t.Fatalf("token requests = %d, want a retry after the transport failures", got)
 	}
@@ -1103,7 +1122,7 @@ func TestTokenSourceNeverMakesACallerWaitForARenewal(t *testing.T) {
 			t.Fatalf("caller %d = %q, %v after %v; want the valid token at once", i, header, err, time.Since(started))
 		}
 	}
-	waitUntil(t, time.Second, "the renewal to dial", func() bool { return dials.Load() == 1 })
+	eventually(t, "the renewal to dial", func() bool { return dials.Load() == 1 })
 	if dials.Load() != 1 {
 		t.Fatalf("renewal dials = %d, want one", dials.Load())
 	}
@@ -1208,7 +1227,7 @@ func TestRegistryCloseStopsRebuildsAndRefreshes(t *testing.T) {
 		t.Fatal("a cluster with no token resolved")
 	}
 	registry.Close()
-	waitUntil(t, time.Second, "the token refresh in flight to stop", func() bool {
+	eventually(t, "the token refresh in flight to stop", func() bool {
 		source.mu.Lock()
 		defer source.mu.Unlock()
 		return source.inflight == nil

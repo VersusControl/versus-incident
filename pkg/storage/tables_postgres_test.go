@@ -120,7 +120,13 @@ func seedTablesPlanData(t *testing.T, p *postgresProvider, scope tenancy.OrgScop
 // main read paths have an index: resources by unit, name and ARN, changes in
 // a window (for one organization and for an enterprise read of two), cost
 // by team, service and day, and open increases. "a|b" accepts
-// either of two indexes that lead with the same key.
+// either of two indexes: two that lead with the same key, or, for a cost
+// statement, its narrow index and the covering totals index, which the
+// planner prefers once the table holds other organizations' rows. Open
+// increases accept any of the increase indexes, which all lead with the
+// organization: an organization holds few increases, so on a shared
+// database the planner may narrow by the organization through any of them.
+// Either way the read uses an index, never a sequential scan.
 func TestPostgresTablesMainQueriesUseIndexes(t *testing.T) {
 	defer failOnPanic(t)
 	p := tablesPostgres(t)
@@ -155,25 +161,25 @@ func TestPostgresTablesMainQueriesUseIndexes(t *testing.T) {
 		{"changes of a resource", "aws_changes_resource", func() (string, []any) {
 			return p.changesSQL(scope, AWSChangeQuery{ResourceARN: "arn:3", Since: tablesBase, Until: tablesBase.Add(48 * time.Hour)})
 		}},
-		{"cost of a team by day", "finops_cost_lines_team", func() (string, []any) {
+		{"cost of a team by day", "finops_cost_lines_team|finops_cost_lines_totals", func() (string, []any) {
 			return p.costTotalsSQL(scope, FinOpsCostQuery{Team: &team, From: from, Through: through}, []FinOpsDimension{FinOpsByDay})
 		}},
-		{"cost of a service by day", "finops_cost_lines_service", func() (string, []any) {
+		{"cost of a service by day", "finops_cost_lines_service|finops_cost_lines_totals", func() (string, []any) {
 			return p.costTotalsSQL(scope, FinOpsCostQuery{Service: "storage", From: from, Through: through}, []FinOpsDimension{FinOpsByDay})
 		}},
-		{"cost by team over days", "finops_cost_lines_day", func() (string, []any) {
+		{"cost by team over days", "finops_cost_lines_day|finops_cost_lines_totals", func() (string, []any) {
 			return p.costTotalsSQL(scope, FinOpsCostQuery{From: from, Through: through}, []FinOpsDimension{FinOpsByTeam})
 		}},
-		{"cost of a team list by day", "finops_cost_lines_team", func() (string, []any) {
+		{"cost of a team list by day", "finops_cost_lines_team|finops_cost_lines_totals", func() (string, []any) {
 			return p.costTotalsSQL(scope, FinOpsCostQuery{Teams: []string{"payments", "search"}, From: from, Through: through}, []FinOpsDimension{FinOpsByDay})
 		}},
-		{"cost of an account list by day", "finops_cost_lines_account", func() (string, []any) {
+		{"cost of an account list by day", "finops_cost_lines_account|finops_cost_lines_totals", func() (string, []any) {
 			return p.costTotalsSQL(scope, FinOpsCostQuery{Accounts: []string{"acct-3", "acct-4"}, From: from, Through: through}, []FinOpsDimension{FinOpsByDay})
 		}},
-		{"cost of a region list by day", "finops_cost_lines_region", func() (string, []any) {
+		{"cost of a region list by day", "finops_cost_lines_region|finops_cost_lines_totals", func() (string, []any) {
 			return p.costTotalsSQL(scope, FinOpsCostQuery{Regions: []string{"region-3"}, From: from, Through: through}, []FinOpsDimension{FinOpsByDay})
 		}},
-		{"open increases", "finops_increases_status", func() (string, []any) {
+		{"open increases", "finops_increases_status|finops_increases_service|finops_increases_owner", func() (string, []any) {
 			return p.increasesSQL(scope, FinOpsIncreaseQuery{Statuses: []string{"open", "expected"}})
 		}},
 	}

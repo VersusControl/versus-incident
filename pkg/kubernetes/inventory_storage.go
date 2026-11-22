@@ -17,7 +17,41 @@ import (
 	"github.com/google/uuid"
 )
 
-const inventoryLeaseTTL = 3 * time.Minute
+// inventoryLeaseTTL is how long an inventory lease outlives its last
+// renewal. A process that dies without releasing its lease (a crash, an OOM
+// kill) blocks every other replica until it expires, and nothing lists the
+// cluster meanwhile. It is kept well below the stale limit for kinds read
+// every 30 seconds or every minute (3 minutes, see syncKindStale), so a
+// takeover after a crash lists the cluster again before its view can turn
+// stale: the newest observation is at most one minute-cadence old at the
+// crash, then the lease runs out, the next replica claims within its
+// one-second poll and lists. inventoryTakeoverBound adds this up, and a test
+// keeps it inside the stale limit.
+const inventoryLeaseTTL = time.Minute
+
+// inventoryLeaseRenewAfter is how much of its lease an owner uses before it
+// renews: a quarter, so a renewal held up for half the lease by a slow or
+// failing write (a database hiccup, a GC pause) still lands with a quarter
+// of the lease, three retry steps, to spare.
+func inventoryLeaseRenewAfter(ttl time.Duration) time.Duration { return ttl / 4 }
+
+// inventoryLeaseRetryStep is how often an owner checks its lease while a
+// collection cycle runs, and retries a failed renewal.
+func inventoryLeaseRetryStep(ttl time.Duration) time.Duration { return ttl / 12 }
+
+// inventoryTakeoverBound is the oldest the newest observation of a kind read
+// every minute can be when a replica that took over a crashed owner's lease
+// publishes again: one cadence before the crash, the whole lease, one poll,
+// and a generous collection cycle.
+const inventoryTakeoverBound = time.Minute + inventoryLeaseTTL + time.Second + 30*time.Second
+
+// inventoryLeaseTTL is the lease length this service claims and renews.
+func (service *Service) inventoryLeaseTTL() time.Duration {
+	if service != nil && service.leaseTTL > 0 {
+		return service.leaseTTL
+	}
+	return inventoryLeaseTTL
+}
 
 var errInventoryLeaseLost = errors.New("kubernetes: inventory lease lost")
 
@@ -247,6 +281,21 @@ type inventoryLease struct {
 	scope    Scope
 	record   inventoryLeaseRecord
 	expected []byte
+	ttl      time.Duration
+}
+
+func (lease *inventoryLease) leaseTTL() time.Duration {
+	if lease.ttl > 0 {
+		return lease.ttl
+	}
+	return inventoryLeaseTTL
+}
+
+// expiresAt is when the lease runs out unless renewed.
+func (lease *inventoryLease) expiresAt() time.Time {
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	return lease.record.Expires
 }
 
 func inventoryDataKey(scope Scope, record inventoryLeaseRecord) (string, error) {
@@ -335,12 +384,13 @@ func (service *Service) claimInventory(ctx context.Context, provider storage.Pro
 	if record.Owner != owner && record.Expires.After(time.Now()) {
 		return nil, false, nil
 	}
-	if record.Owner == owner && record.Expires.After(time.Now().Add(time.Minute)) {
+	ttl := service.inventoryLeaseTTL()
+	if record.Owner == owner && record.Expires.After(time.Now().Add(ttl-inventoryLeaseRenewAfter(ttl))) {
 		// The record read above already carries the cluster's first ready moment,
 		// so a renewed claim publishes generations that still have it.
-		return &inventoryLease{provider: provider, cas: cas, scope: service.scope, record: record, expected: raw}, true, nil
+		return &inventoryLease{provider: provider, cas: cas, scope: service.scope, record: record, expected: raw, ttl: ttl}, true, nil
 	}
-	record.Owner, record.Expires = owner, time.Now().Add(inventoryLeaseTTL)
+	record.Owner, record.Expires = owner, time.Now().Add(ttl)
 	replacement, err := json.Marshal(record)
 	if err != nil {
 		return nil, false, err
@@ -351,7 +401,7 @@ func (service *Service) claimInventory(ctx context.Context, provider storage.Pro
 		won, err = cas.CompareAndSwapBlob(inventoryKey(service.scope), raw, replacement)
 		return err
 	})
-	return &inventoryLease{provider: provider, cas: cas, scope: service.scope, record: record, expected: replacement}, won, err
+	return &inventoryLease{provider: provider, cas: cas, scope: service.scope, record: record, expected: replacement, ttl: ttl}, won, err
 }
 
 func (lease *inventoryLease) renew(ctx context.Context, service *Service) error {
@@ -380,7 +430,7 @@ func (lease *inventoryLease) renewFenced() error {
 		return errInventoryLeaseLost
 	}
 	record := lease.record
-	record.Expires = time.Now().Add(inventoryLeaseTTL)
+	record.Expires = time.Now().Add(lease.leaseTTL())
 	replacement, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -517,7 +567,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	if !lease.record.Expires.After(time.Now()) {
 		return errInventoryLeaseLost
 	}
-	record.Expires = time.Now().Add(inventoryLeaseTTL)
+	record.Expires = time.Now().Add(lease.leaseTTL())
 	replacement, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -597,14 +647,19 @@ func (lease *inventoryLease) commitJournal(parent context.Context, service *Serv
 	// A large capture is saved in several transactions. Start it with at least
 	// half a lease ahead, and confirm the lease before each transaction, so
 	// every part is fenced by a lease that is still held.
-	short := func() bool { return lease.cas != nil && time.Until(lease.record.Expires) < inventoryLeaseTTL/2 }
+	short := func() bool { return lease.cas != nil && time.Until(lease.record.Expires) < lease.leaseTTL()/2 }
 	if short() {
 		if err := lease.renewHeld(parent, service); err != nil {
 			return err
 		}
 	}
-	ctx, cancel := context.WithDeadline(parent, lease.record.Expires)
+	// The save stops when the lease runs out; each renewal between its
+	// transactions moves that point, so a long save that keeps its lease is
+	// not cut at the expiry it started with.
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	expiry := time.AfterFunc(time.Until(lease.record.Expires), cancel)
+	defer expiry.Stop()
 	batch := *generation.EvidenceBatch
 	batch.GuardKey, batch.GuardExpected = inventoryKey(lease.scope), append([]byte(nil), lease.expected...)
 	// Called by the store inside the save, which already holds the fence.
@@ -616,6 +671,7 @@ func (lease *inventoryLease) commitJournal(parent context.Context, service *Serv
 			if err := lease.renewFenced(); err != nil {
 				return nil, storageStageFailure("lease", err)
 			}
+			expiry.Reset(time.Until(lease.record.Expires))
 		}
 		return append([]byte(nil), lease.expected...), nil
 	}

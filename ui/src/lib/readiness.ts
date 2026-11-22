@@ -4,8 +4,8 @@ import type { Readiness } from "./api";
 // status cell. The server ships facts (ready / seen / needed / rate_per_min);
 // everything the operator sees — remaining evidence, progress fraction, and the
 // caveated time estimate — is derived HERE and nowhere else, so the three
-// tables (logs / metrics / traces) stay identical. See
-// plans/productization/sre/signal-time-to-known-design.md §3.1 and §5.
+// tables (logs / metrics / traces) stay identical. With no observed rate there
+// is no estimate (the cell reads as stalled) rather than a guessed time.
 
 export type ReadinessState = "ready" | "learning" | "indeterminate" | "stalled";
 

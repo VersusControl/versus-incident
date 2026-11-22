@@ -717,11 +717,7 @@ func TestLinkedSettleTakeoverFencesStaleOwnerAwaitingResponse(t *testing.T) {
 			stub.add(namespace, breaklogs.LinkedLine{At: breakAt.Add(-time.Minute), Pod: "api-0", Container: "app", Text: "late answer"})
 			var runningA sync.WaitGroup
 			replicaA.scheduleBreakSettles(context.Background(), "replica-a", &runningA)
-			select {
-			case <-stub.arrived:
-			case <-time.After(10 * time.Second):
-				t.Fatal("first owner never queried the source")
-			}
+			waitFor(t, stub.arrived, "first owner never queried the source")
 			sleepUntil(t0.Add(3*time.Second + 200*time.Millisecond))
 			replicaB := linkedReplica(t, kube, cluster, backend.open(t), stub.server.URL, &zero)
 			storeB := replicaB.changeStore()
@@ -823,11 +819,7 @@ func TestLinkedSettlePostgresOutageKeepsAttemptsBounded(t *testing.T) {
 	stub.add(namespace, breaklogs.LinkedLine{At: breakAt.Add(-time.Minute), Pod: "api-0", Container: "app", Text: "settled after recovery"})
 	var running sync.WaitGroup
 	replica.scheduleBreakSettles(context.Background(), "owner", &running)
-	select {
-	case <-stub.arrived:
-	case <-time.After(10 * time.Second):
-		t.Fatal("settle never queried the source")
-	}
+	waitFor(t, stub.arrived, "settle never queried the source")
 	if _, err := conn.ExecContext(context.Background(), "alter database "+quoted+" allow_connections false"); err != nil {
 		t.Skipf("cannot inject a real outage (needs superuser): %v", err)
 	}

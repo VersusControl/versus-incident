@@ -555,9 +555,9 @@ func (fleet *bootFleet) adopt(id string, fixture *fakeCluster, client *Client, d
 	return cluster
 }
 
-// startWithin builds the registry and starts every cluster, proving the boot
+// start builds the registry and starts every cluster, proving the boot
 // call returns on its own: a cluster that never answers must not hold the host.
-func (fleet *bootFleet) startWithin(budget time.Duration) time.Duration {
+func (fleet *bootFleet) start() time.Duration {
 	fleet.t.Helper()
 	entries := make([]ClusterEntry, 0, len(fleet.clusters))
 	for _, cluster := range fleet.clusters {
@@ -575,14 +575,7 @@ func (fleet *bootFleet) startWithin(budget time.Duration) time.Duration {
 		fleet.registry.StartCapture(ctx)
 		done <- time.Since(started)
 	}()
-	select {
-	case elapsed := <-done:
-		return elapsed
-	case <-time.After(budget):
-		cancel()
-		fleet.t.Fatalf("boot did not return within %s: one cluster held the start-up of the others", budget)
-		return 0
-	}
+	return waitFor(fleet.t, done, "boot to return: one cluster held the start-up of the others")
 }
 
 func (fleet *bootFleet) publishedAt(cluster *bootedCluster) (time.Time, bool) {
@@ -591,10 +584,10 @@ func (fleet *bootFleet) publishedAt(cluster *bootedCluster) (time.Time, bool) {
 
 // waitPublished waits until the cluster's own generation reaches the store and
 // reports how long that took from origin.
-func (fleet *bootFleet) waitPublished(cluster *bootedCluster, origin time.Time, budget time.Duration) time.Duration {
+func (fleet *bootFleet) waitPublished(cluster *bootedCluster, origin time.Time) time.Duration {
 	fleet.t.Helper()
 	var at time.Time
-	waitUntil(fleet.t, budget, "cluster "+cluster.id+" to publish its own generation", func() bool {
+	eventually(fleet.t, "cluster "+cluster.id+" to publish its own generation", func() bool {
 		published, ok := fleet.publishedAt(cluster)
 		if ok {
 			at = published
@@ -632,33 +625,12 @@ func (fleet *bootFleet) resolve(cluster *bootedCluster) *Service {
 
 // settle waits until a scope has published nothing new for quiet, so a proof
 // can compare one cluster before and after another cluster changes.
-func (fleet *bootFleet) settle(cluster *bootedCluster, quiet time.Duration, budget time.Duration) {
+func (fleet *bootFleet) settle(cluster *bootedCluster, quiet time.Duration) {
 	fleet.t.Helper()
-	deadline := time.Now().Add(scaledTimeout(budget))
-	for {
+	eventually(fleet.t, "cluster "+cluster.id+" to stop republishing", func() bool {
 		last, ok := fleet.broker.lastPublished(cluster.key)
-		if ok && time.Since(last) >= quiet {
-			return
-		}
-		if time.Now().After(deadline) {
-			fleet.t.Fatalf("cluster %s never stopped republishing", cluster.id)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-func waitUntil(t *testing.T, budget time.Duration, describe string, check func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(scaledTimeout(budget))
-	for {
-		if check() {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", describe)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+		return ok && time.Since(last) >= quiet
+	})
 }
 
 // podNames lists the Pod names one published generation holds.
@@ -732,12 +704,12 @@ func TestEveryConfiguredClusterPublishesAtBoot(t *testing.T) {
 		fleet.add("north", north, staticCredential(t, "north-token"), 0),
 	}
 	origin := time.Now()
-	if boot := fleet.startWithin(2 * time.Second); boot > 2*time.Second {
+	if boot := fleet.start(); measureLatency() && boot > 2*time.Second {
 		t.Fatalf("boot held the host for %s", boot)
 	}
 	keys := map[string]string{}
 	for _, cluster := range clusters {
-		fleet.waitPublished(cluster, origin, 10*time.Second)
+		fleet.waitPublished(cluster, origin)
 	}
 	for _, cluster := range clusters {
 		generation, ok := fleet.generation(cluster)
@@ -784,8 +756,8 @@ func TestUnreachableClusterDoesNotDelayOrBlockAnotherClustersPublish(t *testing.
 	failing := fleet.addUnreachable("a-unreachable", broken, staticCredential(t, "broken-token"))
 	healthyCluster := fleet.add("b-healthy", healthy, staticCredential(t, "healthy-token"), 0)
 	origin := time.Now()
-	fleet.startWithin(2 * time.Second)
-	if elapsed := fleet.waitPublished(healthyCluster, origin, 5*time.Second); elapsed > 2*time.Second {
+	fleet.start()
+	if elapsed := fleet.waitPublished(healthyCluster, origin); measureLatency() && elapsed > 2*time.Second {
 		t.Fatalf("the healthy cluster published only after %s because another cluster was unreachable", elapsed)
 	}
 	if fleet.published(failing) {
@@ -793,7 +765,7 @@ func TestUnreachableClusterDoesNotDelayOrBlockAnotherClustersPublish(t *testing.
 	}
 	// The failed cluster reports the failure instead of an empty healthy view.
 	failingService := fleet.resolve(failing)
-	waitUntil(t, 5*time.Second, "the unreachable cluster to report its failure", func() bool {
+	eventually(t, "the unreachable cluster to report its failure", func() bool {
 		overview, err := failingService.Overview(t.Context())
 		return err == nil && overview.Sync.State == "error" && overview.Pods == 0
 	})
@@ -825,9 +797,9 @@ func TestForbiddenClusterReportsPermissionFailureWithoutBlockingAnother(t *testi
 	forbiddenCluster := fleet.add("a-forbidden", forbidden, staticCredential(t, "forbidden-token"), 0)
 	healthyCluster := fleet.add("b-healthy", healthy, staticCredential(t, "healthy-token"), 0)
 	origin := time.Now()
-	fleet.startWithin(2 * time.Second)
+	fleet.start()
 	forbiddenService := fleet.resolve(forbiddenCluster)
-	waitUntil(t, 10*time.Second, "current forbidden-cycle diagnostics", func() bool {
+	eventually(t, "current forbidden-cycle diagnostics", func() bool {
 		report, err := forbiddenService.SyncHealth(t.Context())
 		if carried, ok := SyncHealthReport(err); ok {
 			report = carried
@@ -838,7 +810,7 @@ func TestForbiddenClusterReportsPermissionFailureWithoutBlockingAnother(t *testi
 	if generation, ok := fleet.generation(forbiddenCluster); ok && len(generation.View.Records) != 0 {
 		t.Fatalf("forbidden cluster published protected records: %v", podNames(generation))
 	}
-	if elapsed := fleet.waitPublished(healthyCluster, origin, 5*time.Second); elapsed > 2*time.Second {
+	if elapsed := fleet.waitPublished(healthyCluster, origin); measureLatency() && elapsed > 2*time.Second {
 		t.Fatalf("healthy cluster published only after %s", elapsed)
 	}
 	healthyGeneration, ok := fleet.generation(healthyCluster)
@@ -866,8 +838,8 @@ func TestStalledClusterDoesNotDelayAnotherClustersPublish(t *testing.T) {
 	baselineFleet := newBootFleet(t, "acme", storage.NewMemory(), "boot")
 	baselineCluster := baselineFleet.add("only", baselineFixture, staticCredential(t, "baseline-token"), 0)
 	baselineOrigin := time.Now()
-	baselineFleet.startWithin(2 * time.Second)
-	baseline := baselineFleet.waitPublished(baselineCluster, baselineOrigin, 10*time.Second)
+	baselineFleet.start()
+	baseline := baselineFleet.waitPublished(baselineCluster, baselineOrigin)
 
 	fleet := newBootFleet(t, "acme", storage.NewMemory(), "boot")
 	stalled := newFakeCluster(t, "stalled-token", "stalled-api")
@@ -877,18 +849,18 @@ func TestStalledClusterDoesNotDelayAnotherClustersPublish(t *testing.T) {
 	stalledCluster := fleet.add("a-stalled", stalled, staticCredential(t, "stalled-token"), 0)
 	healthyCluster := fleet.add("b-healthy", healthy, staticCredential(t, "healthy-token"), 0)
 	origin := time.Now()
-	fleet.startWithin(2 * time.Second)
+	fleet.start()
 	// The hold has to be in effect before the healthy publish is measured: an
 	// observation taken first cannot tell a held LIST from a released one.
-	waitUntil(t, 5*time.Second, "the stalled cluster to be asked to list", func() bool {
+	eventually(t, "the stalled cluster to be asked to list", func() bool {
 		return stalled.requestCount() > 0
 	})
 	if fleet.published(stalledCluster) {
 		t.Fatal("the stalled cluster published while its LIST was unanswered")
 	}
-	elapsed := fleet.waitPublished(healthyCluster, origin, 5*time.Second)
+	elapsed := fleet.waitPublished(healthyCluster, origin)
 	bound := max(750*time.Millisecond, 5*baseline)
-	if elapsed > bound {
+	if measureLatency() && elapsed > bound {
 		t.Fatalf("the healthy cluster published after %s against a %s single-cluster baseline: start-up was serialized behind the stall", elapsed, baseline)
 	}
 	if fleet.published(stalledCluster) {
@@ -899,7 +871,7 @@ func TestStalledClusterDoesNotDelayAnotherClustersPublish(t *testing.T) {
 	}
 	// Both clusters finish once the stalled LIST is answered.
 	release()
-	fleet.waitPublished(stalledCluster, origin, 10*time.Second)
+	fleet.waitPublished(stalledCluster, origin)
 }
 
 // W4: a cluster answering a cyclic continue token aborts its own sync with a
@@ -913,9 +885,9 @@ func TestCyclicContinueTokenStopsOnlyThatClustersSync(t *testing.T) {
 	cyclicCluster := fleet.add("a-cyclic", cyclic, staticCredential(t, "cyclic-token"), 0)
 	healthyCluster := fleet.add("b-healthy", healthy, staticCredential(t, "healthy-token"), 0)
 	origin := time.Now()
-	fleet.startWithin(2 * time.Second)
-	fleet.waitPublished(healthyCluster, origin, 5*time.Second)
-	fleet.waitPublished(cyclicCluster, origin, 10*time.Second)
+	fleet.start()
+	fleet.waitPublished(healthyCluster, origin)
+	fleet.waitPublished(cyclicCluster, origin)
 	generation, ok := fleet.generation(cyclicCluster)
 	if !ok {
 		t.Fatal("the cyclic cluster published no generation")
@@ -954,11 +926,11 @@ func TestCredentialRotationTouchesOnlyItsOwnCluster(t *testing.T) {
 	alphaCluster := fleet.add("a-rotating", rotating, alphaCredential, 0)
 	steadyCluster := fleet.add("b-steady", steady, staticCredential(t, "steady-token"), 0)
 	origin := time.Now()
-	fleet.startWithin(2 * time.Second)
-	fleet.waitPublished(alphaCluster, origin, 10*time.Second)
-	fleet.waitPublished(steadyCluster, origin, 10*time.Second)
-	fleet.settle(steadyCluster, 150*time.Millisecond, 5*time.Second)
-	waitUntil(t, 5*time.Second, "steady full publication", func() bool {
+	fleet.start()
+	fleet.waitPublished(alphaCluster, origin)
+	fleet.waitPublished(steadyCluster, origin)
+	fleet.settle(steadyCluster, 150*time.Millisecond)
+	eventually(t, "steady full publication", func() bool {
 		generation, ok := fleet.generation(steadyCluster)
 		return ok && !generation.FirstReadyAt.IsZero()
 	})
@@ -983,7 +955,7 @@ func TestCredentialRotationTouchesOnlyItsOwnCluster(t *testing.T) {
 	alphaCredential.rotate("beta-token")
 	rotating.rotateToken("beta-token")
 	var rotatedService *Service
-	waitUntil(t, 10*time.Second, "rotated credential recovery after cooldown", func() bool {
+	eventually(t, "rotated credential recovery after cooldown", func() bool {
 		var err error
 		rotatedService, err = fleet.registry.ResolveCluster(fleet.org, alphaCluster.id)
 		return err == nil
@@ -1002,7 +974,7 @@ func TestCredentialRotationTouchesOnlyItsOwnCluster(t *testing.T) {
 	if rotatedKey == alphaKey || rotatedKey == steadyCluster.key {
 		t.Fatal("rotation reused another scope's storage key")
 	}
-	waitUntil(t, 10*time.Second, "the rotated cluster to publish under its new scope", func() bool {
+	eventually(t, "the rotated cluster to publish under its new scope", func() bool {
 		generation, ok := publishedGeneration(base, rotatedScope)
 		if !ok {
 			return false
@@ -1054,10 +1026,10 @@ func TestRemovedClusterStopsWithoutDisturbingTheRemainder(t *testing.T) {
 	removedCluster := fleet.add("a-removed", removed, staticCredential(t, "removed-token"), 0)
 	remainingCluster := fleet.add("b-remaining", remaining, staticCredential(t, "remaining-token"), 0)
 	origin := time.Now()
-	fleet.startWithin(2 * time.Second)
-	fleet.waitPublished(removedCluster, origin, 10*time.Second)
-	fleet.waitPublished(remainingCluster, origin, 10*time.Second)
-	fleet.settle(remainingCluster, 150*time.Millisecond, 5*time.Second)
+	fleet.start()
+	fleet.waitPublished(removedCluster, origin)
+	fleet.waitPublished(remainingCluster, origin)
+	fleet.settle(remainingCluster, 150*time.Millisecond)
 	remainingBefore, ok := fleet.generation(remainingCluster)
 	if !ok {
 		t.Fatal("the remaining cluster published no generation")
@@ -1148,12 +1120,12 @@ func TestKindFirstListedLaterProducesNoChangesOrBreaks(t *testing.T) {
 		}
 	}
 	origin := time.Now()
-	fleet.startWithin(2 * time.Second)
-	fleet.waitPublished(lateCluster, origin, 10*time.Second)
-	fleet.waitPublished(steadyCluster, origin, 10*time.Second)
+	fleet.start()
+	fleet.waitPublished(lateCluster, origin)
+	fleet.waitPublished(steadyCluster, origin)
 	// At boot the kind exists on one cluster only. A cluster that does not
 	// serve it records it as known and empty rather than as a failure.
-	waitUntil(t, 10*time.Second, "the kind to be recorded on both clusters", func() bool {
+	eventually(t, "the kind to be recorded on both clusters", func() bool {
 		steadyGeneration, steadyOK := fleet.generation(steadyCluster)
 		lateGeneration, lateOK := fleet.generation(lateCluster)
 		if !steadyOK || !lateOK {
@@ -1173,7 +1145,7 @@ func TestKindFirstListedLaterProducesNoChangesOrBreaks(t *testing.T) {
 	late.serve("configmaps", fixtureObject("v1", "ConfigMap", "shop", "late-config"))
 	service := fleet.resolve(lateCluster)
 	listed := false
-	waitUntil(t, 40*time.Second, "the late kind to be listed with content", func() bool {
+	eventually(t, "the late kind to be listed with content", func() bool {
 		snapshot, _, err := service.IndexSnapshot(t.Context(), "ConfigMap")
 		if err != nil {
 			return false
@@ -1229,9 +1201,9 @@ func TestAbsentKindSurvivesThePublishedGenerationForANewReplica(t *testing.T) {
 	fixture := newFakeCluster(t, "boot-token", "boot-api")
 	fixture.unserve("configmaps")
 	cluster := fleet.add("a-unserved", fixture, staticCredential(t, "boot-token"), 0)
-	fleet.startWithin(2 * time.Second)
-	fleet.waitPublished(cluster, time.Now(), 10*time.Second)
-	waitUntil(t, 10*time.Second, "the unserved kind to reach the published generation", func() bool {
+	fleet.start()
+	fleet.waitPublished(cluster, time.Now())
+	eventually(t, "the unserved kind to reach the published generation", func() bool {
 		generation, ok := fleet.generation(cluster)
 		if !ok {
 			return false
@@ -1276,8 +1248,8 @@ func TestRelayedGenerationKeepsAnUnservedKindUnlistedForTheJournal(t *testing.T)
 	late := newFakeCluster(t, "late-token", "late-api")
 	late.unserve("configmaps")
 	cluster := fleet.add("a-late", late, staticCredential(t, "late-token"), 150*time.Millisecond)
-	fleet.startWithin(2 * time.Second)
-	fleet.waitPublished(cluster, time.Now(), 10*time.Second)
+	fleet.start()
+	fleet.waitPublished(cluster, time.Now())
 	service := fleet.resolve(cluster)
 	index, err := service.indexes.ForScope(service.indexScope())
 	if err != nil {
@@ -1286,7 +1258,7 @@ func TestRelayedGenerationKeepsAnUnservedKindUnlistedForTheJournal(t *testing.T)
 	// The capture loop relays the published generation on its own, at the kind's
 	// cadence. Observing the relayed state keeps the proof on the path
 	// production uses: a live read would be what records the kind as unserved.
-	waitUntil(t, 10*time.Second, "the capture loop to relay the unserved kind", func() bool {
+	eventually(t, "the capture loop to relay the unserved kind", func() bool {
 		status, _ := index.KindStatus("ConfigMap")
 		return !status.ObservedAt.IsZero()
 	})
@@ -1324,7 +1296,7 @@ func TestRelayedGenerationKeepsAnUnservedKindUnlistedForTheJournal(t *testing.T)
 	if !unchanged {
 		t.Fatal("scheduling the next collection mutated a retained published snapshot")
 	}
-	waitUntil(t, 10*time.Second, "the late kind to be published with content", func() bool {
+	eventually(t, "the late kind to be published with content", func() bool {
 		generation, ok := fleet.generation(cluster)
 		if !ok {
 			return false

@@ -25,7 +25,16 @@ const (
 	KindHealth Kind = "health"
 	// KindChanges is the CloudTrail poller.
 	KindChanges Kind = "changes"
+	// KindPolicy units read resource policies (bucket, key and repository
+	// policies); bucket and key requests are metered. They run on
+	// PolicyInterval.
+	KindPolicy Kind = "policy"
 )
+
+// PolicyInterval is the shortest time between two reads of a policy unit:
+// metered reads run at most four times a day, whatever the inventory
+// interval.
+const PolicyInterval = 6 * time.Hour
 
 // Detail fan-out caps. Beyond them a unit still commits its list and names
 // the unread remainder as a gap.
@@ -92,6 +101,12 @@ var specs = []spec{
 	{service: "cloudfront", global: true, kind: KindInventory, run: collectCloudFront},
 	{service: "route53", global: true, kind: KindInventory, run: collectRoute53},
 	{service: "iam", global: true, kind: KindInventory, run: collectIAM},
+	{service: serviceTransitGateway, kind: KindInventory, run: collectTransitGateways},
+	{service: serviceRAM, kind: KindInventory, run: collectRAM},
+	{service: serviceOrganizations, global: true, kind: KindInventory, run: collectOrganization},
+	{service: serviceECR, kind: KindPolicy, run: collectECR},
+	{service: serviceKMS, kind: KindPolicy, run: collectKMS},
+	{service: serviceS3Policy, global: true, kind: KindPolicy, run: collectBucketPolicies},
 }
 
 // Services lists every unit service the collectors produce, in collection
@@ -104,22 +119,8 @@ func Services() []string {
 	return append(out, snapshot.ChangeService)
 }
 
-// fixActions returns the IAM actions that clear a denial for a unit service,
-// from the catalog when the service is in it.
-func fixActions(service string) []string {
-	switch service {
-	case "vpc":
-		service = "ec2"
-	case snapshot.TagService:
-		return []string{"tag:GetResources"}
-	case snapshot.AppRegistryService:
-		return []string{"servicecatalog:ListApplications", "servicecatalog:ListAssociatedResources"}
-	}
-	if entry, ok := catalog.ByID(service); ok {
-		return entry.FixActions
-	}
-	return nil
-}
+// fixActions returns the IAM actions that clear a denial for a unit service.
+func fixActions(service string) []string { return catalog.FixActionsFor(service) }
 
 // result is one unit's candidate before it is committed.
 type result struct {
@@ -146,6 +147,18 @@ type call struct {
 	// transientCode is the error code of the first detail call that failed
 	// for a passing reason. A unit with one keeps its last good generation.
 	transientCode string
+	// tries counts the calls of each per-item detail operation (one call
+	// per bucket, target group, cluster), so the failures of one operation
+	// can be named once with how many items were read.
+	tries map[string]int
+}
+
+// tried counts one call of a per-item detail operation.
+func (c *call) tried(operation string) {
+	if c.tries == nil {
+		c.tries = make(map[string]int)
+	}
+	c.tries[operation]++
 }
 
 func (c *call) arn(service, resource string) string {
@@ -240,9 +253,56 @@ func transientCode(code string) bool {
 	return true
 }
 
-// capGap names detail calls skipped because a fan-out cap was reached.
-func (c *call) capGap(operation string) model.Gap {
-	return model.Gap{Account: c.unit.Account, Region: c.unit.Region, Service: c.unit.Service, Reason: model.GapNotChecked, Operation: operation}
+// capGap names detail calls skipped because a fan-out cap was reached:
+// seen items were read; total is how many exist, or zero when the unit
+// stopped before it could know.
+func (c *call) capGap(operation string, seen, total int) model.Gap {
+	if total < seen {
+		total = 0
+	}
+	return model.Gap{Account: c.unit.Account, Region: c.unit.Region, Service: c.unit.Service, Reason: model.GapCapped,
+		Operation: operation, Seen: seen, Total: total}
+}
+
+// mergeDetailGaps folds the gaps of one unit into one per operation and
+// reason, in first-seen order. A per-item operation (counted with tried)
+// gets Seen as the calls that answered and Total as the calls made, so 7
+// denied function calls out of 35 read as one gap "28 of 35". A cap gap
+// keeps its own counts.
+func (c *call) mergeDetailGaps(gaps []model.Gap) []model.Gap {
+	if len(gaps) == 0 {
+		return gaps
+	}
+	type key struct {
+		operation string
+		reason    model.GapReason
+	}
+	failed := make(map[string]int)
+	for _, gap := range gaps {
+		if gap.Reason != model.GapCapped {
+			failed[gap.Operation]++
+		}
+	}
+	index := make(map[key]int, len(gaps))
+	out := make([]model.Gap, 0, len(gaps))
+	for _, gap := range gaps {
+		k := key{gap.Operation, gap.Reason}
+		if position, ok := index[k]; ok {
+			if gap.Reason == model.GapCapped {
+				merged := &out[position]
+				merged.Seen = max(merged.Seen, gap.Seen)
+				merged.Total = max(merged.Total, gap.Total)
+			}
+			continue
+		}
+		if tries := c.tries[gap.Operation]; gap.Reason != model.GapCapped && gap.Operation != "" && tries > 0 {
+			gap.Total = tries
+			gap.Seen = max(tries-failed[gap.Operation], 0)
+		}
+		index[k] = len(out)
+		out = append(out, gap)
+	}
+	return out
 }
 
 func clip(value string, limit int) string {

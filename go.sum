@@ -66,6 +66,8 @@ github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.3 h1:W2GBZXhuN8NshnX0y6emc1A
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.3/go.mod h1:8AVcr/vb8bgJu2xczpXR3NMmQGG2w32FnaDs/dy1Aq0=
 github.com/aws/aws-sdk-go-v2/service/ec2 v1.343.0 h1:pOxNUJbUOy779gx205gEpySpT5fu3B0ifPD8jBxujZI=
 github.com/aws/aws-sdk-go-v2/service/ec2 v1.343.0/go.mod h1:khWfxrzSgMjGMAZIaYAHu3IobEo7KRRNwPYaHb1zpng=
+github.com/aws/aws-sdk-go-v2/service/ecr v1.67.5 h1:x90FlZKmmpv4j6XBLeBiUn+wRGNT1RRuI/1Mmw4WWb0=
+github.com/aws/aws-sdk-go-v2/service/ecr v1.67.5/go.mod h1:83MclrkThAnH2IsiaZ0pNAOcukcGAlfkNWNpesKXQIU=
 github.com/aws/aws-sdk-go-v2/service/ecs v1.103.1 h1:DRTV+EGfif88RSqkyHvuyrHGHT9pCdT6yL0ivfALa4U=
 github.com/aws/aws-sdk-go-v2/service/ecs v1.103.1/go.mod h1:jjuJTYCyu/HPuJ0/SccHi+0I4VJFWxTPVxU7HpuZdPw=
 github.com/aws/aws-sdk-go-v2/service/eks v1.105.2 h1:UAiPr4JgYcyjAilxTJTwYIThWgtEn8e1e0r3WQ/PO9A=
@@ -92,8 +94,14 @@ github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.8 h1:RS1Wt+K0r4X0ci
 github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.8/go.mod h1:adMnTy5kyoUW86jhXnGSVc/mvMQI4GZd1qYWMeaS8M8=
 github.com/aws/aws-sdk-go-v2/service/kinesis v1.56.9 h1:LLGKcX/LB4S5KdVQGnMg0dmVp0l1sxn0k3qLMo3mXYs=
 github.com/aws/aws-sdk-go-v2/service/kinesis v1.56.9/go.mod h1:eR3s5rQ4TJu+Fznbv4axx4TEysDiv4nv2ZDLhXTof+E=
+github.com/aws/aws-sdk-go-v2/service/kms v1.62.5 h1:zLDKVpPR80azmHgG+RHgQr9xGbkHeMFXaa3Me0GR9Vs=
+github.com/aws/aws-sdk-go-v2/service/kms v1.62.5/go.mod h1:y1AKPQmIL4psh+C/PhBi3rPPltweFpgwdkld6QNvtgI=
 github.com/aws/aws-sdk-go-v2/service/lambda v1.114.0 h1:UjM7apSnJ8BYMs+AxJlK04eawpVUYify9VXxhvCtJ+w=
 github.com/aws/aws-sdk-go-v2/service/lambda v1.114.0/go.mod h1:HgkYN4d72Fawg3MAJQepmNnROFoN11XYu14hgFfChTY=
+github.com/aws/aws-sdk-go-v2/service/organizations v1.62.7 h1:mdXT609J8fIZ20xmq1IDiuup4cfotpshKI5y8HPqbf4=
+github.com/aws/aws-sdk-go-v2/service/organizations v1.62.7/go.mod h1:zavQOntqMOUBMiwPZ0nQ50TZhea5o4/X9dzG4to4y0A=
+github.com/aws/aws-sdk-go-v2/service/ram v1.46.0 h1:xDrIJfr3Y7GZI/KQK6F70WfZBFJ8LkMdrsynZEFsrOU=
+github.com/aws/aws-sdk-go-v2/service/ram v1.46.0/go.mod h1:JJMRIjVC1Qp7aFggxrBw5Crkqs3hw59nM9Jpw+jHvWo=
 github.com/aws/aws-sdk-go-v2/service/rds v1.131.2 h1:Rytfx+dmiAPJDxJKXCbK6X4staGfRUjfFDx8Lcy/LA8=
 github.com/aws/aws-sdk-go-v2/service/rds v1.131.2/go.mod h1:jh7YjzSQebRzJX2lw/h9tv/1wHo5wDJguuXmsX6SIDs=
 github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi v1.41.11 h1:a4fHZBoS4LDgycvEUb3et+pKBNlcODnzJRJMT7idYTM=

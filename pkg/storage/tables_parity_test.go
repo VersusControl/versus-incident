@@ -201,7 +201,7 @@ func TestTablesParityInventoryCommitsAndHistory(t *testing.T) {
 		unit := AWSUnit{tablesAccount, tablesRegion, "ec2"}
 		t0, t1, t2 := tablesBase, tablesBase.Add(time.Hour), tablesBase.Add(2*time.Hour)
 		r1 := AWSResource{ARN: tablesARN("i-1"), Type: "instance", App: "shop", Name: "Web-Server", State: "running",
-			Tags: map[string]string{"app": "shop", "owner": "[redacted]"}, Relations: []AWSRelation{{"in_vpc", "vpc-1"}},
+			Tags: map[string]string{"app": "shop", "owner": "[redacted]"}, Relations: []AWSRelation{{Type: "in_vpc", Target: "vpc-1"}},
 			Attributes: map[string]string{"id": "i-1"}, Detail: json.RawMessage(`{"z":1,"a":[1,2],"resource_region":"us-east-1"}`)}
 		r2 := AWSResource{ARN: tablesARN("i-2"), Type: "instance", App: "jobs", Name: "worker", State: "running"}
 		h1 := AWSHealth{ARN: r1.ARN, Kind: "alarm", Ref: "arn:aws:cloudwatch:us-east-1:111122223333:alarm:cpu", State: "critical", Summary: "CPU high",

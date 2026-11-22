@@ -444,7 +444,10 @@
     display: none;
   }
   [data-resource-detail] .resource-identity {
-    padding-right: 24px;
+    /* The Investigate and Close buttons sit absolutely at the top right
+       (about 72px plus their 10px inset); the name wraps before reaching them. */
+    --resource-actions-reserve: 80px;
+    padding-right: var(--resource-actions-reserve);
   }
   [data-resource-detail] .resource-name {
     margin-top: 0;
@@ -452,7 +455,7 @@
     line-height: 20px;
   }
   [data-resource-detail] .resource-status {
-    margin: 4px -24px 0 0;
+    margin: 4px calc(-1 * var(--resource-actions-reserve)) 0 0;
   }
   [data-resource-detail] .resource-location {
     position: absolute;

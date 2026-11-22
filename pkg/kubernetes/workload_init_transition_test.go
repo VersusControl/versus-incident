@@ -68,7 +68,10 @@ func TestRunningInitCompletionContinuesCheckpointWithoutReplayingLines(t *testin
 	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
 	service.SetScrubber(replacingScrubber{})
 	seedWorkloadStreamIndex(t, service, running)
-	ctx, cancel := context.WithTimeout(logStreamTestContext(), 8*time.Second)
+	// The stream returns as soon as the completed init's finite read ends;
+	// the deadline only bounds a hung stream, so it leaves room for a loaded
+	// machine.
+	ctx, cancel := context.WithTimeout(logStreamTestContext(), 30*time.Second)
 	defer cancel()
 	counts := make(map[string]int)
 	lines, gaps := 0, 0

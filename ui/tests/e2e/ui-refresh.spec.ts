@@ -8,7 +8,7 @@ import { captureDir, capturePath } from "./support/capture";
 // ui-refresh.spec.ts drives the Settings / Admin one-section layouts, the
 // Logs / Metrics / Traces filter panel and Flat / By service views, and the
 // heatmap scroll containment against a running app. Run it through
-// `plans/harness-run/harness.sh e2e ui ui-refresh`; list cases skip, not pass, when
+// the local test harness (`harness.sh e2e ui ui-refresh`); list cases skip, not pass, when
 // the stack has no learned rows yet (seed with `harness.sh gen ...`).
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
