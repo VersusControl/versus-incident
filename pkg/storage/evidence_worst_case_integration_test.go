@@ -376,9 +376,12 @@ func TestPostgresLargestAcceptedSaveFitsTheLeaseOnDeepHistory(t *testing.T) {
 	}
 	heavySave := time.Since(started)
 	t.Logf("largest saves on %d rows: %d changed records %s; %d unchanged records %s; 128 x 64 KiB %s", seeded.rows, events, changed, events, unchanged, heavySave)
+	if largestSaveBound >= defaultEvidenceSaveTimeout {
+		t.Fatalf("the save bound %s is not inside the %s lease", largestSaveBound, defaultEvidenceSaveTimeout)
+	}
 	for name, took := range map[string]time.Duration{"changed": changed, "unchanged": unchanged, "bytes": heavySave} {
-		if took > 10*time.Second {
-			t.Errorf("largest %s save took %s, more than half the 20 s lease", name, took)
+		if took > largestSaveBound {
+			t.Errorf("largest %s save took %s, over the %s bound inside the 20 s lease", name, took, largestSaveBound)
 		}
 	}
 

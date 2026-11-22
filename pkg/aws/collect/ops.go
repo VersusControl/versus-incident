@@ -303,12 +303,13 @@ func collectCloudFormation(ctx context.Context, c *call) (result, error) {
 		}
 		if index >= maxStacksDescribed {
 			if index == maxStacksDescribed {
-				out.gaps = append(out.gaps, c.capGap("ListStackResources"))
+				out.gaps = append(out.gaps, c.capGap("ListStackResources", maxStacksDescribed, len(stacks)))
 			}
 			out.resources = append(out.resources, resource)
 			continue
 		}
 		token = nil
+		c.tried("ListStackResources")
 		for {
 			page, err := api.ListStackResources(ctx, &cloudformation.ListStackResourcesInput{StackName: aws.String(arn), NextToken: token})
 			if err != nil {
@@ -332,6 +333,16 @@ func collectCloudFormation(ctx context.Context, c *call) (result, error) {
 		out.resources = append(out.resources, resource)
 	}
 	return out, nil
+}
+
+// healthEventTotal is how many events exist when only the first page of
+// events was read: the page's count when it is the last page, otherwise
+// zero, because more pages mean the total is not known.
+func healthEventTotal(page *health.DescribeEventsOutput) int {
+	if page == nil || deref(page.NextToken) != "" {
+		return 0
+	}
+	return len(page.Events)
 }
 
 // collectAWSHealth reads open and upcoming AWS Health events and the
@@ -365,6 +376,7 @@ func collectAWSHealth(ctx context.Context, c *call) (result, error) {
 		summary := "AWS Health: " + strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(deref(event.EventTypeCode), "AWS_"), "_", " "))
 		var affected []string
 		if index < maxHealthEvents {
+			c.tried("DescribeAffectedEntities")
 			entities, err := api.DescribeAffectedEntities(ctx, &health.DescribeAffectedEntitiesInput{
 				Filter:     &healthtypes.EntityFilter{EventArns: []string{arn}},
 				MaxResults: aws.Int32(100),
@@ -383,7 +395,7 @@ func collectAWSHealth(ctx context.Context, c *call) (result, error) {
 				}
 			}
 		} else if index == maxHealthEvents {
-			out.gaps = append(out.gaps, c.capGap("DescribeAffectedEntities"))
+			out.gaps = append(out.gaps, c.capGap("DescribeAffectedEntities", maxHealthEvents, healthEventTotal(page)))
 		}
 		if len(affected) == 0 {
 			item := c.healthItem("", model.SourceAWSHealth, status, summary, derefTime(event.StartTime), arn)
@@ -481,10 +493,11 @@ func collectAppRegistry(ctx context.Context, c *call) (result, error) {
 	}
 	for index := range out.resources {
 		if index >= maxApplications {
-			out.gaps = append(out.gaps, c.capGap("ListAssociatedResources"))
+			out.gaps = append(out.gaps, c.capGap("ListAssociatedResources", maxApplications, len(out.resources)))
 			break
 		}
 		token = nil
+		c.tried("ListAssociatedResources")
 		for {
 			page, err := api.ListAssociatedResources(ctx, &servicecatalogappregistry.ListAssociatedResourcesInput{
 				Application: aws.String(out.resources[index].Attributes[model.AttrApplicationID]),

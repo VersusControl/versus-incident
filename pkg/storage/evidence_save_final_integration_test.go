@@ -51,8 +51,8 @@ func finalSaveDuration(sorted []time.Duration, q float64) time.Duration {
 // of existing events, half new events) and 5,000 issues, of which 1,000 are
 // new, 2,000 changed and 2,000 seen again, while 1,000 others resolve. It
 // times every transaction of each save and checks that the final one, like
-// every part, finishes well inside the 20 s lease, that each whole save
-// completes, and that the issues and journal it leaves are right. It runs once
+// every part, finishes inside finalSaveBound, which is well inside the 20 s
+// lease (5 s, and 15 s in a race build), that each whole save completes, and that the issues and journal it leaves are right. It runs once
 // with planner statistics gathered after the first capture and once before
 // the database has gathered any, as in the first minute after a busy cluster
 // is connected, until autovacuum's first pass.
@@ -72,10 +72,11 @@ func TestPostgresFinalSaveTransactionAtTheCaptureLimitFitsTheLease(t *testing.T)
 // at the record limit that each resolve and open churn issues, and times every
 // save transaction.
 func finalSaveAtTheLimit(t *testing.T, openIssues, churn int, analyze bool) {
-	const (
-		rounds = 3
-		bound  = 5 * time.Second
-	)
+	const rounds = 3
+	bound := finalSaveBound
+	if bound >= defaultEvidenceSaveTimeout {
+		t.Fatalf("the save bound %s is not inside the %s lease", bound, defaultEvidenceSaveTimeout)
+	}
 	changes := MaxEvidenceBatchRecords - openIssues
 	p := worstCaseProvider(t, worstCaseDatabase(t), PostgresOptions{})
 	scope := EvidenceScope{OrgID: "default", ClusterID: "final-save", ClusterUID: "physical"}
@@ -217,13 +218,13 @@ func finalSaveAtTheLimit(t *testing.T, openIssues, churn int, analyze bool) {
 			finalSaveDuration(parts, 0.5), parts[len(parts)-1], transactions[0].took, final.took, whole)
 
 		if transactions[0].took > bound {
-			t.Errorf("capture %d: the first attempt took %s, not well inside the 20 s lease", round, transactions[0].took)
+			t.Errorf("capture %d: the first attempt took %s, not inside the %s bound of the %s lease", round, transactions[0].took, bound, defaultEvidenceSaveTimeout)
 		}
 		if parts[len(parts)-1] > bound {
-			t.Errorf("capture %d: the longest part took %s, not well inside the 20 s lease", round, parts[len(parts)-1])
+			t.Errorf("capture %d: the longest part took %s, not inside the %s bound of the %s lease", round, parts[len(parts)-1], bound, defaultEvidenceSaveTimeout)
 		}
 		if final.took > bound {
-			t.Errorf("capture %d: the final transaction took %s, not well inside the 20 s lease", round, final.took)
+			t.Errorf("capture %d: the final transaction took %s, not inside the %s bound of the %s lease", round, final.took, bound, defaultEvidenceSaveTimeout)
 		}
 		if after.rows-before.rows != written {
 			t.Fatalf("capture %d: the journal grew by %d rows, the parts wrote %d", round, after.rows-before.rows, written)

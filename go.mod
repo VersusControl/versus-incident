@@ -17,6 +17,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/costoptimizationhub v1.35.8
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.3
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.343.0
+	github.com/aws/aws-sdk-go-v2/service/ecr v1.67.5
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.103.1
 	github.com/aws/aws-sdk-go-v2/service/eks v1.105.2
 	github.com/aws/aws-sdk-go-v2/service/elasticache v1.64.2
@@ -25,7 +26,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/health v1.50.5
 	github.com/aws/aws-sdk-go-v2/service/iam v1.64.6
 	github.com/aws/aws-sdk-go-v2/service/kinesis v1.56.9
+	github.com/aws/aws-sdk-go-v2/service/kms v1.62.5
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.114.0
+	github.com/aws/aws-sdk-go-v2/service/organizations v1.62.7
+	github.com/aws/aws-sdk-go-v2/service/ram v1.46.0
 	github.com/aws/aws-sdk-go-v2/service/rds v1.131.2
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.70.6
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.6

@@ -69,6 +69,9 @@ data "aws_iam_policy_document" "metadata_reads" {
       "dynamodb:ListTables",
       # EC2 metadata only
       "ec2:Describe*",
+      # ECR repositories, their policies and image metadata (describe, never pull)
+      "ecr:Describe*",
+      "ecr:GetRepositoryPolicy",
       # ECS
       "ecs:Describe*",
       "ecs:List*",
@@ -88,9 +91,17 @@ data "aws_iam_policy_document" "metadata_reads" {
       # Kinesis
       "kinesis:Describe*",
       "kinesis:List*",
+      # KMS keys and key policies, never key material
+      "kms:GetKeyPolicy",
+      "kms:ListKeys",
       # Lambda configuration, without function code
       "lambda:GetFunctionConfiguration",
       "lambda:List*",
+      # Organizations: the organization and its management account only
+      "organizations:DescribeOrganization",
+      # RAM resource shares
+      "ram:GetResourceShareAssociations",
+      "ram:ListResources",
       # RDS
       "rds:Describe*",
       # Route 53
@@ -98,6 +109,7 @@ data "aws_iam_policy_document" "metadata_reads" {
       "route53:List*",
       # S3 bucket metadata and security flags, never objects
       "s3:GetBucketLocation",
+      "s3:GetBucketPolicy",
       "s3:GetBucketPolicyStatus",
       "s3:GetBucketPublicAccessBlock",
       "s3:GetEncryptionConfiguration",

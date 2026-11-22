@@ -3560,8 +3560,22 @@ export interface AwsServiceSync {
   units_done: number;
   units_total: number;
   last_good_at: string | null;
-  /** Named gaps: throttled | denied | not_checked | not_enabled. */
-  gaps: string[];
+  /**
+   * Named gaps, as reason words (throttled | denied | not_checked |
+   * capped | …) or as gaps carrying the counts of a capped read.
+   */
+  gaps: Array<string | AwsGap>;
+}
+
+/**
+ * One gap in an AWS read. A capped gap counts the items a per-item detail
+ * read covered: `seen` were read; `total` is how many exist, or absent/0
+ * when the read stopped before it could know.
+ */
+export interface AwsGap {
+  reason: string;
+  seen?: number;
+  total?: number;
 }
 
 export interface AwsAccountSync {

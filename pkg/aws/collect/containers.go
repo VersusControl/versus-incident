@@ -43,7 +43,7 @@ func collectECS(ctx context.Context, c *call) (result, error) {
 	}
 	var out result
 	if len(clusters) > maxClusters {
-		out.gaps = append(out.gaps, c.capGap("DescribeServices"))
+		out.gaps = append(out.gaps, c.capGap("DescribeServices", maxClusters, len(clusters)))
 		clusters = clusters[:maxClusters]
 	}
 	if len(clusters) == 0 {
@@ -190,11 +190,12 @@ func collectEKS(ctx context.Context, c *call) (result, error) {
 	}
 	var out result
 	if len(names) > maxClusters {
-		out.gaps = append(out.gaps, c.capGap("DescribeCluster"))
+		out.gaps = append(out.gaps, c.capGap("DescribeCluster", maxClusters, len(names)))
 		names = names[:maxClusters]
 	}
 	nodegroups := 0
 	for _, name := range names {
+		c.tried("DescribeCluster")
 		described, err := api.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: aws.String(name)})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("DescribeCluster", err))
@@ -234,6 +235,7 @@ func collectEKS(ctx context.Context, c *call) (result, error) {
 		out.resources = append(out.resources, resource)
 
 		token = nil
+		c.tried("ListNodegroups")
 		for {
 			page, err := api.ListNodegroups(ctx, &eks.ListNodegroupsInput{ClusterName: aws.String(name), MaxResults: aws.Int32(100), NextToken: token})
 			if err != nil {
@@ -242,10 +244,11 @@ func collectEKS(ctx context.Context, c *call) (result, error) {
 			}
 			for _, group := range page.Nodegroups {
 				if nodegroups >= maxNodegroups {
-					out.gaps = append(out.gaps, c.capGap("DescribeNodegroup"))
+					out.gaps = append(out.gaps, c.capGap("DescribeNodegroup", maxNodegroups, 0))
 					break
 				}
 				nodegroups++
+				c.tried("DescribeNodegroup")
 				detail, err := api.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: aws.String(name), NodegroupName: aws.String(group)})
 				if err != nil || detail.Nodegroup == nil {
 					out.gaps = append(out.gaps, c.detailGap("DescribeNodegroup", err))

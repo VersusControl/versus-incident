@@ -57,8 +57,10 @@ const (
 	awsCollectDefaultBudget = 2
 	// One region: six regional health + aws-health, the region's cloudtrail
 	// and the account's global change stream, fourteen regional inventory +
-	// four global inventory units.
-	awsCollectUnitsOneRegion = 27
+	// four global inventory units, and the six link-read units (transit
+	// gateways, resource shares, the organization, keys, repositories and
+	// bucket policies).
+	awsCollectUnitsOneRegion = 33
 )
 
 // awsCollectDenied is what access-denied-burst denies outright.

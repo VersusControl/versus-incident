@@ -191,20 +191,9 @@ func (conn *Service) targets(ctx context.Context, needRegions bool) []CollectTar
 			}
 			continue
 		}
-		now := conn.now().UTC()
-		regions := account.Regions
-		if len(regions) == 0 {
-			regions = enabledRegions(health.Regions)
-			if len(health.Regions) > 0 && !health.regionsFresh(now) {
-				// The opt-in status is no longer confirmed: every known
-				// Region is polled, and one still off reads as a real gap.
-				regions = knownRegions(health.Regions)
-			}
-		}
+		regions, off := CollectRegions(account, health, conn.now().UTC())
 		if needRegions {
-			// A Region confirmed not enabled is not polled; it is polled
-			// again once a check finds it enabled or the status goes stale.
-			regions = withoutRegions(regions, health.NotEnabledRegionsAt(regions, now))
+			regions = withoutRegions(regions, off)
 		}
 		if needRegions && len(regions) == 0 {
 			continue
@@ -227,6 +216,23 @@ func (conn *Service) targets(ctx context.Context, needRegions bool) []CollectTar
 		targets = append(targets, CollectTarget{AccountID: account.AccountID, Regions: append([]string(nil), regions...), Credentials: credentials})
 	}
 	return targets
+}
+
+// CollectRegions is the one rule for which Regions an account is read in.
+// regions are the account's selected Regions or, when it selects none, the
+// Regions its health check found enabled; when that opt-in status is stale,
+// every known Region, so one still off reads as a real gap. off are the
+// regions AWS has confirmed not enabled as of now: the collectors skip them
+// until a check finds them enabled or the status goes stale.
+func CollectRegions(account AccountRecord, health HealthRecord, now time.Time) (regions, off []string) {
+	regions = account.Regions
+	if len(regions) == 0 {
+		regions = enabledRegions(health.Regions)
+		if len(health.Regions) > 0 && !health.regionsFresh(now) {
+			regions = knownRegions(health.Regions)
+		}
+	}
+	return append([]string(nil), regions...), health.NotEnabledRegionsAt(regions, now)
 }
 
 // confirmIdentity makes sure a config account's credentials sign in to that

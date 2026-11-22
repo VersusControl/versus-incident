@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -445,4 +446,36 @@ func TestAsOfNeverReportsAVerificationAfterAsOf(t *testing.T) {
 			t.Fatalf("as of the re-verification = %+v", later.Units[0])
 		}
 	})
+}
+
+// A relations column written before relation kinds existed holds only type
+// and target. It reads as configured, and a configured relation is written
+// back in that same form, so the upgrade leaves unchanged rows unchanged.
+func TestRelationRowsFromBeforeKindsReadAsConfigured(t *testing.T) {
+	var rows []storage.AWSRelation
+	stored := `[{"type":"routes_to","target":"arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/web/2"},` +
+		`{"type":"in_vpc","target":"arn:aws:ec2:us-east-1:111122223333:vpc/vpc-1"}]`
+	if err := json.Unmarshal([]byte(stored), &rows); err != nil {
+		t.Fatal(err)
+	}
+	resource := resourceOf(storage.AWSResource{ARN: "arn:aws:elasticloadbalancing:us-east-1:111122223333:loadbalancer/app/web/1",
+		Account: account, Type: "load-balancer", Relations: rows})
+	for _, relation := range resource.Relations {
+		if relation.Kind != model.RelationConfigured {
+			t.Fatalf("relation = %+v", relation)
+		}
+	}
+	written, err := json.Marshal(resourceRow(resource).Relations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != stored {
+		t.Fatalf("written back as %s", written)
+	}
+	grant := model.Relation{Type: model.RelationMayAccess, Target: "123400000004", Kind: model.RelationKindMayAccess,
+		Source: "s3:GetBucketPolicy", Access: model.AccessRead, Pattern: "logs/*", Count: 2}
+	back := resourceOf(resourceRow(model.Resource{ARN: "arn:aws:s3:::b", Relations: []model.Relation{grant}}))
+	if len(back.Relations) != 1 || back.Relations[0] != grant {
+		t.Fatalf("grant round trip = %+v", back.Relations)
+	}
 }

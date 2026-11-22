@@ -486,14 +486,21 @@ func write(ctx context.Context) {
 }
 
 // collectorMetadataGets are the only Get operations collectors may call:
-// each returns metadata, never object contents, policy bodies or secrets.
+// each returns metadata, never object contents or secrets. The three
+// resource policy reads return a policy document, which the collector
+// reduces in memory to principal, access class and resource pattern; the
+// document itself is never stored (policy.go).
 var collectorMetadataGets = map[string]bool{
-	"GetResources":          true,
-	"GetQueueAttributes":    true,
-	"GetPublicAccessBlock":  true,
-	"GetBucketPolicyStatus": true,
-	"GetBucketEncryption":   true,
-	"GetRestApis":           true,
+	"GetResources":                 true,
+	"GetQueueAttributes":           true,
+	"GetPublicAccessBlock":         true,
+	"GetBucketPolicyStatus":        true,
+	"GetBucketEncryption":          true,
+	"GetRestApis":                  true,
+	"GetResourceShareAssociations": true,
+	"GetBucketPolicy":              true,
+	"GetKeyPolicy":                 true,
+	"GetRepositoryPolicy":          true,
 }
 
 // TestCollectorsCallOnlyMetadataReads narrows the read-only surface for the

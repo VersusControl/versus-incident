@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AwsAccount, AwsDraftService, AwsOptionalData, AwsSettings } from "@/lib/api";
 import { ApiError, awsErrorFrom, awsErrorText, normalizeAwsSettings } from "@/lib/api";
-import { disconnectedText, fmtClockOrDay } from "@/lib/awsChanges";
+import { disconnectedText, fmtClockOrDay, gapReasonText } from "@/lib/awsChanges";
 import {
   AWS_SERVICE_CATALOG,
   AWS_SERVICE_TOTAL,
@@ -28,6 +28,7 @@ import {
   serviceLabel,
   serviceStatusLabel,
   serviceStatusText,
+  syncProgress,
 } from "@/lib/awsSettings";
 
 const NOW = new Date("2026-11-04T14:21:00Z");
@@ -422,6 +423,69 @@ describe("label maps", () => {
 
   it("words a sync gap for a service missing in the region", () => {
     expect(gapWords("not_available_in_region")).toBe("Not offered in this Region");
+  });
+
+  it("words a capped read with its count, never the raw word or a zero", () => {
+    expect(gapWords("capped")).toBe("Not all read");
+    expect(gapWords({ reason: "capped" })).toBe("Not all read");
+    expect(gapWords({ reason: "capped", seen: 28, total: 35 })).toBe("28 of 35 read");
+    expect(gapWords({ reason: "capped", seen: 28, total: 0 })).toBe("more than 28, not all read");
+    expect(gapWords({ reason: "capped", seen: 28, total: 20 })).toBe("more than 28, not all read");
+    expect(gapWords({ reason: "capped", seen: 500 })).toBe("more than 500, not all read");
+    expect(gapWords({ reason: "capped", seen: 0, total: 35 })).toBe("Not all read");
+    expect(gapWords({ reason: "throttled", seen: 3, total: 5 })).toBe("Not checked: AWS throttled, retrying");
+  });
+
+  it("lists a capped gap on a first-sync row in words", () => {
+    const progress = syncProgress({
+      state: "partial",
+      synced_at: null,
+      first_sync: true,
+      units_done: 2,
+      units_total: 2,
+      services: [
+        { service: "lambda", state: "ok", units_done: 1, units_total: 1, last_good_at: null, gaps: [{ reason: "capped", seen: 50, total: 80 }] },
+        { service: "ec2", state: "failed", units_done: 1, units_total: 1, last_good_at: null, gaps: ["capped"] },
+      ],
+    });
+    const words = progress.rows.flatMap((r) => [r.word, ...r.gaps]);
+    expect(words).not.toContain("capped");
+    expect(progress.rows.find((r) => r.service === "lambda")?.gaps).toEqual(["50 of 80 read"]);
+    expect(progress.rows.find((r) => r.service === "ec2")?.word).toBe("Not all read");
+  });
+
+  it("shows a synced service with unread data as a neutral Read, never a green Ready", () => {
+    const service = (name: string, gaps: Array<string | { reason: string; seen?: number; total?: number }>) =>
+      ({ service: name, state: "ok" as const, units_done: 1, units_total: 1, last_good_at: null, gaps });
+    const progress = syncProgress({
+      state: "ok",
+      synced_at: null,
+      first_sync: true,
+      units_done: 7,
+      units_total: 7,
+      services: [
+        service("lambda", [{ reason: "capped", seen: 50 }]),
+        service("rds", ["not_checked"]),
+        service("ec2", []),
+        service("ecs", ["throttled"]),
+        service("ebs", ["denied"]),
+        service("health", ["not_on_plan"]),
+        service("efs", ["not_available_in_region"]),
+      ],
+    });
+    const row = (name: string) => progress.rows.find((r) => r.service === name);
+    expect(row("lambda")).toMatchObject({ kind: "read", word: "Read", gaps: ["more than 50, not all read"] });
+    expect(row("rds")).toMatchObject({ kind: "read", word: "Read", gaps: ["Not checked"] });
+    expect(row("ec2")).toMatchObject({ kind: "ready", word: "Ready", gaps: [] });
+    expect(row("ecs")).toMatchObject({ kind: "read", word: "Read", gaps: ["Not checked: AWS throttled, retrying"] });
+    expect(row("ebs")).toMatchObject({ kind: "read", word: "Read", gaps: ["Denied"] });
+    expect(row("health")).toMatchObject({ kind: "read", word: "Read", gaps: ["Not on this support plan"] });
+    expect(row("efs")).toMatchObject({ kind: "ready", word: "Ready", gaps: ["Not offered in this Region"] });
+    expect(progress.label).toBe("7 of 7 ready");
+  });
+
+  it("words a capped gap on the Changes and compare views", () => {
+    expect(gapReasonText("capped")).toBe("not all read");
   });
 
   it("names a support-plan gap and service as not on this support plan, never Not enabled", () => {

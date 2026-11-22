@@ -341,6 +341,28 @@ func TestAccessDeniedBurstKeepsOtherUnits(t *testing.T) {
 	}
 }
 
+// A bucket with no public access block or no policy is an answer, not a
+// gap; a detail call denied for every bucket is one gap counting them.
+func TestBucketReadsNameNotSetAsAnswersAndCountDenials(t *testing.T) {
+	h := newHarness(t, fakeaws.ScenarioBadDeploy)
+	mustSync(t, h, target(productionAccount))
+	clean, err := h.store.Sync(context.Background(), snapshot.Query{Account: productionAccount, Service: "s3"})
+	if err != nil || len(clean) != 1 || clean[0].Sync.State != model.SyncOK || len(clean[0].Sync.Gaps) != 0 {
+		t.Fatalf("s3 with settings not set = %+v, %v", clean, err)
+	}
+
+	denied := newHarness(t, fakeaws.ScenarioAccessDeniedBurst)
+	mustSync(t, denied, target(productionAccount))
+	statuses, err := denied.store.Sync(context.Background(), snapshot.Query{Account: productionAccount, Service: "s3"})
+	if err != nil || len(statuses) != 1 {
+		t.Fatalf("s3 = %+v, %v", statuses, err)
+	}
+	gaps := statuses[0].Sync.Gaps
+	if len(gaps) != 1 || gaps[0].Operation != "GetBucketEncryption" || gaps[0].Reason != model.GapDenied || gaps[0].Seen != 0 || gaps[0].Total != 2 {
+		t.Fatalf("s3 gaps = %+v, want one denial for 0 of 2 buckets", gaps)
+	}
+}
+
 // TestThrottledAPIShowsGapsNotZeros syncs cleanly, then again under
 // throttling: no committed resource disappears and the failures are named.
 func TestThrottledAPIShowsGapsNotZeros(t *testing.T) {

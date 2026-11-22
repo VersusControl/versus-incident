@@ -15,6 +15,7 @@ func init() {
 	registerEstate(map[string]estateHandler{
 		"iam:GetAccountAuthorizationDetails":        (*Server).estateAuthorizationDetails,
 		"iam:GetRole":                               (*Server).estateGetRole,
+		"iam:ListRoles":                             (*Server).estateListRoles,
 		"iam:GetCredentialReport":                   (*Server).estateCredentialReport,
 		"organizations:DescribeOrganization":        (*Server).estateDescribeOrganization,
 		"organizations:ListAccounts":                (*Server).estateOrganizationsDenied,
@@ -236,6 +237,20 @@ func (s *Server) estateAuthorizationDetails(writer http.ResponseWriter, call est
 	writeXMLBody(writer, queryResult("GetAccountAuthorizationDetails", inner))
 }
 
+// estateListRoles answers ListRoles the way IAM does: the trust policy is
+// percent-encoded and the list carries neither tags nor last use, which
+// only GetRole returns.
+func (s *Server) estateListRoles(writer http.ResponseWriter, call estateCall) {
+	members := ""
+	for _, role := range estateRoles(call.account) {
+		arn := "arn:aws:iam::" + call.account + ":role" + role.path + role.name
+		members += "<member>" + xmlText("Path", role.path) + xmlText("RoleName", role.name) + xmlText("RoleId", role.id) +
+			xmlText("Arn", arn) + xmlText("CreateDate", iso(call.now.Add(-role.created))) +
+			xmlText("AssumeRolePolicyDocument", policyEncode(role.trust)) + xmlText("MaxSessionDuration", "3600") + "</member>"
+	}
+	writeXMLBody(writer, queryResult("ListRoles", "<Roles>"+members+"</Roles><IsTruncated>false</IsTruncated>"))
+}
+
 func (s *Server) estateGetRole(writer http.ResponseWriter, call estateCall) {
 	name := call.request.params.Get("RoleName")
 	for _, role := range estateRoles(call.account) {
@@ -351,7 +366,7 @@ func estateBuckets(account string) []string {
 
 func (s *Server) estateListBuckets(writer http.ResponseWriter, call estateCall) {
 	body := `<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Owner><ID>` +
-		strings.Repeat(estateShort(call.account), 16)[:64] + `</ID></Owner><Buckets>`
+		strings.Repeat(estateShort(call.account), 22)[:64] + `</ID></Owner><Buckets>`
 	for _, bucket := range estateBuckets(call.account) {
 		body += `<Bucket>` + xmlText("Name", bucket) + xmlText("CreationDate", isoMillis(call.now.Add(-days(400)))) +
 			xmlText("BucketRegion", EstateHomeRegion) + `</Bucket>`
@@ -428,6 +443,38 @@ func (s *Server) estateDescribeKey(writer http.ResponseWriter, call estateCall) 
 // a grant to the workloads account limited to calls through S3.
 func (s *Server) estateKeyPolicy(writer http.ResponseWriter, call estateCall) {
 	id := jsonString(jsonBody(call.request), "KeyId")
+	if call.account == EstateData && id == estateManagedKeyID {
+		// An AWS managed key answers its standard policy: any principal of
+		// the account, through the one service the key is for.
+		writeJSONBody(writer, mustJSON(map[string]any{"PolicyName": "default", "Policy": `{
+  "Version" : "2012-10-17",
+  "Id" : "auto-s3-2",
+  "Statement" : [ {
+    "Sid" : "Allow access through S3 for all principals in the account that are authorized to use S3",
+    "Effect" : "Allow",
+    "Principal" : {
+      "AWS" : "*"
+    },
+    "Action" : [ "kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey" ],
+    "Resource" : "*",
+    "Condition" : {
+      "StringEquals" : {
+        "kms:ViaService" : "s3.` + EstateHomeRegion + `.amazonaws.com",
+        "kms:CallerAccount" : "` + EstateData + `"
+      }
+    }
+  }, {
+    "Sid" : "Allow direct access to key metadata to the account",
+    "Effect" : "Allow",
+    "Principal" : {
+      "AWS" : "arn:aws:iam::` + EstateData + `:root"
+    },
+    "Action" : [ "kms:Describe*", "kms:Get*", "kms:List*" ],
+    "Resource" : "*"
+  } ]
+}`}))
+		return
+	}
 	if call.account != EstateData || id != estateDataKeyID {
 		estateError(writer, call, http.StatusBadRequest, "NotFoundException", "Key '"+call.arn("kms", "key/"+id)+"' does not exist")
 		return

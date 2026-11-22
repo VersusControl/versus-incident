@@ -2,6 +2,7 @@ package mount
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -92,6 +93,47 @@ func TestChangeScopeWithoutFreshRegionReadListsNoneOff(t *testing.T) {
 	accounts, _, err := changeScope(settings, scope.Write, conn)
 	if err != nil || len(accounts) != 1 || len(accounts[0].NotEnabled) != 0 || len(accounts[0].Regions) != 2 {
 		t.Fatalf("scope without a fresh read = %+v, %v", accounts, err)
+	}
+}
+
+// The coverage scope reads Regions by the collectors' rule: an account that
+// selects none, with a stale opt-in read, is read in every known Region, so
+// its units there stay in scope. A fresh read keeps only the enabled ones
+// and names the rest as off. The Changes scope keeps its own rule.
+func TestCoverageScopeUsesTheCollectorRegionRule(t *testing.T) {
+	provider := storage.NewMemory()
+	scope := tenancy.DefaultOrgScope()
+	settings := awssettings.NewStore(provider, scope)
+	const accountID = "111122223333"
+	now := time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
+	known := []awssettings.RegionStatus{{Region: "us-east-1", Enabled: true}, {Region: "af-south-1", Enabled: false}}
+	if err := settings.SaveHealth(scope.Write, awssettings.HealthRecord{AccountID: accountID, Status: awssettings.StatusConnected,
+		Regions: known, RegionsReadAt: now.Add(-48 * time.Hour), RegionsFreshUntil: now.Add(-24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	conn := c.AWSConnectorConfig{Enable: true, Accounts: []c.AWSAccountConfig{{AccountID: accountID}}}
+	at := func() time.Time { return now }
+	stale, ok, err := coverageScope(settings, scope.Write, conn, at)
+	if err != nil || !ok || len(stale) != 1 || !slices.Equal(stale[0].Regions, []string{"af-south-1", "us-east-1"}) && !slices.Equal(stale[0].Regions, []string{"us-east-1", "af-south-1"}) || len(stale[0].NotEnabled) != 0 {
+		t.Fatalf("stale coverage scope = %+v, %v", stale, err)
+	}
+	changes, _, err := changeScope(settings, scope.Write, conn)
+	if err != nil || len(changes) != 1 || !slices.Equal(changes[0].Regions, []string{"us-east-1"}) {
+		t.Fatalf("changes scope = %+v, %v, want its own rule unchanged", changes, err)
+	}
+
+	if err := settings.SaveHealth(scope.Write, awssettings.HealthRecord{AccountID: accountID, Status: awssettings.StatusConnected,
+		Regions: known, RegionsReadAt: now, RegionsFreshUntil: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _, err := coverageScope(settings, scope.Write, conn, at)
+	if err != nil || len(fresh) != 1 || !slices.Equal(fresh[0].Regions, []string{"us-east-1"}) || len(fresh[0].NotEnabled) != 0 {
+		t.Fatalf("fresh coverage scope = %+v, %v", fresh, err)
+	}
+	conn.Accounts[0].Regions = []string{"us-east-1", "af-south-1"}
+	selected, _, err := coverageScope(settings, scope.Write, conn, at)
+	if err != nil || len(selected) != 1 || !slices.Equal(selected[0].Regions, []string{"us-east-1"}) || !slices.Equal(selected[0].NotEnabled, []string{"af-south-1"}) {
+		t.Fatalf("selected coverage scope = %+v, %v", selected, err)
 	}
 }
 

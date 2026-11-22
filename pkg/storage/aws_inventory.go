@@ -228,10 +228,17 @@ type AWSSnapshotView struct {
 	Flags     []AWSSecurityFlag
 }
 
-// AWSRelation is one edge from a resource.
+// AWSRelation is one edge from a resource. Kind, Source, Access, Pattern
+// and Count are empty on rows stored before relation kinds existed; an
+// empty kind reads as configured.
 type AWSRelation struct {
-	Type   string `json:"type"`
-	Target string `json:"target"`
+	Type    string `json:"type"`
+	Target  string `json:"target"`
+	Kind    string `json:"kind,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Access  string `json:"access,omitempty"`
+	Pattern string `json:"pattern,omitempty"`
+	Count   int    `json:"count,omitempty"`
 }
 
 // AWSResource is one resource row. Account, Region and Service name the unit
@@ -479,7 +486,7 @@ func cleanAWSResource(unit AWSUnit, row AWSResource) (AWSResource, error) {
 		return AWSResource{}, ErrInvalidAWSInventory
 	}
 	for _, relation := range row.Relations {
-		if !validTableStrings(relation.Type, relation.Target) {
+		if !validTableStrings(relation.Type, relation.Target, relation.Kind, relation.Source, relation.Access, relation.Pattern) || relation.Count < 0 {
 			return AWSResource{}, ErrInvalidAWSInventory
 		}
 	}

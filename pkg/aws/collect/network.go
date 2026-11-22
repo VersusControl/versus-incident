@@ -96,11 +96,12 @@ func collectELB(ctx context.Context, c *call) (result, error) {
 		}
 		if index >= maxTargetGroupHealth {
 			if index == maxTargetGroupHealth {
-				out.gaps = append(out.gaps, c.capGap("DescribeTargetHealth"))
+				out.gaps = append(out.gaps, c.capGap("DescribeTargetHealth", maxTargetGroupHealth, len(groups)))
 			}
 			out.resources = append(out.resources, resource)
 			continue
 		}
+		c.tried("DescribeTargetHealth")
 		health, err := api.DescribeTargetHealth(ctx, &elasticloadbalancingv2.DescribeTargetHealthInput{TargetGroupArn: aws.String(arn)})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("DescribeTargetHealth", err))

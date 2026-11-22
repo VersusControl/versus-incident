@@ -44,7 +44,15 @@ func marshalDetail(value any) json.RawMessage {
 func resourceRow(resource model.Resource) storage.AWSResource {
 	relations := make([]storage.AWSRelation, 0, len(resource.Relations))
 	for _, relation := range resource.Relations {
-		relations = append(relations, storage.AWSRelation{Type: string(relation.Type), Target: relation.Target})
+		// A configured relation is stored without its kind, the form rows
+		// had before kinds existed, so an unchanged resource keeps the same
+		// row bytes across the upgrade.
+		kind := string(relation.Kind)
+		if relation.Kind == model.RelationConfigured {
+			kind = ""
+		}
+		relations = append(relations, storage.AWSRelation{Type: string(relation.Type), Target: relation.Target, Kind: kind,
+			Source: relation.Source, Access: relation.Access, Pattern: relation.Pattern, Count: relation.Count})
 	}
 	return storage.AWSResource{
 		ARN: resource.ARN, Type: resource.Type, App: resource.App, Name: resource.Name, State: resource.State,
@@ -61,9 +69,20 @@ func resourceOf(row storage.AWSResource) model.Resource {
 		App: row.App, AppSource: detail.AppSource, AppTag: detail.AppTag, Name: row.Name, State: row.State, Tags: row.Tags, Attributes: row.Attributes,
 	}
 	for _, relation := range row.Relations {
-		resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationType(relation.Type), Target: relation.Target})
+		resource.Relations = append(resource.Relations, relationOf(relation))
 	}
 	return resource
+}
+
+// relationOf reads one stored relation. A row stored before relation kinds
+// existed has no kind and reads as configured.
+func relationOf(row storage.AWSRelation) model.Relation {
+	kind := model.RelationKind(row.Kind)
+	if kind == "" {
+		kind = model.RelationConfigured
+	}
+	return model.Relation{Type: model.RelationType(row.Type), Target: row.Target, Kind: kind, Source: row.Source,
+		Access: row.Access, Pattern: row.Pattern, Count: row.Count}
 }
 
 func healthRow(item model.Health) storage.AWSHealth {

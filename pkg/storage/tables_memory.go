@@ -28,6 +28,9 @@ type memoryTables struct {
 	increases map[string]map[string]FinOpsIncrease
 	reports   map[string]map[string]FinOpsReport
 	decisions map[string]map[string]FinOpsSavingDecision
+	// accountLabels holds the AWS account labels by organization and
+	// account.
+	accountLabels map[string]map[string]AWSAccountLabel
 }
 
 type memoryUnitKey struct {

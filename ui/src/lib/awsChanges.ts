@@ -452,6 +452,7 @@ const REASON_TEXT: Record<GapReason, string> = {
 const SERVICE_REASON_TEXT: Record<string, string> = {
   not_on_plan: "not on this support plan",
   not_available_in_region: "not offered in this Region",
+  capped: "not all read",
 };
 
 export function gapReasonText(reason: string | null | undefined): string {

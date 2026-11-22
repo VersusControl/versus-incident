@@ -27,8 +27,8 @@ func TestSanitizeKeepsClosedAttributesAndStableRelations(t *testing.T) {
 	if out.Attributes[AttrID] != "i-1" {
 		t.Fatal("sanitize shares the attribute map")
 	}
-	left, _ := json.Marshal(Sanitize(Resource{Relations: []Relation{{RelationInVPC, "b"}, {RelationInVPC, "a"}}}))
-	right, _ := json.Marshal(Sanitize(Resource{Relations: []Relation{{RelationInVPC, "a"}, {RelationInVPC, "b"}}}))
+	left, _ := json.Marshal(Sanitize(Resource{Relations: []Relation{{Type: RelationInVPC, Target: "b"}, {Type: RelationInVPC, Target: "a"}}}))
+	right, _ := json.Marshal(Sanitize(Resource{Relations: []Relation{{Type: RelationInVPC, Target: "a"}, {Type: RelationInVPC, Target: "b"}}}))
 	if string(left) != string(right) {
 		t.Fatal("equal inventories encode differently")
 	}
@@ -59,6 +59,49 @@ func TestGapReasonForCodeNeverReadsAsZero(t *testing.T) {
 		if got := GapReasonForCode(code); got != want {
 			t.Errorf("GapReasonForCode(%q) = %s, want %s", code, got, want)
 		}
+	}
+}
+
+// Every code a unit can record, and anything unknown, lands in exactly one
+// read outcome; only not read and capped count as gaps.
+func TestEveryGapCodeMapsToOneOutcome(t *testing.T) {
+	want := map[string]ReadOutcome{
+		"denied": OutcomeNotRead, "trust_denied": OutcomeNotRead, "external_id_mismatch": OutcomeNotRead,
+		"role_not_found": OutcomeNotRead, "not_on_plan": OutcomeNotRead, "throttled": OutcomeNotRead,
+		"timeout": OutcomeNotRead, "network": OutcomeNotRead, "no_server_identity": OutcomeNotRead,
+		"storage": OutcomeNotRead, "invalid_snapshot": OutcomeNotRead, "": OutcomeNotRead, "anything": OutcomeNotRead,
+		"capped": OutcomeNotRead, "region_disabled": OutcomeOffInAWS, "not_enabled": OutcomeOffInAWS,
+		"not_available_in_region": OutcomeNotOffered,
+	}
+	outcomes := map[ReadOutcome]bool{OutcomeNotRead: true, OutcomeCapped: true, OutcomeOffInAWS: true, OutcomeNotOffered: true}
+	for code, outcome := range want {
+		got := Gap{Reason: GapReasonForCode(code)}.Outcome()
+		if !outcomes[got] || got != outcome {
+			t.Errorf("code %q = %s, want %s", code, got, outcome)
+		}
+	}
+	reasons := map[GapReason]ReadOutcome{
+		GapDenied: OutcomeNotRead, GapThrottled: OutcomeNotRead, GapNotOnPlan: OutcomeNotRead, GapNotChecked: OutcomeNotRead,
+		GapCapped: OutcomeCapped, GapNotEnabled: OutcomeOffInAWS, GapNotInRegion: OutcomeNotOffered, "unknown": OutcomeNotRead,
+	}
+	for reason, outcome := range reasons {
+		if got := OutcomeForReason(reason); got != outcome {
+			t.Errorf("reason %s = %s, want %s", reason, got, outcome)
+		}
+		if gap := (outcome == OutcomeNotRead || outcome == OutcomeCapped); outcome.IsGap() != gap {
+			t.Errorf("outcome %s IsGap = %t", outcome, outcome.IsGap())
+		}
+	}
+}
+
+func TestGapCountsAreOmittedWhenZero(t *testing.T) {
+	encoded, err := json.Marshal(Gap{Account: "111122223333", Region: "us-east-1", Service: "s3", Reason: GapDenied})
+	if err != nil || strings.Contains(string(encoded), "seen") || strings.Contains(string(encoded), "total") {
+		t.Fatalf("gap = %s, %v", encoded, err)
+	}
+	encoded, _ = json.Marshal(Gap{Reason: GapCapped, Seen: 100, Total: 140})
+	if !strings.Contains(string(encoded), `"seen":100,"total":140`) {
+		t.Fatalf("capped gap = %s", encoded)
 	}
 }
 
@@ -186,5 +229,61 @@ func TestRedactNameShowsATagApplicationOnlyWhenItsKeyIsAllowlisted(t *testing.T)
 				t.Fatalf("an empty app keeps its source %q", r.AppSource)
 			}
 		})
+	}
+}
+
+// A relation stored before relation kinds existed has only a type and a
+// target; it reads as configured.
+func TestRelationStoredWithoutKindReadsAsConfigured(t *testing.T) {
+	var resource Resource
+	stored := `{"arn":"arn:aws:elasticloadbalancing:us-east-1:111122223333:loadbalancer/app/web/1","service":"elbv2",` +
+		`"type":"load-balancer","account":"111122223333","region":"us-east-1","name":"web",` +
+		`"relations":[{"type":"routes_to","target":"arn:aws:elasticloadbalancing:us-east-1:111122223333:targetgroup/web/2"}]}`
+	if err := json.Unmarshal([]byte(stored), &resource); err != nil {
+		t.Fatal(err)
+	}
+	if len(resource.Relations) != 1 || resource.Relations[0].Kind != RelationConfigured || resource.Relations[0].Source != "" {
+		t.Fatalf("relations = %+v", resource.Relations)
+	}
+	var grant Relation
+	if err := json.Unmarshal([]byte(`{"type":"may_access","target":"123400000004","kind":"may_access","access":"read"}`), &grant); err != nil {
+		t.Fatal(err)
+	}
+	if grant.Kind != RelationKindMayAccess || grant.Access != AccessRead {
+		t.Fatalf("grant = %+v", grant)
+	}
+}
+
+// Two reads of one link (an A and an AAAA alias, two statements granting
+// the same) stay one link; links that differ in kind, access or pattern
+// stay apart, and the order they were read in does not change the result.
+func TestSanitizeKeepsLinksApartByKindAccessAndPattern(t *testing.T) {
+	relations := []Relation{
+		{Type: RelationAliasOf, Target: "web.elb.amazonaws.com", Kind: RelationConfigured, Source: "route53:ListResourceRecordSets"},
+		{Type: RelationAliasOf, Target: "web.elb.amazonaws.com", Source: "route53:ListResourceRecordSets"},
+		{Type: RelationAliasOf, Target: "web.elb.amazonaws.com", Kind: RelationInferred},
+		{Type: RelationMayAccess, Target: "123400000004", Kind: RelationKindMayAccess, Access: AccessRead, Count: 3},
+		{Type: RelationMayAccess, Target: "123400000004", Kind: RelationKindMayAccess, Access: AccessRead, Count: 7},
+		{Type: RelationMayAccess, Target: "123400000004", Kind: RelationKindMayAccess, Access: AccessWrite},
+		{Type: RelationMayAccess, Target: "123400000004", Kind: RelationKindMayAccess, Access: AccessRead, Pattern: "logs/*"},
+	}
+	out := Sanitize(Resource{Relations: relations}).Relations
+	if len(out) != 5 {
+		t.Fatalf("relations = %+v", out)
+	}
+	if out[0].Kind != RelationConfigured || out[0].Source != "route53:ListResourceRecordSets" || out[1].Kind != RelationInferred {
+		t.Fatalf("aliases = %+v", out[:2])
+	}
+	if out[2].Count != 7 || out[2].Pattern != "" || out[3].Pattern != "logs/*" || out[4].Access != AccessWrite {
+		t.Fatalf("grants = %+v", out[2:])
+	}
+	reversed := make([]Relation, len(relations))
+	for index, relation := range relations {
+		reversed[len(relations)-1-index] = relation
+	}
+	left, _ := json.Marshal(out)
+	right, _ := json.Marshal(Sanitize(Resource{Relations: reversed}).Relations)
+	if string(left) != string(right) {
+		t.Fatalf("read order changes the result:\n%s\n%s", left, right)
 	}
 }

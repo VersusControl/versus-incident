@@ -71,14 +71,26 @@ func worldOperation(request awsRequest) string {
 			action = "GetBucketPolicyStatus"
 		case query.Has("encryption"):
 			action = "GetBucketEncryption"
+		case query.Has("policy"):
+			action = "GetBucketPolicy"
 		}
 	case "cloudfront":
 		if strings.HasPrefix(path, "/2020-05-31/distribution") {
 			action = "ListDistributions"
 		}
 	case "route53":
-		if strings.HasPrefix(path, "/2013-04-01/healthcheck") {
+		switch {
+		case strings.HasPrefix(path, "/2013-04-01/healthcheck"):
 			action = "ListHealthChecks"
+		case path == "/2013-04-01/hostedzone":
+			action = "ListHostedZones"
+		}
+	case "ram":
+		switch path {
+		case "/listresources":
+			action = "ListResources"
+		case "/getresourceshareassociations":
+			action = "GetResourceShareAssociations"
 		}
 	}
 	if service == "" || action == "" {

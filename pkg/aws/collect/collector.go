@@ -329,6 +329,11 @@ func (collector *Collector) effectiveOptions() Options {
 // good generation and records why; it never affects another unit. Only one
 // sync per account runs at a time.
 func (collector *Collector) Sync(ctx context.Context, target Target, kinds ...Kind) (Report, error) {
+	return collector.sync(ctx, target, kinds, nil)
+}
+
+// sync is Sync limited, when only is set, to the units whose keys it holds.
+func (collector *Collector) sync(ctx context.Context, target Target, kinds []Kind, only map[string]bool) (Report, error) {
 	if collector == nil || collector.store == nil {
 		return Report{}, snapshot.ErrNoStorage
 	}
@@ -355,6 +360,15 @@ func (collector *Collector) Sync(ctx context.Context, target Target, kinds ...Ki
 	}
 	writer := collector.store.Writer(target.AccountID)
 	planned := plan(target.AccountID, target.Regions, kinds)
+	if only != nil {
+		kept := planned[:0]
+		for _, item := range planned {
+			if only[item.unit.Key()] {
+				kept = append(kept, item)
+			}
+		}
+		planned = kept
+	}
 	// Every unit of every kind is registered before the first one runs, so
 	// first-sync progress has a fixed total from the start and never reads
 	// as finished between kinds.
@@ -422,6 +436,7 @@ func (collector *Collector) runUnit(ctx context.Context, c *call, entry spec) Un
 	unitCtx, cancel := context.WithTimeout(ctx, unitTimeout)
 	out, err := entry.run(unitCtx, c)
 	cancel()
+	out.gaps = c.mergeDetailGaps(out.gaps)
 	if ctx.Err() != nil {
 		// Shutdown: whatever the unit read is incomplete and is not kept.
 		return report
@@ -476,7 +491,11 @@ func (collector *Collector) runUnit(ctx context.Context, c *call, entry spec) Un
 		return report
 	}
 	report.Outcome = OutcomeCommitted
-	report.Resources = len(generation.Resources)
+	for _, resource := range generation.Resources {
+		if resource.Type != model.ResourcePolicyType {
+			report.Resources++
+		}
+	}
 	return report
 }
 

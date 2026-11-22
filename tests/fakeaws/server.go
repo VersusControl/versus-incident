@@ -638,7 +638,7 @@ func (s *Server) writeError(writer http.ResponseWriter, protocol string, status 
 
 // restJSONServices answer errors as REST-JSON: the code in the
 // X-Amzn-Errortype header and the body.
-var restJSONServices = map[string]bool{"lambda": true, "eks": true, "apigateway": true, "servicecatalog": true}
+var restJSONServices = map[string]bool{"lambda": true, "eks": true, "apigateway": true, "servicecatalog": true, "ram": true}
 
 // writeErrorFor answers an error in the exact shape the calling service's
 // SDK parses: EC2's query errors, S3's bare <Error>, REST-JSON's header and

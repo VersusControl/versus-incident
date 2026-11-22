@@ -2,8 +2,11 @@ package collect
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
 )
 
 // Intervals is how often each kind of unit is re-read.
@@ -19,6 +22,8 @@ func (intervals Intervals) of(kind Kind) time.Duration {
 		return intervals.Health
 	case KindChanges:
 		return intervals.Changes
+	case KindPolicy:
+		return max(intervals.Inventory, PolicyInterval)
 	default:
 		return intervals.Inventory
 	}
@@ -28,8 +33,8 @@ func (intervals Intervals) of(kind Kind) time.Duration {
 const schedulerTick = 10 * time.Second
 
 // kindOrder runs health first so a first sync shows what is broken early,
-// then changes, then the slower inventory.
-var kindOrder = []Kind{KindHealth, KindChanges, KindInventory}
+// then changes, then the slower inventory, then the policy reads.
+var kindOrder = []Kind{KindHealth, KindChanges, KindInventory, KindPolicy}
 
 // Scheduler runs the collector for every connected account on its interval
 // per kind. One goroutine does all the work, account after account, so the
@@ -45,6 +50,7 @@ type Scheduler struct {
 
 	mu      sync.Mutex
 	last    map[string]time.Time
+	policy  map[string]policyState
 	pending map[string]bool
 	wake    chan struct{}
 	stopped chan struct{}
@@ -90,6 +96,7 @@ func NewScheduler(collector *Collector, targets func(context.Context) []Target, 
 		now:       time.Now,
 		tick:      schedulerTick,
 		last:      make(map[string]time.Time),
+		policy:    make(map[string]policyState),
 		pending:   make(map[string]bool),
 		wake:      make(chan struct{}, 1),
 		stopped:   make(chan struct{}),
@@ -170,6 +177,12 @@ func (scheduler *Scheduler) RunDue(ctx context.Context) {
 		scheduler.mu.Unlock()
 
 		for _, kind := range kindOrder {
+			if kind == KindPolicy {
+				if !scheduler.runPolicy(ctx, target, intervals.of(kind)) {
+					return
+				}
+				continue
+			}
 			now := scheduler.now()
 			key := lastKey(target.AccountID, kind)
 			scheduler.mu.Lock()
@@ -186,6 +199,73 @@ func (scheduler *Scheduler) RunDue(ctx context.Context) {
 			scheduler.mu.Unlock()
 		}
 	}
+}
+
+// policyState is what this process knows of one account's policy reads:
+// the units it planned and when the next of them is due.
+type policyState struct {
+	units string
+	next  time.Time
+}
+
+// runPolicy reads the account's policy units that are due. The cadence is
+// per unit and kept in the store, not in this process: a unit is due when
+// its own stored attempt, as any replica recorded it, is older than the
+// interval, or it was never attempted. A restart or a second replica never
+// reads a unit again inside the interval, and a new Region or a pass cut
+// short reads only the units that need it. A trigger does not force it.
+// The replicas share one lock per account, and a replica that does not get
+// it leaves the read to the one that did. It reports false only when ctx
+// ended.
+func (scheduler *Scheduler) runPolicy(ctx context.Context, target Target, interval time.Duration) bool {
+	now := scheduler.now()
+	units := Plan(target.AccountID, target.Regions, KindPolicy)
+	keys := make([]string, 0, len(units))
+	for _, unit := range units {
+		keys = append(keys, unit.Key())
+	}
+	fingerprint := strings.Join(keys, "\x00")
+	scheduler.mu.Lock()
+	state, known := scheduler.policy[target.AccountID]
+	scheduler.mu.Unlock()
+	if known && state.units == fingerprint && now.Before(state.next) {
+		return true
+	}
+	store := scheduler.collector.Store()
+	unlock, acquired, err := store.LockPolicyReads(ctx, target.AccountID)
+	if err != nil || !acquired {
+		return ctx.Err() == nil
+	}
+	defer unlock()
+	statuses, err := store.Sync(ctx, snapshot.Query{Account: target.AccountID})
+	if err != nil {
+		return ctx.Err() == nil
+	}
+	attempted := map[string]time.Time{}
+	for _, status := range statuses {
+		attempted[status.Unit.Key()] = status.Sync.AttemptedAt
+	}
+	due := map[string]bool{}
+	next := now.Add(interval)
+	for _, key := range keys {
+		at := attempted[key]
+		if at.IsZero() || now.Sub(at) >= interval {
+			due[key] = true
+			continue
+		}
+		if at.Add(interval).Before(next) {
+			next = at.Add(interval)
+		}
+	}
+	if len(due) > 0 {
+		if _, err := scheduler.collector.sync(ctx, target, []Kind{KindPolicy}, due); err != nil {
+			return ctx.Err() == nil
+		}
+	}
+	scheduler.mu.Lock()
+	scheduler.policy[target.AccountID] = policyState{units: fingerprint, next: next}
+	scheduler.mu.Unlock()
+	return true
 }
 
 func (scheduler *Scheduler) purgeRemovedAccounts(ctx context.Context) {
