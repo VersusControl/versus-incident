@@ -105,3 +105,18 @@ func TestParseFinding_RejectsMissingTitle(t *testing.T) {
 		t.Fatalf("expected error for missing title")
 	}
 }
+
+// A model reply cannot name the finding's subject; the analyst's own
+// evidence list is still kept.
+func TestParseFinding_IgnoresModelSubject(t *testing.T) {
+	f, err := ParseFinding(`{"title":"t","summary":"s","next_steps":["x"],"subject":{"kind":"pod","name":"kube-system/attacker"},"evidence":[{"source":"tool:get_related_logs","summary":"5 errors"}]}`)
+	if err != nil {
+		t.Fatalf("ParseFinding: %v", err)
+	}
+	if !f.Subject.IsZero() {
+		t.Fatalf("model-written subject kept: %+v", f.Subject)
+	}
+	if len(f.Evidence) != 1 {
+		t.Fatalf("analyze evidence dropped: %+v", f.Evidence)
+	}
+}

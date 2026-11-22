@@ -26,18 +26,62 @@ type KubernetesConnectorConfig struct {
 	Multiple             bool `mapstructure:"multiple"`
 	KubernetesToolConfig `mapstructure:",squash"`
 	Clusters             []KubernetesClusterConfig `mapstructure:"clusters"`
+	// AnomalyDetection is an opaque settings block for an anomaly-detection
+	// extension. It applies to every cluster; a cluster's own block refines
+	// it. Versus stores and copies it and reads nothing inside it.
+	AnomalyDetection map[string]any `mapstructure:"anomaly_detection"`
 }
 
 type KubernetesClusterConfig struct {
 	DisplayName          string `mapstructure:"display_name"`
 	KubernetesToolConfig `mapstructure:",squash"`
+	// AnomalyDetection is this cluster's opaque anomaly-detection block,
+	// layered over the connector-level one by the extension that reads it.
+	AnomalyDetection map[string]any `mapstructure:"anomaly_detection"`
 }
+
+// DefaultKubernetesClusterID is the cluster ID of a single-cluster connector
+// configured without cluster_id.
+const DefaultKubernetesClusterID = "default"
 
 func (connector KubernetesConnectorConfig) Resolved() []KubernetesClusterConfig {
 	if connector.Multiple {
 		return append([]KubernetesClusterConfig(nil), connector.Clusters...)
 	}
 	return []KubernetesClusterConfig{{KubernetesToolConfig: connector.KubernetesToolConfig}}
+}
+
+// KubernetesAnomalyDetectionBlocks is the anomaly_detection settings that
+// apply to one cluster, as two separate layers.
+type KubernetesAnomalyDetectionBlocks struct {
+	// ClusterID is the cluster's ID; DefaultKubernetesClusterID for a
+	// single-cluster connector without cluster_id.
+	ClusterID string
+	// Connector is the connector-level block, nil when absent.
+	Connector map[string]any
+	// Cluster is the cluster's own block, nil when absent. Always nil for a
+	// single-cluster connector, whose only block is the connector-level one.
+	Cluster map[string]any
+}
+
+// AnomalyDetectionBlocks returns, for each resolved cluster in order, the
+// connector-level and cluster-level anomaly_detection blocks, unmerged. The
+// maps are deep copies, so a caller may change them freely.
+func (connector KubernetesConnectorConfig) AnomalyDetectionBlocks() []KubernetesAnomalyDetectionBlocks {
+	resolved := connector.Resolved()
+	out := make([]KubernetesAnomalyDetectionBlocks, len(resolved))
+	for index, entry := range resolved {
+		id := entry.ClusterID
+		if id == "" {
+			id = DefaultKubernetesClusterID
+		}
+		out[index] = KubernetesAnomalyDetectionBlocks{
+			ClusterID: id,
+			Connector: cloneAnyMap(connector.AnomalyDetection),
+			Cluster:   cloneAnyMap(entry.AnomalyDetection),
+		}
+	}
+	return out
 }
 
 type KubernetesToolConfig struct {
@@ -197,7 +241,7 @@ func validateMultipleShape(value any) error {
 			if strings.EqualFold(name, "clusters") && !multiple {
 				return errors.New("connectors.kubernetes.clusters requires multiple: true")
 			}
-			if multiple && !strings.EqualFold(name, "multiple") && !strings.EqualFold(name, "clusters") {
+			if multiple && !strings.EqualFold(name, "multiple") && !strings.EqualFold(name, "clusters") && !strings.EqualFold(name, "anomaly_detection") {
 				return errors.New("connectors.kubernetes: configure each cluster under clusters")
 			}
 		}
@@ -382,6 +426,9 @@ func connectorShapeError(value any, target reflect.Type, path string) error {
 	if value == nil {
 		return fmt.Errorf("%s: invalid value", path)
 	}
+	if target == reflect.TypeOf(map[string]any(nil)) {
+		return opaqueBlockKeyError(value, path)
+	}
 	if target.Kind() != reflect.Struct {
 		if reflect.TypeOf(value).AssignableTo(target) {
 			return nil
@@ -413,6 +460,53 @@ func connectorShapeError(value any, target reflect.Type, path string) error {
 		}
 		if err := connectorShapeError(fields[key], fieldType, path+"."+connectorKeyForError(key)); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// opaqueBlockKeyError checks a free-form settings block: it must be a
+// mapping, and every mapping inside it, at any depth, must have text keys, so
+// the block decodes the same way wherever it is read. The first offending key
+// is named by path; values are never echoed.
+func opaqueBlockKeyError(value any, path string) error {
+	if _, ok := value.(map[string]any); !ok {
+		if _, mixed := value.(map[any]any); !mixed {
+			return fmt.Errorf("%s: invalid value", path)
+		}
+	}
+	return opaqueValueKeyError(value, path)
+}
+
+func opaqueValueKeyError(value any, path string) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if err := opaqueValueKeyError(typed[key], path+"."+connectorKeyForError(key)); err != nil {
+				return err
+			}
+		}
+	case map[any]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			if _, text := key.(string); !text {
+				keys = append(keys, connectorKeyForError(fmt.Sprint(key)))
+			}
+		}
+		sort.Strings(keys)
+		if len(keys) > 0 {
+			return fmt.Errorf("%s: key %s must be text; quote it", path, keys[0])
+		}
+	case []any:
+		for index, item := range typed {
+			if err := opaqueValueKeyError(item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

@@ -55,7 +55,7 @@ func NewKubernetesRegistry(cfg config.KubernetesConnectorConfig, scope tenancy.O
 		}
 		id := entry.ClusterID
 		if id == "" {
-			id = "default"
+			id = config.DefaultKubernetesClusterID
 		}
 		provider := entry.Auth.Mode
 		switch provider {

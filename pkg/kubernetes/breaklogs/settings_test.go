@@ -64,3 +64,29 @@ func TestSettingsCASDefaultsIsolationAndContention(t *testing.T) {
 		}
 	}
 }
+
+func TestScopeAllowsFollowsTheSettingsPageMeaning(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		scope     Scope
+		namespace string
+		want      bool
+	}{
+		{"empty include reads every namespace", Scope{}, "shop", true},
+		{"empty lists from storage read every namespace", Scope{Include: []string{}, Exclude: []string{}}, "shop", true},
+		{"empty include still honours exclude", Scope{Exclude: []string{"kube-system"}}, "kube-system", false},
+		{"empty include lets other namespaces through exclude", Scope{Exclude: []string{"kube-system"}}, "shop", true},
+		{"include names the only namespaces", Scope{Include: []string{"shop"}}, "shop", true},
+		{"include leaves other namespaces out", Scope{Include: []string{"shop"}}, "billing", false},
+		{"exclude wins over include", Scope{Include: []string{"shop"}, Exclude: []string{"shop"}}, "shop", false},
+		{"names match exactly", Scope{Include: []string{"shop"}}, "shop-staging", false},
+		{"names are case sensitive", Scope{Include: []string{"shop"}}, "Shop", false},
+		{"an empty namespace is never allowed", Scope{}, "", false},
+		{"an empty namespace is never allowed by include", Scope{Include: []string{""}}, "", false},
+	} {
+		if got := test.scope.Allows(test.namespace); got != test.want {
+			t.Errorf("%s: Allows(%q) = %v, want %v", test.name, test.namespace, got, test.want)
+		}
+	}
+}

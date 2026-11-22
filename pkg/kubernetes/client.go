@@ -101,10 +101,14 @@ type Client struct {
 	now              func() time.Time
 	backoffMu        sync.Mutex
 	backoffUntil     time.Time
-	authMu           sync.Mutex
-	authGeneration   atomic.Uint64
-	authContext      context.Context
-	authCancel       context.CancelFunc
+	// systemBackoffUntil is the API server's throttle on system reads. It is
+	// kept apart from backoffUntil, so a 429 on a background system read
+	// never stalls the user's reads, and theirs never stall system reads.
+	systemBackoffUntil time.Time
+	authMu             sync.Mutex
+	authGeneration     atomic.Uint64
+	authContext        context.Context
+	authCancel         context.CancelFunc
 	// proofs caches identity proofs per token for sources whose renewals
 	// are proved; it is created on first use.
 	proofsMu sync.Mutex
@@ -161,6 +165,24 @@ type captureReadContextKey struct{}
 
 func captureReadContext(ctx context.Context, owner string) context.Context {
 	return context.WithValue(ctx, captureReadContextKey{}, owner)
+}
+
+type systemReadContextKey struct{}
+
+// systemRead marks the requests of a gated system read (see system_reads.go).
+// The API server's answer to such a request is about that read alone: a 403
+// is not recorded as a history authority denial. bodyLimit, when above the
+// client's own limit, is the largest body the read accepts; it is bounded by
+// the system read ceiling, never by the caller.
+func systemRead(ctx context.Context, bodyLimit int64) context.Context {
+	return context.WithValue(ctx, systemReadContextKey{}, systemReadMark{bodyLimit: bodyLimit})
+}
+
+type systemReadMark struct{ bodyLimit int64 }
+
+func systemReadFrom(ctx context.Context) (systemReadMark, bool) {
+	mark, ok := ctx.Value(systemReadContextKey{}).(systemReadMark)
+	return mark, ok
 }
 
 type discoveryReadContextKey struct{}
@@ -305,10 +327,41 @@ func (client *Client) get(ctx context.Context, apiPath, accept string) ([]byte, 
 	return data, nil
 }
 
+// extendBackoff pushes back the throttle the request on ctx belongs to.
+func (client *Client) extendBackoff(ctx context.Context, until time.Time) {
+	client.backoffMu.Lock()
+	defer client.backoffMu.Unlock()
+	if _, system := systemReadFrom(ctx); system {
+		client.systemBackoffUntil = maxTime(client.systemBackoffUntil, until)
+		return
+	}
+	client.backoffUntil = maxTime(client.backoffUntil, until)
+}
+
+// systemThrottle answers a system read at once while the API server's
+// throttle on system reads lasts, instead of waiting it out: a background
+// read has no user waiting and tries again on its next cycle.
+func (client *Client) systemThrottle() error {
+	if client == nil {
+		return ErrClusterUnavailable
+	}
+	client.backoffMu.Lock()
+	until := client.systemBackoffUntil
+	client.backoffMu.Unlock()
+	if delay := time.Until(until); delay > 0 {
+		return &ErrThrottled{RetryAfter: delay}
+	}
+	return nil
+}
+
 func (client *Client) waitBackoff(ctx context.Context) error {
+	_, system := systemReadFrom(ctx)
 	for {
 		client.backoffMu.Lock()
 		until := client.backoffUntil
+		if system {
+			until = client.systemBackoffUntil
+		}
 		client.backoffMu.Unlock()
 		delay := time.Until(until)
 		if delay <= 0 {
@@ -419,9 +472,7 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if hint := response.Header.Get("Retry-After"); hint != "" {
 			delay := parseRetryAfter(hint, time.Now().UTC())
-			client.backoffMu.Lock()
-			client.backoffUntil = maxTime(client.backoffUntil, time.Now().Add(delay))
-			client.backoffMu.Unlock()
+			client.extendBackoff(ctx, time.Now().Add(delay))
 		}
 		currentRequest := requestService == nil || requestService.identity.requestGeneration.Load() == requestCredentialGeneration
 		if response.StatusCode == http.StatusUnauthorized && requestService != nil {
@@ -432,14 +483,12 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 				requestService.denyHistoryAuthority(ctx, apiPath, true)
 			}
 		}
-		if response.StatusCode == http.StatusForbidden && currentRequest && requestService != nil {
+		if _, system := systemReadFrom(ctx); response.StatusCode == http.StatusForbidden && currentRequest && requestService != nil && !system {
 			requestService.denyHistoryAuthority(ctx, apiPath, false)
 		}
 		if response.StatusCode == http.StatusTooManyRequests {
 			delay := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-			client.backoffMu.Lock()
-			client.backoffUntil = maxTime(client.backoffUntil, time.Now().UTC().Add(delay))
-			client.backoffMu.Unlock()
+			client.extendBackoff(ctx, time.Now().UTC().Add(delay))
 			return nil, false, &ErrThrottled{RetryAfter: delay}
 		}
 		if response.StatusCode == http.StatusBadRequest {
@@ -462,8 +511,12 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 		}
 		return nil, false, classifyStatus(response.StatusCode)
 	}
-	if maxBytes <= 0 || maxBytes > client.maxBodyBytes {
-		maxBytes = client.maxBodyBytes
+	ceiling := client.maxBodyBytes
+	if mark, system := systemReadFrom(ctx); system && mark.bodyLimit > ceiling {
+		ceiling = min(mark.bodyLimit, systemMetricsResponseCeiling)
+	}
+	if maxBytes <= 0 || maxBytes > ceiling {
+		maxBytes = ceiling
 	}
 	limited := io.LimitReader(response.Body, maxBytes+1)
 	data, err := io.ReadAll(limited)

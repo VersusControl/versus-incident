@@ -119,5 +119,8 @@ func ParseFinding(raw string) (*core.AIFinding, error) {
 	if len(f.RootCauseHypotheses) == 0 && len(f.NextSteps) == 0 && len(f.Suggestions) == 0 {
 		return nil, fmt.Errorf("analyze: empty finding (no hypotheses or next_steps)")
 	}
+	// The subject names the object the detector found; the model never
+	// sets it, because log text in the prompt can steer the reply.
+	f.Subject = core.FindingSubject{}
 	return &f, nil
 }

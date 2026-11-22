@@ -54,6 +54,7 @@ type Worker struct {
 	// calling AI, so a detection is never dropped for lack of a key.
 	ai                       AIBundle
 	emitter                  Emitter
+	detectEmitter            *DetectEmitter
 	continueDetectionEpisode DetectionEpisodeRecorder
 	healthRecorder           core.LogHealthRecorder
 	orgID                    string
@@ -203,6 +204,8 @@ func NewWorker(opt WorkerOptions) (*Worker, error) {
 	// metric/trace brains are built here for the matching configured sources.
 	w.brains = make(map[string]typedBrain)
 	w.resolveRegisteredBrains()
+
+	w.detectEmitter = w.newDetectEmitter()
 
 	return w, nil
 }

@@ -528,8 +528,10 @@ func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
 	out.Kubernetes.EndpointCIDRs = append([]string(nil), src.Kubernetes.EndpointCIDRs...)
 	out.Kubernetes.ExcludeResources = append([]string(nil), src.Kubernetes.ExcludeResources...)
 	out.Kubernetes.Namespaces = append([]string(nil), src.Kubernetes.Namespaces...)
+	out.Kubernetes.AnomalyDetection = cloneAnyMap(src.Kubernetes.AnomalyDetection)
 	out.Kubernetes.Clusters = append([]KubernetesClusterConfig(nil), src.Kubernetes.Clusters...)
 	for index := range out.Kubernetes.Clusters {
+		out.Kubernetes.Clusters[index].AnomalyDetection = cloneAnyMap(src.Kubernetes.Clusters[index].AnomalyDetection)
 		out.Kubernetes.Clusters[index].ChangeCapture = src.Kubernetes.Clusters[index].ChangeCapture
 		out.Kubernetes.Clusters[index].EndpointCIDRs = append([]string(nil), src.Kubernetes.Clusters[index].EndpointCIDRs...)
 		out.Kubernetes.Clusters[index].ExcludeResources = append([]string(nil), src.Kubernetes.Clusters[index].ExcludeResources...)
@@ -579,6 +581,13 @@ func cloneAnyValue(v interface{}) interface{} {
 	switch t := v.(type) {
 	case map[string]interface{}:
 		return cloneAnyMap(t)
+	case map[interface{}]interface{}:
+		// YAML decodes a mapping with a non-string key (`{500: page}`) this way.
+		out := make(map[interface{}]interface{}, len(t))
+		for k, e := range t {
+			out[k] = cloneAnyValue(e)
+		}
+		return out
 	case []interface{}:
 		out := make([]interface{}, len(t))
 		for i, e := range t {

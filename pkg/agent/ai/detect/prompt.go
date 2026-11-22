@@ -101,5 +101,9 @@ func ParseFinding(raw string) (*core.AIFinding, error) {
 	if len(f.Suggestions) > 5 {
 		f.Suggestions = f.Suggestions[:5]
 	}
+	// The subject and the evidence come from the detector, never from the
+	// model: a reply can be steered by the log text in the prompt.
+	f.Subject = core.FindingSubject{}
+	f.Evidence = nil
 	return &f, nil
 }

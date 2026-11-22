@@ -244,12 +244,19 @@ func saveDelayReplica(t *testing.T, endpoint string, store storage.Provider, clu
 
 func saveDelayReplicaRegistry(t *testing.T, endpoint string, store storage.Provider, clusterID string, pace replicaPace) (*Service, *ServiceRegistry) {
 	t.Helper()
+	return saveDelayReplicaWithGrace(t, endpoint, store, clusterID, pace, 500*time.Millisecond)
+}
+
+// saveDelayReplicaWithGrace starts a replica whose published capture reads as
+// delayed once its own save has been pending for longer than grace.
+func saveDelayReplicaWithGrace(t *testing.T, endpoint string, store storage.Provider, clusterID string, pace replicaPace, grace time.Duration) (*Service, *ServiceRegistry) {
+	t.Helper()
 	client, err := NewClient(Config{Endpoint: endpoint, AllowLoopbackHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(client, Scope{OrgID: "default", ClusterID: clusterID, CredentialID: "unchanged"}, time.Hour)
-	service.historySaveGrace = 500 * time.Millisecond
+	service.historySaveGrace = grace
 	if pace == fixturePace {
 		useFixturePace(service)
 	}
@@ -404,7 +411,11 @@ func TestHistorySaveOutageStaysWithinItsCluster(t *testing.T) {
 	endpoint := saveDelayCluster(t)
 	observed := newFailingSaveStore(fmt.Errorf("journal statement: %w", context.DeadlineExceeded), "save-delay-a")
 	failing := saveDelayReplica(t, endpoint, observed, "save-delay-a", fixturePace)
-	healthy := saveDelayReplica(t, endpoint, observed, "save-delay-b", fixturePace)
+	// The healthy cluster's own save can wait past a short grace on a loaded
+	// race run and would then read as delayed by itself. Its grace is long so
+	// only state from the other cluster could put a save status on its pages;
+	// the check below proves its saves still land during the other's outage.
+	healthy, _ := saveDelayReplicaWithGrace(t, endpoint, observed, "save-delay-b", fixturePace, scaledTimeout(10*time.Second))
 	waitUntil(t, 45*time.Second, "a failed history save on one cluster", func() bool {
 		return observed.failures.Load() > 1 && historySaveOf(t, failing) != nil
 	})
@@ -414,6 +425,26 @@ func TestHistorySaveOutageStaysWithinItsCluster(t *testing.T) {
 	}
 	if page.Capture.HistorySave != nil {
 		t.Fatalf("another cluster's save outage reached this cluster: %+v", page.Capture.HistorySave)
+	}
+	healthyScope := storage.EvidenceScope{OrgID: "default", ClusterID: "save-delay-b", ClusterUID: "save-delay-physical"}
+	waitUntil(t, 10*time.Second, "the healthy cluster's published capture saved during the other's outage", func() bool {
+		healthy.changes.mu.Lock()
+		cache := healthy.changes.inventories[healthy.indexScope()]
+		healthy.changes.mu.Unlock()
+		if cache == nil {
+			return false
+		}
+		cache.mu.RLock()
+		batch, failure := cache.generation.EvidenceBatch, cache.generation.EvidenceFailure
+		cache.mu.RUnlock()
+		checkpoint, err := observed.EvidenceCheckpoint(t.Context(), healthyScope)
+		if err != nil || checkpoint.At.IsZero() || failure != "" {
+			return false
+		}
+		return batch == nil || batch.ID == checkpoint.ID || !batch.At.After(checkpoint.At)
+	})
+	if observed.failures.Load() < 2 || historySaveOf(t, failing) == nil {
+		t.Fatal("the failing cluster recovered before the healthy cluster's save was checked")
 	}
 }
 
