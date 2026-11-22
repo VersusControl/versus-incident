@@ -295,13 +295,14 @@ func TestDelayedCredentialDenialCannotRetireVerifiedReplacement(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
 			started, release := make(chan struct{}), make(chan struct{})
+			var startedOnce sync.Once
 			var releaseOnce sync.Once
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/selfsubjectreviews") {
 					_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview", "status": map[string]any{"userInfo": map[string]any{"username": "verified", "uid": "identity", "groups": []string{"readers"}}}})
 					return
 				}
-				close(started)
+				startedOnce.Do(func() { close(started) })
 				<-release
 				http.Error(w, "old request", status)
 			}))
@@ -335,11 +336,7 @@ func TestDelayedCredentialDenialCannotRetireVerifiedReplacement(t *testing.T) {
 				}
 				done <- service.client.GetMetadataJSON(ctx, "/api/v1/pods", &result)
 			}()
-			select {
-			case <-started:
-			case <-time.After(time.Second):
-				t.Fatal("request did not start")
-			}
+			waitFor(t, started, "request did not start")
 			bearer.Store("Bearer replacement")
 			if err := service.acceptCredential(t.Context(), "Bearer replacement"); err != nil {
 				t.Fatal(err)
@@ -594,17 +591,14 @@ func settleRefresh(t *testing.T, source *expiringBearerSource) {
 	t.Helper()
 	// A refresh against a failing provider runs the SDK's jittered retries,
 	// which can take several seconds; the refresh timeout is its upper bound.
-	deadline := time.Now().Add(tokenRefreshTimeout + 5*time.Second)
-	for time.Now().Before(deadline) {
+	for wait := polling(t, "token refresh did not finish"); ; wait.next() {
 		source.mu.Lock()
 		idle := source.inflight == nil
 		source.mu.Unlock()
 		if idle {
 			return
 		}
-		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("token refresh did not finish")
 }
 
 func TestExpiringBearerSourceCanceledWaiterReturns(t *testing.T) {
@@ -1443,11 +1437,7 @@ func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
 			if !errors.Is(err, ErrUnauthorized) {
 				t.Fatalf("definitive rejection hidden: %v", err)
 			}
-			select {
-			case <-bound.Done():
-			case <-time.After(time.Second):
-				t.Fatal("alias stream context survived rejection")
-			}
+			waitFor(t, bound.Done(), "alias stream context survived rejection")
 			for _, old := range []*Service{service, alias, shared} {
 				if old.identity.ctx.Err() == nil {
 					t.Fatal("shared client epoch survived rejection")
@@ -1548,6 +1538,7 @@ func TestProjectedExpiredFreshnessTransientAndForbidden(t *testing.T) {
 func TestProjectedLateVerificationCannotResurrectRejectedCache(t *testing.T) {
 	var blocked atomic.Bool
 	started, release := make(chan struct{}), make(chan struct{})
+	var startedOnce sync.Once
 	config, sign := projectedAuthFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			if request.URL.Path == "/api/v1/pods" {
@@ -1555,7 +1546,7 @@ func TestProjectedLateVerificationCannotResurrectRejectedCache(t *testing.T) {
 				return
 			}
 			if blocked.Load() && request.URL.Path == "/openid/v1/jwks" {
-				close(started)
+				startedOnce.Do(func() { close(started) })
 				select {
 				case <-release:
 				case <-request.Context().Done():
@@ -1718,14 +1709,16 @@ func TestProjectedExpiredFreshnessCancellationDoesNotExtendLease(t *testing.T) {
 
 func TestProjectedAPIRejectionCancelsOpenStream(t *testing.T) {
 	opened, stopped := make(chan struct{}), make(chan struct{})
+	var openedOnce sync.Once
+	var stoppedOnce sync.Once
 	config, sign := projectedAuthFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			if strings.HasSuffix(request.URL.Path, "/log") {
 				writer.WriteHeader(http.StatusOK)
 				writer.(http.Flusher).Flush()
-				close(opened)
+				openedOnce.Do(func() { close(opened) })
 				<-request.Context().Done()
-				close(stopped)
+				stoppedOnce.Do(func() { close(stopped) })
 				return
 			}
 			if request.URL.Path == "/api/v1/pods" {
@@ -1748,25 +1741,13 @@ func TestProjectedAPIRejectionCancelsOpenStream(t *testing.T) {
 	go func() {
 		done <- service.streamPodLogs(t.Context(), PodLogStreamOptions{Namespace: "default", Pod: "api"}, func(PodLogStreamEvent) error { return nil }, time.Second, time.Second, time.Second, 1024)
 	}()
-	select {
-	case <-opened:
-	case <-time.After(time.Second):
-		t.Fatal("stream did not open")
-	}
+	waitFor(t, opened, "stream did not open")
 	var output any
 	if err := client.GetJSON(t.Context(), "/api/v1/pods", &output); !errors.Is(err, ErrUnauthorized) {
 		t.Fatal("API did not reject credential")
 	}
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("API rejection did not cancel upstream stream")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("stream did not stop")
-	}
+	waitFor(t, stopped, "API rejection did not cancel upstream stream")
+	waitFor(t, done, "stream did not stop")
 }
 
 func TestProjectedVerifierRejectsUntrustedKeysAndDiscovery(t *testing.T) {

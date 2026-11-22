@@ -137,7 +137,7 @@ func snapshotOwnDatabase(t *testing.T) string {
 	t.Helper()
 	server := os.Getenv("TEST_POSTGRES_DSN")
 	if server == "" {
-		t.Skip("TEST_POSTGRES_DSN not set; skipping the Postgres test that needs its own database")
+		t.Skip("isolated Postgres required: set TEST_POSTGRES_DSN")
 	}
 	target, err := url.Parse(server)
 	if err != nil {

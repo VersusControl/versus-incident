@@ -8,36 +8,36 @@ import type { KubernetesIssue, KubernetesTimelinePage } from "../../src/lib/api"
 const sync = { state: "ready", age_s: 0, partial: false };
 const execute = promisify(execFile);
 const issue: KubernetesIssue = {
-  root: { kind: "Deployment", namespace: "shop", name: "qa-checkout", uid: "k27-checkout" },
+  root: { kind: "Deployment", namespace: "shop", name: "qa-checkout", uid: "persisted-checkout" },
   rule: "pod.crash_loop", severity: "critical", count: 2, of: 2, broken: true,
-  broke_at: new Date(Date.now() - 120_000).toISOString(), occurrence_id: "k27-occurrence",
+  broke_at: new Date(Date.now() - 120_000).toISOString(), occurrence_id: "persisted-occurrence",
 };
 
 async function capture(page: Page, width: number, theme: "light" | "dark", state: string) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(await page.locator("html").getAttribute("data-theme")).toBe(theme === "light" ? "light" : null);
-  await page.screenshot({ path: capturePath("k27-history", width, theme, state), animations: "disabled" });
+  await page.screenshot({ path: capturePath("kubernetes-persisted-history", width, theme, state), animations: "disabled" });
   if (width === 390) {
     const clipped = await page.getByRole("group", { name: "Timeline window", exact: true }).evaluate(group => {
       const edge = Math.min(innerWidth, group.closest("section")!.getBoundingClientRect().right);
       return [...group.querySelectorAll("button")].filter(button => button.getBoundingClientRect().right > edge + 1).map(button => button.textContent);
     });
-    expect(clipped, "K27-B2: compact Timeline window controls must not be clipped on mobile").toEqual([]);
+    expect(clipped, "compact Timeline window controls must not be clipped on mobile").toEqual([]);
   }
 }
 
 async function watchHistorySkeletons(page: Page) {
   await page.evaluate(() => {
-    document.documentElement.dataset.k27Skeletons = "0";
+    document.documentElement.dataset.historySkeletons = "0";
     new MutationObserver(() => {
       if (document.querySelector('[aria-label="Loading projected change history"], [aria-label="Loading related root change history"], [aria-label="Loading break timeline"]')) {
-        document.documentElement.dataset.k27Skeletons = String(Number(document.documentElement.dataset.k27Skeletons) + 1);
+        document.documentElement.dataset.historySkeletons = String(Number(document.documentElement.dataset.historySkeletons) + 1);
       }
     }).observe(document.body, { childList: true, subtree: true });
   });
 }
 
-test("K27 live authenticated persisted history and commit stream smoke (no interception)", async ({ page }, testInfo) => {
+test("live authenticated persisted history and commit stream smoke (no interception)", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   await openApp(page, "/agent/kubernetes?view=timeline");
   if (process.env.E2E_LICENSED === "1") {
@@ -175,7 +175,7 @@ async function historyFixture(page: Page, selected: KubernetesIssue = issue, row
         items: cursor ? [] : [{ type: "break", id: "qa-break", at: rowAt, issue: selected }],
         total: capped ? 1000 : 1, crash_count: 0, counts: { change: 0, crash: 0, break: capped ? 1000 : 1 },
         gaps: [], sync, since: url.searchParams.get("since")!, until: url.searchParams.get("until")!,
-        ...(capped && !cursor ? { count_capped: true, next: "k27+/cursor" } : {}),
+        ...(capped && !cursor ? { count_capped: true, next: "persisted+/cursor" } : {}),
       };
       return answer(route, payload);
     }
@@ -187,7 +187,7 @@ async function historyFixture(page: Page, selected: KubernetesIssue = issue, row
         window: { from: url.searchParams.get("since"), to: url.searchParams.get("until") },
         pods: [{ name: "qa-retained-pod", uid: "qa-pod", state: "terminated", short: "retained" }],
         containers: [{ name: "app", main: true }], main_container: "app",
-        lines: [{ at: selected.broke_at, pod: "qa-retained-pod", pod_uid: "qa-pod", container: "app", init: false, slot: "previous", level: "error", text: "K27 saved evidence", source: "native" }],
+        lines: [{ at: selected.broke_at, pod: "qa-retained-pod", pod_uid: "qa-pod", container: "app", init: false, slot: "previous", level: "error", text: "Saved break evidence", source: "native" }],
         markers: [], counts: { all: 1, errors: 1, warnings: 0 }, rate: [], patterns: [], sources: [],
         coverage: { state: "complete", gaps: [], reason: "", tip: false },
       });
@@ -211,7 +211,7 @@ async function historyFixture(page: Page, selected: KubernetesIssue = issue, row
 }
 
 for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const) {
-  test(`K27 intercepted seeded hang timeout denial and deep link ${width} ${theme}`, async ({ page }) => {
+  test(`intercepted seeded hang timeout denial and deep link ${width} ${theme}`, async ({ page }) => {
     test.setTimeout(90_000);
     await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
     await page.emulateMedia({ colorScheme: theme });
@@ -228,19 +228,19 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
       await expect.poll(() => fixture.reads.filter(url => url.pathname.endsWith("/changes") && url.searchParams.has("root_uid")).length).toBeGreaterThan(0);
       await expect.poll(() => fixture.reads.filter(url => url.pathname.endsWith("/crashes") && url.searchParams.has("root_uid")).length).toBeGreaterThan(0);
       await expect.poll(() => fixture.reads.filter(url => url.pathname.endsWith("/break-logs")).length).toBeGreaterThan(0);
-      await expect(page.getByText("K27 saved evidence", { exact: true })).toBeVisible();
+      await expect(page.getByText("Saved break evidence", { exact: true })).toBeVisible();
       const windowsBefore = fixture.reads.filter(url => url.pathname.endsWith("/changes")).length;
       await page.getByRole("group", { name: "Timeline window", exact: true }).getByRole("button", { name: "15m", exact: true }).click();
       await expect.poll(() => fixture.reads.filter(url => url.pathname.endsWith("/changes")).length).toBeGreaterThan(windowsBefore);
       await expect(chart).toBeVisible();
-      await expect(page.getByText("K27 saved evidence", { exact: true })).toBeVisible();
+      await expect(page.getByText("Saved break evidence", { exact: true })).toBeVisible();
       await capture(page, width, theme, "seeded-hung-intercepted");
       fixture.setFault("timeout");
       fixture.release();
       await expect(page.getByText(/Couldn't refresh — showing stored break evidence/)).toBeVisible();
       await expect(chart).toBeVisible();
       await capture(page, width, theme, "seeded-504-intercepted");
-      await expect(page.getByText("Retained root context is unavailable.", { exact: false }), "K27-B3: a transient confirmation failure must not contradict the retained seeded evidence").toHaveCount(0);
+      await expect(page.getByText("Retained root context is unavailable.", { exact: false }), "a transient confirmation failure must not contradict the retained seeded evidence").toHaveCount(0);
       const deepLink = page.url();
       fixture.setFault("denied");
       await page.getByRole("button", { name: "Retry root context", exact: true }).click();
@@ -263,7 +263,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"] as const)
   });
 }
 
-test("K27 intercepted last-good window slide capped cursor and commit reconnect", async ({ page }) => {
+test("intercepted last-good window slide capped cursor and commit reconnect", async ({ page }) => {
   await openApp(page, "/now");
   const fixture = await historyFixture(page);
   fixture.cap();
@@ -273,7 +273,7 @@ test("K27 intercepted last-good window slide capped cursor and commit reconnect"
     await expect(timeline).toContainText("1000+");
     await expect(timeline).toContainText("Counts are lower bounds from a bounded sample.");
     await timeline.getByRole("navigation", { name: "Timeline pages" }).getByRole("button", { name: /Next/ }).click();
-    await expect.poll(() => fixture.reads.some(url => url.searchParams.get("cursor") === "k27+/cursor")).toBe(true);
+    await expect.poll(() => fixture.reads.some(url => url.searchParams.get("cursor") === "persisted+/cursor")).toBe(true);
     await expect(timeline).toContainText("1000+");
     await page.goto("/agent/kubernetes?view=timeline");
     await expect(page.getByRole("link", { name: "Open break details" })).toBeVisible();
@@ -285,7 +285,7 @@ test("K27 intercepted last-good window slide capped cursor and commit reconnect"
     await expect.poll(() => fixture.reads.filter(url => url.pathname.endsWith("/timeline")).length).toBeGreaterThan(before);
     await expect(page.getByRole("link", { name: "Open break details" })).toBeVisible();
     await expect(page.getByLabel("Loading projected change history")).toHaveCount(0);
-    await expect(page.locator("html")).toHaveAttribute("data-k27-skeletons", "0");
+    await expect(page.locator("html")).toHaveAttribute("data-history-skeletons", "0");
     await expect.poll(() => fixture.connections()).toBeGreaterThan(1);
     await expect.poll(() => fixture.reconnectHints.slice(1)).toContain("7");
     const historyReads = fixture.reads.filter(url => url.pathname.endsWith("/timeline")).length;
@@ -297,7 +297,7 @@ test("K27 intercepted last-good window slide capped cursor and commit reconnect"
   } finally { fixture.release(); await page.unrouteAll({ behavior: "ignoreErrors" }); }
 });
 
-test("K27 intercepted Overview and Issues seed every retained break shape during lookup hang", async ({ page }) => {
+test("intercepted Overview and Issues seed every retained break shape during lookup hang", async ({ page }) => {
   test.setTimeout(120_000);
   await openApp(page, "/now");
   const samples = [
@@ -309,7 +309,7 @@ test("K27 intercepted Overview and Issues seed every retained break shape during
     { kind: "Pod", view: "overview", broken: false },
   ];
   for (const [index, sample] of samples.entries()) {
-    const selected = { ...issue, root: { ...issue.root, kind: sample.kind, name: `qa-${sample.kind.toLowerCase()}-${index}`, uid: `k27-root-${index}` }, broken: sample.broken, history: "complete" as const };
+    const selected = { ...issue, root: { ...issue.root, kind: sample.kind, name: `qa-${sample.kind.toLowerCase()}-${index}`, uid: `persisted-root-${index}` }, broken: sample.broken, history: "complete" as const };
     const fixture = await historyFixture(page, selected);
     fixture.setFault("hang");
     try {
@@ -318,12 +318,12 @@ test("K27 intercepted Overview and Issues seed every retained break shape during
       await expect(page.getByRole("region", { name: "Resource timeline chart", exact: true })).toBeVisible();
       await expect(page.getByLabel("Loading related root change history")).toHaveCount(0);
       await expect.poll(() => fixture.reads.some(url => url.pathname.endsWith("/break-logs"))).toBe(true);
-      await expect(page.getByText("K27 saved evidence", { exact: true })).toBeVisible();
+      await expect(page.getByText("Saved break evidence", { exact: true })).toBeVisible();
     } finally { fixture.release(); await page.unrouteAll({ behavior: "ignoreErrors" }); }
   }
 });
 
-test("K27 intercepted Overview retains last-good Changes tile on failed refresh", async ({ page }) => {
+test("intercepted Overview retains last-good Changes tile on failed refresh", async ({ page }) => {
   await openApp(page, "/now");
   const fixture = await historyFixture(page);
   try {
@@ -341,7 +341,7 @@ test("K27 intercepted Overview retains last-good Changes tile on failed refresh"
   } finally { fixture.release(); await page.unrouteAll({ behavior: "ignoreErrors" }); }
 });
 
-test("K27 intercepted pending refresh preserves rows on range change but isolates a new filter", async ({ page }) => {
+test("intercepted pending refresh preserves rows on range change but isolates a new filter", async ({ page }) => {
   await openApp(page, "/now");
   const fixture = await historyFixture(page);
   try {
@@ -358,7 +358,7 @@ test("K27 intercepted pending refresh preserves rows on range change but isolate
     await page.getByRole("group", { name: "Timeline window", exact: true }).getByRole("button", { name: "6h", exact: true }).click();
     await expect(row).toBeVisible();
     await expect(page.getByLabel("Loading projected change history")).toHaveCount(0);
-    await expect(page.locator("html")).toHaveAttribute("data-k27-skeletons", "0");
+    await expect(page.locator("html")).toHaveAttribute("data-history-skeletons", "0");
     await page.getByRole("combobox", { name: "Timeline kind", exact: true }).selectOption("Pod");
     await expect(row).toHaveCount(0);
     await expect(page.getByLabel("Loading projected change history")).toBeVisible();
@@ -367,7 +367,7 @@ test("K27 intercepted pending refresh preserves rows on range change but isolate
   } finally { fixture.release(); await page.unrouteAll({ behavior: "ignoreErrors" }); }
 });
 
-test("K27 intercepted older occurrence keeps log selection independent of latest row observation (K27-B1)", async ({ page }) => {
+test("intercepted older occurrence keeps log selection independent of latest row observation", async ({ page }) => {
   await openApp(page, "/now");
   const fixture = await historyFixture(page, { ...issue, broke_at: new Date(Date.now() - 3_600_000).toISOString() }, new Date().toISOString());
   try {
@@ -376,23 +376,23 @@ test("K27 intercepted older occurrence keeps log selection independent of latest
     await expect.poll(() => fixture.reads.some(url => url.pathname.endsWith("/break-logs"))).toBe(true);
     const request = fixture.reads.find(url => url.pathname.endsWith("/break-logs"))!;
     const center = Date.parse(request.searchParams.get("center")!);
-    expect(center, "K27-B1: a first-page saved-log selection must lie inside its own requested window").toBeGreaterThanOrEqual(Date.parse(request.searchParams.get("since")!));
-    expect(center, "K27-B1: latest observation must not replace the occurrence's saved-log anchor").toBeLessThanOrEqual(Date.parse(request.searchParams.get("until")!));
-    await expect(page.getByText("K27 saved evidence", { exact: true })).toBeVisible();
+    expect(center, "a first-page saved-log selection must lie inside its own requested window").toBeGreaterThanOrEqual(Date.parse(request.searchParams.get("since")!));
+    expect(center, "latest observation must not replace the occurrence's saved-log anchor").toBeLessThanOrEqual(Date.parse(request.searchParams.get("until")!));
+    await expect(page.getByText("Saved break evidence", { exact: true })).toBeVisible();
   } finally { fixture.release(); await page.unrouteAll({ behavior: "ignoreErrors" }); }
 });
 
-test("K27 intercepted first open before first commit recovers without reload (R1)", async ({ page }) => {
+test("intercepted first open before first commit recovers without reload", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.emulateMedia({ colorScheme: "dark" });
   await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
   await openApp(page, "/now");
   const fixture = await historyFixture(page);
   fixture.startBeforeFirstCommit();
-  const documentMarker = `k27-r1-${Date.now()}`;
+  const documentMarker = `persisted-document-${Date.now()}`;
   try {
     await page.goto("/agent/kubernetes?view=timeline");
-    await page.locator("html").evaluate((html, marker) => { html.setAttribute("data-k27-document", marker); }, documentMarker);
+    await page.locator("html").evaluate((html, marker) => { html.setAttribute("data-persisted-document", marker); }, documentMarker);
     await expect.poll(() => fixture.connections()).toBeGreaterThanOrEqual(1);
     await expect(page.getByRole("link", { name: "Open break details", exact: true })).toHaveCount(0);
     fixture.publishFirstCommit();
@@ -403,27 +403,27 @@ test("K27 intercepted first open before first commit recovers without reload (R1
     await page.getByRole("tab", { name: "Overview", exact: true }).click();
     await expect(page.getByRole("button", { name: "Timeline for qa-checkout", exact: true })).toBeVisible();
     await expect(page.locator("[data-sync-state]")).toContainText(/Last synced|Updates disconnected/);
-    await expect(page.locator("html"), "first-commit recovery must not depend on a document reload").toHaveAttribute("data-k27-document", documentMarker);
+    await expect(page.locator("html"), "first-commit recovery must not depend on a document reload").toHaveAttribute("data-persisted-document", documentMarker);
   } finally { fixture.release(); await page.unrouteAll({ behavior: "ignoreErrors" }); }
 });
 
-test("K27 intercepted typed stream denial wipes history but preserves current recovery lane (R1)", async ({ page }) => {
+test("intercepted typed stream denial wipes history but preserves current recovery lane", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.emulateMedia({ colorScheme: "dark" });
   await page.addInitScript(() => localStorage.setItem("versus.theme", "dark"));
   await openApp(page, "/now");
   const fixture = await historyFixture(page);
-  const documentMarker = `k27-r1-${Date.now()}`;
+  const documentMarker = `persisted-document-${Date.now()}`;
   try {
     await page.goto("/agent/kubernetes?view=timeline");
-    await page.locator("html").evaluate((html, marker) => { html.setAttribute("data-k27-document", marker); }, documentMarker);
+    await page.locator("html").evaluate((html, marker) => { html.setAttribute("data-persisted-document", marker); }, documentMarker);
     await page.getByRole("link", { name: "Open break details", exact: true }).click();
     const chart = page.getByRole("region", { name: "Resource timeline chart", exact: true });
     await expect(chart).toBeVisible();
-    await expect(page.getByText("K27 saved evidence", { exact: true })).toBeVisible();
+    await expect(page.getByText("Saved break evidence", { exact: true })).toBeVisible();
     fixture.denyHistoryAuthority();
     await expect(chart).toHaveCount(0);
-    await expect(page.getByText("K27 saved evidence", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Saved break evidence", { exact: true })).toHaveCount(0);
     await page.getByRole("tab", { name: "Overview", exact: true }).click();
     await expect(page.getByRole("region", { name: "Cluster health", exact: true })).toBeVisible();
     await expect(page.locator("[data-sync-state]")).not.toContainText(/Failed|Preparing/);
@@ -433,12 +433,12 @@ test("K27 intercepted typed stream denial wipes history but preserves current re
     await expect(page.getByRole("button", { name: "Timeline for qa-checkout-renewed", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Timeline for qa-checkout", exact: true })).toHaveCount(0);
     await capture(page, 1440, "dark", "r1-reauthorized-fresh-history-intercepted");
-    await expect(page.locator("html"), "typed history authority recovery must not require a document reload").toHaveAttribute("data-k27-document", documentMarker);
+    await expect(page.locator("html"), "typed history authority recovery must not require a document reload").toHaveAttribute("data-persisted-document", documentMarker);
   } finally { fixture.release(); await page.unrouteAll({ behavior: "ignoreErrors" }); }
 });
 
-test("K27 real SSE lease bounds a revoked licensed session", async ({ page }, testInfo) => {
-  test.skip(process.env.E2E_K27_SESSION_LEASE !== "1", "requires the isolated licensed session-revocation fixture");
+test("real SSE lease bounds a revoked licensed session", async ({ page }, testInfo) => {
+  test.skip(process.env.E2E_HISTORY_SESSION_LEASE !== "1", "requires the isolated licensed session-revocation fixture");
   test.setTimeout(75_000);
   await openApp(page, "/now");
   const session = (await page.context().cookies()).find(cookie => cookie.name === "versus_enterprise_session");
@@ -472,11 +472,11 @@ test("K27 real SSE lease bounds a revoked licensed session", async ({ page }, te
   } finally { clearTimeout(deadline); controller.abort(); }
 });
 
-test("K27 real ten-minute collector blackhole preserves history and recovers (W1)", async ({ page }, testInfo) => {
-  test.skip(process.env.E2E_K27_BLACKHOLE !== "1", "requires the isolated project-owned kind network fixture");
+test("real ten-minute collector blackhole preserves history and recovers", async ({ page }, testInfo) => {
+  test.skip(process.env.E2E_HISTORY_BLACKHOLE !== "1", "requires the isolated project-owned kind network fixture");
   test.setTimeout(900_000);
   const project = process.env.HARNESS_PROJECT ?? "";
-  expect(project.startsWith("k27-licensed-"), "never disconnect a shared harness network").toBe(true);
+  expect(project.startsWith("isolated-licensed-"), "never disconnect a shared harness network").toBe(true);
   const network = `${project}_default`;
   const node = `${process.env.E2E_KIND_CLUSTER ?? "versus-harness"}-control-plane`;
   const overview = await page.context().newPage();
@@ -541,7 +541,7 @@ test("K27 real ten-minute collector blackhole preserves history and recovers (W1
         timeline: await breakLink.isVisible(),
         detail: await chart.isVisible(),
         tile: await tile.textContent({ timeout: 1000 }).catch(() => null),
-        skeletons: await Promise.all(pages.map(surface => surface.locator("html").getAttribute("data-k27-skeletons"))),
+        skeletons: await Promise.all(pages.map(surface => surface.locator("html").getAttribute("data-history-skeletons"))),
       };
       syncLabels.add((await overview.locator("[data-sync-state]").textContent()) ?? "");
       if (!sample.timeline || !sample.detail || sample.tile === null || sample.tile.includes("Unknown") || sample.skeletons.some(count => count !== "0")) uiFailures.push(sample);

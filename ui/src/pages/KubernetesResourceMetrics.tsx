@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { useQueries } from "@tanstack/react-query";
 import type {
   KubernetesCrashEvent,
@@ -108,6 +108,7 @@ export function ResourceMetrics({
       : null;
   };
   const crashesQuery = useResourceCrashes(resource);
+  const restartsHeading = useRef<HTMLHeadingElement>(null);
   const crashes = scopedCrashes(
     crashesQuery.isError ? undefined : crashesQuery.data,
     resource,
@@ -172,7 +173,7 @@ export function ResourceMetrics({
           );
         })}
         <div aria-label="Restarts metric tile" className="metric-tile rounded-control border border-ink-700 bg-surface-sunken p-3">
-          <h3 className="text-2xs text-ink-300">Restarts</h3>
+          <h3 ref={restartsHeading} tabIndex={-1} className="text-2xs text-ink-300 focus:outline-none">Restarts</h3>
           <span className="metric-corner text-ink-400">24 h</span>
           <p
             className={`mt-2 text-lg font-semibold ${restarts === null ? "text-ink-400" : "text-ink-50"}`}
@@ -221,6 +222,15 @@ export function ResourceMetrics({
         <p>{`${counted(crashesQuery.data.crash_count ?? 0, "captured crash")} in the last 24h`}</p>
         {(crashesQuery.data.next || crashesQuery.paging.canPrevious) && <CursorPagination state={crashesQuery.paging} busy={crashesQuery.isFetching} next={crashesQuery.data.next} total={crashesQuery.data.total} limit={crashesQuery.data.limit} capped={crashesQuery.data.count_capped} count={crashesQuery.data.items?.length} />}
       </nav>}
+      {/* A later crash page whose link expired cannot load again; restart
+          from the first page, like the Timeline's "Restart history". The
+          button goes away once it is used, so focus moves to the Restarts
+          tile that shows the first page again. The padding keeps the
+          button's focus ring clear of the drawer's clipped edge. */}
+      {crashesQuery.isError && !crashesQuery.historyOff && crashesQuery.paging.cursor && <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 p-1 text-2xs text-ink-300">
+        <span>This crash page could not be loaded; its link may have expired.</span>
+        <button type="button" className="btn text-link" onClick={() => { crashesQuery.paging.resetPage(); restartsHeading.current?.focus(); }}>Restart crashes</button>
+      </div>}
       <section
         id="resource-usage-chart"
         data-mobile-open={chartVisible}

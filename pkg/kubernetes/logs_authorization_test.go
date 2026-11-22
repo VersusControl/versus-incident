@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestIdlePodCredentialRotationCancelsWithoutAnotherRequest(t *testing.T) {
@@ -47,22 +46,10 @@ func TestIdlePodCredentialRotationCancelsWithoutAnotherRequest(t *testing.T) {
 	go func() {
 		done <- service.StreamPodLogs(ctx, PodLogStreamOptions{Namespace: "shop", Pod: "api", Container: "app"}, func(PodLogStreamEvent) error { return nil })
 	}()
-	select {
-	case <-opened:
-	case <-time.After(3 * time.Second):
-		t.Fatal("idle source did not open")
-	}
+	waitFor(t, opened, "idle source did not open")
 	header.Store("Bearer rotated-unit-token")
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("idle Pod survived credential identity rotation")
-	}
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("rotated idle upstream was not closed")
-	}
+	waitFor(t, done, "idle Pod survived credential identity rotation")
+	waitFor(t, closed, "rotated idle upstream was not closed")
 }
 
 func TestLogStreamAuthorizationInitialDenyAndIdleRevocation(t *testing.T) {
@@ -83,11 +70,7 @@ func TestLogStreamAuthorizationInitialDenyAndIdleRevocation(t *testing.T) {
 	}
 	defer stop()
 	revoke.Store(true)
-	select {
-	case <-ctx.Done():
-	case <-time.After(3 * time.Second):
-		t.Fatal("idle stream access was not revalidated")
-	}
+	waitFor(t, ctx.Done(), "idle stream access was not revalidated")
 }
 
 func TestLogStreamAuthorizationWatcherJoinsOnCancellation(t *testing.T) {

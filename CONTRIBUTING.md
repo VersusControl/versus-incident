@@ -70,6 +70,7 @@ listener, signal source) follow the patterns in `pkg/common/` and
   calls.
 - Prefer table-driven tests for multiple input cases.
 - Run `go test ./...` and confirm it passes before opening a PR.
+- Run `scripts/ci-local.sh` to run the Go checks CI runs for your change (same race shards and flags); `--help` lists its options.
 
 For the local race/coverage loop, run from the module root:
 

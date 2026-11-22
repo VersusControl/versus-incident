@@ -89,17 +89,34 @@ describe("Kubernetes resource API", () => {
     if (route === "timeline") expect(result).toMatchObject({ gaps: [{ from: "start", to: "end" }], total: 90000 });
   });
 
-  it("restarts an expired file cursor once without mutating history and retains the exact query", async () => {
+  it("hands an expired caller page link back to the pager instead of reading page 1 under it", async () => {
     const fetch = vi.spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Invalid query" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "The list changed since this page was loaded.", code: "cursor_expired" }), { status: 400 }));
+    await expect(createKubernetesApi("west").kubernetesChanges({ since: "2020-01-01T00:00:00Z", namespace: "shop", cursor: "expired", type: "deleted" })).rejects.toMatchObject({ status: 400 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts a link it followed past empty pages from page 1 once, keeping the exact query", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], next: "skipped" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "The list changed since this page was loaded.", code: "cursor_expired" }), { status: 400 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ id: "retained" }] })));
-    await createKubernetesApi("west").kubernetesChanges({ since: "2020-01-01T00:00:00Z", namespace: "shop", cursor: "expired", type: "deleted" });
-    const restarted = new URL(String(fetch.mock.calls[1][0]), "http://localhost");
+    const result = await createKubernetesApi("west").kubernetesChanges({ since: "2020-01-01T00:00:00Z", namespace: "shop", type: "deleted" });
+    expect(result.items).toEqual([{ id: "retained" }]);
+    const restarted = new URL(String(fetch.mock.calls[2][0]), "http://localhost");
     expect(restarted.searchParams.has("cursor")).toBe(false);
     expect(restarted.searchParams.get("since")).toBe("2020-01-01T00:00:00Z");
     expect(restarted.searchParams.get("namespace")).toBe("shop");
     expect(restarted.searchParams.get("cluster")).toBe("west");
     expect(fetch.mock.calls.every((call) => !call[1]?.method || call[1]?.method === "GET")).toBe(true);
+  });
+
+  it("treats a 400 that is not an expired link as a fault, even on a followed link", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [], next: "skipped" })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "Invalid query", code: "invalid_arguments" }), { status: 400 }));
+    await expect(createKubernetesApi("west").kubernetesChanges({ since: "2020-01-01T00:00:00Z" })).rejects.toMatchObject({ status: 400 });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("bounds empty-page work and rejects a nonadvancing continuation", async () => {

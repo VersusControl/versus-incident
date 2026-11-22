@@ -124,7 +124,7 @@ func (service *Service) SyncHealth(ctx context.Context) (SyncHealth, error) {
 	}
 	kinds := syncHealthKinds(generation)
 	markAuthorityPending(kinds, service.authorityPendingKinds())
-	report := buildSyncHealth(kinds, generation.FirstReadyAt)
+	report := buildSyncHealth(kinds, generation.FirstReadyAt, service.inventoryFreshFloor())
 	if generation.FirstReadyAt.IsZero() {
 		report.Progress = service.coldSyncProgress()
 	}
@@ -238,7 +238,7 @@ func (service *Service) failedSyncHealth(err error) SyncHealth {
 			kinds[kind] = state
 		}
 	}
-	report := buildSyncHealth(kinds, service.recordedFirstReadyAt())
+	report := buildSyncHealth(kinds, service.recordedFirstReadyAt(), time.Time{})
 	if observedAt.IsZero() {
 		report.AgeSeconds = nil
 	}
@@ -322,7 +322,9 @@ func (generation *inventoryGeneration) markFirstReady(now time.Time) {
 }
 
 // buildSyncHealth aggregates a complete kind set into the health surface.
-func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt time.Time) SyncHealth {
+// freshFloor is the earliest observation time the stale rule uses (see
+// inventoryFreshFloor); zero applies the rule to the kinds' own times.
+func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt, freshFloor time.Time) SyncHealth {
 	names := make([]string, 0, len(all))
 	for kind := range all {
 		names = append(names, kind)
@@ -338,7 +340,7 @@ func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt time.Time
 		result.Truncated = true
 		result.OmittedKinds = omitted
 	}
-	state, partial, ageSeconds, ready, pending := summarizeSyncHealth(all)
+	state, partial, ageSeconds, ready, pending := summarizeSyncHealthFrom(all, freshFloor)
 	result.State, result.Partial, result.AgeSeconds = state, partial, &ageSeconds
 	result.ReadyKinds, result.PendingKinds = ready, pending
 	return result
@@ -354,6 +356,13 @@ func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt time.Time
 // is an error only when the failure is the cluster's own: a cycle that failed
 // as a whole, a credential the cluster rejects, or nothing readable at all.
 func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, float64, int, int) {
+	return summarizeSyncHealthFrom(kinds, time.Time{})
+}
+
+// summarizeSyncHealthFrom is summarizeSyncHealth with the stale rule counting
+// ages from no earlier than freshFloor. The reported age stays the age of the
+// oldest observation.
+func summarizeSyncHealthFrom(kinds map[string]kubeindex.KindStatus, freshFloor time.Time) (string, bool, float64, int, int) {
 	failed, clusterFailed, degraded, stale, loading := false, false, false, false, false
 	ready, pending, unreadable := 0, 0, 0
 	oldest := time.Time{}
@@ -380,7 +389,7 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 			// capability limit too, and its data is as current as any ready
 			// kind's.
 			ready++
-			if syncKindStale(kind, state) {
+			if syncKindStale(kind, state, freshFloor) {
 				stale = true
 			}
 			continue
@@ -401,7 +410,7 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 			continue
 		}
 		ready++
-		if syncKindStale(kind, state) {
+		if syncKindStale(kind, state, freshFloor) {
 			stale = true
 		}
 	}
@@ -437,9 +446,23 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 	return "ready", false, ageSeconds, ready, pending
 }
 
-// syncKindStale applies the same freshness rule a view uses for a listed kind.
-func syncKindStale(kind string, state kubeindex.KindStatus) bool {
-	return time.Since(state.ObservedAt) > max(3*time.Minute, 2*inventoryCadence(kind))
+// syncKindStale applies the same freshness rule a view uses for a listed kind,
+// counting its age from no earlier than freshFloor.
+func syncKindStale(kind string, state kubeindex.KindStatus, freshFloor time.Time) bool {
+	limit := max(3*time.Minute, 2*inventoryCadence(kind))
+	return time.Since(restartAge(state.ObservedAt, freshFloor, limit)) > limit
+}
+
+// restartAge is the time a freshness rule with the given limit counts an
+// observation's age from. The restart floor applies only to an observation
+// that was still fresh when the process started: one already older than the
+// limit then belongs to an outage that began before the restart, and the
+// restart must not hide it.
+func restartAge(observed, freshFloor time.Time, limit time.Duration) time.Time {
+	if freshFloor.IsZero() || freshFloor.Sub(observed) > limit {
+		return observed
+	}
+	return maxTime(observed, freshFloor)
 }
 
 // syncKindProblems lists every failing kind, most recent failure first.

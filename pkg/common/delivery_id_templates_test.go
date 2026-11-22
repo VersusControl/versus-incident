@@ -11,7 +11,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
-// H4 (B219): the delivery ID is added to the data of every notification, so
+// The delivery ID is added to the data of every notification, so
 // a shipped template must render exactly the same message with and without
 // it. Only a custom template that names .DeliveryID shows it.
 func TestShippedTemplatesRenderTheSameWithADeliveryID(t *testing.T) {

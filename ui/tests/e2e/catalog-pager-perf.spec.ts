@@ -16,9 +16,9 @@ import { captureDir } from "./support/capture";
 //   3. click-to-sort reorders the LOADED rows;
 //   4. no console / page errors surface on a large catalog.
 //
-// Bring the stack up first (plans/harness-run/harness.sh up oss; it uses Postgres),
+// Bring the stack up first with the local test harness (`harness.sh up oss`; it uses Postgres),
 // seed >1000 patterns + >1000 services, and run via
-// `plans/harness-run/harness.sh e2e ui catalog-pager-perf`.
+// `harness.sh e2e ui catalog-pager-perf`.
 // ---------------------------------------------------------------------------
 
 const SHOTS = captureDir();

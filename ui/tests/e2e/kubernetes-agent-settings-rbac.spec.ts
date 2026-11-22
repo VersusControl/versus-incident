@@ -1,8 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { harnessRuntimeStateDir } from "./support/capture";
+import { pathToFileURL } from "node:url";
+import { HARNESS_DIR_MISSING, harnessDir, harnessPath, harnessRuntimeStateDir } from "./support/capture";
 
 type LicensedIdentity = { id: string; subject: string; role: string; clusters: string[]; expected_mfa: boolean; login_url: string };
 type LicensedContract = { configured: boolean; base_url: string; org: string; identities: LicensedIdentity[] };
@@ -20,13 +20,13 @@ test.describe("Kubernetes agent settings real licensed RBAC", () => {
   let browserFixture: unknown;
 
   test.beforeAll(async () => {
-    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
+    test.skip(!harnessDir(), HARNESS_DIR_MISSING);
     const state = harnessRuntimeStateDir();
     contract = JSON.parse(fs.readFileSync(path.join(state, "licensed-kubernetes.json"), "utf8"));
     expect(contract.configured, "a completed real Enterprise bootstrap is required").toBe(true);
     const browserFile = process.env.HARNESS_KUBERNETES_BROWSER_FILE;
     if (!browserFile) throw new Error("HARNESS_KUBERNETES_BROWSER_FILE must point to the private mode-0600 browser fixture");
-    helper = await import(pathToFileURL(path.join(root, "plans/harness-run/tests/enterprise/licensed-keycloak-browser.mjs")).href) as LicensedBrowserHelper;
+    helper = await import(pathToFileURL(harnessPath("tests", "enterprise", "licensed-keycloak-browser.mjs")).href) as LicensedBrowserHelper;
     browserFixture = await helper.loadBrowserFixture(browserFile);
   });
 

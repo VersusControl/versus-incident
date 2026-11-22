@@ -368,6 +368,8 @@ func (index *localEvidence) publish(ctx context.Context, conn *sql.Conn, key str
 	if !valid || !present {
 		return nil
 	}
+	statements := localStatements{conn: conn}
+	defer statements.close()
 	oldRecords := map[uint64]bool{}
 	for _, record := range before.Records {
 		oldRecords[record.Sequence] = true
@@ -382,18 +384,18 @@ func (index *localEvidence) publish(ctx context.Context, conn *sql.Conn, key str
 		if err != nil {
 			return err
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT INTO evidence_events(key,sequence,id,type,at,observed,namespace,name,kind,authority_kind,uid,root,pod,rule,broken,gap_from,gap_to,raw,superseded)
+		if _, err = statements.exec(ctx, `INSERT INTO evidence_events(key,sequence,id,type,at,observed,namespace,name,kind,authority_kind,uid,root,pod,rule,broken,gap_from,gap_to,raw,superseded)
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,(SELECT MIN(sequence) FROM evidence_events WHERE key=? AND id=? AND sequence>?))`, key, record.Sequence, record.ID, record.Type, localEvidenceTime(record.At), localEvidenceTime(record.ObservedAt),
 			record.Namespace, record.Name, record.Kind, record.AuthorizationKind, record.UID, record.RootUID, record.PodUID, record.Rule, record.Broken, localEvidenceTime(record.GapFrom), localEvidenceTime(record.GapTo), raw, key, record.ID, record.Sequence); err != nil {
 			return err
 		}
-		if _, err = conn.ExecContext(ctx, `UPDATE evidence_events SET superseded=? WHERE key=? AND id=? AND sequence<? AND(superseded IS NULL OR superseded>?)`, record.Sequence, key, record.ID, record.Sequence, record.Sequence); err != nil {
+		if _, err = statements.exec(ctx, `UPDATE evidence_events SET superseded=? WHERE key=? AND id=? AND sequence<? AND(superseded IS NULL OR superseded>?)`, record.Sequence, key, record.ID, record.Sequence, record.Sequence); err != nil {
 			return err
 		}
 	}
 	for sequence := range oldRecords {
 		if !retained[sequence] {
-			if _, err = conn.ExecContext(ctx, `DELETE FROM evidence_events WHERE key=? AND sequence=?`, key, sequence); err != nil {
+			if _, err = statements.exec(ctx, `DELETE FROM evidence_events WHERE key=? AND sequence=?`, key, sequence); err != nil {
 				return err
 			}
 		}
@@ -423,16 +425,20 @@ func (index *localEvidence) publish(ctx context.Context, conn *sql.Conn, key str
 		}
 		var nextRevision sql.NullInt64
 		var nextAt sql.NullString
-		err = conn.QueryRowContext(ctx, `SELECT revision,observed FROM evidence_versions WHERE key=? AND id=? AND revision>? ORDER BY revision LIMIT 1`, key, issue.OccurrenceID, observation.Revision).Scan(&nextRevision, &nextAt)
+		following, err := statements.prepare(ctx, `SELECT revision,observed FROM evidence_versions WHERE key=? AND id=? AND revision>? ORDER BY revision LIMIT 1`)
+		if err != nil {
+			return err
+		}
+		err = following.QueryRowContext(ctx, key, issue.OccurrenceID, observation.Revision).Scan(&nextRevision, &nextAt)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT INTO evidence_versions(key,version,id,revision,observed,first,seen,closed,root,namespace,kind,authority_kind,rule,severity,broken,observation_only,center,superseded,superseded_at,raw)
+		if _, err = statements.exec(ctx, `INSERT INTO evidence_versions(key,version,id,revision,observed,first,seen,closed,root,namespace,kind,authority_kind,rule,severity,broken,observation_only,center,superseded,superseded_at,raw)
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, key, version, issue.OccurrenceID, observation.Revision, localEvidenceTime(observation.At), localEvidenceTime(issue.FirstSeen), localEvidenceTime(issue.LastSeen),
 			localEvidenceNullable(issue.ClosedAt), issue.UID, issue.Namespace, issue.Kind, issue.AuthorizationKind, issue.Rule, severity, issue.Broken, issue.ObservationOnly, center, nextRevision, nextAt, raw); err != nil {
 			return err
 		}
-		if _, err = conn.ExecContext(ctx, `UPDATE evidence_versions SET superseded=?,superseded_at=? WHERE key=? AND id=? AND revision<? AND(superseded IS NULL OR superseded>?)`,
+		if _, err = statements.exec(ctx, `UPDATE evidence_versions SET superseded=?,superseded_at=? WHERE key=? AND id=? AND revision<? AND(superseded IS NULL OR superseded>?)`,
 			observation.Revision, localEvidenceTime(observation.At), key, issue.OccurrenceID, observation.Revision, observation.Revision); err != nil {
 			return err
 		}
@@ -453,14 +459,14 @@ func (index *localEvidence) publish(ctx context.Context, conn *sql.Conn, key str
 		if oldObservations[observation.OccurrenceID][observation.Revision] {
 			continue
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT INTO evidence_observations(key,id,revision,observed,seen,version,measurements) VALUES(?,?,?,?,?,?,?)`, key, observation.OccurrenceID, observation.Revision, localEvidenceTime(observation.At), localEvidenceTime(observation.LastSeen), observation.Version, []byte(observation.Measurements)); err != nil {
+		if _, err = statements.exec(ctx, `INSERT INTO evidence_observations(key,id,revision,observed,seen,version,measurements) VALUES(?,?,?,?,?,?,?)`, key, observation.OccurrenceID, observation.Revision, localEvidenceTime(observation.At), localEvidenceTime(observation.LastSeen), observation.Version, []byte(observation.Measurements)); err != nil {
 			return err
 		}
 	}
 	for id, revisions := range oldObservations {
 		for revision := range revisions {
 			if !observations[id][revision] {
-				if _, err = conn.ExecContext(ctx, `DELETE FROM evidence_observations WHERE key=? AND id=? AND revision=?`, key, id, revision); err != nil {
+				if _, err = statements.exec(ctx, `DELETE FROM evidence_observations WHERE key=? AND id=? AND revision=?`, key, id, revision); err != nil {
 					return err
 				}
 			}
@@ -468,7 +474,7 @@ func (index *localEvidence) publish(ctx context.Context, conn *sql.Conn, key str
 	}
 	for version := range before.OccurrenceVersions {
 		if _, exists := after.OccurrenceVersions[version]; !exists {
-			if _, err = conn.ExecContext(ctx, `DELETE FROM evidence_versions WHERE key=? AND version=?`, key, version); err != nil {
+			if _, err = statements.exec(ctx, `DELETE FROM evidence_versions WHERE key=? AND version=?`, key, version); err != nil {
 				return err
 			}
 		}
@@ -501,7 +507,7 @@ func (index *localEvidence) publish(ctx context.Context, conn *sql.Conn, key str
 		if err != nil {
 			return err
 		}
-		if _, err = conn.ExecContext(ctx, `INSERT INTO evidence_current(key,id,first,seen,closed,root,namespace,kind,authority_kind,rule,severity,broken,observation_only,center,raw)
+		if _, err = statements.exec(ctx, `INSERT INTO evidence_current(key,id,first,seen,closed,root,namespace,kind,authority_kind,rule,severity,broken,observation_only,center,raw)
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key,id) DO UPDATE SET first=excluded.first,seen=excluded.seen,closed=excluded.closed,root=excluded.root,
  namespace=excluded.namespace,kind=excluded.kind,authority_kind=excluded.authority_kind,rule=excluded.rule,severity=excluded.severity,broken=excluded.broken,
  observation_only=excluded.observation_only,center=excluded.center,raw=excluded.raw`, key, id, localEvidenceTime(issue.FirstSeen), localEvidenceTime(issue.LastSeen), localEvidenceNullable(issue.ClosedAt),
@@ -511,12 +517,51 @@ func (index *localEvidence) publish(ctx context.Context, conn *sql.Conn, key str
 	}
 	for id := range before.Occurrences {
 		if _, exists := current[id]; !exists {
-			if _, err = conn.ExecContext(ctx, `DELETE FROM evidence_current WHERE key=? AND id=?`, key, id); err != nil {
+			if _, err = statements.exec(ctx, `DELETE FROM evidence_current WHERE key=? AND id=?`, key, id); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// localStatements prepares each per-record statement of one publish once, on
+// the publishing connection inside its transaction, and reuses it for every
+// record, instead of compiling the same SQL again for each row.
+type localStatements struct {
+	conn     *sql.Conn
+	prepared map[string]*sql.Stmt
+}
+
+func (s *localStatements) prepare(ctx context.Context, query string) (*sql.Stmt, error) {
+	if stmt, ok := s.prepared[query]; ok {
+		return stmt, nil
+	}
+	stmt, err := s.conn.PrepareContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if s.prepared == nil {
+		s.prepared = map[string]*sql.Stmt{}
+	}
+	s.prepared[query] = stmt
+	return stmt, nil
+}
+
+func (s *localStatements) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	stmt, err := s.prepare(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return stmt.ExecContext(ctx, args...)
+}
+
+// close releases every prepared statement before the connection returns to
+// the pool.
+func (s *localStatements) close() {
+	for _, stmt := range s.prepared {
+		_ = stmt.Close()
+	}
 }
 
 func sameLocalIssue(a, b EvidenceIssue) bool {

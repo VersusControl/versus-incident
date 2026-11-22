@@ -65,7 +65,7 @@ const page3: IssueSeed[] = [
   { name: "notify", severity: "info", broken: false, at: "2026-11-05T05:30:00Z" },
 ];
 
-type IssuesState = "paged" | "capped" | "critical" | "truncated" | "read-failure" | "budget" | "storage" | "no-match" | "no-match-incomplete";
+type IssuesState = "paged" | "capped" | "critical" | "truncated" | "read-failure" | "budget" | "storage" | "no-match" | "no-match-incomplete" | "history-unavailable";
 
 type Fixture = {
   issues: IssuesState;
@@ -160,6 +160,20 @@ function issuePage(state: Fixture, url: URL) {
   }
   if (state.issues === "capped") {
     return { ...base, items: page1.map(issueOf), totals: { critical: 1000, warning: 1000, info: 1000 }, total: 1001, limit: 5, count_capped: true, next: "issues-capped-2" };
+  }
+  // Saved break history did not answer: the live items stay, without their
+  // saved break time or occurrence, and the page names the history store once.
+  if (state.issues === "history-unavailable") {
+    return {
+      ...base,
+      sync: { ...sync, partial: true },
+      items: page1.map(issueOf).map(item => ({ ...item, broke_at: undefined, occurrence_id: undefined, partial: true })),
+      totals,
+      total: 42,
+      limit: 5,
+      next: "issues-p2",
+      partial_failures: [{ resource_id: "kubernetes.history", class: "historical_evidence_unavailable" }],
+    };
   }
   if (state.issues === "truncated") {
     return {
@@ -322,6 +336,22 @@ async function installFixture(page: Page, state: Fixture) {
       return answer(route, { items: [], continue: "", truncated: false, sync });
     }
     if (path === "/api/admin/kubernetes/timeline") return answer(route, timelinePage(state));
+    // An opened Pod drawer reads its own describe; answer with the Pod it names
+    // so the drawer renders a whole resource, not a malformed body.
+    const describe = path.match(/^\/api\/admin\/kubernetes\/resources\/core~v1~pods\/([^/]+)\/describe$/);
+    if (describe) {
+      const name = decodeURIComponent(describe[1]);
+      return answer(route, {
+        resource: {
+          resource_id: "core~v1~pods", api_version: "v1", kind: "Pod", namespace: url.searchParams.get("namespace") ?? "shop", name, uid: `uid-${name}`,
+          created_at: "2026-11-05T12:00:00Z", owners: [], conditions: [{ type: "Ready", status: "True", reason: "ContainersReady", last_transition_at: "2026-11-05T12:01:00Z" }],
+          summary: { phase: "Running", node: "node-01", restart_count: 0, main_container: "api", containers: [{ name: "api", image: "checkout:v42" }] },
+        },
+        events: [],
+        related_resources: [],
+        sync,
+      });
+    }
     if (path.includes("/deployment") || path.includes("/sso/")) return answer(route, { error: "Community" }, 403);
     if (path.startsWith("/api/admin/kubernetes/")) return answer(route, { items: [], nodes: [], edges: [], omitted: {}, truncated: false, available: false, gaps: [], sync });
     return answer(route, { items: [], incidents: [], total: 0, by_origin: {}, enable: false });
@@ -447,6 +477,8 @@ async function pagerText(page: Page, scope = issuesSection(page)) {
 
 test.describe("Kubernetes list paging, order and history warnings", () => {
   test.skip(process.env.E2E_UI_FIXTURES !== "1", "deterministic intercepted UI evidence, not live collection");
+  // Captures are reviewed and published at twice their displayed size.
+  test.use({ deviceScaleFactor: 2 });
 
   test("the dev server serves the current pager and warning copy", async ({ page }) => {
     await page.goto("/");
@@ -456,7 +488,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
     const warnings = await page.request.get("/src/pages/kubernetesWarningItems.ts");
     expect(warnings.ok()).toBe(true);
     const warningsSource = await warnings.text();
-    // Proof the served bundle is the K30 source, not a stale build.
+    // Proof the served bundle is the current source, not a stale build.
     expect(pagerSource).toContain("Page ");
     expect(pagerSource).toContain("capped");
     expect(warningsSource).toContain("Some changes before this break were not loaded");
@@ -479,14 +511,17 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       const firstRow = section.locator("article[aria-label]").first();
       // Newest broke_at first inside the critical group, and the unbroken row
       // (newer first_seen) stays after the broken ones.
-      expect(await firstRow.innerText()).toContain("Broke " + await page.evaluate(iso => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "2026-11-05T15:38:00Z"));
+      // "Broke" and its <time> are separate flex items, so innerText puts a
+      // line break between them; compare the words, not the layout.
+      expect((await firstRow.innerText()).replace(/\s+/g, " ")).toContain("Broke " + await page.evaluate(iso => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "2026-11-05T15:38:00Z"));
       expect((await rowNames(page)).indexOf("Deployment search")).toBeGreaterThan((await rowNames(page)).indexOf("Deployment ledger"));
       await expect(section.locator('article[aria-label="Deployment search"]')).toContainText("First seen");
       // A nil broke_at sorts last in its severity group and reads as unknown.
-      await expect(section.locator('article[aria-label="Deployment payments"]')).toContainText("Broke Time unavailable");
+      await expect(section.locator('article[aria-label="Deployment payments"]')).toContainText("Break time unknown");
+      await expect(section.locator('article[aria-label="Deployment payments"]')).not.toContainText("Time unavailable");
       await assertPagerFits(page);
       await noHorizontalOverflow(page, `issues page 1 ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-pager", viewport.width, "dark", "page-1"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-pager", viewport.width, "dark", "page-1"), fullPage: true, animations: "disabled" });
 
       // Page 2 continues the order and keeps the range.
       await section.getByRole("button", { name: "Next page" }).click();
@@ -496,7 +531,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await expect(section.getByLabel("Issue severity")).toBeVisible();
       await assertPagerFits(page);
       await noHorizontalOverflow(page, `issues page 2 ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-pager", viewport.width, "dark", "page-2"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-pager", viewport.width, "dark", "page-2"), fullPage: true, animations: "disabled" });
 
       // Page 3 keeps its own range and order.
       await section.getByRole("button", { name: "Next page" }).click();
@@ -507,14 +542,14 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await expect(thirdRow).toContainText("First seen");
       await assertPagerFits(page);
       await noHorizontalOverflow(page, `issues page 3 ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-pager", viewport.width, "dark", "page-3"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-pager", viewport.width, "dark", "page-3"), fullPage: true, animations: "disabled" });
 
       // Prev returns with the same counts, proving the first page's total is kept.
       await section.getByRole("button", { name: "Previous page" }).click();
       await expect.poll(() => pagerText(page)).toContain("Page 2 / 9");
       await expect.poll(() => pagerText(page)).toContain("6–10 of 42");
 
-      // B4: a severity filter shows only its own count, never "Unknown".
+      // A severity filter shows only its own count, never "Unknown".
       await section.getByLabel("Issue severity").selectOption("critical");
       await expect(section.getByLabel("critical count")).toHaveText("42");
       await expect(section.getByLabel("warning count")).toHaveCount(0);
@@ -524,7 +559,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await expect.poll(() => pagerText(page)).toContain("Page 1 / 9");
       await assertPagerFits(page);
       await noHorizontalOverflow(page, `issues critical ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-filter", viewport.width, "dark", "critical-only"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-filter", viewport.width, "dark", "critical-only"), fullPage: true, animations: "disabled" });
     }
   });
 
@@ -559,7 +594,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
         });
         expect(fits, "the severity badge must fit").toBe(true);
         await noHorizontalOverflow(page, `issues ${stateName} ${viewport.name}`);
-        await page.screenshot({ path: capturePath("k30-issues-filter", viewport.width, "dark", stateName === "no-match" ? "critical-zero" : "critical-unknown-incomplete"), fullPage: true, animations: "disabled" });
+        await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-filter", viewport.width, "dark", stateName === "no-match" ? "critical-zero" : "critical-unknown-incomplete"), fullPage: true, animations: "disabled" });
       }
     }
   });
@@ -577,10 +612,10 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await expect(section).toContainText("Counts are lower bounds from a bounded sample.");
       await assertPagerFits(page);
       await noHorizontalOverflow(page, `capped issues ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-pager", viewport.width, "dark", "capped-total"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-pager", viewport.width, "dark", "capped-total"), fullPage: true, animations: "disabled" });
     }
 
-    // B2: a capped history window marks the issue, not the list. The same row
+    // A capped history window marks the issue, not the list. The same row
     // keeps exactly one marker collapsed and expanded; a clean row stays bare.
     const capCopy = "Some changes before this break were not loaded";
     for (const viewport of viewports) {
@@ -608,11 +643,11 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await expect(panel.getByText("Some data is incomplete", { exact: true })).toBeVisible();
       await expect(panel).not.toContainText("could not be read");
       await noHorizontalOverflow(page, `truncated issues marker panel ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-warning", viewport.width, "dark", "capped-history-marker-panel"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-warning", viewport.width, "dark", "capped-history-marker-panel"), fullPage: true, animations: "disabled" });
       await page.keyboard.press("Escape");
       await expect(panel).toHaveCount(0);
       await noHorizontalOverflow(page, `truncated issues collapsed ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-warning", viewport.width, "dark", "capped-history-collapsed"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-warning", viewport.width, "dark", "capped-history-collapsed"), fullPage: true, animations: "disabled" });
 
       // Expanded: still exactly one marker, and the empty body names the cap.
       await capped.getByRole("button", { name: "Expand checkout" }).click();
@@ -624,7 +659,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await page.keyboard.press("Escape");
       await assertMarkerLayout(page, capped, section);
       await testInfo.attach(`capped-history-row-${viewport.name}`, { body: JSON.stringify({ row: await capped.innerText(), section: await section.innerText() }, null, 2), contentType: "application/json" });
-      await page.screenshot({ path: capturePath("k30-issues-warning", viewport.width, "dark", "capped-history-expanded"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-warning", viewport.width, "dark", "capped-history-expanded"), fullPage: true, animations: "disabled" });
 
       // A genuinely empty, complete row keeps the old copy and gains no marker.
       await clean.getByRole("button", { name: "Expand ledger" }).click();
@@ -632,16 +667,294 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await expect(clean).toContainText("No change on it, its config or its nodes");
       await expect(clean).not.toContainText(capCopy);
       await noHorizontalOverflow(page, `truncated issues expanded ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-warning", viewport.width, "dark", "clean-row-expanded"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-warning", viewport.width, "dark", "clean-row-expanded"), fullPage: true, animations: "disabled" });
+    }
+  });
+
+  test("live issues listed while saved break history is unavailable give a row reason and a top bar warning", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
+    const sentence = "Issues are live, but saved break history is temporarily unavailable, so break times and occurrence links are hidden. It is retried on the next refresh.";
+    for (const viewport of viewports) {
+      for (const theme of ["dark", "light"] as const) {
+        const state = fixture();
+        state.issues = "history-unavailable";
+        await open(page, state, viewport, theme, "/agent/kubernetes?view=issues");
+        const section = issuesSection(page);
+        await expectRows(page, ["Deployment checkout", "Deployment ledger", "Deployment payments", "Deployment search", "Deployment email"]);
+        // The page sentence is in the top bar's warning list, never in the
+        // Issues card, and never the change-capture wording.
+        await expect(section.getByText(sentence)).toHaveCount(0);
+        await expect(section).not.toContainText("Change history");
+        await expect(section.locator(':scope > button[aria-label="Resource coverage"]'), "no list-level marker in the card").toHaveCount(0);
+        // The card shows no state pill for an incomplete page: neither ready nor partial.
+        await expect(section.locator(":scope > header .pill")).toHaveCount(0);
+        // Every broken row reads as unknown and gives its reason.
+        const payments = section.locator('article[aria-label="Deployment payments"]');
+        await expect(payments).toContainText("Break time unknown");
+        await expect(payments).toContainText("Saved history unavailable");
+        await expect(payments).not.toContainText("Time unavailable");
+        await expect(section.locator('article[aria-label="Deployment checkout"]')).not.toContainText("Broke ");
+        await expect(section.getByLabel("critical count")).toHaveText("24");
+        await assertPagerFits(page);
+        await noHorizontalOverflow(page, `history-unavailable issues ${viewport.name} ${theme}`);
+        await testInfo.attach(`history-unavailable-${viewport.name}-${theme}`, { body: JSON.stringify({ section: await section.innerText() }, null, 2), contentType: "application/json" });
+        await page.screenshot({ path: capturePath("kubernetes-issues-saved-history-unavailable", viewport.width, theme, "partial-page"), fullPage: true, animations: "disabled" });
+        // The top bar's coverage marker is the only one on the page, and it
+        // carries the saved-history sentence.
+        const topBarMarker = page.getByRole("button", { name: "Resource coverage" });
+        await expect(topBarMarker).toHaveCount(1);
+        await topBarMarker.click();
+        const panel = page.getByRole("region", { name: "Resource coverage details" });
+        await expect(panel.getByRole("list", { name: "Coverage reasons" }).getByRole("listitem")).toHaveText([sentence]);
+        await noHorizontalOverflow(page, `history-unavailable top bar warning ${viewport.name} ${theme}`);
+        await page.screenshot({ path: capturePath("kubernetes-issues-saved-history-unavailable", viewport.width, theme, "top-bar-warning"), fullPage: false, animations: "disabled" });
+        await page.keyboard.press("Escape");
+        await expect(panel).toHaveCount(0);
+        // The text contrast of the row copy against what it sits on.
+        const contrast = await page.evaluate(() => {
+          const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+          const lum = ([r, g, b]: number[]) => { const c = [r, g, b].map(v => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
+          const background = (el: Element | null): number[] => { for (let node = el; node; node = node.parentElement) { const c = rgb(getComputedStyle(node).backgroundColor); if (c.length >= 3 && (c[3] === undefined || c[3] > 0.5)) return c; } return [255, 255, 255]; };
+          const ratio = (el: Element | null) => { if (!el) return null; const a = lum(rgb(getComputedStyle(el).color)), b = lum(background(el)); return Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100; };
+          const section = document.querySelector('section[aria-label="Kubernetes issues"]');
+          return {
+            rowReason: ratio(section?.querySelector("[data-row-reason]") ?? null),
+            breakTimeUnknown: ratio([...(section?.querySelectorAll("article span") ?? [])].find(el => el.textContent === "Break time unknown") ?? null),
+          };
+        });
+        await testInfo.attach(`history-unavailable-contrast-${viewport.name}-${theme}`, { body: JSON.stringify(contrast, null, 2), contentType: "application/json" });
+      }
+    }
+  });
+
+  test("on a phone the view tab rail keeps the active tab in view and the drawer title clears its actions", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
+    const phone = viewports.find(viewport => viewport.name === "mobile")!;
+    const longName = "checkout-payments-reconciliation-worker-7f9c6d5b8-x2k4q";
+    for (const theme of ["dark", "light"] as const) {
+      // A late tab is active on arrival: the rail scrolls to it, and both ends
+      // fade because tabs are hidden on either side.
+      await open(page, fixture(), phone, theme, "/agent/kubernetes?view=releases");
+      const rail = page.getByRole("tablist", { name: "Kubernetes views", exact: true });
+      const active = rail.getByRole("tab", { name: "Helm", exact: true });
+      await expect(active).toHaveAttribute("aria-selected", "true");
+      await expect.poll(() => active.evaluate(el => {
+        const tab = el.getBoundingClientRect();
+        const box = el.parentElement!.getBoundingClientRect();
+        return tab.left >= box.left - 1 && tab.right <= box.right + 1;
+      }), { message: "the active tab must be fully inside the rail" }).toBe(true);
+      await expect(rail).toHaveAttribute("data-overflow-start", "true");
+      await expect(rail).toHaveAttribute("data-overflow-end", "true");
+      expect(await rail.evaluate(el => getComputedStyle(el).maskImage || getComputedStyle(el).webkitMaskImage), "a rail hiding tabs fades its edges").toContain("gradient");
+      // Every tab cut by the rail edge sits under a fade: a clipped label is
+      // only allowed on a side that fades.
+      const clipped = await rail.evaluate(el => {
+        const box = el.getBoundingClientRect();
+        return [...el.querySelectorAll('[role="tab"]')].map(tab => tab.getBoundingClientRect()).filter(tab => tab.right > box.left && tab.left < box.right).map(tab => ({ start: tab.left < box.left - 1, end: tab.right > box.right + 1 }));
+      });
+      for (const edge of clipped) {
+        if (edge.start) await expect(rail).toHaveAttribute("data-overflow-start", "true");
+        if (edge.end) await expect(rail).toHaveAttribute("data-overflow-end", "true");
+      }
+      await noHorizontalOverflow(page, `phone tab rail ${theme}`);
+      await page.screenshot({ path: capturePath("kubernetes-tab-rail", phone.width, theme, "late-tab-active"), fullPage: false, animations: "disabled" });
+
+      // The first tab shows the rail start: no start fade, end fade kept.
+      await rail.getByRole("tab", { name: "Overview", exact: true }).click();
+      await expect(rail).not.toHaveAttribute("data-overflow-start", "true");
+      await expect(rail).toHaveAttribute("data-overflow-end", "true");
+
+      // A long resource name wraps clear of Investigate and Close, and the full
+      // name is on the title.
+      await open(page, fixture(), phone, theme, `/agent/kubernetes?view=issues&r=${encodeURIComponent(`core~v1~pods/shop/${longName}`)}`);
+      const drawer = page.locator("[data-resource-detail]");
+      const name = drawer.locator(".resource-name");
+      await expect(name).toBeVisible({ timeout: 30_000 });
+      await expect(name).toHaveAttribute("title", longName);
+      await expect(name).toHaveText(longName);
+      // Measure after the drawer has slid in and its detail has loaded.
+      await expect(drawer.getByRole("heading", { name: "Restarts", exact: true })).toBeVisible({ timeout: 30_000 });
+      let lastBox = "";
+      await expect.poll(async () => { const box = JSON.stringify(await drawer.boundingBox()); const settled = box === lastBox; lastBox = box; return settled; }, { intervals: [150] }).toBe(true);
+      await testInfo.attach(`drawer-title-boxes-${theme}`, { body: JSON.stringify({ drawer: await drawer.boundingBox(), name: await name.boundingBox(), investigate: await drawer.getByRole("button", { name: "Investigate", exact: true }).boundingBox(), close: await drawer.getByRole("button", { name: "Close panel", exact: true }).boundingBox() }, null, 2), contentType: "application/json" });
+      const overlap = async (other: Locator) => {
+        const a = await name.boundingBox();
+        const b = await other.boundingBox();
+        if (!a || !b) return false;
+        return Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x) > 1 && Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y) > 1;
+      };
+      expect(await overlap(drawer.getByRole("button", { name: "Investigate", exact: true })), "the name must not run under Investigate").toBe(false);
+      expect(await overlap(drawer.getByRole("button", { name: "Close panel", exact: true })), "the name must not run under Close").toBe(false);
+      await testInfo.attach(`drawer-title-${theme}`, { body: JSON.stringify({ name: await name.boundingBox(), investigate: await drawer.getByRole("button", { name: "Investigate", exact: true }).boundingBox() }, null, 2), contentType: "application/json" });
+      await page.screenshot({ path: capturePath("kubernetes-drawer-title", phone.width, theme, "long-name"), fullPage: false, animations: "disabled" });
+    }
+  });
+
+  test("a later crash page that cannot load offers Restart crashes and returns focus to Restarts", async ({ page }, testInfo) => {
+    test.setTimeout(240_000);
+    const podName = "checkout-7d9f8c-x2k4q";
+    const podUID = "pod-x2k4q";
+    const iso = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+    const crashOf = (id: string, minutesAgo: number) => ({
+      id, sequence: 1, cluster: "default", namespace: "shop", pod: podName, pod_uid: podUID,
+      root_uid: "deploy-checkout", root_kind: "Deployment", root_name: "checkout", container: "api",
+      type: "termination", termination_slot: "previous", exit_code: 137, reason: "OOMKilled",
+      restart_count: 6, at: iso(minutesAgo), time_source: "finished_at", observed_at: iso(minutesAgo),
+    });
+    // A later crash page that fails for a reason other than an expired link:
+    // the page stays an error and offers Restart crashes. An expired link is
+    // covered by the next test, where the pager returns to page 1 instead.
+    for (const [viewport, theme] of [[viewports[0], "dark"], [viewports[1], "dark"], [viewports[1], "light"]] as const) {
+      const cursors: Array<string | null> = [];
+      await open(page, fixture(), viewport, theme, "/agent/kubernetes?view=issues");
+      await page.route("**/api/admin/kubernetes/resources/core~v1~pods/**/describe**", route => route.fulfill({
+        json: {
+          resource: {
+            resource_id: "core~v1~pods", api_version: "v1", kind: "Pod", namespace: "shop", name: podName, uid: podUID,
+            created_at: iso(180), owners: [], conditions: [{ type: "Ready", status: "True", reason: "ContainersReady", last_transition_at: iso(134) }],
+            summary: { phase: "Running", node: "node-01", restart_count: 6, main_container: "api", containers: [{ name: "api", image: "checkout:v42" }] },
+          },
+          events: [], related_resources: [], sync,
+        },
+      }));
+      await page.route("**/api/admin/kubernetes/crashes**", route => {
+        const url = new URL(route.request().url());
+        const cursor = url.searchParams.get("cursor");
+        cursors.push(cursor);
+        if (cursor) return route.fulfill({ status: 503, json: { error: "History store did not answer.", code: "history_unavailable" } });
+        return route.fulfill({
+          json: {
+            items: [crashOf("c1", 8), crashOf("c2", 134)], crash_count: 120, next: "crash-page-2",
+            since: url.searchParams.get("since") ?? iso(1440), until: url.searchParams.get("until") ?? iso(0),
+            started_at: iso(170), retention_from: iso(1440), retention_basis: "observed_at", gaps: [], capture_gaps: [], limitations: [],
+            coverage: { Pod: { from: iso(1440), to: iso(0) } }, capture: { mode: "continuous", behind: false, last_cycle_at: iso(0) }, sync,
+          },
+        });
+      });
+      await page.goto(`/agent/kubernetes?view=issues&r=${encodeURIComponent(`core~v1~pods/shop/${podName}`)}`);
+      const drawer = page.locator("[data-resource-detail]");
+      const pager = drawer.getByRole("navigation", { name: "Captured crash pages" });
+      await expect(pager).toBeVisible({ timeout: 30_000 });
+      await expect(pager).toContainText("120 captured crashes in the last 24h");
+      await expect(drawer.getByRole("button", { name: "Restart crashes" })).toHaveCount(0);
+      await pager.getByRole("button", { name: "Next page" }).click();
+      const restart = drawer.getByRole("button", { name: "Restart crashes" });
+      await expect(restart).toBeVisible({ timeout: 30_000 });
+      const notice = drawer.getByRole("status").filter({ hasText: "This crash page could not be loaded; its link may have expired." });
+      await expect(notice).toHaveCount(1);
+      await expect(notice.getByRole("button", { name: "Restart crashes" })).toBeVisible();
+      await expect(drawer.locator(".metric-restart-description")).toContainText("Crash evidence unavailable");
+      await noHorizontalOverflow(page, `crash restart notice ${viewport.name} ${theme}`);
+      // Keyboard path: the button is reachable and shows its focus ring.
+      await restart.focus();
+      await page.keyboard.press("Shift+Tab");
+      await page.keyboard.press("Tab");
+      await expect(restart).toBeFocused();
+      const ring = await restart.evaluate(el => { const s = getComputedStyle(el); return { outline: `${s.outlineStyle} ${s.outlineWidth} ${s.outlineColor}`, shadow: s.boxShadow }; });
+      await notice.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: capturePath("kubernetes-resource-crashes", viewport.width, theme, "page-expired-restart-focused"), fullPage: false, animations: "disabled" });
+      await page.keyboard.press("Enter");
+      const heading = drawer.getByRole("heading", { name: "Restarts", exact: true });
+      await expect(heading).toBeFocused();
+      await expect(restart).toHaveCount(0);
+      await expect(pager).toBeVisible();
+      await expect(pager).toContainText("120 captured crashes in the last 24h");
+      await expect(pager.getByRole("button", { name: "Previous page" })).toBeDisabled();
+      // The first page comes back (from cache or a fresh read), never the
+      // failed cursor again.
+      const failedReads = cursors.filter(Boolean).length;
+      expect(failedReads, "the failed page was asked for").toBeGreaterThan(0);
+      await expect(drawer.locator(".metric-restart-description")).toContainText("shown OOMKilled");
+      await page.waitForTimeout(500);
+      expect(cursors.filter(Boolean).length, "the restart does not ask for the failed page again").toBe(failedReads);
+      await noHorizontalOverflow(page, `crash restart done ${viewport.name} ${theme}`);
+      await testInfo.attach(`crash-restart-${viewport.name}-${theme}`, { body: JSON.stringify({ cursors, ring, active: await page.evaluate(() => document.activeElement?.textContent) }, null, 2), contentType: "application/json" });
+      await page.screenshot({ path: capturePath("kubernetes-resource-crashes", viewport.width, theme, "restarted-first-page"), fullPage: false, animations: "disabled" });
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+    }
+  });
+
+  test("a crash page link the server reports as expired never labels the first page as a later one", async ({ page }, testInfo) => {
+    test.setTimeout(120_000);
+    // The server answers an expired crash cursor with 400 cursor_expired. The
+    // user must then either be offered Restart crashes or see the pager back
+    // on its first page; the first page's crashes under "Page 2" is wrong.
+    const podName = "checkout-7d9f8c-x2k4q";
+    const podUID = "pod-x2k4q";
+    const iso = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+    const cursors: Array<string | null> = [];
+    await open(page, fixture(), viewports[0], "dark", "/agent/kubernetes?view=issues");
+    await page.route("**/api/admin/kubernetes/resources/core~v1~pods/**/describe**", route => route.fulfill({
+      json: {
+        resource: {
+          resource_id: "core~v1~pods", api_version: "v1", kind: "Pod", namespace: "shop", name: podName, uid: podUID,
+          created_at: iso(180), owners: [], conditions: [],
+          summary: { phase: "Running", node: "node-01", restart_count: 6, main_container: "api", containers: [{ name: "api", image: "checkout:v42" }] },
+        },
+        events: [], related_resources: [], sync,
+      },
+    }));
+    await page.route("**/api/admin/kubernetes/crashes**", route => {
+      const url = new URL(route.request().url());
+      const cursor = url.searchParams.get("cursor");
+      cursors.push(cursor);
+      if (cursor) return route.fulfill({ status: 400, json: { error: "The list changed since this page was loaded.", code: "cursor_expired" } });
+      return route.fulfill({
+        json: {
+          items: [{ id: "c1", sequence: 1, cluster: "default", namespace: "shop", pod: podName, pod_uid: podUID, root_uid: "deploy-checkout", root_kind: "Deployment", root_name: "checkout", container: "api", type: "termination", termination_slot: "previous", exit_code: 137, reason: "OOMKilled", restart_count: 6, at: iso(8), time_source: "finished_at", observed_at: iso(8) }],
+          crash_count: 120, next: "crash-page-2",
+          since: url.searchParams.get("since") ?? iso(1440), until: url.searchParams.get("until") ?? iso(0),
+          started_at: iso(170), retention_from: iso(1440), retention_basis: "observed_at", gaps: [], capture_gaps: [], limitations: [],
+          coverage: { Pod: { from: iso(1440), to: iso(0) } }, capture: { mode: "continuous", behind: false, last_cycle_at: iso(0) }, sync,
+        },
+      });
+    });
+    await page.goto(`/agent/kubernetes?view=issues&r=${encodeURIComponent(`core~v1~pods/shop/${podName}`)}`);
+    const drawer = page.locator("[data-resource-detail]");
+    const pager = drawer.getByRole("navigation", { name: "Captured crash pages" });
+    await expect(pager).toBeVisible({ timeout: 30_000 });
+    await pager.getByRole("button", { name: "Next page" }).click();
+    await expect.poll(() => cursors.filter(Boolean).length).toBeGreaterThan(0);
+    await page.waitForTimeout(1_500);
+    const seen = {
+      cursors,
+      pager: (await pager.innerText().catch(() => "")).replace(/\s+/g, " ").trim(),
+      restartButton: await drawer.getByRole("button", { name: "Restart crashes" }).count(),
+      restartsTile: (await drawer.locator(".metric-restart-description").innerText().catch(() => "")).trim(),
+    };
+    await testInfo.attach("crash-cursor-expired-400", { body: JSON.stringify(seen, null, 2), contentType: "application/json" });
+    await pager.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: capturePath("kubernetes-resource-crashes", 1440, "dark", "cursor-expired-400"), fullPage: false, animations: "disabled" });
+    const backOnFirstPage = !/\bPage 2\b/.test(seen.pager) && await pager.getByRole("button", { name: "Previous page" }).isDisabled().catch(() => true);
+    expect(seen.restartButton === 1 || backOnFirstPage, `after an expired crash link the pager read "${seen.pager}" with ${seen.restartButton} Restart crashes button(s)`).toBe(true);
+  });
+
+  test("a drawer whose resource is gone says so instead of breaking the page", async ({ page }) => {
+    test.setTimeout(120_000);
+    const podName = "checkout-7d9f8c-gone1";
+    for (const [viewport, theme] of [[viewports[0], "dark"], [viewports[1], "light"]] as const) {
+      await open(page, fixture(), viewport, theme, "/agent/kubernetes?view=issues");
+      await page.route("**/api/admin/kubernetes/resources/core~v1~pods/**/describe**", route => route.fulfill({ status: 404, json: { error: "The Kubernetes object was not found.", code: "not_found" } }));
+      await page.goto(`/agent/kubernetes?view=issues&r=${encodeURIComponent(`core~v1~pods/shop/${podName}`)}`);
+      const drawer = page.locator("[data-resource-detail]");
+      await expect(drawer.getByRole("status").filter({ hasText: "This Pod no longer exists in the cluster. It may have been deleted or replaced." })).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole("heading", { name: "Couldn't render this page" })).toHaveCount(0);
+      await expect(drawer.getByText("Couldn't load resource detail")).toHaveCount(0);
+      await expect(issuesSection(page)).toBeVisible();
+      await noHorizontalOverflow(page, `gone drawer ${viewport.name} ${theme}`);
+      await page.screenshot({ path: capturePath("kubernetes-drawer-resource-gone", viewport.width, theme, "not-found"), fullPage: false, animations: "disabled" });
+      await page.unrouteAll({ behavior: "ignoreErrors" });
     }
   });
 
   test("a real history read failure keeps the list-level Change history wording", async ({ page }) => {
     test.setTimeout(240_000);
+    // The coverage panel words each class the way the server's own sentences
+    // do; a source or storage fault is retried by the next sync.
     const expected: Record<string, string> = {
-      "read-failure": "Change history: source could not be read",
-      budget: "Change history: the read budget for this sync ran out",
-      storage: "Change history: the cluster was read, but the snapshot could not be saved",
+      "read-failure": "Change history could not be read; the next sync tries again.",
+      budget: "Change history was read only in part because it is larger than one read allows.",
+      storage: "Change history could not be read; the next sync tries again.",
     };
     for (const viewport of viewports) {
       for (const stateName of ["read-failure", "budget", "storage"] as const) {
@@ -661,12 +974,12 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
         await expect(detail).not.toContainText("Some resources could not be read");
         const reason = detail.getByRole("list", { name: "Coverage reasons" }).getByRole("listitem").first();
         await expect(reason).toHaveText(expected[stateName]);
-        if (stateName !== "read-failure") {
+        if (stateName === "budget") {
           await expect(reason).not.toContainText("could not be read");
           await expect(reason).toHaveText(expected[stateName]);
         }
         await noHorizontalOverflow(page, `${stateName} issues ${viewport.name}`);
-        await page.screenshot({ path: capturePath("k30-issues-warning", viewport.width, "dark", `${stateName}-list-level`), fullPage: true, animations: "disabled" });
+        await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-warning", viewport.width, "dark", `${stateName}-list-level`), fullPage: true, animations: "disabled" });
         await page.keyboard.press("Escape");
       }
     }
@@ -684,7 +997,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       expect(await pagerText(page, workloads)).toContain("Page 1 / 3");
       await assertPagerFits(page, workloads);
       await noHorizontalOverflow(page, `workloads totals ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-workloads-pager", viewport.width, "dark", "totals"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-workloads-pager", viewport.width, "dark", "totals"), fullPage: true, animations: "disabled" });
 
       // Workloads without a total keep the plain "Page N" form.
       state.workloadTotals = false;
@@ -696,7 +1009,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       expect(workloadFallback).not.toMatch(/Page 1 \/ /);
       await assertPagerFits(page, workloads);
       await noHorizontalOverflow(page, `workloads fallback ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-workloads-pager", viewport.width, "dark", "no-total"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-workloads-pager", viewport.width, "dark", "no-total"), fullPage: true, animations: "disabled" });
 
       // Nodes with total + limit.
       const nodeState = fixture();
@@ -707,7 +1020,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       expect(await pagerText(page, nodes)).toContain("Page 1 / 3");
       await assertPagerFits(page, nodes);
       await noHorizontalOverflow(page, `nodes totals ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-nodes-pager", viewport.width, "dark", "totals"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-nodes-pager", viewport.width, "dark", "totals"), fullPage: true, animations: "disabled" });
 
       // Nodes without a total.
       nodeState.nodeTotals = false;
@@ -719,7 +1032,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       expect(nodeFallback).not.toMatch(/Page 1 \/ /);
       await assertPagerFits(page, nodes);
       await noHorizontalOverflow(page, `nodes fallback ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-nodes-pager", viewport.width, "dark", "no-total"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-nodes-pager", viewport.width, "dark", "no-total"), fullPage: true, animations: "disabled" });
 
       // Timeline with total + limit.
       const timelineState = fixture();
@@ -730,7 +1043,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       expect(await pagerText(page, timeline)).toContain("Page 1 / 3");
       await assertPagerFits(page, timeline);
       await noHorizontalOverflow(page, `timeline totals ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-timeline-pager", viewport.width, "dark", "totals"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-timeline-pager", viewport.width, "dark", "totals"), fullPage: true, animations: "disabled" });
 
       // Timeline without a limit keeps "Page N".
       timelineState.timelineTotals = false;
@@ -742,7 +1055,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       expect(timelineFallback).not.toMatch(/Page 1 \/ /);
       await assertPagerFits(page, timeline);
       await noHorizontalOverflow(page, `timeline fallback ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-timeline-pager", viewport.width, "dark", "no-total"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-timeline-pager", viewport.width, "dark", "no-total"), fullPage: true, animations: "disabled" });
     }
   });
 
@@ -757,7 +1070,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       expect(await page.locator("html")).toHaveAttribute("data-theme", "light");
       await assertPagerFits(page);
       await noHorizontalOverflow(page, `light issues ${viewport.name}`);
-      await page.screenshot({ path: capturePath("k30-issues-pager", viewport.width, "light", "page-1"), fullPage: true, animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-list-paging-issues-pager", viewport.width, "light", "page-1"), fullPage: true, animations: "disabled" });
     }
   });
 });

@@ -244,12 +244,19 @@ func saveDelayReplica(t *testing.T, endpoint string, store storage.Provider, clu
 
 func saveDelayReplicaRegistry(t *testing.T, endpoint string, store storage.Provider, clusterID string, pace replicaPace) (*Service, *ServiceRegistry) {
 	t.Helper()
+	return saveDelayReplicaWithGrace(t, endpoint, store, clusterID, pace, 500*time.Millisecond)
+}
+
+// saveDelayReplicaWithGrace starts a replica whose published capture reads as
+// delayed once its own save has been pending for longer than grace.
+func saveDelayReplicaWithGrace(t *testing.T, endpoint string, store storage.Provider, clusterID string, pace replicaPace, grace time.Duration) (*Service, *ServiceRegistry) {
+	t.Helper()
 	client, err := NewClient(Config{Endpoint: endpoint, AllowLoopbackHTTP: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	service := NewService(client, Scope{OrgID: "default", ClusterID: clusterID, CredentialID: "unchanged"}, time.Hour)
-	service.historySaveGrace = 500 * time.Millisecond
+	service.historySaveGrace = grace
 	if pace == fixturePace {
 		useFixturePace(service)
 	}
@@ -305,7 +312,7 @@ func TestHistorySaveOutageIsReportedAlikeByEveryReplica(t *testing.T) {
 				save := historySaveOf(t, service)
 				return save != nil && save.Code == test.code
 			}
-			waitUntil(t, 45*time.Second, "a failed history save seen by every replica", func() bool {
+			eventually(t, "a failed history save seen by every replica", func() bool {
 				return observed.failures.Load() > 1 && reports(replicas[0]) && reports(replicas[1])
 			})
 			scope := storage.EvidenceScope{OrgID: "default", ClusterID: "save-delay", ClusterUID: "save-delay-physical"}
@@ -388,7 +395,7 @@ func TestHistorySaveOutageIsReportedAlikeByEveryReplica(t *testing.T) {
 			observed.readsDown.Store(false)
 
 			observed.restore()
-			waitUntil(t, 45*time.Second, "the next successful history save on every replica", func() bool {
+			eventually(t, "the next successful history save on every replica", func() bool {
 				return historySaveCleared(t, replicas[0]) && historySaveCleared(t, replicas[1])
 			})
 			latest, err := observed.EvidenceCheckpoint(t.Context(), scope)
@@ -404,8 +411,12 @@ func TestHistorySaveOutageStaysWithinItsCluster(t *testing.T) {
 	endpoint := saveDelayCluster(t)
 	observed := newFailingSaveStore(fmt.Errorf("journal statement: %w", context.DeadlineExceeded), "save-delay-a")
 	failing := saveDelayReplica(t, endpoint, observed, "save-delay-a", fixturePace)
-	healthy := saveDelayReplica(t, endpoint, observed, "save-delay-b", fixturePace)
-	waitUntil(t, 45*time.Second, "a failed history save on one cluster", func() bool {
+	// The healthy cluster's own save can wait past a short grace on a loaded
+	// race run and would then read as delayed by itself. Its grace is long so
+	// only state from the other cluster could put a save status on its pages;
+	// the check below proves its saves still land during the other's outage.
+	healthy, _ := saveDelayReplicaWithGrace(t, endpoint, observed, "save-delay-b", fixturePace, scaledTimeout(10*time.Second))
+	eventually(t, "a failed history save on one cluster", func() bool {
 		return observed.failures.Load() > 1 && historySaveOf(t, failing) != nil
 	})
 	page, err := healthy.Crashes(t.Context(), kubechanges.CrashQuery{})
@@ -414,6 +425,26 @@ func TestHistorySaveOutageStaysWithinItsCluster(t *testing.T) {
 	}
 	if page.Capture.HistorySave != nil {
 		t.Fatalf("another cluster's save outage reached this cluster: %+v", page.Capture.HistorySave)
+	}
+	healthyScope := storage.EvidenceScope{OrgID: "default", ClusterID: "save-delay-b", ClusterUID: "save-delay-physical"}
+	eventually(t, "the healthy cluster's published capture saved during the other's outage", func() bool {
+		healthy.changes.mu.Lock()
+		cache := healthy.changes.inventories[healthy.indexScope()]
+		healthy.changes.mu.Unlock()
+		if cache == nil {
+			return false
+		}
+		cache.mu.RLock()
+		batch, failure := cache.generation.EvidenceBatch, cache.generation.EvidenceFailure
+		cache.mu.RUnlock()
+		checkpoint, err := observed.EvidenceCheckpoint(t.Context(), healthyScope)
+		if err != nil || checkpoint.At.IsZero() || failure != "" {
+			return false
+		}
+		return batch == nil || batch.ID == checkpoint.ID || !batch.At.After(checkpoint.At)
+	})
+	if observed.failures.Load() < 2 || historySaveOf(t, failing) == nil {
+		t.Fatal("the failing cluster recovered before the healthy cluster's save was checked")
 	}
 }
 
@@ -458,7 +489,7 @@ func TestLeaseLossNeverReportsAnUnresolvedCredential(t *testing.T) {
 	base := storage.NewMemory()
 	observed := &conflictingSaveStore{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore)}
 	service, registry := saveDelayReplicaRegistry(t, endpoint, observed, "lease-loss", fixturePace)
-	waitUntil(t, 45*time.Second, "repeated lease conflicts on history saves", func() bool {
+	eventually(t, "repeated lease conflicts on history saves", func() bool {
 		return observed.conflicts.Load() > 2
 	})
 	service.recovery.mu.Lock()
@@ -515,7 +546,7 @@ func TestRejectedHistorySaveDoesNotStopCollection(t *testing.T) {
 	base := storage.NewMemory()
 	observed := &rejectingSaveStore{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore), rejecting: true, attempts: map[string]int{}}
 	service := saveDelayReplica(t, endpoint, observed, "save-rejected", fixturePace)
-	waitUntil(t, 45*time.Second, "a rejected history save reported to readers", func() bool {
+	eventually(t, "a rejected history save reported to readers", func() bool {
 		save := historySaveOf(t, service)
 		return save != nil && save.Code == "history_save_rejected" && !save.Retryable
 	})
@@ -535,7 +566,7 @@ func TestRejectedHistorySaveDoesNotStopCollection(t *testing.T) {
 	service.changes.mu.Lock()
 	cache := service.changes.inventories[service.indexScope()]
 	service.changes.mu.Unlock()
-	waitUntil(t, 75*time.Second, "new cluster data published and its own save attempted while saves are rejected", func() bool {
+	eventuallyWithin(t, 75*time.Second, "new cluster data published and its own save attempted while saves are rejected", func() bool {
 		observed.mu.Lock()
 		distinct := map[string]bool{}
 		for _, id := range observed.rejected {
@@ -584,7 +615,7 @@ func TestRejectedHistorySaveDoesNotStopCollection(t *testing.T) {
 
 	// The following good capture saves, records the uncovered interval as a
 	// gap, and clears the rejection.
-	waitUntil(t, 75*time.Second, "the next capture saved after the rejection", func() bool {
+	eventuallyWithin(t, 75*time.Second, "the next capture saved after the rejection", func() bool {
 		observed.mu.Lock()
 		saved := len(observed.saved) > released
 		observed.mu.Unlock()
@@ -660,7 +691,7 @@ func TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica(t *testing.T) {
 	// checkpoint outage starts, and a faster capture could save again in between.
 	replicas := []*Service{saveDelayReplica(t, endpoint, observed, "save-unprepared", productionPace), saveDelayReplica(t, endpoint, observed, "save-unprepared", productionPace)}
 	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "save-unprepared", ClusterUID: "save-delay-physical"}
-	waitUntil(t, 45*time.Second, "a complete first capture saved to history", func() bool {
+	eventually(t, "a complete first capture saved to history", func() bool {
 		health, err := replicas[0].SyncHealth(t.Context())
 		checkpoint, checkpointErr := observed.EvidenceStore.EvidenceCheckpoint(t.Context(), scope)
 		return err == nil && health.State == "ready" && health.PendingKinds == 0 && checkpointErr == nil && checkpoint.ID != "" && historySaveCleared(t, replicas[0])
@@ -681,7 +712,7 @@ func TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica(t *testing.T) {
 		return cache.generation.EvidenceBatch == nil && cache.generation.EvidenceFailure == "storage_unavailable"
 	}
 	observed.down.Store(true)
-	waitUntil(t, 75*time.Second, "a capture published on every replica without a save", func() bool {
+	eventuallyWithin(t, 75*time.Second, "a capture published on every replica without a save", func() bool {
 		return unprepared(replicas[0]) && unprepared(replicas[1])
 	})
 	observed.down.Store(false)
