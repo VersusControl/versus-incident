@@ -96,11 +96,15 @@ type Client struct {
 	// discoveryLimiter paces background discovery reads apart from inventory
 	// LISTs, so a discovery walk never waits behind the LIST pace.
 	discoveryLimiter *rate.Limiter
-	metadataMu       sync.Mutex
-	metadataDenied   map[metadataDenyKey]metadataDenyMemo
-	now              func() time.Time
-	backoffMu        sync.Mutex
-	backoffUntil     time.Time
+	// discoveryBound replaces discoveryWalkBound for one client when set; a
+	// test fixture serving many API groups uses it on a loaded machine. Zero
+	// keeps the production bound.
+	discoveryBound time.Duration
+	metadataMu     sync.Mutex
+	metadataDenied map[metadataDenyKey]metadataDenyMemo
+	now            func() time.Time
+	backoffMu      sync.Mutex
+	backoffUntil   time.Time
 	// systemBackoffUntil is the API server's throttle on system reads. It is
 	// kept apart from backoffUntil, so a 429 on a background system read
 	// never stalls the user's reads, and theirs never stall system reads.
@@ -205,6 +209,15 @@ func newDiscoveryLimiter() *rate.Limiter {
 
 // discoveryWalkBound is the time a collection cycle gives one discovery walk.
 const discoveryWalkBound = 10 * time.Second
+
+// discoveryWalkTimeout is the time this client's collection cycle gives one
+// discovery walk.
+func (client *Client) discoveryWalkTimeout() time.Duration {
+	if client != nil && client.discoveryBound > 0 {
+		return client.discoveryBound
+	}
+	return discoveryWalkBound
+}
 
 // NewClient validates transport policy and constructs a read-only API client.
 func NewClient(config Config) (*Client, error) {

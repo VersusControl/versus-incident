@@ -142,8 +142,7 @@ func (provider *delayedUsageProvider) CompareAndSwapBlob(key string, expected, r
 
 func waitUsageInterestCount(t *testing.T, service *Service, count int) {
 	t.Helper()
-	deadline := time.Now().Add(scaledTimeout(3 * time.Second))
-	for time.Now().Before(deadline) {
+	for wait := polling(t, "interest worker did not persist expected batch"); ; wait.next() {
 		entries, _, err := readUsageManifest(service.usageProvider(), usageBridgePrefix(service.cacheKey())+"interest")
 		if err != nil {
 			t.Fatal(err)
@@ -151,15 +150,12 @@ func waitUsageInterestCount(t *testing.T, service *Service, count int) {
 		if len(entries) == count {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("interest worker did not persist expected batch", count)
 }
 
 func waitUsageInterestIdle(t *testing.T, service *Service) *usageInterestWorker {
 	t.Helper()
-	deadline := time.Now().Add(scaledTimeout(3 * time.Second))
-	for time.Now().Before(deadline) {
+	for wait := polling(t, "interest worker to drain"); ; wait.next() {
 		service.usageHistory.Lock()
 		worker := service.usageHistory.workers[service.cacheKey()]
 		service.usageHistory.Unlock()
@@ -171,10 +167,7 @@ func waitUsageInterestIdle(t *testing.T, service *Service) *usageInterestWorker 
 				return worker
 			}
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("interest worker did not drain")
-	return nil
 }
 
 func TestHistoryInterestWorkerRetriesWholeBatchAndSkipsRecentTouches(t *testing.T) {
@@ -253,11 +246,7 @@ func TestHistoryInterestShutdownJoinsUncancellableProviderCall(t *testing.T) {
 	case <-time.After(30 * time.Millisecond):
 	}
 	close(provider.release)
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("worker did not join after provider returned")
-	}
+	waitFor(t, stopped, "worker did not join after provider returned")
 	service.usageHistory.Lock()
 	count := len(service.usageHistory.workers)
 	service.usageHistory.Unlock()
@@ -302,11 +291,7 @@ func TestHistoryCacheWriteDoesNotHoldCredentialReadLock(t *testing.T) {
 	if _, err := service.UsageHistory(logStreamTestContext(), "shop", "first"); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-provider.started:
-	case <-time.After(time.Second):
-		t.Fatal("worker did not reach CAS")
-	}
+	waitFor(t, provider.started, "worker did not reach CAS")
 	read := make(chan error, 1)
 	go func() { _, err := service.UsageHistory(logStreamTestContext(), "shop", "second"); read <- err }()
 	select {
@@ -380,21 +365,16 @@ func TestConcurrentHistoryReadsQueueAllInterestsWithoutStorageLatency(t *testing
 	}
 	close(start)
 	requests.Wait()
-	if elapsed := time.Since(clock); elapsed > 200*time.Millisecond {
+	if elapsed := time.Since(clock); measureLatency() && elapsed > 200*time.Millisecond {
 		t.Errorf("history GET waited on manifest IO: %s", elapsed)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	count := 0
-	for time.Now().Before(deadline) {
+	for wait := polling(t, "all 50 concurrent history interests persisted"); ; wait.next() {
 		entries, _, err := readUsageManifest(provider, usageBridgePrefix(service.cacheKey())+"interest")
 		if err != nil {
 			t.Fatal(err)
 		}
-		count = len(entries)
-		if count == 50 {
+		if len(entries) == 50 {
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("concurrent history interests were lost: %d/50", count)
 }

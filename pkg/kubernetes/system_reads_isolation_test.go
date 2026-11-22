@@ -201,7 +201,7 @@ func TestSystemReadsSlowPolicyDoesNotBlockOtherClusters(t *testing.T) {
 	}()
 	select {
 	case <-entered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(scaledTimeout(hangGuard)):
 		t.Fatal("the prod read never asked the policy")
 	}
 
@@ -220,7 +220,7 @@ func TestSystemReadsSlowPolicyDoesNotBlockOtherClusters(t *testing.T) {
 		if err != nil {
 			t.Fatalf("staging read while prod's policy blocks: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(scaledTimeout(hangGuard)):
 		t.Fatal("a blocked policy for prod held up staging reads or the counters")
 	}
 
@@ -231,7 +231,7 @@ func TestSystemReadsSlowPolicyDoesNotBlockOtherClusters(t *testing.T) {
 		if err != nil {
 			t.Fatalf("prod read after the policy answered: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(scaledTimeout(hangGuard)):
 		t.Fatal("prod read did not finish after the policy answered")
 	}
 }

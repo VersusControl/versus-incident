@@ -499,9 +499,20 @@ func (index *localEvidence) queryOccurrences(ctx context.Context, tx *sql.Tx, ke
 		countAllowed = "(" + allowed + " AND e.severity<>'')"
 	}
 	typeSQL := `CASE WHEN NOT COALESCE(` + countAllowed + `,0) THEN 'coverage_gap' WHEN e.closed IS NOT NULL THEN 'issue_resolved' WHEN e.observation_only=1 THEN 'issue_observed' ELSE 'issue_opened' END`
+	// A point-in-time read of one occurrence answers only its newest visible
+	// version, as the Postgres store does. Should two versions both pass the
+	// visibility test, the older one is not what the occurrence looked like
+	// at that time, and there is no next page: every version shares the
+	// occurrence's first-seen time and ID, so a continuation keyed on them
+	// could only skip or repeat a version.
+	single := query.OccurrenceID != "" && !query.Lookup
+	bounded := " LIMIT 1001"
+	if single {
+		bounded = " ORDER BY e.revision DESC LIMIT 1"
+	}
 	if query.Cursor == "" && !query.Lookup {
 		rows, err := tx.QueryContext(ctx, cte+`SELECT type,severity,broken,COUNT(*) FROM(SELECT `+typeSQL+` AS type,
- CASE WHEN `+allowed+` THEN e.severity ELSE '' END AS severity,CASE WHEN `+allowed+` THEN e.broken ELSE 0 END AS broken`+from+" WHERE "+where+` LIMIT 1001) bounded GROUP BY type,severity,broken`, []any(args)...)
+ CASE WHEN `+allowed+` THEN e.severity ELSE '' END AS severity,CASE WHEN `+allowed+` THEN e.broken ELSE 0 END AS broken`+from+" WHERE "+where+bounded+`) bounded GROUP BY type,severity,broken`, []any(args)...)
 		if err != nil {
 			return page, err
 		}
@@ -541,11 +552,14 @@ func (index *localEvidence) queryOccurrences(ctx context.Context, tx *sql.Tx, ke
 		seen = sample
 		observed = `(SELECT o.observed FROM evidence_observations o WHERE o.key=e.key AND o.id=e.id AND o.version=e.version AND o.revision<=` + pin + ` AND o.observed<=` + until + ` ORDER BY o.revision DESC LIMIT 1)`
 		measurements = `(SELECT o.measurements FROM evidence_observations o WHERE o.key=e.key AND o.id=e.id AND o.version=e.version AND o.revision<=` + pin + ` AND o.observed<=` + until + ` ORDER BY o.revision DESC LIMIT 1)`
-		if query.OccurrenceID != "" {
+		if single {
 			order = "e.revision DESC"
 		}
 	}
 	limit := query.Limit + 1
+	if single {
+		limit = 1
+	}
 	if query.Lookup {
 		order = "e.seen DESC,e.id DESC"
 		limit = 1

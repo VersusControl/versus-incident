@@ -900,13 +900,13 @@ func TestSystemReadThrottleIsKeptApartFromViewerReads(t *testing.T) {
 		fixture.kube.mu.Lock()
 		fixture.kube.status = 0
 		fixture.kube.mu.Unlock()
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second) // testlint:allow a bound shorter than the throttle proves the viewer read did not wait it out
 		defer cancel()
 		var list map[string]any
 		if err := fixture.service.client.GetJSON(ctx, "/api/v1/events", &list); err != nil {
 			t.Fatalf("a viewer read waited out the system read's throttle: %v", err)
 		}
-		ctx, cancel = context.WithTimeout(t.Context(), 300*time.Millisecond)
+		ctx, cancel = context.WithTimeout(t.Context(), 300*time.Millisecond) // testlint:allow the throttled read must give up at this deadline
 		defer cancel()
 		if _, err := fixture.reads.PodMetrics(ctx, "prod"); err == nil {
 			t.Fatal("a system read ignored its own throttle")
@@ -924,7 +924,7 @@ func TestSystemReadThrottleIsKeptApartFromViewerReads(t *testing.T) {
 		fixture.kube.mu.Lock()
 		fixture.kube.status = 0
 		fixture.kube.mu.Unlock()
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second) // testlint:allow a bound shorter than the throttle proves the system read did not wait it out
 		defer cancel()
 		if _, err := fixture.reads.PodMetrics(ctx, "prod"); err != nil {
 			t.Fatalf("a system read waited out the viewer's throttle: %v", err)
@@ -958,7 +958,7 @@ func TestProjectedTokenProofThrottleFollowsTheReadItRunsFor(t *testing.T) {
 		return client.backoffUntil, client.systemBackoffUntil
 	}
 	waitsWithin := func(client *Client, ctx context.Context) error {
-		ctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond) // testlint:allow the throttled wait must give up at this deadline
 		defer cancel()
 		return client.waitBackoff(ctx)
 	}

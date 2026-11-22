@@ -283,8 +283,8 @@ func verdictOf(p *Pattern) string {
 	return p.Verdict
 }
 
-// TestCatalog_GraceControl_MutatesInMemoryWithStore pins the fix for QA-078,
-// the same bug class as MarkKnown above. IsServiceInGrace reads the in-memory
+// TestCatalog_GraceControl_MutatesInMemoryWithStore checks that a grace edit reaches
+// the in-memory map (the same bug class as MarkKnown above). IsServiceInGrace reads the in-memory
 // map on every signal and nothing reloads it from the store, so a store-only
 // grace edit did not reach the worker until the next process start: the API
 // returned 200 and AllServices (a store read) reported in_grace=false while
@@ -312,7 +312,7 @@ func TestCatalog_GraceControl_MutatesInMemoryWithStore(t *testing.T) {
 	}
 	// The worker's very next tick must see this — no restart, no reload.
 	if cat.IsServiceInGrace("checkout", grace) {
-		t.Error("after EndServiceGrace the service is STILL in grace in memory: the worker would keep learning silently until restart (QA-078)")
+		t.Error("after EndServiceGrace the service is STILL in grace in memory: the worker would keep learning silently until restart")
 	}
 
 	if !cat.RestartServiceGrace("checkout") {

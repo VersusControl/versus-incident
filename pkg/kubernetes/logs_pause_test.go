@@ -116,11 +116,15 @@ func TestPartialLogBatchPauseResumesWithoutLossOrDuplicates(t *testing.T) {
 		for _, pauseAt := range []int{1, 31} {
 			t.Run(kind+"/"+strconv.Itoa(pauseAt), func(t *testing.T) {
 				records := workloadStreamRecords("StatefulSet", 1, 1)
+				// Every request serves the same lines with the same timestamps,
+				// as the kubelet does; a timestamp taken per request would
+				// change the line identity when the pause and the resume fall
+				// in different seconds.
+				base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 					if serveStreamPodObject(writer, request, records) {
 						return
 					}
-					base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
 					for i := 1; i <= 33; i++ {
 						fmt.Fprintf(writer, "%s line-%d\n", base.Format(time.RFC3339Nano), i)
 					}

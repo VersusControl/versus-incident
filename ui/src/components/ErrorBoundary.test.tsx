@@ -13,11 +13,18 @@ afterEach(cleanup);
 
 // React logs the caught error to console.error by design; silence it so the
 // suite output stays readable (the boundary's own log is asserted instead).
+// In development React also re-dispatches each intentional throw as a window
+// "error" event, which jsdom prints as an uncaught error; cancelling the event
+// keeps that expected noise out of the log without hiding real failures, which
+// still fail their assertions.
+const quietIntentionalThrow = (event: ErrorEvent) => event.preventDefault();
 beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
+  window.addEventListener("error", quietIntentionalThrow);
 });
 
 afterEach(() => {
+  window.removeEventListener("error", quietIntentionalThrow);
   vi.restoreAllMocks();
 });
 

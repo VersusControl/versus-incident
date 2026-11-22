@@ -136,7 +136,7 @@ func snapshotOwnDatabase(t *testing.T) string {
 	t.Helper()
 	server := os.Getenv("TEST_POSTGRES_DSN")
 	if server == "" {
-		t.Fatal("TEST_POSTGRES_DSN is required")
+		t.Skip("isolated Postgres required: set TEST_POSTGRES_DSN")
 	}
 	target, err := url.Parse(server)
 	if err != nil {

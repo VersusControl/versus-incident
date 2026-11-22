@@ -912,15 +912,13 @@ func TestInventoryFirstSyncProgressIsMonotonicAndEndsAtPublication(t *testing.T)
 		t.Fatalf("cluster version=%q", version)
 	}
 	lastStep := 0
-	deadline := time.Now().Add(20 * time.Second)
-	for {
+	for wait := polling(t, "progress to report node and namespace counts"); ; wait.next() {
 		overview, err := service.Overview(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
 		progress := overview.Sync.Progress
-		if overview.Sync.State == "syncing" && progress == nil && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
+		if overview.Sync.State == "syncing" && progress == nil {
 			continue
 		}
 		if overview.Sync.State != "syncing" || progress == nil {
@@ -939,10 +937,6 @@ func TestInventoryFirstSyncProgressIsMonotonicAndEndsAtPublication(t *testing.T)
 			}
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("progress never reported node and namespace counts: %+v", progress)
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	resources, err := service.Workloads(t.Context(), WorkloadListOptions{})
 	if err != nil {
@@ -953,7 +947,7 @@ func TestInventoryFirstSyncProgressIsMonotonicAndEndsAtPublication(t *testing.T)
 	}
 	released.Store(true)
 	close(release)
-	for {
+	for wait := polling(t, "first generation never published"); ; wait.next() {
 		overview, err := service.Overview(t.Context())
 		if err != nil {
 			t.Fatal(err)
@@ -969,10 +963,6 @@ func TestInventoryFirstSyncProgressIsMonotonicAndEndsAtPublication(t *testing.T)
 		} else {
 			lastStep = progress.StepIndex
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("first generation never published")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -1046,13 +1036,10 @@ func TestInventoryPublishesCoreKindsBeforeSlowExtrasAndFillsThemInLater(t *testi
 	service.SetChangeStorage(provider)
 	service.startInventory(t.Context())
 	t.Cleanup(service.StopCapture)
-	deadline := time.Now().Add(10 * time.Second)
-	for generation := cachedGeneration(service); len(generation.View.Kinds) == 0 || generation.Usage.ObservedAt.IsZero(); generation = cachedGeneration(service) {
-		if time.Now().After(deadline) {
-			t.Fatal("core generation never published")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	eventually(t, "the core generation to publish", func() bool {
+		generation := cachedGeneration(service)
+		return len(generation.View.Kinds) > 0 && !generation.Usage.ObservedAt.IsZero()
+	})
 	core := cachedGeneration(service)
 	for kind := range core.View.Kinds {
 		if !inventoryCoreKinds[kind] {
@@ -1100,29 +1087,17 @@ func TestInventoryPublishesCoreKindsBeforeSlowExtrasAndFillsThemInLater(t *testi
 	if err != nil || len(complete.Nodes) != 0 || complete.Sync.State != "partial" || len(complete.Sync.Pending) == 0 {
 		t.Fatalf("complete graph claimed completeness while kinds load: %+v err=%v", complete.Sync, err)
 	}
-	for extraDiscovery.Load() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the extras cycle never started")
-		}
-		time.Sleep(5 * time.Millisecond)
+	for wait := polling(t, "the extras cycle never started"); extraDiscovery.Load() == 0; wait.next() {
 	}
 	if latest := cachedGeneration(service); latest.Revision != core.Revision {
 		t.Fatal("a generation published while extras were still loading")
 	}
 	close(release)
-	for {
+	for wait := polling(t, "the extra kinds to fill in"); ; wait.next() {
 		full := cachedGeneration(service)
 		if !full.PendingDiscovery && len(full.Pending) == 0 && len(full.Resources["example.com~v1~widgets"]) == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			keys := []string{}
-			for id := range full.Resources {
-				keys = append(keys, id)
-			}
-			t.Fatalf("extras never filled in: pending=%v discovery=%v resources=%v partial=%+v", full.Pending, full.PendingDiscovery, keys, full.DiscoveryPartial)
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	claims, err = service.CachedResources(t.Context(), ListOptions{ResourceID: indexedResourceIDs["PersistentVolumeClaim"]})
 	if err != nil || len(claims.Items) != 1 || claims.Sync.State != "ready" || len(claims.Sync.Pending) != 0 || claims.Sync.PendingKinds != 0 {
@@ -1151,15 +1126,12 @@ func TestInventoryKeepsTheCoreGenerationWhenExtrasFail(t *testing.T) {
 	failExtras.Store(true)
 	service.startInventory(t.Context())
 	t.Cleanup(service.StopCapture)
-	deadline := time.Now().Add(10 * time.Second)
-	for generation := cachedGeneration(service); len(generation.View.Kinds) == 0 || generation.Usage.ObservedAt.IsZero(); generation = cachedGeneration(service) {
-		if time.Now().After(deadline) {
-			t.Fatal("core generation never published")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	eventually(t, "the core generation to publish", func() bool {
+		generation := cachedGeneration(service)
+		return len(generation.View.Kinds) > 0 && !generation.Usage.ObservedAt.IsZero()
+	})
 	core := cachedGeneration(service)
-	for {
+	for wait := polling(t, "optional discovery failure was not recorded"); ; wait.next() {
 		generation := cachedGeneration(service)
 		failed := false
 		for _, failure := range generation.DiscoveryPartial {
@@ -1168,10 +1140,6 @@ func TestInventoryKeepsTheCoreGenerationWhenExtrasFail(t *testing.T) {
 		if failed {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("optional discovery failure was not recorded")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	stored, _, err := readInventoryGeneration(provider, service.scope, "")
 	if err != nil || !stored.View.Kinds["Pod"].ObservedAt.Equal(core.View.Kinds["Pod"].ObservedAt) {
@@ -1571,11 +1539,7 @@ func TestFirstReadyPublicationDoesNotWaitForOptionalUsage(t *testing.T) {
 		t.Fatalf("optional usage was not blocked: %v", err)
 	default:
 	}
-	select {
-	case <-metricsStarted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("optional usage read did not start")
-	}
+	waitFor(t, metricsStarted, "optional usage read did not start")
 	close(release)
 	if err := <-finished; err != nil {
 		t.Fatal(err)

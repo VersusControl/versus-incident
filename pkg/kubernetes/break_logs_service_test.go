@@ -1112,18 +1112,10 @@ func TestBreakLogCaptureDualSlotAndStopDrainsJob(t *testing.T) {
 	snapshot.Records[1].Containers[0].Running = true
 	snapshot.Records[1].Containers[0].StateKnown = true
 	service.enqueueBreakLogs(snapshot, "", t.Context())
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("job not started")
-	}
+	waitFor(t, started, "job not started")
 	done := make(chan struct{})
 	go func() { service.StopCapture(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("stop failed to drain")
-	}
+	waitFor(t, done, "stop failed to drain")
 	if previous.Load() != 1 || current.Load() != 0 {
 		t.Fatal("cancellation failed")
 	}
@@ -1671,11 +1663,7 @@ func TestEnqueuedInventoryRetainsRecoveredStandalonePod(t *testing.T) {
 	done := service.changes.logDone[service.indexScope()]
 	service.changes.mu.Unlock()
 	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("capture did not drain")
-		}
+		waitFor(t, done, "capture did not drain")
 	}
 	state, err := service.changeStore().BreakLogs(at)
 	if err != nil {

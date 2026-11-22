@@ -208,11 +208,7 @@ func TestTimelineReservationPinAndRefreshRaceUsesOnePublicationFence(t *testing.
 					result <- err
 				}
 			}()
-			select {
-			case <-barrier.started:
-			case <-time.After(time.Second):
-				t.Fatal("CAS race barrier not reached")
-			}
+			waitFor(t, barrier.started, "CAS race barrier not reached")
 			if pinWins {
 				if _, err := replica.reservationFixturePage(ctx, pagination); err != nil {
 					t.Fatal(err)
@@ -341,17 +337,9 @@ func TestTimelineReservationIdenticalTabsWaitForReservedPayloadPublication(t *te
 	}
 	a, b := make(chan result, 1), make(chan result, 1)
 	go func() { page, err := first.reservationFixturePage(ctx, query); a <- result{page, err} }()
-	select {
-	case <-barrier.started:
-	case <-time.After(time.Second):
-		t.Fatal("publisher did not reserve before payload")
-	}
+	waitFor(t, barrier.started, "publisher did not reserve before payload")
 	go func() { page, err := second.reservationFixturePage(ctx, query); b <- result{page, err} }()
-	select {
-	case <-barrier.pending:
-	case <-time.After(time.Second):
-		t.Fatal("identical reader did not reach pending publication")
-	}
+	waitFor(t, barrier.pending, "identical reader did not reach pending publication")
 	select {
 	case got := <-b:
 		t.Fatalf("pending publication was exposed as capacity/data error: %+v", got)

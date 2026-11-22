@@ -373,10 +373,10 @@ func TestRedisTailDedupBackend_KeysAreSourceScoped(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// SigNoz — the source QA-069 was measured on
+// SigNoz — persisted dedup across a process restart
 // -----------------------------------------------------------------------------
 
-// TestSigNozSource_PersistedDedupSurvivesRestart is the QA-069 regression: a
+// TestSigNozSource_PersistedDedupSurvivesRestart guards against replay after restart: a
 // process restart must re-emit ZERO rows and still leave no gap.
 //
 // The pre-restart tick leaves a full reorder window of rows sitting at and

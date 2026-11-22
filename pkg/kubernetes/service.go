@@ -266,6 +266,9 @@ type Service struct {
 	evidenceHeartbeat time.Duration
 	historySaveGrace  time.Duration
 	cadenceDivisor    int
+	// leaseTTL replaces inventoryLeaseTTL when set; tests shorten it to
+	// exercise a takeover without waiting a production lease out.
+	leaseTTL time.Duration
 	// optionalStartWindow bounds how long a cycle starts optional kind reads;
 	// zero means the default window.
 	optionalStartWindow time.Duration
@@ -1171,7 +1174,7 @@ func (service *Service) CachedResources(ctx context.Context, options ListOptions
 			if !state.ObservedAt.IsZero() {
 				page.Sync.AgeSeconds = max(0, time.Since(state.ObservedAt).Seconds())
 			}
-			if page.Sync.State == "ready" && page.Sync.AgeSeconds > (10*time.Minute).Seconds() {
+			if page.Sync.State == "ready" && !state.ObservedAt.IsZero() && time.Since(restartAge(state.ObservedAt, service.inventoryFreshFloor(), 10*time.Minute)) > 10*time.Minute {
 				page.Sync.State, page.Sync.Partial = "stale", true
 			}
 			if state.Error != "" {

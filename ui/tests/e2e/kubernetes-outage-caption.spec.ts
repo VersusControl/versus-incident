@@ -4,14 +4,14 @@ import { promisify } from "node:util";
 import { openApp } from "./helpers";
 import { capturePath } from "./support/capture";
 
-// K27-B4 / plan item F5 / W1 caption delta, deliberately narrower than the
-// preserved 600 s retention proof in kubernetes-persisted-history-k27.spec.ts.
+// Outage caption check, deliberately narrower than the preserved 600 s
+// retention proof in kubernetes-persisted-history.spec.ts.
 // It asserts only the repaired top-bar caption during a SHORT real outage of
 // the isolated project-owned kind connector path, plus retained rows and the
 // replacement of the caption on recovery without a document reload.
 //
 // Requires the isolated licensed project + kind network fixture:
-//   E2E_K27_CAPTION=1 HARNESS_PROJECT=k27-licensed-... 
+//   E2E_CAPTION_OUTAGE=1 HARNESS_PROJECT=isolated-licensed-... 
 const execute = promisify(execFile);
 
 const CAPTION = '[data-sync-state]';
@@ -85,10 +85,10 @@ async function setTheme(page: Page, theme: "light" | "dark") {
 
 async function watchHistorySkeletons(page: Page) {
   await page.evaluate(() => {
-    document.documentElement.dataset.k27Skeletons = "0";
+    document.documentElement.dataset.historySkeletons = "0";
     new MutationObserver(() => {
       if (document.querySelector('[aria-label="Loading projected change history"], [aria-label="Loading related root change history"], [aria-label="Loading break timeline"]')) {
-        document.documentElement.dataset.k27Skeletons = String(Number(document.documentElement.dataset.k27Skeletons) + 1);
+        document.documentElement.dataset.historySkeletons = String(Number(document.documentElement.dataset.historySkeletons) + 1);
       }
     }).observe(document.body, { childList: true, subtree: true });
   });
@@ -105,15 +105,15 @@ async function capture(page: Page, rows: ReturnType<Page["getByRole"]>, width: n
   expect(layout.textRight, `${state}: caption text must not run past the viewport — "${layout.text}"`).toBeLessThanOrEqual(layout.viewport + 1);
   expect(layout.overlaps, `${state}: caption must not overlap top-bar controls`).toEqual([]);
   expect(layout.clippedBy, `${state}: caption must not be clipped by an ancestor`).toEqual([]);
-  await page.screenshot({ path: capturePath("k27-caption", width, theme, state), animations: "disabled" });
+  await page.screenshot({ path: capturePath("kubernetes-outage-caption", width, theme, state), animations: "disabled" });
   return layout;
 }
 
-test("K27 real short outage captions the actual last-good time (K27-B4/F5/W1)", async ({ page }, testInfo) => {
-  test.skip(process.env.E2E_K27_CAPTION !== "1", "requires the isolated project-owned kind network fixture");
+test("real short outage captions the actual last-good time", async ({ page }, testInfo) => {
+  test.skip(process.env.E2E_CAPTION_OUTAGE !== "1", "requires the isolated project-owned kind network fixture");
   test.setTimeout(900_000);
   const project = process.env.HARNESS_PROJECT ?? "";
-  expect(project.startsWith("k27-licensed-"), "never disconnect a shared harness network").toBe(true);
+  expect(project.startsWith("isolated-licensed-"), "never disconnect a shared harness network").toBe(true);
   const network = `${project}_default`;
   const node = `${process.env.E2E_KIND_CLUSTER ?? "versus-harness"}-control-plane`;
 
@@ -165,7 +165,7 @@ test("K27 real short outage captions the actual last-good time (K27-B4/F5/W1)", 
     await expect(page.locator(CAPTION)).toContainText(/Last synced|Updates disconnected/, { timeout: 60_000 });
     await expect.poll(() => observed.length, { timeout: 60_000 }).toBeGreaterThan(0);
     await watchHistorySkeletons(page);
-    await page.evaluate(() => { document.documentElement.dataset.k27Doc = "k27-caption"; });
+    await page.evaluate(() => { document.documentElement.dataset.outageDocument = "kubernetes-outage-caption"; });
 
     // The same browser context, a second surface: the Overview tile header
     // states the observed_at of the data actually on screen, so the caption can
@@ -202,7 +202,7 @@ test("K27 real short outage captions the actual last-good time (K27-B4/F5/W1)", 
     await expect(page.locator('[data-sync-strip="failed"]')).toBeVisible();
     await expect(page.locator('[data-sync-strip="failed"]')).toContainText("Cluster sync failed");
     expect(await rows.count(), "retained rows must stay rendered").toBeGreaterThanOrEqual(baselineRows);
-    expect(await page.evaluate(() => document.documentElement.dataset.k27Skeletons)).toBe("0");
+    expect(await page.evaluate(() => document.documentElement.dataset.historySkeletons)).toBe("0");
 
     await expect(overviewPage.locator(CAPTION), "the Overview surface must carry the same outage caption").toContainText(UNREACHABLE, { timeout: 120_000 });
     await expect(overviewPage.locator(CAPTION)).not.toContainText(/Syncing/);
@@ -221,7 +221,7 @@ test("K27 real short outage captions the actual last-good time (K27-B4/F5/W1)", 
       snapshotAsCaption,
       `the Overview caption (${captionTime(overviewCaption)}) must match the Overview data actually on screen (${snapshotDuring})`,
     ).toBe(captionTime(overviewCaption));
-    await overviewPage.screenshot({ path: capturePath("k27-caption-overview", 1440, "dark", "outage-live"), animations: "disabled" });
+    await overviewPage.screenshot({ path: capturePath("kubernetes-outage-caption-overview", 1440, "dark", "outage-live"), animations: "disabled" });
 
     // Let the outage age past a whole minute so "not the current clock" is a
     // real assertion rather than a same-minute coincidence.
@@ -256,7 +256,7 @@ test("K27 real short outage captions the actual last-good time (K27-B4/F5/W1)", 
         text: layout.text,
         state: layout.state,
         rows: await rows.count(),
-        skeletons: await page.evaluate(() => document.documentElement.dataset.k27Skeletons ?? null),
+        skeletons: await page.evaluate(() => document.documentElement.dataset.historySkeletons ?? null),
       };
       samples.push(sample);
       if (!sample.text.includes(UNREACHABLE) || captionTime(sample.text) !== shownTime) violations.push(`caption changed at ${sample.elapsed_ms}ms: ${sample.text}`);
@@ -276,7 +276,7 @@ test("K27 real short outage captions the actual last-good time (K27-B4/F5/W1)", 
     await expect(page.locator(CAPTION)).toContainText(/Last synced|Updates disconnected/, { timeout: 120_000 });
     await expect(page.locator(CAPTION)).not.toContainText(/Syncing/);
     await expect(rows.first(), "retained rows must survive recovery").toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.dataset.k27Doc), "recovery must not reload the document").toBe("k27-caption");
+    expect(await page.evaluate(() => document.documentElement.dataset.outageDocument), "recovery must not reload the document").toBe("kubernetes-outage-caption");
     await capture(page, rows, 1440, "dark", "recovered-live");
     await expect(overviewPage.locator(CAPTION), "the Overview surface must recover without a reload").not.toContainText(UNREACHABLE, { timeout: 180_000 });
     await expect(overviewPage.locator(CAPTION)).toContainText(/Last synced|Updates disconnected/, { timeout: 120_000 });

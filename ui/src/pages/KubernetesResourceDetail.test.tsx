@@ -438,7 +438,7 @@ describe("Resource detail surfaces", () => {
         <ResourceHeader resource={pod} />
       </h2>,
     );
-    expect(screen.getByText("checkout-0")).toBeTruthy();
+    expect(screen.getByText("checkout-0").getAttribute("title")).toBe("checkout-0");
     expect(screen.getByText("Ready 1/1")).toBeTruthy();
     expect(screen.getByText("2 restarts").className).toContain(
       "text-sev-warning",
@@ -903,6 +903,24 @@ describe("Resource detail surfaces", () => {
     expect(api.kubernetesCrashes).not.toHaveBeenCalled();
     expect(api.kubernetesChanges).not.toHaveBeenCalled();
   });
+  it("returns the resource Timeline to page 1 when the server reports a later page's link expired", async () => {
+    vi.mocked(api.kubernetesTimeline).mockRestore();
+    const first = timelinePage([{ type: "crash", id: crash.id, at: crash.at, crash }], { next: "timeline-page-2", total: 300, limit: 100 });
+    const cursors: Array<string | null> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input), "http://localhost");
+      cursors.push(url.searchParams.get("cursor"));
+      if (url.searchParams.get("cursor")) return new Response(JSON.stringify({ error: "The list changed since this page was loaded.", code: "cursor_expired" }), { status: 400 });
+      return new Response(JSON.stringify(first), { status: 200 });
+    });
+    mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
+    await screen.findByRole("button", { name: "View logs before crash" });
+    fireEvent.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(cursors).toContain("timeline-page-2"));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Previous page" }) as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.queryByRole("button", { name: "Restart history" })).toBeNull();
+    expect(cursors.filter(Boolean)).toEqual(["timeline-page-2"]);
+  });
   it("loads only a selected crash page, keeps its window frozen and uses the aggregate termination count", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(now));
@@ -927,6 +945,66 @@ describe("Resource detail surfaces", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
     expect(api.kubernetesCrashes).toHaveBeenCalledTimes(3);
     expect(vi.mocked(api.kubernetesCrashes).mock.calls[2][0]?.cursor).toBeUndefined();
+  });
+  it("restarts crash pages from the first page when a later page's link expires", async () => {
+    const first = { items: [crash], crash_count: 120, since: "2026-10-20T08:00:00Z", until: now, started_at: now, retention_from: now, retention_basis: "capture", gaps: [], capture_gaps: [], coverage: {}, limitations: [], capture: { mode: "continuous", behind: false }, sync: { state: "ready", age_s: 0, partial: false }, next: "expired-crash-page" };
+    vi.mocked(api.kubernetesCrashes).mockImplementation(async (options) => {
+      if (options?.cursor) throw new ApiError(400, "invalid arguments");
+      return first as never;
+    });
+    mount(<ResourceMetrics resource={pod} liveSamples={[]} onCrash={vi.fn()} />);
+    const pager = await screen.findByRole("navigation", { name: "Captured crash pages" });
+    expect(screen.queryByRole("button", { name: "Restart crashes" })).toBeNull();
+    const original = vi.mocked(api.kubernetesCrashes).mock.calls[0][0]!;
+    fireEvent.click(within(pager).getByRole("button", { name: "Next page" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart crashes" }));
+    // The button removes itself, so focus lands on the Restarts tile, not the body.
+    expect(document.activeElement?.textContent).toBe("Restarts");
+    await screen.findByRole("navigation", { name: "Captured crash pages" });
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Restart crashes" })).toBeNull());
+    const cursors = vi.mocked(api.kubernetesCrashes).mock.calls.map(([options]) => options?.cursor);
+    expect(cursors.slice(0, 2)).toEqual([undefined, "expired-crash-page"]);
+    expect(cursors.slice(2).every((cursor) => cursor === undefined)).toBe(true);
+    expect(screen.getByText("120 captured crashes in the last 24h")).toBeTruthy();
+    expect(vi.mocked(api.kubernetesCrashes).mock.calls.at(-1)![0]).toMatchObject({ pod_uid: original.pod_uid, namespace: original.namespace, limit: 50 });
+  });
+  it("returns the crash pager to page 1 when the server reports a later page's link expired", async () => {
+    // Through the real history reader and request path: only fetch is faked.
+    vi.mocked(api.kubernetesCrashes).mockRestore();
+    const first = { items: [crash], crash_count: 120, since: "2026-10-20T08:00:00Z", until: now, started_at: now, retention_from: now, retention_basis: "capture", gaps: [], capture_gaps: [], coverage: {}, limitations: [], capture: { mode: "continuous", behind: false }, sync: { state: "ready", age_s: 0, partial: false }, next: "crash-page-2" };
+    const cursors: Array<string | null> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input), "http://localhost");
+      cursors.push(url.searchParams.get("cursor"));
+      if (url.searchParams.get("cursor")) return new Response(JSON.stringify({ error: "The list changed since this page was loaded.", code: "cursor_expired" }), { status: 400 });
+      return new Response(JSON.stringify(first), { status: 200 });
+    });
+    mount(<ResourceMetrics resource={pod} liveSamples={[]} onCrash={vi.fn()} />);
+    const pager = await screen.findByRole("navigation", { name: "Captured crash pages" });
+    fireEvent.click(within(pager).getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(cursors).toContain("crash-page-2"));
+    await waitFor(() => expect((within(screen.getByRole("navigation", { name: "Captured crash pages" })).getByRole("button", { name: "Previous page" }) as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.getByRole("navigation", { name: "Captured crash pages" }).textContent).not.toMatch(/Page 2/);
+    // The expired link is asked for once and never retried as page 1 by the reader.
+    expect(cursors.filter(Boolean)).toEqual(["crash-page-2"]);
+    expect(screen.queryByRole("button", { name: "Restart crashes" })).toBeNull();
+  });
+  it("offers Restart crashes for a later page that fails for another reason, without reloading page 1 behind it", async () => {
+    vi.mocked(api.kubernetesCrashes).mockRestore();
+    const first = { items: [crash], crash_count: 120, since: "2026-10-20T08:00:00Z", until: now, started_at: now, retention_from: now, retention_basis: "capture", gaps: [], capture_gaps: [], coverage: {}, limitations: [], capture: { mode: "continuous", behind: false }, sync: { state: "ready", age_s: 0, partial: false }, next: "crash-page-2" };
+    const cursors: Array<string | null> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(String(input), "http://localhost");
+      cursors.push(url.searchParams.get("cursor"));
+      if (url.searchParams.get("cursor")) return new Response(JSON.stringify({ error: "The Kubernetes request is missing or has invalid parameters.", code: "invalid_arguments" }), { status: 400 });
+      return new Response(JSON.stringify(first), { status: 200 });
+    });
+    mount(<ResourceMetrics resource={pod} liveSamples={[]} onCrash={vi.fn()} />);
+    const pager = await screen.findByRole("navigation", { name: "Captured crash pages" });
+    const before = cursors.length;
+    fireEvent.click(within(pager).getByRole("button", { name: "Next page" }));
+    expect(await screen.findByRole("button", { name: "Restart crashes" })).toBeTruthy();
+    expect(cursors.slice(before)).toEqual(["crash-page-2"]);
   });
   it("hides the crash section when nothing crashed and pages only when there is another page", async () => {
     const page = { items: [], crash_count: 0, since: "2026-10-20T08:00:00Z", until: now, started_at: now, retention_from: now, retention_basis: "capture", gaps: [], capture_gaps: [], coverage: {}, limitations: [], capture: { mode: "continuous", behind: false }, sync: { state: "ready", age_s: 0, partial: false } };

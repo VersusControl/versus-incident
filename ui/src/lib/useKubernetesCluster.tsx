@@ -375,5 +375,10 @@ export function useKubernetesCrashes(options: Omit<KubernetesCrashQuery, "limit"
     gcTime: 60_000,
     refetchOnWindowFocus: false,
   });
+  // An expired crash page link comes back from the reader as an error. On
+  // arrival the pager returns to page 1, so page 1's crashes are never labelled
+  // as a later page; a page already on screen keeps its rows and offers
+  // Restart crashes.
+  useKubernetesCursorReset(paging, query);
   return { ...query, paging, focused };
 }

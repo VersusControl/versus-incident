@@ -1,9 +1,12 @@
 package kubernetes
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -190,6 +193,117 @@ func TestPodLogStreamResolvesADefaultContainer(t *testing.T) {
 	}
 	if err := service.ValidatePodLogStream(PodLogStreamOptions{Namespace: "shop", Pod: "api", Previous: true, Cursor: cursor}); err != nil {
 		t.Fatalf("container-less resume refused: %v", err)
+	}
+}
+
+// A live follow of a multi-container Pod opened without a container follows
+// the resolved one. When the connection drops and the viewer reconnects
+// without a container from the cursor it holds, the stream resumes on that
+// same container with the lines written meanwhile, none lost or repeated.
+func TestPodLogLiveFollowResolvesADefaultContainerAndResumes(t *testing.T) {
+	base := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	lines := []struct {
+		at   time.Time
+		text string
+	}{{base, "line-1"}, {base.Add(time.Second), "line-2"}, {base.Add(2 * time.Second), "line-3"}}
+	var mu sync.Mutex
+	var queries []url.Values
+	written := 2
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasSuffix(request.URL.Path, "/log") {
+			writeJSON(writer, map[string]any{"kind": "Pod", "metadata": map[string]any{"name": "api", "namespace": "shop"}, "spec": map[string]any{"containers": []any{map[string]any{"name": "istio-proxy"}, map[string]any{"name": "app"}}}})
+			return
+		}
+		query := request.URL.Query()
+		mu.Lock()
+		queries = append(queries, query)
+		available := lines[:written]
+		mu.Unlock()
+		if !query.Has("container") {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusBadRequest)
+			writer.Write([]byte(`{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"BadRequest","code":400,"message":"a container name must be specified for pod api"}`))
+			return
+		}
+		// Like the kubelet, a resumed read starts at sinceTime, and the lines
+		// keep the timestamps they were written with.
+		var since time.Time
+		if value := query.Get("sinceTime"); value != "" {
+			parsed, err := time.Parse(time.RFC3339Nano, value)
+			if err != nil {
+				t.Errorf("sinceTime %q: %v", value, err)
+			}
+			since = parsed
+		}
+		for _, line := range available {
+			if line.at.Before(since) {
+				continue
+			}
+			fmt.Fprintf(writer, "%s %s\n", line.at.Format(time.RFC3339Nano), line.text)
+		}
+		writer.(http.Flusher).Flush()
+	}))
+	defer server.Close()
+	service := newTestService(t, server.URL, Scope{OrgID: "default", ClusterID: "cluster"})
+	service.SetScrubber(replacingScrubber{})
+	// stream follows until the upstream connection closes and returns the
+	// lines shown and the last cursor the viewer was given.
+	stream := func(options PodLogStreamOptions) ([]string, string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(logStreamTestContext(), 30*time.Second)
+		defer cancel()
+		seen, cursor := []string{}, ""
+		err := service.StreamPodLogs(ctx, options, func(event PodLogStreamEvent) error {
+			if event.Cursor != "" {
+				cursor = event.Cursor
+			}
+			if event.Event != "line" {
+				return nil
+			}
+			if event.Container != "app" {
+				t.Errorf("line %q names container %q", event.Text, event.Container)
+			}
+			seen = append(seen, event.Text)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("stream: %v", err)
+		}
+		return seen, cursor
+	}
+	first, cursor := stream(PodLogStreamOptions{Namespace: "shop", Pod: "api"})
+	if strings.Join(first, ",") != "line-1,line-2" || cursor == "" {
+		t.Fatalf("first follow lines=%v cursor=%q", first, cursor)
+	}
+	mu.Lock()
+	written = 3
+	mu.Unlock()
+	resume := PodLogStreamOptions{Namespace: "shop", Pod: "api", Cursor: cursor}
+	if err := service.ValidatePodLogStream(resume); err != nil {
+		t.Fatalf("container-less reconnect refused: %v", err)
+	}
+	second, _ := stream(resume)
+	if strings.Join(second, ",") != "line-3" {
+		t.Fatalf("reconnect lines=%v, want only line-3", second)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	followed := []url.Values{}
+	for _, query := range queries {
+		if query.Has("container") {
+			followed = append(followed, query)
+		}
+	}
+	if len(followed) != 2 {
+		t.Fatalf("upstream log reads with a container = %d, want 2: %v", len(followed), queries)
+	}
+	for i, query := range followed {
+		if query.Get("container") != "app" || query.Get("follow") != "true" || query.Get("previous") == "true" {
+			t.Fatalf("read %d did not follow the resolved container live: %v", i, query)
+		}
+	}
+	if followed[0].Get("sinceTime") != "" || followed[1].Get("sinceTime") == "" || followed[1].Has("tailLines") {
+		t.Fatalf("reconnect did not resume from the cursor: first=%v second=%v", followed[0], followed[1])
 	}
 }
 

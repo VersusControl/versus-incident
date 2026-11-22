@@ -2,6 +2,8 @@ package kubernetes
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"math"
 	"math/big"
 	"sort"
@@ -192,6 +194,13 @@ func (service *Service) Issues(ctx context.Context, options IssueOptions) (Issue
 // pinOpenOccurrences makes live broken items carry the identity and break time
 // of their persisted open occurrence, so a selection built from the live list
 // keeps resolving after the live condition time moves.
+//
+// A history store that is slow or unavailable does not fail the page: the
+// live items stay, unpinned and marked partial, and the page carries one
+// historical_evidence_unavailable entry. After the first such lookup the rest
+// are skipped, so many slow roots cost about one lookup timeout. A caller whose
+// own context ended still gets that error, and authority denials keep failing
+// the page for the caller to decide.
 func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage) error {
 	if service.evidenceStore() == nil {
 		return nil
@@ -202,26 +211,54 @@ func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage)
 			need[issue.Root.UID] = append(need[issue.Root.UID], position)
 		}
 	}
+	reported, storeDown := false, false
+	markPartial := func() {
+		page.Sync.Partial = true
+		if !reported {
+			reported = true
+			page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: "historical_evidence_unavailable"})
+		}
+	}
+	// Unavailable history cannot authorize a live condition time as an
+	// occurrence selector. Only a decoded open record can.
+	unpin := func(positions []int) {
+		for _, position := range positions {
+			live := &page.Items[position]
+			live.OccurrenceID, live.BrokeAt, live.BrokeAtSource = "", nil, ""
+			live.Partial = true
+		}
+	}
 	for rootUID, positions := range need {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if storeDown {
+			unpin(positions)
+			continue
+		}
 		lookup, stop := context.WithTimeout(ctx, openOccurrenceLookupTimeout)
 		stored, err := service.historicalIssues(lookup, IssueOptions{RootUID: rootUID, Namespace: page.Items[positions[0]].Root.Namespace, Since: time.Now().UTC().Add(-breaklogs.Retention), Until: time.Now().UTC(), Limit: 100, itemsOnly: true})
 		stop()
 		if err != nil {
-			return err
+			if callerErr := ctx.Err(); callerErr != nil {
+				return callerErr
+			}
+			if !occurrenceLookupUnavailable(err) {
+				return err
+			}
+			storeDown = true
+			service.logOccurrenceLookupUnavailable()
+			markPartial()
+			unpin(positions)
+			continue
 		}
 		incomplete := stored.Sync.Partial || stored.Next != ""
 		if incomplete {
-			page.Sync.Partial = true
-			page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: "historical_evidence_unavailable"})
+			markPartial()
+			unpin(positions)
 		}
 		for _, position := range positions {
 			live := &page.Items[position]
-			if incomplete {
-				// Unavailable history cannot authorize a live condition time as
-				// an occurrence selector. A decoded open record below can.
-				live.OccurrenceID, live.BrokeAt, live.BrokeAtSource = "", nil, ""
-				live.Partial = true
-			}
 			for _, item := range stored.Items {
 				if item.Rule == live.Rule && item.Broken && item.ClosedAt == nil && item.BrokeAt != nil && item.OccurrenceID != "" {
 					live.OccurrenceID, live.BrokeAt = item.OccurrenceID, item.BrokeAt
@@ -233,7 +270,30 @@ func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage)
 			}
 		}
 	}
+	if len(need) > 0 && !storeDown {
+		problems().Clear(problemKey(service.scope.OrgID, service.scope.ClusterID, "issue_occurrence_lookup"), "kubernetes: cluster %q saved occurrence lookups answer again", service.scope.ClusterID)
+	}
 	return nil
+}
+
+// occurrenceLookupUnavailable reports whether a failed open-occurrence lookup
+// means the history store could not answer in time (slow, unreachable, or
+// converting its read models), the same store failures issue alerts pause on.
+// An authority denial or an unestablished history is not an availability
+// failure and keeps failing the lookup.
+func occurrenceLookupUnavailable(err error) bool {
+	if errors.Is(err, errHistoryAuthority) || errors.Is(err, errHistoryNotEstablished) || errors.Is(err, errHistoryMismatch) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrUnauthorized) {
+		return false
+	}
+	return isHistoryStoreError(err)
+}
+
+// logOccurrenceLookupUnavailable warns, at most once per throttle window, that
+// live issues are listed without their saved occurrences. A slow, unreachable
+// or converting store shares one cause, so a store flipping between them does
+// not log again at each flip.
+func (service *Service) logOccurrenceLookupUnavailable() {
+	problems().Fail(slog.LevelWarn, problemKey(service.scope.OrgID, service.scope.ClusterID, "issue_occurrence_lookup"), "storage unavailable", "kubernetes: cluster %q live issues are listed without their saved occurrences (storage unavailable); check that the history storage backend is reachable and answering quickly", service.scope.ClusterID)
 }
 
 // Top returns the highest-usage pods or nodes from the Metrics API.

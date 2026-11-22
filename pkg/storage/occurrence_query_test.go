@@ -506,3 +506,81 @@ func TestOpenOccurrencePinsBreakTimeAcrossConditionChanges(t *testing.T) {
 		}
 	}
 }
+
+// A point-in-time read of one occurrence answers what it looked like at that
+// time: its newest visible version, and nothing to page to. Every version of
+// an occurrence shares its first-seen time and ID, so if an older version also
+// passes the visibility test, here because a sample was stored with a later
+// observation time than the version after it, a page of one must not offer a
+// next page that skips or repeats a version, and a larger page must not list
+// the older version as well.
+func TestOneOccurrenceReadAnswersItsNewestVisibleVersionOnly(t *testing.T) {
+	for _, backend := range []string{"memory", "file"} {
+		t.Run(backend, func(t *testing.T) {
+			var provider Provider = NewMemory()
+			if backend == "file" {
+				var err error
+				if provider, err = NewFile(FileOptions{DataDir: t.TempDir()}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = provider.Close() })
+			}
+			store := provider.(EvidenceStore)
+			scope := EvidenceScope{OrgID: "default", ClusterID: "one-occurrence-versions", ClusterUID: "physical"}
+			opened := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+			for i, minutes := range []int{1, 20, 50} {
+				cp, err := store.EvidenceCheckpoint(t.Context(), scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				at := opened.Add(time.Duration(minutes) * time.Minute)
+				payload := fmt.Sprintf(`{"severity":"warning","version":%d}`, i+1)
+				batch := EvidenceBatch{ID: fmt.Sprintf("capture-%d", i), Expected: cp.ID, Generation: cp.Generation, At: at, CoveredThrough: at, Epoch: "versions",
+					Issues: []EvidenceIssue{{Key: "pod-1", Kind: "Pod", UID: "pod-1", Namespace: "shop", Rule: "pod.crash_loop", FirstSeen: opened, LastSeen: at, Payload: json.RawMessage(payload)}}}
+				if err = store.CommitEvidence(t.Context(), scope, batch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Store the second version's sample as observed after the third
+			// version: the first version then stays visible until that time,
+			// alongside the third.
+			blobs, err := provider.ListBlobs(localEvidencePrefix)
+			if err != nil || len(blobs) != 1 {
+				t.Fatalf("stored evidence: %d blobs, %v", len(blobs), err)
+			}
+			var state evidenceState
+			if err = json.Unmarshal(blobs[0].Data, &state); err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Observations) != 3 || state.Observations[1].Revision != 2 {
+				t.Fatalf("precondition: samples %+v", state.Observations)
+			}
+			state.Observations[1].At = opened.Add(100 * time.Minute)
+			raw, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = provider.WriteBlob(blobs[0].Name, raw); err != nil {
+				t.Fatal(err)
+			}
+			id := state.Observations[0].OccurrenceID
+			for _, limit := range []int{1, 10} {
+				page, err := store.QueryEvidence(t.Context(), scope, EvidenceQuery{Type: "occurrence", OccurrenceID: id, Since: opened.Add(-time.Minute), Until: opened.Add(70 * time.Minute), Limit: limit})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(page.Items) != 1 || page.Total != 1 || page.Next != "" {
+					t.Fatalf("limit %d: %d items, total %d, next page %t; want the newest version alone", limit, len(page.Items), page.Total, page.Next != "")
+				}
+				var issue EvidenceIssue
+				if err = json.Unmarshal(page.Items[0].Payload, &issue); err != nil {
+					t.Fatal(err)
+				}
+				var value struct{ Version int }
+				if err = json.Unmarshal(issue.Payload, &value); err != nil || value.Version != 3 {
+					t.Fatalf("limit %d: read version %d (%v), want the third", limit, value.Version, err)
+				}
+			}
+		})
+	}
+}

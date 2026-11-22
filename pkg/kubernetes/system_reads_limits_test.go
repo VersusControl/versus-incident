@@ -111,7 +111,7 @@ func TestSystemReadsCallLimitCoversABlockingPolicy(t *testing.T) {
 				return true
 			}
 			fixture.reads.callTimeout = 300 * time.Millisecond
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), scaledTimeout(hangGuard))
 			defer cancel()
 			started := time.Now()
 			_, err := fixture.reads.PodMetrics(ctx, "prod")

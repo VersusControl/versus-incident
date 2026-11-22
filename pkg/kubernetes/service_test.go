@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -911,6 +912,8 @@ func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
 	t.Parallel()
 	const podCount = 6501
 	var podRequests atomic.Int32
+	var pagesMu sync.Mutex
+	pageRequests := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api":
@@ -921,6 +924,9 @@ func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
 			writeJSON(writer, map[string]any{"resources": []any{map[string]any{"name": "pods", "kind": "Pod", "namespaced": true, "verbs": []string{"get", "list"}}}})
 		case "/api/v1/pods":
 			podRequests.Add(1)
+			pagesMu.Lock()
+			pageRequests[request.URL.Query().Get("continue")]++
+			pagesMu.Unlock()
 			if request.URL.Query().Get("limit") != strconv.Itoa(kubernetesIndexPageSize) {
 				t.Errorf("pod page limit = %q", request.URL.Query().Get("limit"))
 			}
@@ -948,8 +954,17 @@ func TestOverviewCountsPodsAcrossSafeInternalPages(t *testing.T) {
 	service.indexes = nil
 	warmTestInventory(t, service)
 	overview, err := service.Overview(context.Background())
-	if err != nil || overview.Pods != podCount || podRequests.Load() != (podCount+kubernetesIndexPageSize-1)/kubernetesIndexPageSize || containsString(overview.Omitted, "core~v1~pods") || containsString(overview.Omitted, "budget_exhausted") {
+	if err != nil || overview.Pods != podCount || containsString(overview.Omitted, "core~v1~pods") || containsString(overview.Omitted, "budget_exhausted") {
 		t.Fatalf("overview=%#v pod requests=%d err=%v", overview, podRequests.Load(), err)
+	}
+	// Every internal page is read, and none past the last. A page read can be
+	// retried after a slow answer, so the total is bounded rather than exact.
+	pages := (podCount + kubernetesIndexPageSize - 1) / kubernetesIndexPageSize
+	pagesMu.Lock()
+	distinct := len(pageRequests)
+	pagesMu.Unlock()
+	if distinct != pages || int(podRequests.Load()) > 2*pages {
+		t.Fatalf("pod pages read=%d want %d, pod requests=%d want at most %d", distinct, pages, podRequests.Load(), 2*pages)
 	}
 	for _, partial := range overview.Partial {
 		if partial.Class == "budget_exhausted" {
@@ -1169,6 +1184,9 @@ func TestAggregateEncodedTrimAttributesDroppedTailWithoutDuplicateOmissions(t *t
 
 func TestTerminalEncodedSizeTruncationPropagatesThroughAggregates(t *testing.T) {
 	t.Parallel()
+	// Only the namespaced reads below are the aggregates under test; the
+	// background inventory lists cluster-wide and may follow its own
+	// continuation on any later cycle.
 	var continuationRequests atomic.Int32
 	// The projection keeps at most the index label bound, so each object is
 	// wider than one aggregate page only once the page holds enough of them.
@@ -1194,14 +1212,14 @@ func TestTerminalEncodedSizeTruncationPropagatesThroughAggregates(t *testing.T) 
 				map[string]any{"name": "events", "kind": "Event", "namespaced": true, "verbs": []string{"get", "list"}},
 			}})
 		case "/api/v1/pods", "/api/v1/namespaces/default/pods":
-			if request.URL.Query().Get("continue") != "" {
+			if request.URL.Query().Get("continue") != "" && request.URL.Path != "/api/v1/pods" {
 				continuationRequests.Add(1)
 			}
 			writeJSON(writer, map[string]any{"metadata": map[string]any{"continue": "page-2"}, "items": items})
 		case "/api/v1/namespaces/default/pods/needle-0":
 			writeJSON(writer, items[0])
 		case "/api/v1/events", "/api/v1/namespaces/default/events":
-			if request.URL.Query().Get("continue") != "" {
+			if request.URL.Query().Get("continue") != "" && request.URL.Path != "/api/v1/events" {
 				continuationRequests.Add(1)
 			}
 			writeJSON(writer, map[string]any{"metadata": map[string]any{"continue": "events-2"}, "items": items})
@@ -1911,11 +1929,7 @@ func TestPodLogStreamDiscardBudgetAndCancellation(t *testing.T) {
 					t.Fatal("partial discarded record emitted")
 				}
 			}
-			select {
-			case <-closed:
-			case <-time.After(time.Second):
-				t.Fatal("discard reader survived cancellation")
-			}
+			waitFor(t, closed, "discard reader survived cancellation")
 		})
 	}
 }
@@ -2458,11 +2472,7 @@ func TestPodLogStreamReadErrorContextTermination(t *testing.T) {
 						cancel()
 					}
 					if ending != "upstream" {
-						select {
-						case <-streamContext.Done():
-						case <-time.After(3 * time.Second):
-							t.Fatal("stream context did not terminate at the expected boundary")
-						}
+						waitFor(t, streamContext.Done(), "stream context did not terminate at the expected boundary")
 					}
 				}
 				classified := false
@@ -2476,11 +2486,7 @@ func TestPodLogStreamReadErrorContextTermination(t *testing.T) {
 				err := service.streamPodLogs(parent, PodLogStreamOptions{Namespace: "default", Pod: "pod"}, func(event PodLogStreamEvent) error {
 					events = append(events, event)
 					if event.Event == "line" {
-						select {
-						case <-failure.ready:
-						case <-time.After(3 * time.Second):
-							t.Fatal("upstream failure reader did not reach its boundary")
-						}
+						waitFor(t, failure.ready, "upstream failure reader did not reach its boundary")
 						if boundary == "emit" {
 							endContext()
 						}
@@ -2557,11 +2563,12 @@ func TestPodLogSessionPreflightCloseAndReuse(t *testing.T) {
 
 func TestPodLogStreamCancellationAndAdmission(t *testing.T) {
 	closed := make(chan struct{})
+	var closedOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Write([]byte("2026-10-01T00:00:00Z secret\n"))
 		writer.(http.Flusher).Flush()
 		<-request.Context().Done()
-		close(closed)
+		closedOnce.Do(func() { close(closed) })
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{OrgID: "cancel"})
@@ -2571,11 +2578,7 @@ func TestPodLogStreamCancellationAndAdmission(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
 	}
-	select {
-	case <-closed:
-	case <-time.After(time.Second):
-		t.Fatal("upstream not canceled")
-	}
+	waitFor(t, closed, "upstream not canceled")
 	if err := service.StreamPodLogs(context.Background(), PodLogStreamOptions{}, func(PodLogStreamEvent) error { return nil }); !errors.Is(err, ErrForbidden) {
 		t.Fatal("missing authorization accepted")
 	}

@@ -78,7 +78,7 @@ func TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood(
 			registry := NewServiceRegistry(service)
 			defer registry.Close()
 			registry.StartCapture(t.Context())
-			waitUntil(t, 8*time.Second, "complete initial publication", func() bool {
+			eventually(t, "complete initial publication", func() bool {
 				report, err := service.SyncHealth(t.Context())
 				return err == nil && report.State == "ready" && report.PendingKinds == 0 && !report.FirstReadyAt.IsZero()
 			})
@@ -160,7 +160,7 @@ func TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood(
 				t.Fatal(err)
 			}
 			close(firstGate)
-			waitUntil(t, 8*time.Second, "failed attempt or its candidate publication", func() bool {
+			eventually(t, "failed attempt or its candidate publication", func() bool {
 				cache.mu.RLock()
 				defer cache.mu.RUnlock()
 				return cache.failed || cache.generation.Revision != record.Revision
@@ -220,7 +220,7 @@ func TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood(
 			mode.Store(0)
 			close(secondGate)
 			forceCycle(short)
-			waitUntil(t, 8*time.Second, "current authorized recovery publication", func() bool {
+			eventually(t, "current authorized recovery publication", func() bool {
 				report, err := service.SyncHealth(t.Context())
 				if err != nil || report.State != "ready" || report.FailingKinds != 0 {
 					return false
@@ -249,7 +249,7 @@ func TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood(
 			forceCycle(map[string]bool{"Secret": true})
 			// Readers see the new denial while its proof runs, before the
 			// collection that carries it is published, so wait for both.
-			waitUntil(t, 8*time.Second, "published isolated Secret capability gap", func() bool {
+			eventually(t, "published isolated Secret capability gap", func() bool {
 				report, err := service.SyncHealth(t.Context())
 				if err != nil || report.Kinds["Secret"].Error != "forbidden" {
 					return false
@@ -320,7 +320,7 @@ func TestQualifiedMetadataNullFallbackPublishesCurrentAuthorityToPublicViews(t *
 	registry := NewServiceRegistry(service)
 	defer registry.Close()
 	registry.StartCapture(t.Context())
-	waitUntil(t, 10*time.Second, "initial publication before material denial", func() bool {
+	eventually(t, "initial publication before material denial", func() bool {
 		report, err := service.SyncHealth(t.Context())
 		return err == nil && report.State == "ready" && report.PendingKinds == 0 && !report.FirstReadyAt.IsZero()
 	})
@@ -348,7 +348,7 @@ func TestQualifiedMetadataNullFallbackPublishesCurrentAuthorityToPublicViews(t *
 	case cache.wake <- struct{}{}:
 	default:
 	}
-	waitUntil(t, 10*time.Second, "qualified empty metadata fallback publication", func() bool {
+	eventually(t, "qualified empty metadata fallback publication", func() bool {
 		report, err := service.SyncHealth(t.Context())
 		return err == nil && proofs.Load() > 0 && report.Kinds["Pod"].Error == "forbidden" && report.Kinds["Secret"].Error == "forbidden"
 	})
@@ -455,7 +455,7 @@ func (harness *restartFixture) boot(org string, read []string, divisor int) (*Se
 func (harness *restartFixture) storeFirstGeneration() inventoryGeneration {
 	harness.t.Helper()
 	first, registry := harness.boot("default", nil, 0)
-	waitUntil(harness.t, 10*time.Second, "the first process to publish a complete generation", func() bool {
+	eventually(harness.t, "the first process to publish a complete generation", func() bool {
 		report, err := first.SyncHealth(harness.t.Context())
 		return err == nil && report.State == "ready" && report.PendingKinds == 0 && !report.FirstReadyAt.IsZero()
 	})
@@ -541,7 +541,7 @@ func TestRestartDuringClusterOutageKeepsStoredInventoryAndRestoresIt(t *testing.
 			outage := restart.outage(harness)
 			harness.fail.Store(&outage)
 			restarted, _ := harness.boot(restart.org, restart.read, 30)
-			waitUntil(t, 30*time.Second, "the restarted process to retry the unanswered restore proof", func() bool {
+			eventually(t, "the restarted process to retry the unanswered restore proof", func() bool {
 				restarted.inventoryRestore.mu.Lock()
 				remembered := restarted.inventoryRestore.unanswered != nil
 				restarted.inventoryRestore.mu.Unlock()
@@ -580,7 +580,7 @@ func TestRestartDuringClusterOutageKeepsStoredInventoryAndRestoresIt(t *testing.
 			harness.mutate(`{"operation":"upsert","resource":"pods","namespace":"batch","name":"created-during-outage","object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"created-during-outage","namespace":"batch","uid":"created-during-outage"},"status":{"phase":"Running"}}}`)
 			harness.fail.Store(nil)
 			harness.release()
-			waitUntil(t, 30*time.Second, "the restarted process to publish and read its own generation with the new pod", func() bool {
+			eventually(t, "the restarted process to publish and read its own generation with the new pod", func() bool {
 				generation, published := publishedGeneration(harness.provider, restarted.ActiveScope())
 				names, err := restartedPods(t, restarted)
 				return published && slices.Contains(podNames(generation), "created-during-outage") && err == nil && slices.Contains(names, "created-during-outage")
@@ -595,7 +595,7 @@ func TestRestartDuringClusterOutageKeepsStoredInventoryAndRestoresIt(t *testing.
 				}
 			}
 			var created []string
-			waitUntil(t, 30*time.Second, "the new pod recorded as created", func() bool {
+			eventually(t, "the new pod recorded as created", func() bool {
 				history, err := restarted.Changes(t.Context(), ChangeQuery{Kind: "Pod", Type: kubechanges.Created, Limit: 500})
 				if err != nil {
 					return false
@@ -633,16 +633,16 @@ func TestRestartWithOneFailingKindServesTheRestOfTheCluster(t *testing.T) {
 	}
 	harness.fail.Store(&broken)
 	restarted, _ := harness.boot("default", nil, 0)
-	waitUntil(t, 10*time.Second, "pods readable after the restart", func() bool {
+	eventually(t, "pods readable after the restart", func() bool {
 		names, err := restartedPods(t, restarted)
 		return err == nil && len(names) > 0
 	})
-	waitUntil(t, 10*time.Second, "the failing kind reported as an error", func() bool {
+	eventually(t, "the failing kind reported as an error", func() bool {
 		generation, published := publishedGeneration(harness.provider, restarted.ActiveScope())
 		state := generation.View.Kinds["ControllerRevision"]
 		return published && state.State == "error" && state.Error == "unavailable" && generation.View.Kinds["Pod"].State == "ready"
 	})
-	waitUntil(t, 10*time.Second, "the failing kind read as partial", func() bool {
+	eventually(t, "the failing kind read as partial", func() bool {
 		page, err := restarted.CachedResources(t.Context(), ListOptions{ResourceID: indexedResourceIDs["ControllerRevision"]})
 		reported := false
 		for _, partial := range page.Partial {
@@ -667,7 +667,7 @@ func (harness *restartFixture) storeNamespaceSecret() {
 	}
 	harness.fail.Store(&clusterWideDenied)
 	first, registry := harness.boot("default", nil, 0)
-	waitUntil(harness.t, 20*time.Second, "the shop Secret stored for its namespace", func() bool {
+	eventually(harness.t, "the shop Secret stored for its namespace", func() bool {
 		names, _ := shopSecrets(harness.t, first)
 		generation, published := publishedGeneration(harness.provider, first.ActiveScope())
 		stored := false
@@ -736,7 +736,7 @@ func TestOutageThenLostNamespaceGrantNeverServesStoredNamespaceRecords(t *testin
 	}
 	harness.fail.Store(&outage)
 	restarted, _ := harness.boot("default", nil, 30)
-	waitUntil(t, 10*time.Second, "the restarted process to keep the stored generation", func() bool {
+	eventually(t, "the restarted process to keep the stored generation", func() bool {
 		restarted.inventoryRestore.mu.Lock()
 		defer restarted.inventoryRestore.mu.Unlock()
 		return restarted.inventoryRestore.unanswered != nil
@@ -823,7 +823,7 @@ func TestSlowRecoveryUnderContinuousReadsRestoresAsFastAsWithoutReads(t *testing
 		time.Sleep(8 * time.Second)
 		harness.fail.Store(&slow)
 		started := time.Now()
-		waitUntil(t, 60*time.Second, "the worker to restore the stored generation", func() bool {
+		eventually(t, "the worker to restore the stored generation", func() bool {
 			restarted.changes.mu.Lock()
 			cache := restarted.changes.inventories[restarted.indexScope()]
 			restarted.changes.mu.Unlock()

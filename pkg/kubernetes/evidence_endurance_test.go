@@ -179,7 +179,7 @@ func TestDurableEvidenceEndurance(t *testing.T) {
 		defer service.recovery.mu.Unlock()
 		return service.recovery.revision, service.recovery.lastCommitted, service.recovery.workers
 	}
-	waitUntil(t, 45*time.Second, "autonomous nonempty initial publication", func() bool {
+	eventually(t, "autonomous nonempty initial publication", func() bool {
 		rev, _, _ := revision(current("rotating"))
 		healthyRev, _, _ := revision(current("healthy"))
 		return rev != "" && healthyRev != "" && observed.commits.Load() > 0
@@ -395,7 +395,7 @@ func TestDurableEvidenceEndurance(t *testing.T) {
 	if !authorityObserved || !authorityRecovered || authorityProofs.Load() < 2 {
 		t.Fatal("required same-scope current-authority denial/retry/recovery did not complete")
 	}
-	waitUntil(t, 45*time.Second, "autonomous final recovery", func() bool {
+	eventually(t, "autonomous final recovery", func() bool {
 		_, at, workers := revision(current("rotating"))
 		return workers == 1 && time.Since(at) < 30*time.Second
 	})

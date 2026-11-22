@@ -119,7 +119,7 @@ func TestMassPodReplacementBeyondTheSaveLimitIsNotSilentlyLost(t *testing.T) {
 	service := saveDelayReplica(t, upstream.URL, base, "mass-churn", productionPace)
 	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "mass-churn", ClusterUID: "mass-churn-physical"}
 	store := base.(storage.EvidenceStore)
-	waitUntil(t, 120*time.Second, "the first capture of 5,100 Pods saved to history", func() bool {
+	eventuallyWithin(t, 120*time.Second, "the first capture of 5,100 Pods saved to history", func() bool {
 		checkpoint, err := store.EvidenceCheckpoint(t.Context(), scope)
 		return err == nil && checkpoint.ID != "" && historySaveCleared(t, service)
 	})
@@ -170,7 +170,7 @@ func TestMassPodReplacementBeyondTheSaveLimitIsNotSilentlyLost(t *testing.T) {
 	}
 	var batch *storage.EvidenceBatch
 	var failure string
-	waitUntil(t, 120*time.Second, "the replaced Pods published", func() bool {
+	eventuallyWithin(t, 120*time.Second, "the replaced Pods published", func() bool {
 		var replaced bool
 		replaced, batch, failure = published()
 		return replaced
@@ -182,7 +182,7 @@ func TestMassPodReplacementBeyondTheSaveLimitIsNotSilentlyLost(t *testing.T) {
 		t.Fatalf("the capture of the replaced Pods was published but never prepared for saving (failure %q)", failure)
 	}
 	t.Logf("published capture after replacement: prepared records=%d", len(batch.Records))
-	waitUntil(t, 60*time.Second, "the replacement capture saved", func() bool {
+	eventually(t, "the replacement capture saved", func() bool {
 		latest, err := store.EvidenceCheckpoint(t.Context(), scope)
 		// This capture, or a later one, is the saved checkpoint.
 		return err == nil && latest.Generation == batch.Generation && !latest.At.Before(batch.At)
@@ -360,7 +360,7 @@ func TestPoisonObjectsDoNotStopPostgresHistorySaves(t *testing.T) {
 	service := saveDelayReplica(t, upstream.URL, store, "poison", fixturePace)
 	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "poison", ClusterUID: "poison-physical"}
 	evidence := store.(storage.EvidenceStore)
-	waitUntil(t, 90*time.Second, "a first capture saved to Postgres", func() bool {
+	eventuallyWithin(t, 90*time.Second, "a first capture saved to Postgres", func() bool {
 		checkpoint, err := evidence.EvidenceCheckpoint(t.Context(), scope)
 		return err == nil && checkpoint.ID != ""
 	})
@@ -390,7 +390,7 @@ func TestPoisonObjectsDoNotStopPostgresHistorySaves(t *testing.T) {
 		t.Helper()
 		seen := map[string]bool{}
 		current := from
-		waitUntil(t, 120*time.Second, describe, func() bool {
+		eventuallyWithin(t, 120*time.Second, describe, func() bool {
 			checkpoint, err := evidence.EvidenceCheckpoint(t.Context(), scope)
 			if err == nil && checkpoint.ID != current {
 				seen[checkpoint.ID] = true

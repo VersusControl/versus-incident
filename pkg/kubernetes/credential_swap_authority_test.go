@@ -97,18 +97,14 @@ func TestSwappedCredentialThatReadsNothingStillRunsTheProof(t *testing.T) {
 	cluster.swapCredential()
 	cluster.denyAll.Store(true)
 	cluster.force(nil)
-	select {
-	case <-started:
-	case <-time.After(scaledTimeout(10 * time.Second)):
-		t.Fatal("a new credential that read nothing did not start an authority proof")
-	}
+	waitFor(t, started, "a new credential that read nothing did not start an authority proof")
 	ctx := t.Context()
 	if workloads, _ := cluster.service.Workloads(ctx, WorkloadListOptions{}); len(workloads.Items) != 0 {
 		t.Fatal("workloads read by the replaced credential were served while the proof was pending")
 	}
 	released = true
 	close(release)
-	waitUntil(t, 10*time.Second, "failed proof to fail the cycle", func() bool {
+	eventually(t, "failed proof to fail the cycle", func() bool {
 		cluster.cache.mu.RLock()
 		defer cluster.cache.mu.RUnlock()
 		return cluster.cache.failed

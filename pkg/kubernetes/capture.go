@@ -135,6 +135,55 @@ type captureLoop struct {
 	gapFrom       map[string]time.Time
 	leaseTTL      time.Duration
 	renewInterval time.Duration
+	// retries counts, per kind, the capture passes in a row that found the
+	// kind's inventory not moved: still warming, never listed, or not listed
+	// again since its last capture. Such a kind is asked again after a delay
+	// that doubles up to its cadence, instead of on every pass.
+	retries map[string]int
+	// heldAt is the published inventory revision a retrying kind last saw. A
+	// capture pass reads only published inventory, so nothing can move for
+	// the kind until a new publication; one cuts its delay short.
+	heldAt map[string]string
+	// now reads the loop's clock; nil reads the real clock. Tests set it to
+	// run many capture passes without waiting for them.
+	now func() time.Time
+}
+
+// captureRetryBase is the first delay before a kind whose inventory did not
+// move is captured again.
+const captureRetryBase = time.Second
+
+// retryLocked schedules the next capture of a kind whose inventory did not
+// move, doubling the delay on each pass in a row up to the kind's cadence.
+// The caller holds loop.mu.
+func (loop *captureLoop) retryLocked(kind string, now time.Time, cadence time.Duration) {
+	if loop.retries == nil {
+		loop.retries = map[string]int{}
+	}
+	delay := min(captureRetryBase, cadence)
+	for range loop.retries[kind] {
+		if delay >= cadence {
+			break
+		}
+		delay *= 2
+	}
+	loop.retries[kind]++
+	loop.next[kind] = now.Add(min(delay, cadence))
+}
+
+// settledLocked ends the retry delay of a kind whose inventory moved, or
+// whose state is a settled one with its own cadence. The caller holds
+// loop.mu.
+func (loop *captureLoop) settledLocked(kind string) {
+	delete(loop.retries, kind)
+	delete(loop.heldAt, kind)
+}
+
+func (loop *captureLoop) clock() time.Time {
+	if loop == nil || loop.now == nil {
+		return time.Now().UTC()
+	}
+	return loop.now().UTC()
 }
 
 var captureCadences = map[string]time.Duration{
@@ -519,6 +568,7 @@ func (service *Service) capture(loop *captureLoop) {
 			loop.next = map[string]time.Time{}
 			loop.success = map[string]time.Time{}
 			loop.completed = map[string]time.Time{}
+			loop.retries, loop.heldAt = nil, nil
 			loop.mu.Unlock()
 		}
 		select {
@@ -593,31 +643,72 @@ func (service *Service) captureOwned(loop *captureLoop, store *kubechanges.Store
 		loop.mu.Unlock()
 	}()
 	for {
-		now := time.Now().UTC()
-		loop.mu.Lock()
-		due := []string{}
-		if !now.Before(loop.backoff) {
-			for kind := range captureCadences {
-				if !now.Before(loop.next[kind]) {
-					due = append(due, kind)
-				}
-			}
-		}
-		loop.mu.Unlock()
-		if len(due) > 0 {
+		service.captureTick(loop, func(due []string) {
 			_, _, err := service.IndexSnapshot(context.WithValue(ownedContext, cachedCaptureContextKey{}, true), due...)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				loop.mu.Lock()
 				loop.status.Behind = true
 				loop.mu.Unlock()
 			}
-		}
+		})
 		select {
 		case <-ownedContext.Done():
 			return
 		case <-ticks:
 		}
 	}
+}
+
+// captureTick runs one pass of the capture loop: it captures the kinds that
+// are due, if any, and reports whether it ran a capture cycle. A kind waiting
+// out a retry delay is due early once the inventory publishes again.
+func (service *Service) captureTick(loop *captureLoop, capture func(due []string)) bool {
+	revision := service.publishedInventoryRevision()
+	now := loop.clock()
+	loop.mu.Lock()
+	due := []string{}
+	if !now.Before(loop.backoff) {
+		for kind := range captureCadences {
+			held, waiting := loop.heldAt[kind]
+			if !now.Before(loop.next[kind]) || waiting && held != revision {
+				due = append(due, kind)
+			}
+		}
+	}
+	loop.mu.Unlock()
+	if len(due) == 0 {
+		return false
+	}
+	capture(due)
+	// Stamp the kinds still retrying with the revision read before the pass:
+	// a publication made during the pass then still counts as new.
+	loop.mu.Lock()
+	for _, kind := range due {
+		if loop.retries[kind] == 0 {
+			delete(loop.heldAt, kind)
+			continue
+		}
+		if loop.heldAt == nil {
+			loop.heldAt = map[string]string{}
+		}
+		loop.heldAt[kind] = revision
+	}
+	loop.mu.Unlock()
+	return true
+}
+
+// publishedInventoryRevision is the revision of the inventory generation this
+// scope serves, or "" before the first one.
+func (service *Service) publishedInventoryRevision() string {
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	if cache == nil {
+		return ""
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return cache.generation.Revision
 }
 
 func (service *Service) captureState() *captureLoop {
@@ -631,8 +722,8 @@ func (service *Service) captureCycle(store *kubechanges.Store, deltas <-chan kub
 }
 
 func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas <-chan kubeindex.Delta, snapshot kubeindex.Snapshot, kinds []string, started time.Time, crashes *crashCaptureBatch, expectedOwner ...string) error {
-	now := time.Now().UTC()
 	loop := service.captureState()
+	now := loop.clock()
 	continuous := loop != nil && loop.status.Mode == "continuous"
 	if continuous {
 		loop.mu.Lock()
@@ -716,9 +807,11 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 			if !(kind == "Secret" && state.Error == "forbidden" || kind == "ControllerRevision" && (state.Error == "forbidden" || state.Error == "not_found")) {
 				behind = true
 			}
-			loop.next[kind] = now.Add(service.collectionCadence(cadence))
 			if state.Error == "syncing" || state.State == "" || state.State == "warming" {
-				loop.next[kind] = now.Add(250 * time.Millisecond)
+				loop.retryLocked(kind, now, service.collectionCadence(cadence))
+			} else {
+				loop.next[kind] = now.Add(service.collectionCadence(cadence))
+				loop.settledLocked(kind)
 			}
 			continue
 		}
@@ -732,10 +825,16 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 			if previous.IsZero() || checkpoint.After(previous) {
 				success[kind] = checkpoint
 				loop.next[kind] = now.Add(service.collectionCadence(cadence))
+				loop.settledLocked(kind)
+			} else {
+				// Not listed again since its last capture: nothing new to
+				// save until the inventory lists it again.
+				loop.retryLocked(kind, now, service.collectionCadence(cadence))
 			}
 			continue
 		}
 		loop.next[kind] = now.Add(service.collectionCadence(cadence))
+		loop.settledLocked(kind)
 		if previous.IsZero() {
 			coverage[kind] = kubechanges.Gap{From: observed, To: observed}
 			if old := loop.gapFrom[kind]; !old.IsZero() {

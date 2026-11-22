@@ -40,7 +40,7 @@ import { useCursorPagination } from "@/lib/pagination";
 import { type KubernetesExplorerTab } from "./kubernetesExplorerTabs";
 import { BreakRow, BreakTimelineLane, CrashJournal, TimelineCard } from "./KubernetesBreakTimeline";
 import { KubernetesWarnings } from "./KubernetesWarnings";
-import { failureWarnings, issueWarnings } from "./kubernetesWarningItems";
+import { breakHistoryUnavailable, failureWarnings, issueWarnings, savedBreakHistoryUnavailable } from "./kubernetesWarningItems";
 import { KubernetesAgentTab } from "./KubernetesAgentTab";
 import { KubernetesBreakLogs, KubernetesBreakLogsProvider } from "./KubernetesBreakLogs";
 import { timestampNanos } from "@/lib/useKubernetesBreakLogs";
@@ -415,11 +415,11 @@ function TopUsageRows({ data, compact = false }: { data: KubernetesTopPage; comp
   );
 }
 
-export function KubernetesExplorerTabContent({ tab, onSelectResource, clusterId }: { tab: KubernetesExplorerTab; onSelectResource: ResourceSelection; clusterId?: string }) {
+export function KubernetesExplorerTabContent({ tab, onSelectResource, clusterId, onPageWarnings }: { tab: KubernetesExplorerTab; onSelectResource: ResourceSelection; clusterId?: string; onPageWarnings?: (warnings: string[]) => void }) {
   switch (tab) {
     case "overview": return null;
     case "nodes": return null;
-    case "issues": return <IssuesView onSelectResource={onSelectResource} clusterId={clusterId} />;
+    case "issues": return <IssuesView onSelectResource={onSelectResource} clusterId={clusterId} onPageWarnings={onPageWarnings} />;
     case "resources": return <ResourcesView onSelectResource={onSelectResource} />;
     case "releases": return <ReleasesView />;
     case "gitops": return <GitOpsView />;
@@ -770,7 +770,7 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
   </section>;
 }
 
-function IssuesView({ onSelectResource, clusterId }: { onSelectResource: ResourceSelection; clusterId?: string }) {
+function IssuesView({ onSelectResource, clusterId, onPageWarnings }: { onSelectResource: ResourceSelection; clusterId?: string; onPageWarnings?: (warnings: string[]) => void }) {
   const { client: api } = useKubernetesCluster();
   const firstReadyAt = useKubernetesFirstReady();
   const [severity, setSeverity] = useState("");
@@ -799,9 +799,16 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
   const access = useKubernetesNamespaceAccess();
   const totalsKnown = Boolean(current && (current.items.length > 0 || countsKnown(access, current, currentFault)));
   const totals = totalsKnown && current ? current.totals : {};
+  // Live issues listed while saved break history did not answer: the page
+  // warning goes to the top bar with the page's other warnings, and the card
+  // shows no "ready" state for a page that is not complete.
+  const historyMissing = Boolean(issues.data && breakHistoryUnavailable(issues.data.partial_failures));
+  const historyWarning = historyMissing ? savedBreakHistoryUnavailable : "";
+  useEffect(() => { onPageWarnings?.(historyWarning ? [historyWarning] : []); }, [historyWarning, onPageWarnings]);
+  useEffect(() => () => onPageWarnings?.([]), [onPageWarnings]);
   return (
     <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes issues">
-      <ExplorerHeader icon={<AlertTriangle size={15} />} title="Issues" trailing={!denied && issues.data && <span className={`pill ${statusTone(issuesFault ? "error" : issues.data.sync.state)}`}>{issuesFault ? "unavailable" : issues.data.sync.state}</span>} />
+      <ExplorerHeader icon={<AlertTriangle size={15} />} title="Issues" trailing={!denied && issues.data && (issuesFault || !historyMissing) && <span className={`pill ${statusTone(issuesFault ? "error" : issues.data.sync.state)}`}>{issuesFault ? "unavailable" : issues.data.sync.state}</span>} />
       <KubernetesIssueAlerts />
       <div className={`${filterRowClass} border-b border-ink-700 p-3`}>
         <KubernetesFilterField label="Severity"><select aria-label="Issue severity" className={filterFieldControlClass} value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="">All severities</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option></select></KubernetesFilterField>
@@ -819,7 +826,7 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
         {current?.count_capped && <p className="px-4 py-2 text-xs text-ink-400">Counts are lower bounds from a bounded sample.</p>}
         <div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{issues.data.items.map((issue, index) => <BreakRow key={`${issue.rule}:${issue.root.uid ?? issue.root.name}:${index}`} issue={issue} resource={issueResource(issue)} onSelectResource={onSelectResource} clusterId={clusterId} warningScope={JSON.stringify([namespace, severity, paging.cursor])} sourceSync={issuesFault ? undefined : issues.data?.sync} sourceFailures={issues.data?.partial_failures} collapsed />)}</div>
         {issues.data.items.length === 0 && !issues.data.next && !incompleteKubernetesSnapshot(issues.data) && !issuesFault && <p className="p-6 text-center text-sm text-ink-400">No issues match these filters.</p>}
-        <PartialFailuresDisclosure failures={issues.data.partial_failures} />
+        <PartialFailuresDisclosure failures={issues.data.partial_failures?.filter((failure) => !breakHistoryUnavailable([failure]))} />
         <CursorPagination state={paging} next={issues.data.next} total={issues.data.total} limit={issues.data.limit} capped={issues.data.count_capped} count={issues.data.items.length} />
       </>}
     </section>
@@ -1177,6 +1184,10 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     retry: false,
     refetchInterval: false,
   });
+  // An expired page link returns to page 1 instead of showing page 1's
+  // events under a later page number.
+  const timelineReset = useKubernetesCursorReset(paging, timeline);
+  const timelineFault = timeline.isError && !timelineReset;
   const { refetch: refetchTimeline } = timeline;
   // History is not kept for a namespace-only identity: the page is empty by
   // design, so it is neither retried nor refreshed every 30 s.
@@ -1195,10 +1206,10 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
   if (data && !timeline.isPlaceholderData && shownMinutes !== minutes) setShownMinutes(minutes);
   const rangeLoading = Boolean(data) && timeline.isPlaceholderData && shownMinutes !== minutes;
   const warnings = failureWarnings(data?.partial_failures);
-  if (timeline.isError && data) warnings.push({ id: "refresh-failed", content: `Couldn't refresh — showing data from ${new Date(timeline.dataUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` });
+  if (timelineFault && data) warnings.push({ id: "refresh-failed", content: `Couldn't refresh — showing data from ${new Date(timeline.dataUpdatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` });
   if (data?.sync.state === "stale") warnings.push({ id: "timeline-stale", content: "Timeline evidence includes stale snapshots." });
   if (data?.gaps?.length) warnings.push({ id: "history-gaps", content: "History capture does not cover the whole range" });
-  if (timeline.isError || ["error", "partial"].includes(data?.sync.state ?? "")) warnings.push({ id: "history-unavailable", content: "Some history could not be read" });
+  if (timelineFault || ["error", "partial"].includes(data?.sync.state ?? "")) warnings.push({ id: "history-unavailable", content: "Some history could not be read" });
   const openChange = (change: KubernetesChange) => {
     const resource_id = resourceIdForKind(change.kind);
     if (!resource_id) return;
@@ -1233,7 +1244,7 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
       content: <Link aria-describedby={description} className="block h-full w-full" to={focusedLink(crash.root_uid || crash.pod_uid, entry.at, crash.namespace, undefined, crash.id)}>Open crash details</Link> };
   });
   return <section className="card overflow-clip transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes change timeline">
-    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && !historyIsOff && (data.items.length > 0 || !timeline.isError && !incompleteKubernetesSnapshot(data)) && <span className="text-2xs text-ink-400">{breaksOnly ? `${counted(data.counts?.break ?? data.total, "break", data.count_capped)} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event", data.count_capped)} and ${counted(data.crash_count, "crash", data.count_capped)}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
+    <ExplorerHeader icon={<History size={15} />} title="Breaks and changes" trailing={<span className="flex flex-wrap items-center gap-2">{data && !historyIsOff && (data.items.length > 0 || !timelineFault && !incompleteKubernetesSnapshot(data)) && <span className="text-2xs text-ink-400">{breaksOnly ? `${counted(data.counts?.break ?? data.total, "break", data.count_capped)} in ${timelineRanges.find(([value]) => value === minutes)?.[1]}` : `${counted(data.total, "event", data.count_capped)} and ${counted(data.crash_count, "crash", data.count_capped)}`}</span>}<SegmentedControl param="breaks" aria-label="Timeline events" defaultValue="all" options={[{ value: "all", label: "All" }, { value: "1", label: "Breaks only" }]} /></span>} />
     {data?.count_capped && <p className="px-4 py-2 text-xs text-ink-400">Counts are lower bounds from a bounded sample.</p>}
     <div className="flex flex-wrap items-end justify-between gap-3 border-b border-ink-700 p-3">
       <TimelineRangeControl minutes={minutes} onChange={setMinutes} loading={rangeLoading} />
@@ -1242,8 +1253,9 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
     {timeline.isPending && <CardSkeleton label="Loading projected change history" rows={5} />}
     {historyIsOff ? <KubernetesHistoryOffNotice /> : <>
     {(timeline.unpublished || data?.sync.state === "syncing") && !firstReadyAt && <div className="p-3"><KubernetesPreparingPanel progress={data?.sync.progress} /></div>}
-    {!data && !timeline.isPending && !timeline.isError && (firstReadyAt || !timeline.unpublished) && <p role="status" className="p-4 text-sm text-ink-400">Timeline unavailable.</p>}
-    {timeline.isError && <p role="status" className="p-4 text-sm text-ink-400">Timeline unavailable. <button type="button" className="text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor && timeline.error instanceof ApiError && timeline.error.status === 400 ? "Restart Timeline" : "Retry Timeline"}</button></p>}
+    {!data && !timeline.isPending && !timelineFault && (firstReadyAt || !timeline.unpublished) && <p role="status" className="p-4 text-sm text-ink-400">Timeline unavailable.</p>}
+    {timelineReset === "notice" && <ListChangedNotice onBack={paging.resetPage} className="border-b border-ink-700" />}
+    {timelineFault && <p role="status" className="p-4 text-sm text-ink-400">Timeline unavailable. <button type="button" className="text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor && timeline.error instanceof ApiError && timeline.error.status === 400 ? "Restart Timeline" : "Retry Timeline"}</button></p>}
     <KubernetesHistorySaveNotice pages={[data]} className="border-b border-ink-700 px-4 py-2" />
     <div aria-busy={timeline.isFetching} data-timeline-list className={`transition-opacity duration-150 motion-reduce:transition-none ${rangeLoading ? "opacity-60" : ""}`}>
       <VirtualList ariaLabel="Breaks and changes" items={rows} itemKey={(row) => row.id} itemHeight={resourceRowHeight} renderItem={(row) => <article className="relative grid h-full grid-cols-[5rem_minmax(0,1fr)] items-center gap-3 border-b border-ink-700 px-4 text-xs">
@@ -1251,7 +1263,7 @@ function UnfocusedTimelineView({ onSelectResource }: { onSelectResource: Resourc
         <div id={`timeline-row-${row.id}`} className="min-w-0"><p className="truncate" title={`${row.kind} ${row.namespace ? `${row.namespace}/` : ""}${row.name}`}><span className="text-ink-400">{row.kind}</span> {row.name}</p><p className="truncate text-ink-400">{row.summary}</p></div>
         <div className="absolute inset-0 rounded-control text-transparent hover:bg-ink-500/10 focus-within:ring-2 focus-within:ring-inset focus-within:ring-accent">{row.content}</div>
       </article>} />
-      {!rows.length && data && !data.next && !data.gaps?.length && !timeline.isError && !incompleteKubernetesSnapshot(data) && <p className="p-4 text-xs text-ink-400">{breaksOnly ? "No breaks in this range." : "No changes or crashes in this range."}</p>}
+      {!rows.length && data && !data.next && !data.gaps?.length && !timelineFault && !incompleteKubernetesSnapshot(data) && <p className="p-4 text-xs text-ink-400">{breaksOnly ? "No breaks in this range." : "No changes or crashes in this range."}</p>}
       <nav aria-label="Timeline pages"><CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} total={data?.total} limit={data?.limit} capped={data?.count_capped} count={data?.items.length} /></nav>
     </div>
     <div className="px-2"><KubernetesWarnings warnings={warnings} scope={JSON.stringify([cluster, namespace, kind, breaksOnly, since, until, paging.cursor])} /></div>

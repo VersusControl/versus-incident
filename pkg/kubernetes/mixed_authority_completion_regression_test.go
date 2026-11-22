@@ -208,7 +208,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					}
 					return r
 				}
-				waitUntil(t, 30*time.Second, "initial complete capture", func() bool {
+				eventually(t, "initial complete capture", func() bool {
 					r := health()
 					return r.State == "ready" && r.PendingKinds == 0 && !r.FirstReadyAt.IsZero()
 				})
@@ -219,7 +219,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					t.Fatalf("baseline captured history: %d %v", len(history.Items), err)
 				}
 				phase.Store(1)
-				waitUntil(t, 55*time.Second, "natural current whole-authority failure", func() bool {
+				eventually(t, "natural current whole-authority failure", func() bool {
 					r := health()
 					return r.State == "error" && r.Kinds["Pod"].CycleFailure && r.Kinds["Pod"].Error == "forbidden"
 				})
@@ -371,7 +371,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				releasedAt := time.Now().UTC()
 				releaseTail()
 				if incomplete {
-					waitUntil(t, 12*time.Second, "invalid final LIST uncertainty admission", func() bool {
+					eventually(t, "invalid final LIST uncertainty admission", func() bool {
 						_, err := service.Workloads(t.Context(), WorkloadListOptions{})
 						return invalidFinal.Load() > 0 && (errors.Is(err, ErrInventoryNotReady) || errors.Is(err, ErrForbidden))
 					})
@@ -384,7 +384,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 				}
 				// Only autonomous collection may satisfy this. No due-time edit,
 				// cache invalidation, wake send or protected recovery read occurs here.
-				waitUntil(t, 80*time.Second, "finite tail and natural fresh global completion", func() bool {
+				eventuallyWithin(t, 80*time.Second, "finite tail and natural fresh global completion", func() bool {
 					r := health()
 					if r.State != "ready" || r.PendingKinds != 0 || r.FailingKinds != 0 || freshGlobal.Load() == 0 {
 						return false
@@ -397,7 +397,7 @@ func TestAutonomousMixedAuthorityFiniteCompletion(t *testing.T) {
 					}
 					return true
 				})
-				waitUntil(t, 12*time.Second, "new current capture journal", func() bool {
+				eventually(t, "new current capture journal", func() bool {
 					cp, err := observed.EvidenceCheckpoint(t.Context(), evidenceScope)
 					return err == nil && cp.ID != checkpoint.ID && cp.At.After(checkpoint.At)
 				})

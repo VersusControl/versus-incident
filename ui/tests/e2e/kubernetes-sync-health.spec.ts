@@ -1,12 +1,12 @@
-// K20 honest-sync-failures browser acceptance.
+// Honest sync failures browser acceptance.
 //
-// Proves D1 = A (no cluster data while the sync is not complete and healthy),
+// Proves that no cluster data is shown while the sync is not complete and healthy,
 // the four sync-health states and their copy, honest recovery without a page
 // reload, the absence of a misleading "Loading N more resource types" note
-// while a kind is failing, and the P8 filter alignment (Timeline namespace vs
+// while a kind is failing, and the filter alignment (Timeline namespace vs
 // kind, Issues severity vs namespace) at 1440 and 390 in both themes.
 //
-// Two fixture modes, selected by E2E_K20_MODE:
+// Two fixture modes, selected by E2E_SYNC_HEALTH_MODE:
 //   faults — gate/degraded/failed/secret-probe clusters on one versus instance.
 //   sync   — one healthy cluster and one held first sync that fails, is
 //            released and recovers.
@@ -19,24 +19,24 @@ import * as path from "node:path";
 import { openApp } from "./helpers";
 import { capturePath, harnessResultsDir } from "./support/capture";
 
-const mode = process.env.E2E_K20_MODE || "faults";
+const mode = process.env.E2E_SYNC_HEALTH_MODE || "faults";
 const apiBaseURL = process.env.E2E_BASE_URL || "http://127.0.0.1:3000";
 const gatewaySecret = process.env.E2E_GATEWAY_SECRET || "";
-const controlURL = process.env.E2E_K20_CONTROL_URL || "";
-const controlCA = process.env.E2E_K20_CONTROL_CA || "";
-const preparingControlURL = process.env.E2E_K20_PREPARING_CONTROL_URL || "";
-const preparingControlCA = process.env.E2E_K20_PREPARING_CONTROL_CA || "";
+const controlURL = process.env.E2E_SYNC_HEALTH_CONTROL_URL || "";
+const controlCA = process.env.E2E_SYNC_HEALTH_CONTROL_CA || "";
+const preparingControlURL = process.env.E2E_SYNC_HEALTH_PREPARING_CONTROL_URL || "";
+const preparingControlCA = process.env.E2E_SYNC_HEALTH_PREPARING_CONTROL_CA || "";
 
 const clusters = {
-  gate: process.env.E2E_K20_GATE_CLUSTER || "gate",
-  degraded: process.env.E2E_K20_DEGRADED_CLUSTER || "degraded",
-  failed: process.env.E2E_K20_FAILED_CLUSTER || "noncore-fault",
-  secret: process.env.E2E_K20_SECRET_CLUSTER || "secret-probe",
-  forbidAll: process.env.E2E_K20_FORBID_ALL_CLUSTER || "forbid-all",
-  limitedRbac: process.env.E2E_K20_LIMITED_RBAC_CLUSTER || "limited-rbac",
-  healthy: process.env.E2E_K20_HEALTHY_CLUSTER || "healthy",
-  preparing: process.env.E2E_K20_PREPARING_CLUSTER || "preparing",
-  recovery: process.env.E2E_K20_RECOVERY_CLUSTER || "recovery",
+  gate: process.env.E2E_SYNC_HEALTH_GATE_CLUSTER || "gate",
+  degraded: process.env.E2E_SYNC_HEALTH_DEGRADED_CLUSTER || "degraded",
+  failed: process.env.E2E_SYNC_HEALTH_FAILED_CLUSTER || "noncore-fault",
+  secret: process.env.E2E_SYNC_HEALTH_SECRET_CLUSTER || "secret-probe",
+  forbidAll: process.env.E2E_SYNC_HEALTH_FORBID_ALL_CLUSTER || "forbid-all",
+  limitedRbac: process.env.E2E_SYNC_HEALTH_LIMITED_RBAC_CLUSTER || "limited-rbac",
+  healthy: process.env.E2E_SYNC_HEALTH_HEALTHY_CLUSTER || "healthy",
+  preparing: process.env.E2E_SYNC_HEALTH_PREPARING_CLUSTER || "preparing",
+  recovery: process.env.E2E_SYNC_HEALTH_RECOVERY_CLUSTER || "recovery",
 };
 
 const viewports = [
@@ -171,7 +171,7 @@ async function expectTopState(page: Page, text: RegExp) {
 }
 
 async function expectTopReady(page: Page) {
-  // QA-195: the state is always written out at every width, Ready included, so
+  // The state is always written out at every width, Ready included, so
   // Ready is one [data-sync-state="ready"] reading "Live (Ns)", never absent.
   await expect(page.locator("[data-sync-state]")).toHaveCount(1);
   const state = page.locator('[data-sync-state="ready"]');
@@ -268,7 +268,7 @@ function controlClient(url = controlURL, caFile = controlCA) {
 }
 
 // ---------------------------------------------------------------------------
-// P8 geometry
+// Filter alignment geometry
 // ---------------------------------------------------------------------------
 
 interface FieldBox {
@@ -338,7 +338,7 @@ function compareFields(leftName: string, left: FieldBox, rightName: string, righ
   // The two fields sit in different columns, so each column's left is
   // expected to differ. What must be identical is the label baseline/text box
   // and the control's top, height and border box. Both rows share one
-  // two-column grid at every width (QA-193), so every delta must be 0.00px —
+  // two-column grid at every width, so every delta must be 0.00px —
   // a 1px tolerance would hide the stacking this test exists to catch.
   const pairs: Array<[string, number, number]> = [
     [`${leftName} vs ${rightName} label baseline`, left.labelBaseline, right.labelBaseline],
@@ -368,7 +368,7 @@ function compareFields(leftName: string, left: FieldBox, rightName: string, righ
 test.describe("faults", () => {
   test.skip(mode !== "faults", "faults fixture only");
 
-  test("D1=A: one failing kind blocks all ten views (Overview, Workloads, Issues, Timeline, Topology, Nodes, Helm, GitOps, Traffic and Agent)", async ({ browser }) => {
+  test("one failing kind blocks all ten views (Overview, Workloads, Issues, Timeline, Topology, Nodes, Helm, GitOps, Traffic and Agent)", async ({ browser }) => {
     test.setTimeout(240_000);
     for (const viewport of viewports) {
       for (const theme of themes) {
@@ -386,14 +386,14 @@ test.describe("faults", () => {
           await expectNoClusterData(page, view.id);
           await expectNoLoadingCopy(page);
           const capture = viewport.name === "desktop" && theme === "dark" || viewport.name === "mobile" && theme === "light" || view.id === "overview";
-          if (capture) await saveCapture(page, `k20-gate-${view.id}`, viewport, theme, "blocked");
+          if (capture) await saveCapture(page, `kubernetes-sync-health-gate-${view.id}`, viewport, theme, "blocked");
         }
         await expect(page.locator("[data-sync-health]")).toHaveCount(1);
       }
     }
   });
 
-  test("D1=A: the gated resource drawer shows the sync surface instead of resource data", async ({ browser }) => {
+  test("the gated resource drawer shows the sync surface instead of resource data", async ({ browser }) => {
     test.setTimeout(120_000);
     for (const viewport of viewports) {
       const theme: Theme = viewport.name === "desktop" ? "dark" : "light";
@@ -405,7 +405,7 @@ test.describe("faults", () => {
       await expect(dialog.locator(".resource-detail-content")).toHaveCount(0);
       await expect(dialog.locator('[role="tablist"][aria-label="Resource detail views"]')).toHaveCount(0);
       await expect(dialog.locator("table, svg[role=img]")).toHaveCount(0);
-      await saveCapture(page, "k20-gate-drawer", viewport, theme, "blocked");
+      await saveCapture(page, "kubernetes-sync-health-gate-drawer", viewport, theme, "blocked");
     }
   });
 
@@ -431,7 +431,7 @@ test.describe("faults", () => {
         await Promise.all([requestedSync, requestedOverview]);
         await expect(retry).toBeEnabled();
         await waitSurface(page, "degraded");
-        await saveCapture(page, "k20-degraded", viewport, theme, "surface");
+        await saveCapture(page, "kubernetes-sync-health-degraded", viewport, theme, "surface");
       }
     }
   });
@@ -457,7 +457,7 @@ test.describe("faults", () => {
         await Promise.all([requestedSync, requestedOverview]);
         await expect(retry).toBeEnabled();
         await waitSurface(page, "failed");
-        await saveCapture(page, "k20-failed", viewport, theme, "surface");
+        await saveCapture(page, "kubernetes-sync-health-failed", viewport, theme, "surface");
 
         if (viewport.name === "desktop" && theme === "dark") {
           for (const view of views) {
@@ -473,7 +473,7 @@ test.describe("faults", () => {
 
   test("Permission-gap probes: Secret-only 403 unreadable note, forbid-all (100% 403), and limited-rbac (Node 403)", async ({ browser }) => {
     test.setTimeout(180_000);
-    // 1. Secret-only 403 (QA-197): explorer opens with [data-unreadable-note] naming Secret.
+    // 1. Secret-only 403: explorer opens with [data-unreadable-note] naming Secret.
     const secretPage = await newPage(browser, viewports[0], "dark");
     await openCluster(secretPage, clusters.secret);
     await expectTopReady(secretPage);
@@ -481,10 +481,10 @@ test.describe("faults", () => {
     const unreadableNote = secretPage.locator("[data-unreadable-note]");
     await expect(unreadableNote).toBeVisible();
     await expect(unreadableNote).toContainText("Not readable with this connector identity: Secret (permission denied). Everything else is shown.");
-    await saveCapture(secretPage, "k20-secret-probe", viewports[0], "dark", "overview");
+    await saveCapture(secretPage, "kubernetes-sync-health-secret-probe", viewports[0], "dark", "overview");
     await selectView(secretPage, "releases", "Helm");
     await expect(unreadableNote).toBeVisible();
-    await saveCapture(secretPage, "k20-secret-probe", viewports[0], "dark", "helm");
+    await saveCapture(secretPage, "kubernetes-sync-health-secret-probe", viewports[0], "dark", "helm");
 
     // 2. forbid-all (-forbid-lists: every LIST returns 403 Forbidden, ready_kinds=0, unreadable_kinds=18).
     const forbidAllSync = await fetchBackendSync(clusters.forbidAll);
@@ -495,12 +495,12 @@ test.describe("faults", () => {
     const forbidSurfaceState = await surface(forbidPage).getAttribute("data-sync-health");
     const forbidTopText = await forbidPage.locator("[data-sync-state]").innerText();
     const forbidHeading = await forbidPage.locator("#kubernetes-view-panel h2").first().innerText();
-    await saveCapture(forbidPage, "k20-forbid-all", viewports[0], "dark", "surface");
+    await saveCapture(forbidPage, "kubernetes-sync-health-forbid-all", viewports[0], "dark", "surface");
 
     const forbidMobile = await newPage(browser, viewports[1], "light");
     await openCluster(forbidMobile, clusters.forbidAll);
     await expect(surface(forbidMobile)).toBeVisible({ timeout: 30_000 });
-    await saveCapture(forbidMobile, "k20-forbid-all", viewports[1], "light", "surface");
+    await saveCapture(forbidMobile, "kubernetes-sync-health-forbid-all", viewports[1], "light", "surface");
 
     // 3. limited-rbac (Node and Secret return 403 Forbidden).
     const limitedSync = await fetchBackendSync(clusters.limitedRbac);
@@ -510,17 +510,17 @@ test.describe("faults", () => {
     await expect(limitedPage.locator("[data-unreadable-note]")).toBeVisible({ timeout: 30_000 });
     const limitedUnreadableText = await limitedPage.locator("[data-unreadable-note]").innerText();
     const limitedBodyText = await limitedPage.locator("#kubernetes-view-panel").innerText();
-    await saveCapture(limitedPage, "k20-limited-rbac", viewports[0], "dark", "overview");
+    await saveCapture(limitedPage, "kubernetes-sync-health-limited-rbac", viewports[0], "dark", "overview");
     await selectView(limitedPage, "nodes", "Nodes");
     await limitedPage.waitForTimeout(1500);
-    await saveCapture(limitedPage, "k20-limited-rbac", viewports[0], "dark", "nodes");
+    await saveCapture(limitedPage, "kubernetes-sync-health-limited-rbac", viewports[0], "dark", "nodes");
     await selectView(limitedPage, "topology", "Topology");
     await limitedPage.waitForTimeout(1500);
-    await saveCapture(limitedPage, "k20-limited-rbac", viewports[0], "dark", "topology");
+    await saveCapture(limitedPage, "kubernetes-sync-health-limited-rbac", viewports[0], "dark", "topology");
 
     fs.mkdirSync(harnessResultsDir(), { recursive: true });
     fs.writeFileSync(
-      path.join(harnessResultsDir(), "k20-permission-probes.json"),
+      path.join(harnessResultsDir(), "kubernetes-sync-health-permission-probes.json"),
       `${JSON.stringify({
         forbidAll: {
           overviewSync: forbidAllOverview.sync,
@@ -621,7 +621,7 @@ test.describe("faults", () => {
         await expect(row.getByText("Not ready", { exact: true })).toHaveCount(1);
       }
 
-      await saveCapture(page, "k20-fleet-faults", viewport, theme, "blocked-rows");
+      await saveCapture(page, "kubernetes-sync-health-fleet-faults", viewport, theme, "blocked-rows");
     }
   });
 });
@@ -655,7 +655,7 @@ test.describe("sync", () => {
       await expect(recoveryRow.locator("[data-sync-state-label]")).toHaveText("Failed");
       await expect(recoveryRow.locator("meter")).toHaveCount(0);
       await expect(recoveryRow.getByText("Hidden", { exact: true })).toHaveCount(2);
-      await saveCapture(page, "k20-fleet", viewport, theme, "preparing-row");
+      await saveCapture(page, "kubernetes-sync-health-fleet", viewport, theme, "preparing-row");
     }
   });
 
@@ -675,7 +675,7 @@ test.describe("sync", () => {
         await expect(page.locator("[data-preparing-panel]")).toBeVisible();
         await expectNoDataViews(page, "overview");
         await expect(page.locator("[data-pending-note]")).toHaveCount(0);
-        await saveCapture(page, "k20-preparing", viewport, theme, "first-sync");
+        await saveCapture(page, "kubernetes-sync-health-preparing", viewport, theme, "first-sync");
       }
     }
 
@@ -692,13 +692,13 @@ test.describe("sync", () => {
     const panelText = await page.locator("#kubernetes-view-panel").innerText();
     expect(panelText.match(/Loading/g)?.length).toBe(1);
     await expectNoClusterData(page, "overview");
-    await saveCapture(page, "k20-pending", viewports[0], "dark", "only-loading");
+    await saveCapture(page, "kubernetes-sync-health-pending", viewports[0], "dark", "only-loading");
 
     const mobileNote = await newPage(browser, viewports[1], "light");
     await openCluster(mobileNote, clusters.preparing);
     await waitSurface(mobileNote, "preparing", 60_000);
     await expect(mobileNote.locator("[data-pending-note]")).toBeVisible({ timeout: 30_000 });
-    await saveCapture(mobileNote, "k20-pending", viewports[1], "light", "only-loading");
+    await saveCapture(mobileNote, "kubernetes-sync-health-pending", viewports[1], "light", "only-loading");
 
     // 3. Release the last held kind: surface gone, data rendered, top bar Live,
     //    same page, same timeOrigin.
@@ -709,8 +709,8 @@ test.describe("sync", () => {
       await expect(marker(current, "overview")).toBeVisible({ timeout: 30_000 });
     }
     expect(await page.evaluate(() => performance.timeOrigin)).toBe(origin);
-    await saveCapture(page, "k20-recovered", viewports[0], "dark", "ready");
-    await saveCapture(mobileNote, "k20-recovered", viewports[1], "light", "ready");
+    await saveCapture(page, "kubernetes-sync-health-recovered", viewports[0], "dark", "ready");
+    await saveCapture(mobileNote, "kubernetes-sync-health-recovered", viewports[1], "light", "ready");
   });
 
   test("A failing held kind is released; the surface clears and the views render without a reload, and on the fleet page the row flips from Failed to Ready with counts while the overview envelope still says failed", async ({ browser }) => {
@@ -730,7 +730,7 @@ test.describe("sync", () => {
       await expectTopState(entry.page, /Failed/);
       await expectNoClusterData(entry.page, "overview");
       await expectNoLoadingCopy(entry.page);
-      await saveCapture(entry.page, "k20-held", entry.viewport, entry.theme, "failed");
+      await saveCapture(entry.page, "kubernetes-sync-health-held", entry.viewport, entry.theme, "failed");
     }
 
     // Open fleet pages (1440 dark and 390 light) right before releasing the held
@@ -776,7 +776,7 @@ test.describe("sync", () => {
       await expectTopReady(entry.page);
       await expect(marker(entry.page, "overview")).toBeVisible({ timeout: 30_000 });
       expect(await entry.page.evaluate(() => performance.timeOrigin)).toBe(origins[index]);
-      await saveCapture(entry.page, "k20-recovered-held", entry.viewport, entry.theme, "ready");
+      await saveCapture(entry.page, "kubernetes-sync-health-recovered-held", entry.viewport, entry.theme, "ready");
       await selectView(entry.page, "resources", "Workloads");
       await expect(marker(entry.page, "resources")).toBeVisible();
       await expect(entry.page.locator("[data-sync-health]")).toHaveCount(0);
@@ -795,7 +795,7 @@ test.describe("sync", () => {
       await expect(recoveryRow.getByText("Not ready", { exact: true })).toHaveCount(0);
       await expect.poll(() => entry.syncStates.at(-1), { timeout: 10_000 }).toBe("ready");
       expect(entry.catalogStates[0]).toBe("error");
-      await saveCapture(entry.page, "k20-fleet-recovered", entry.viewport, entry.theme, "ready-row");
+      await saveCapture(entry.page, "kubernetes-sync-health-fleet-recovered", entry.viewport, entry.theme, "ready-row");
     }
   });
 
@@ -819,10 +819,10 @@ test.describe("sync", () => {
       await expect(marker(entry.page, "overview")).toBeVisible();
       await entry.page.evaluate(() => {
         (document.activeElement as HTMLElement | null)?.blur();
-        (window as unknown as { __k20UserInteractions: number }).__k20UserInteractions = 0;
+        (window as unknown as { __syncHealthUserInteractions: number }).__syncHealthUserInteractions = 0;
         for (const eventName of ["click", "keydown", "focus"]) {
           window.addEventListener(eventName, () => {
-            (window as unknown as { __k20UserInteractions: number }).__k20UserInteractions += 1;
+            (window as unknown as { __syncHealthUserInteractions: number }).__syncHealthUserInteractions += 1;
           });
         }
       });
@@ -853,9 +853,9 @@ test.describe("sync", () => {
       await expectSince(row);
       await expectNoClusterData(entry.page, "overview");
       await expectNoLoadingCopy(entry.page);
-      expect(await entry.page.evaluate(() => (window as unknown as { __k20UserInteractions: number }).__k20UserInteractions)).toBe(0);
+      expect(await entry.page.evaluate(() => (window as unknown as { __syncHealthUserInteractions: number }).__syncHealthUserInteractions)).toBe(0);
       expect(await entry.page.evaluate(() => performance.timeOrigin)).toBe(origins[index]);
-      await saveCapture(entry.page, "k20-reblocked", entry.viewport, entry.theme, "failed");
+      await saveCapture(entry.page, "kubernetes-sync-health-reblocked", entry.viewport, entry.theme, "failed");
     }
 
     // Verify all ten explorer views are re-blocked by the late-failing kind.
@@ -873,7 +873,7 @@ test.describe("sync", () => {
     for (const entry of pages) {
       await entry.page.evaluate(() => {
         (document.activeElement as HTMLElement | null)?.blur();
-        (window as unknown as { __k20UserInteractions: number }).__k20UserInteractions = 0;
+        (window as unknown as { __syncHealthUserInteractions: number }).__syncHealthUserInteractions = 0;
       });
     }
     await fake("/_fake/list-holds", { resource: "controllerrevisions", hold: false });
@@ -886,9 +886,9 @@ test.describe("sync", () => {
       expect(elapsedAfterBackendReady, "view must re-open within the 5s error /sync polling window").toBeLessThanOrEqual(8_000);
       await expectTopReady(entry.page);
       await expect(marker(entry.page, "overview")).toBeVisible({ timeout: 10_000 });
-      expect(await entry.page.evaluate(() => (window as unknown as { __k20UserInteractions: number }).__k20UserInteractions)).toBe(0);
+      expect(await entry.page.evaluate(() => (window as unknown as { __syncHealthUserInteractions: number }).__syncHealthUserInteractions)).toBe(0);
       expect(await entry.page.evaluate(() => performance.timeOrigin)).toBe(origins[index]);
-      await saveCapture(entry.page, "k20-reopened", entry.viewport, entry.theme, "ready");
+      await saveCapture(entry.page, "kubernetes-sync-health-reopened", entry.viewport, entry.theme, "ready");
     }
   });
 
@@ -901,7 +901,7 @@ test.describe("sync", () => {
     for (const view of views) {
       await selectView(page, view.id, view.label);
       await expect(marker(page, view.id)).toBeVisible();
-      await saveCapture(page, `k20-healthy-${view.id}`, viewports[0], "dark", "data");
+      await saveCapture(page, `kubernetes-sync-health-healthy-${view.id}`, viewports[0], "dark", "data");
     }
 
     const mobile = await newPage(browser, viewports[1], "light");
@@ -910,7 +910,7 @@ test.describe("sync", () => {
     for (const view of views.filter((entry) => ["overview", "resources", "issues", "timeline", "topology"].includes(entry.id))) {
       await selectView(mobile, view.id, view.label);
       await expect(marker(mobile, view.id)).toBeVisible();
-      await saveCapture(mobile, `k20-healthy-${view.id}`, viewports[1], "light", "data");
+      await saveCapture(mobile, `kubernetes-sync-health-healthy-${view.id}`, viewports[1], "light", "data");
     }
 
     // Deep link to a resource drawer: it opens on the named resource.
@@ -921,7 +921,7 @@ test.describe("sync", () => {
     await expect(dialog).toContainText("app-00000");
     await expect(dialog.locator(".resource-detail-content")).toHaveCount(1);
     await expect(dialog.locator("#kubernetes-drawer-tab-overview")).toBeVisible();
-    await saveCapture(deep, "k20-healthy-drawer", viewports[0], "dark", "deeplink");
+    await saveCapture(deep, "kubernetes-sync-health-healthy-drawer", viewports[0], "dark", "deeplink");
 
     // Deep link to a Timeline filter state.
     const timeline = await newPage(browser, viewports[0], "dark");
@@ -930,7 +930,7 @@ test.describe("sync", () => {
     await expect(timeline.getByRole("tablist", { name: "Timeline events", exact: true }).getByRole("tab", { name: "Breaks only", exact: true })).toHaveAttribute("aria-selected", "true");
   });
 
-  test("P8: Timeline namespace/kind and Issues severity/namespace are pixel-identical; Traffic header is the reference", async ({ browser }) => {
+  test("Timeline namespace/kind and Issues severity/namespace are pixel-identical; Traffic header is the reference", async ({ browser }) => {
     test.setTimeout(180_000);
     const report: Record<string, unknown> = {};
     const alignmentFailures: string[] = [];
@@ -945,13 +945,13 @@ test.describe("sync", () => {
         const tlNamespace = await measureField(page, '[aria-label="Kubernetes change timeline"]', "Timeline namespace", "combobox");
         const tlKind = await measureField(page, '[aria-label="Kubernetes change timeline"]', "Timeline kind", "combobox");
         const timelineDeltas = compareFields("namespace", tlNamespace, "kind", tlKind);
-        await saveCapture(page, "k20-p8-timeline", viewport, theme, "aligned");
+        await saveCapture(page, "kubernetes-sync-health-alignment-timeline", viewport, theme, "aligned");
 
         await selectView(page, "issues", "Issues");
         await expect(marker(page, "issues")).toBeVisible();
         const issueSeverity = await measureField(page, '[aria-label="Kubernetes issues"]', "Issue severity", "combobox");
         const issueNamespace = await measureField(page, '[aria-label="Kubernetes issues"]', "Issue namespace", "combobox");
-        console.log(`[k20-p8] ${viewport.name}-${theme} issues severity=${JSON.stringify(issueSeverity)} namespace=${JSON.stringify(issueNamespace)}`);
+        console.log(`[sync-health-alignment] ${viewport.name}-${theme} issues severity=${JSON.stringify(issueSeverity)} namespace=${JSON.stringify(issueNamespace)}`);
         let issuesDeltas: Record<string, number> = {};
         try {
           issuesDeltas = compareFields("severity", issueSeverity, "namespace", issueNamespace);
@@ -959,7 +959,7 @@ test.describe("sync", () => {
           alignmentFailures.push(`${viewport.name}-${theme} issues: ${String(err)}`);
           issuesDeltas = { labelBaseline: Number(Math.abs(issueSeverity.labelBaseline - issueNamespace.labelBaseline).toFixed(2)), controlTop: Number(Math.abs(issueSeverity.control.top - issueNamespace.control.top).toFixed(2)), controlHeight: Number(Math.abs(issueSeverity.control.height - issueNamespace.control.height).toFixed(2)) };
         }
-        await saveCapture(page, "k20-p8-issues", viewport, theme, "issues-row");
+        await saveCapture(page, "kubernetes-sync-health-alignment-issues", viewport, theme, "issues-row");
 
         await selectView(page, "traffic", "Traffic");
         await expect(marker(page, "traffic")).toBeVisible();
@@ -969,14 +969,14 @@ test.describe("sync", () => {
         // This is the unchanged reference geometry.
         expect(Math.abs(trafficNamespace.top - trafficWindow.top), "traffic control top").toBeLessThanOrEqual(1);
         expect(Math.abs(trafficNamespace.height - trafficWindow.height), "traffic control height").toBeLessThanOrEqual(1);
-        await saveCapture(page, "k20-traffic-reference", viewport, theme, "header");
+        await saveCapture(page, "kubernetes-sync-health-traffic-reference", viewport, theme, "header");
 
         report[`${viewport.name}-${theme}`] = { timeline: { namespace: tlNamespace, kind: tlKind, deltas: timelineDeltas }, issues: { severity: issueSeverity, namespace: issueNamespace, deltas: issuesDeltas }, traffic: { namespace: trafficNamespace, window: trafficWindow } };
       }
     }
     fs.mkdirSync(harnessResultsDir(), { recursive: true });
-    fs.writeFileSync(path.join(harnessResultsDir(), "k20-p8-measurements.json"), `${JSON.stringify({ report, alignmentFailures }, null, 2)}\n`);
-    console.log(`[k20-p8] measurements ${JSON.stringify(report)}`);
+    fs.writeFileSync(path.join(harnessResultsDir(), "kubernetes-sync-health-alignment-measurements.json"), `${JSON.stringify({ report, alignmentFailures }, null, 2)}\n`);
+    console.log(`[sync-health-alignment] measurements ${JSON.stringify(report)}`);
     expect(alignmentFailures, alignmentFailures.join("\n")).toEqual([]);
   });
 });
