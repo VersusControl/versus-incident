@@ -706,6 +706,41 @@ describe("KubernetesPage", () => {
 		expect(panel.textContent).not.toMatch(/[·•]/);
 	});
 
+	const goneText = "This Deployment no longer exists in the cluster. It may have been deleted or replaced.";
+	const unavailableText = "This Deployment is unavailable. It may have been deleted, or its kind is not read by this connector.";
+	const deniedText = "This Deployment can't be read with the current access to this cluster.";
+	it.each([
+		["the describe read answers a plain 404", () => vi.mocked(api.kubernetesDescribe).mockRejectedValue(new ApiError(404, "not found")), goneText],
+		["the describe answer carries no resource", () => vi.mocked(api.kubernetesDescribe).mockResolvedValue({} as Awaited<ReturnType<typeof api.kubernetesDescribe>>), goneText],
+		["the server answers 404 resource_unavailable", () => vi.mocked(api.kubernetesDescribe).mockRejectedValue(new ApiError(404, "The Kubernetes resource or optional API is unavailable.", { error: "The Kubernetes resource or optional API is unavailable.", code: "resource_unavailable" })), unavailableText],
+		["the server answers 404 cluster_not_found", () => vi.mocked(api.kubernetesDescribe).mockRejectedValue(new ApiError(404, "The Kubernetes cluster is unavailable.", { error: "The Kubernetes cluster is unavailable.", code: "cluster_not_found" })), deniedText],
+		["the server answers 403", () => vi.mocked(api.kubernetesDescribe).mockRejectedValue(new ApiError(403, "Kubernetes denied access to this resource.", { error: "Kubernetes denied access to this resource.", code: "cluster_permission_denied" })), deniedText],
+	])("shows a missing-resource state when %s, with no live logs or Investigate", async (_case, answer, expected) => {
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "default", name: "checkout", uid: "checkout-uid" }], truncated: false });
+		answer();
+		vi.mocked(api.kubernetesWorkload).mockImplementation(() => new Promise(() => undefined));
+		renderWorkloads();
+		fireEvent.click(await screen.findByRole("button", { name: "Logs for checkout" }));
+		const dialog = await screen.findByRole("dialog");
+		expect(await within(dialog).findByText(expected)).toBeTruthy();
+		for (const other of [goneText, unavailableText, deniedText].filter((text) => text !== expected)) expect(within(dialog).queryByText(other)).toBeNull();
+		expect(within(dialog).queryByText("Couldn't load resource detail")).toBeNull();
+		expect(within(dialog).queryByRole("button", { name: "Investigate" })).toBeNull();
+		expect(dialog.querySelector(".resource-log-slot")).toBeNull();
+		expect(screen.queryByTestId("error-boundary")).toBeNull();
+	});
+
+	it("keeps a retryable error for a describe fault that is not a missing resource", async () => {
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "default", name: "checkout", uid: "checkout-uid" }], truncated: false });
+		vi.mocked(api.kubernetesDescribe).mockRejectedValue(new ApiError(503, "The cluster did not respond.", { error: "The cluster did not respond.", code: "connector_unreachable" }));
+		vi.mocked(api.kubernetesWorkload).mockImplementation(() => new Promise(() => undefined));
+		renderWorkloads();
+		fireEvent.click(await screen.findByRole("button", { name: "Logs for checkout" }));
+		const dialog = await screen.findByRole("dialog");
+		expect(await within(dialog).findByText("Couldn't load resource detail")).toBeTruthy();
+		expect(within(dialog).getByRole("button", { name: "Investigate" })).toBeTruthy();
+	});
+
 	it("preserves inventory alongside unrelated failures and keeps coverage focus on snapshot refresh", async () => {
 		const overview = { connector: "kubernetes", cluster_id: "production", observed_at: "2026-10-14T12:00:00Z", nodes: 3, ready_nodes: 2, pods: 18, running_pods: 16, namespaces: 5, active_namespaces: 5, workloads: 7, warnings: 2, truncated: true, partial_failures: [{ resource_id: "ConfigMap", class: "forbidden" }] };
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(overview);
@@ -756,6 +791,9 @@ describe("KubernetesPage", () => {
 		const preparing = { ...entry, health: "syncing" as const, sync: { state: "syncing", age_s: 0, partial: false } };
 		const settled = { ...entry, health: "healthy" as const, sync: { state: "live", age_s: 0, partial: false } };
 		vi.mocked(api.kubernetesClusters).mockResolvedValue({ multiple: true, clusters: [settled] });
+		// Each fleet row reads its cluster's own report; answer it so the row
+		// query never resolves to undefined.
+		vi.mocked(api.kubernetesClusterSyncHealth).mockResolvedValue({ state: "ready", partial: false, age_s: 0, kinds: {}, total_kinds: 20, ready_kinds: 20, failing_kinds: 0, pending_kinds: 0, truncated: false });
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
 		client.setQueryData(["kubernetes-clusters"], { multiple: true, clusters: [preparing] });
 		vi.useFakeTimers();
@@ -781,6 +819,7 @@ describe("KubernetesPage", () => {
 	it("does not poll the catalog while the tab is hidden", async () => {
 		const preparing = { id: "one", health: "syncing" as const, provider: "generic", nodes: 0, ready_nodes: 0, pods: 0, running_pods: 0, warnings: 0, sync: { state: "syncing", age_s: 0, partial: false }, observed_at: "2026-10-25T08:00:00Z" };
 		vi.mocked(api.kubernetesClusters).mockResolvedValue({ multiple: true, clusters: [preparing] });
+		vi.mocked(api.kubernetesClusterSyncHealth).mockResolvedValue({ state: "syncing", partial: false, age_s: 0, kinds: {}, total_kinds: 20, ready_kinds: 0, failing_kinds: 0, pending_kinds: 20, truncated: false });
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
 		client.setQueryData(["kubernetes-clusters"], { multiple: true, clusters: [preparing] });
 		const hidden = (value: DocumentVisibilityState) => Object.defineProperty(document, "visibilityState", { configurable: true, get: () => value });
@@ -806,6 +845,7 @@ describe("KubernetesPage", () => {
 	it("uses fleet mode with one configured cluster and never starts dashboard streams", async () => {
 		const catalog = { multiple: true, clusters: [{ id: "one", health: "healthy" as const, provider: "generic", nodes: 1, ready_nodes: 1, pods: 1, running_pods: 1, warnings: 0, sync: { state: "live", age_s: 0, partial: false }, observed_at: "2026-10-09T12:00:00Z" }] };
 		vi.mocked(api.kubernetesClusters).mockResolvedValue(catalog);
+		vi.mocked(api.kubernetesClusterSyncHealth).mockResolvedValue({ state: "ready", partial: false, age_s: 0, kinds: {}, total_kinds: 20, ready_kinds: 20, failing_kinds: 0, pending_kinds: 0, truncated: false });
 		const client = new QueryClient();
 		client.setQueryData(["kubernetes-clusters"], catalog);
 		renderPage(client);
@@ -2733,7 +2773,9 @@ describe("KubernetesPage sync gate", () => {
 		const ready = { ...report("ready", { Pod: readyKind }), first_ready_at: published };
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(ready);
 		await act(async () => { client.setQueryData(["kubernetes", "_", "kubernetes-sync-health"], ready); });
-		expect(await screen.findByText("restored-api")).toBeTruthy();
+		// The refetch after readiness runs through several query hops; under a
+		// loaded full-suite run that can take longer than the default 1 s wait.
+		expect(await screen.findByText("restored-api", {}, { timeout: 5000 })).toBeTruthy();
 		expect(container.querySelector("[data-preparing-panel], [data-sync-health]")).toBeNull();
 	});
 
@@ -3389,7 +3431,7 @@ describe("KubernetesPage sync gate", () => {
 		expect(await screen.findByRole("region", { name: "Cluster health" })).toBeTruthy();
 	}, 15_000);
 
-	// F2: a background resync is not a reason to replace rows that are already in
+	// A background resync is not a reason to replace rows that are already in
 	// hand. Preparing belongs to a cluster that has never published anything.
 	it("keeps the Workloads rows through a background resync", async () => {
 		vi.mocked(api.kubernetesOverview).mockResolvedValue(healthyOverview);
@@ -3413,7 +3455,7 @@ describe("KubernetesPage sync gate", () => {
 		expect(within(workloads).queryByText("checkout")).toBeNull();
 	});
 
-	// F1: a dead credential must be named on whatever tab the operator is on. The
+	// A dead credential must be named on whatever tab the operator is on. The
 	// last report that succeeded is never preferred over the failing one, and the
 	// failure still says when the cluster first published — but an age is only
 	// stated for data that is actually on screen, and this page loaded none.
@@ -3474,7 +3516,7 @@ describe("KubernetesPage sync gate", () => {
 		expect(screen.getByRole("region", { name: "Cluster health" })).toBeTruthy();
 	}, 15_000);
 
-	// QA-211: a published cluster whose credential was removed is not a product
+	// A published cluster whose credential was removed is not a product
 	// nobody configured. The overview words both the same way, so the page leans
 	// on the one read a dead credential cannot suppress — the health report.
 	const deadCredentialKinds = { Secret: { state: "error", observed_at: "0001-01-01T00:00:00Z", last_attempt_at: "2026-10-26T09:12:03Z", records: 0, partial: true, error: "unauthorized" } };

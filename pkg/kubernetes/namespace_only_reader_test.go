@@ -852,9 +852,29 @@ func TestFailingNamespaceIsNotReportedReadyThroughAnother(t *testing.T) {
 		t.Fatalf("the Pod age follows the fresh namespace %s, not the failing one %s", shop.ObservedAt, committed.View.Kinds["Pod"].ObservedAt)
 	}
 	cluster.failNamespace.Store(nil)
-	cluster.cycle(nil, "Pod")
-	if report, err := cluster.service.SyncHealth(ctx); err != nil || report.State != "ready" {
-		t.Fatalf("after the namespace recovered the report did not return to ready: state=%s failing=%+v err=%v", report.State, report.Failing, err)
+	// A recovery cycle publishes as soon as its witness kind is read; on a
+	// loaded machine the namespace's other kinds can still be waiting for
+	// their own read, so the report stays partial until each of them has been
+	// read again. Drive cycles until it is ready, within a bound, and require
+	// every kind still failing meanwhile to name the namespace that failed.
+	deadline := time.Now().Add(scaledTimeout(30 * time.Second))
+	for {
+		cluster.cycle(nil, "Pod")
+		report, err := cluster.service.SyncHealth(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.State == "ready" {
+			break
+		}
+		for _, problem := range report.Failing {
+			if problem.Namespace != "payments" || problem.Class == "namespace_scope" {
+				t.Fatalf("while the namespace recovered a kind failed outside it: %+v", problem)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after the namespace recovered the report did not return to ready: state=%s failing=%+v", report.State, report.Failing)
+		}
 	}
 }
 

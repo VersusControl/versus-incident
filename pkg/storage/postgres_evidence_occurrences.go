@@ -68,8 +68,10 @@ func (p *postgresProvider) queryOccurrenceSnapshots(parent context.Context, scop
 	if err != nil {
 		return EvidencePage{}, err
 	}
-	// One occurrence's history pages by last_seen. A link of this list that
-	// pages in another order, or predates links naming their order, restarts
+	// One occurrence's history pages newest first by last_seen, or by
+	// observed_at when the query reads by observation time; links of this
+	// list are labelled "last_seen" in both cases. A link labelled with
+	// another order, or one that predates links naming their order, restarts
 	// the list from its first page.
 	if query.Cursor != "" && cursor.Ordering != "last_seen" {
 		return EvidencePage{}, ErrEvidenceCursorExpired

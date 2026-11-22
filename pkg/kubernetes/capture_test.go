@@ -803,11 +803,12 @@ func TestCaptureHonoursRetryAfter(t *testing.T) {
 func TestStopCaptureDrainsForegroundRefresh(t *testing.T) {
 	started := make(chan struct{})
 	canceled := make(chan struct{})
-	var once sync.Once
+	var once, cancelOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		once.Do(func() { close(started) })
 		<-request.Context().Done()
-		close(canceled)
+		// A retried or second request ends the same way; close only once.
+		cancelOnce.Do(func() { close(canceled) })
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
@@ -1338,10 +1339,12 @@ func TestCaptureMarksGapAndFencesLostOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.Kinds["Pod"] = kubeindex.KindStatus{State: "ready", Records: 1, ObservedAt: loop.success["Pod"]}
-	previousNext := loop.next["Pod"]
 	previousSuccess := loop.success["Pod"]
-	if err := service.captureCycle(store, nil, snapshot, []string{"Pod"}, now); err != nil || !loop.next["Pod"].Equal(previousNext) || !loop.success["Pod"].Equal(previousSuccess) {
-		t.Fatal("cached read advanced coverage or postponed capture")
+	// A read that saw no new listing advances nothing and is asked again
+	// after a short retry delay, not after a whole cadence.
+	err := service.captureCycle(store, nil, snapshot, []string{"Pod"}, now)
+	if err != nil || !loop.success["Pod"].Equal(previousSuccess) || loop.retries["Pod"] != 1 || time.Until(loop.next["Pod"]) > captureRetryBase {
+		t.Fatalf("cached read advanced coverage or postponed capture: next in %s, retries %d, err %v", time.Until(loop.next["Pod"]), loop.retries["Pod"], err)
 	}
 	page, err := store.ReadWindow(now.Add(-time.Hour), now.Add(time.Minute), now)
 	if err != nil || len(page.Gaps) != 1 || page.Coverage["Pod"].From.IsZero() {
@@ -1405,18 +1408,52 @@ func TestMetadataNegotiationFailsClosedAndSecretReprobeCoalesces(t *testing.T) {
 }
 
 func TestCaptureDemandAndNoCASShutdown(t *testing.T) {
+	// The inventory worker starts in every capture mode and may list before
+	// Close, so the fake answers its reads. Demand capture itself must not run
+	// a capture cycle or read container logs.
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		t.Error("demand capture made an upstream request")
+		if strings.HasSuffix(request.URL.Path, "/log") {
+			t.Errorf("demand capture read container logs: %s", request.URL.Path)
+		}
+		writeJSON(writer, map[string]any{})
 	}))
 	defer server.Close()
 	service := newTestService(t, server.URL, Scope{ClusterID: "cluster"})
-	service.SetChangeStorage(storage.NewMemory())
+	provider := storage.NewMemory()
+	service.SetChangeStorage(provider)
 	if err := service.SetCaptureMode("demand"); err != nil {
 		t.Fatal(err)
 	}
 	registry := NewServiceRegistry(service)
 	registry.StartCapture(t.Context())
+	service.changes.mu.Lock()
+	loop := service.changes.captures[service.indexScope()]
+	service.changes.mu.Unlock()
+	if loop == nil || service.recovery == nil {
+		t.Fatal("demand capture registered no loop or cluster recovery")
+	}
+	// A capture loop claims its history lease before anything else; by the
+	// time the inventory worker has begun its second cycle, one started by
+	// mistake would have written it.
+	waitUntil(t, 30*time.Second, "inventory worker's second cycle", func() bool {
+		service.recovery.mu.Lock()
+		defer service.recovery.mu.Unlock()
+		return service.recovery.attempts >= 2
+	})
 	registry.Close()
+	// A capture cycle, or the lease it runs under, writes the change history
+	// or the capture state; demand capture with nothing to settle writes
+	// neither.
+	for _, prefix := range []string{"kubernetes/changes/", "kubernetes/capture-state/"} {
+		blobs, err := provider.ListBlobs(prefix)
+		if err != nil || len(blobs) != 0 {
+			names := []string{}
+			for _, blob := range blobs {
+				names = append(names, blob.Name)
+			}
+			t.Fatalf("demand capture wrote capture history %v (%v)", names, err)
+		}
+	}
 	registry.Close()
 	if service.CaptureStatus().Mode != "demand" {
 		t.Fatal("demand opt-out ignored")

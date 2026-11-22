@@ -314,7 +314,7 @@ describe("Cluster sync health", () => {
     expect(health.kinds).toEqual(["Node"]);
   });
 
-  // QA-197: a kind the connector identity may not read is a capability gap, not
+  // A kind the connector identity may not read is a capability gap, not
   // a sync fault, so it must never close a view or join the failing rows.
   it("keeps a cluster ready, and names the kinds it may not read, when only permissions are missing", () => {
     const health = syncHealth({
@@ -392,7 +392,7 @@ describe("Cluster sync health", () => {
     expect(syncHealth({ sync: { state: "partial", age_s: 0, partial: true }, kinds: {} }).state).toBe("degraded");
   });
 
-  // K22 S4: "has this cluster ever published" is a durable property of the
+  // "Has this cluster ever published" is a durable property of the
   // cluster, so it survives any current state and any restart.
   it("carries the first publication through every state, and never invents one", () => {
     const published = "2026-10-26T08:00:00Z";
@@ -432,7 +432,7 @@ describe("Cluster sync health", () => {
     expect(syncFailureReport("bad gateway")).toEqual({});
   });
 
-  // B221 (P16): after a new material denial the server holds the kind as
+  // After a new material denial the server holds the kind as
   // pending with its own class while the authority check runs. That is not a
   // failure: the cluster is preparing, never failed or degraded, and the kind
   // is not named as a sync problem with "the last sync attempt failed".

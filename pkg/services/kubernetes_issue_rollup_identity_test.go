@@ -11,7 +11,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
-// H2 (B218): a storm roll-up is keyed by its window start. Two senders that
+// A storm roll-up is keyed by its window start. Two senders that
 // report the same roll-up window while its count drifts between
 // ticks notify once over one incident; a roll-up for the next window is a new
 // episode.

@@ -22,14 +22,14 @@ function nonEmpty(value: string | undefined, fallback: string): string {
   return v === "" ? fallback : v;
 }
 
-// The default targets a locally run binary on :8080. `plans/harness-run/harness.sh e2e ui`
-// sets E2E_BASE_URL and credentials for the active harness app (OSS or Enterprise).
+// The default targets a locally run binary on :8080. The local test harness
+// (`harness.sh e2e ui`) sets E2E_BASE_URL and credentials for the active harness app (OSS or Enterprise).
 const baseURL = fixtureOnly ? "http://127.0.0.1:4175" : nonEmpty(process.env.E2E_BASE_URL, "http://localhost:8080");
 const headful = (process.env.E2E_HEADFUL ?? "").toLowerCase() === "true";
 
 // This config drives a REAL running instance like an operator, unless a spec
 // intercepts the API itself. It does NOT start a server — bring one up first:
-//   • plans/harness-run/harness.sh up oss            (or an enterprise-* scenario)
+//   • the local test harness: `harness.sh up oss` (or an enterprise-* scenario)
 //   • or locally: build ui/dist, then `go run ./cmd` from versus-incident/
 // Review-first: read the spec + README before running against any instance.
 export default defineConfig({
@@ -50,8 +50,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  // Binding standard (plans/harness-run/README.md): artifacts live under the
-  // run's images/results dirs (HARNESS_*), or `_adhoc` when run outside run.sh.
+  // Artifacts live under the harness run's images/results dirs (HARNESS_*), or
+  // the harness's `_adhoc` folders when run without the harness.
   outputDir: path.join(harnessImagesDir(), "_playwright"),
   reporter: [
     ["list"],

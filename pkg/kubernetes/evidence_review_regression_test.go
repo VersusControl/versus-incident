@@ -1407,22 +1407,28 @@ func TestHistoricalIssuesReportStoreStageWhileReadModelsConvert(t *testing.T) {
 	}
 }
 
-func TestLiveIssuesFailClosedWhenOccurrenceLookupFails(t *testing.T) {
-	for _, cause := range []error{storage.ErrUnsupported, context.DeadlineExceeded, ErrForbidden, ErrUnauthorized} {
+// liveBrokenPodsContext returns a context pinned to a ready inventory in which
+// each named pod crash-loops on its own, so every pod is its own broken root.
+func liveBrokenPodsContext(ctx context.Context, pods ...string) context.Context {
+	at := time.Now().UTC()
+	kinds := map[string]kubeindex.KindStatus{}
+	for kind := range indexedResourceIDs {
+		kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: at, CompletedAt: at}
+	}
+	records := []kubeindex.Record{{Kind: "Namespace", Name: "kube-system", UID: "physical"}}
+	for _, pod := range pods {
+		records = append(records, kubeindex.Record{Kind: "Pod", Namespace: "shop", Name: pod, UID: pod, Phase: "Running", ReadyStatus: "False", ReadyTransitionAt: at.Add(-time.Minute), Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 2}}})
+	}
+	return pinInventory(ctx, inventoryGeneration{View: kubeindex.Snapshot{Kinds: kinds, Records: records}})
+}
+
+func TestLiveIssuesFailWhenOccurrenceLookupIsDenied(t *testing.T) {
+	for _, cause := range []error{ErrForbidden, ErrUnauthorized} {
 		t.Run(errorClass(cause), func(t *testing.T) {
 			service, store, _ := reviewHistoryService(t)
 			reviewHistoryCycle(t, service)
 			service.SetChangeStorage(occurrenceLookupFailureStore{Provider: service.usageProvider(), EvidenceStore: store, cause: cause})
-			at := time.Now().UTC()
-			kinds := map[string]kubeindex.KindStatus{}
-			for kind := range indexedResourceIDs {
-				kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: at, CompletedAt: at}
-			}
-			generation := inventoryGeneration{View: kubeindex.Snapshot{Kinds: kinds, Records: []kubeindex.Record{
-				{Kind: "Namespace", Name: "kube-system", UID: "physical"},
-				{Kind: "Pod", Namespace: "shop", Name: "api-0", UID: "pod", Phase: "Running", ReadyStatus: "False", ReadyTransitionAt: at.Add(-time.Minute), Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 2}}},
-			}}}
-			ctx := pinInventory(t.Context(), generation)
+			ctx := liveBrokenPodsContext(t.Context(), "api-0")
 			before, err := service.issuesSnapshot(ctx, IssueOptions{})
 			if err != nil || len(before.Items) == 0 || !before.Items[0].Broken {
 				t.Fatalf("fixture has no live broken issue: %+v %v", before, err)
@@ -1430,9 +1436,183 @@ func TestLiveIssuesFailClosedWhenOccurrenceLookupFails(t *testing.T) {
 			page, err := service.Issues(ctx, IssueOptions{})
 			expected := DiagnoseError(historyStoreError(cause)).Code
 			if !errors.Is(err, cause) || len(page.Items) != 0 || DiagnoseError(err).Code != expected {
-				t.Fatalf("lookup failure served drifting live items or lost its cause: items=%d wraps_cause=%t code=%s want=%s err=%v", len(page.Items), errors.Is(err, cause), DiagnoseError(err).Code, expected, err)
+				t.Fatalf("denied lookup served drifting live items or lost its cause: items=%d wraps_cause=%t code=%s want=%s err=%v", len(page.Items), errors.Is(err, cause), DiagnoseError(err).Code, expected, err)
 			}
 		})
+	}
+}
+
+// slowOccurrenceStore answers occurrence reads like a history store that does
+// not answer in time: each read waits briefly, or until its context ends, and
+// then fails with a deadline. Other reads go to the real store.
+type slowOccurrenceStore struct {
+	storage.Provider
+	storage.EvidenceStore
+	delay time.Duration
+	cause error
+	reads *atomic.Int32
+	// onRead, when set, runs at the start of each occurrence read.
+	onRead func()
+}
+
+func (store slowOccurrenceStore) QueryEvidence(ctx context.Context, scope storage.EvidenceScope, query storage.EvidenceQuery) (storage.EvidencePage, error) {
+	if query.Type != "occurrence" {
+		return store.EvidenceStore.QueryEvidence(ctx, scope, query)
+	}
+	store.reads.Add(1)
+	if store.onRead != nil {
+		store.onRead()
+	}
+	select {
+	case <-time.After(store.delay):
+	case <-ctx.Done():
+		return storage.EvidencePage{}, ctx.Err()
+	}
+	return storage.EvidencePage{}, store.cause
+}
+
+func TestLiveIssuesDegradeWhenHistoryStoreIsSlowOrUnavailable(t *testing.T) {
+	for name, cause := range map[string]error{"timeout": context.DeadlineExceeded, "unavailable": storage.ErrUnsupported, "converting": storage.ErrEvidenceNotReady} {
+		t.Run(name, func(t *testing.T) {
+			service, store, _ := reviewHistoryService(t)
+			reviewHistoryCycle(t, service)
+			reads := &atomic.Int32{}
+			service.SetChangeStorage(slowOccurrenceStore{Provider: service.usageProvider(), EvidenceStore: store, delay: 20 * time.Millisecond, cause: cause, reads: reads})
+			page, err := service.Issues(liveBrokenPodsContext(t.Context(), "api-0"), IssueOptions{})
+			if err != nil {
+				t.Fatalf("slow history failed the live page: %v", err)
+			}
+			if len(page.Items) == 0 || !page.Sync.Partial {
+				t.Fatalf("slow history dropped the live items or did not mark the page partial: %+v", page)
+			}
+			history := 0
+			for _, failure := range page.Partial {
+				if failure.ResourceID == "kubernetes.history" && failure.Class == "historical_evidence_unavailable" {
+					history++
+				}
+			}
+			if history != 1 {
+				t.Fatalf("want one history partial failure, got %d: %+v", history, page.Partial)
+			}
+			for _, item := range page.Items {
+				if item.Broken && (!item.Partial || item.OccurrenceID != "" || item.BrokeAt != nil || item.BrokeAtSource != "") {
+					t.Fatalf("unavailable history left a live item selectable by its condition time: %+v", item)
+				}
+			}
+		})
+	}
+}
+
+func TestLiveIssuesStopLookingUpAfterFirstSlowRoot(t *testing.T) {
+	service, store, _ := reviewHistoryService(t)
+	reviewHistoryCycle(t, service)
+	reads := &atomic.Int32{}
+	const delay = 200 * time.Millisecond
+	service.SetChangeStorage(slowOccurrenceStore{Provider: service.usageProvider(), EvidenceStore: store, delay: delay, cause: context.DeadlineExceeded, reads: reads})
+	pods := make([]string, 12)
+	for i := range pods {
+		pods[i] = fmt.Sprintf("api-%d", i)
+	}
+	ctx := liveBrokenPodsContext(t.Context(), pods...)
+	started := time.Now()
+	page, err := service.Issues(ctx, IssueOptions{})
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("slow history failed the live page: %v", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("slow history was read %d times for %d roots, want one read", got, len(pods))
+	}
+	if elapsed > scaledTimeout(3*delay) {
+		t.Fatalf("%d slow roots took %s, want about one lookup (%s)", len(pods), elapsed, delay)
+	}
+	broken, history := 0, 0
+	for _, item := range page.Items {
+		if !item.Broken {
+			continue
+		}
+		broken++
+		if !item.Partial || item.OccurrenceID != "" || item.BrokeAt != nil || item.BrokeAtSource != "" {
+			t.Fatalf("a skipped root kept an occurrence selector: %+v", item)
+		}
+	}
+	for _, failure := range page.Partial {
+		if failure.Class == "historical_evidence_unavailable" {
+			history++
+		}
+	}
+	if broken != len(pods) || !page.Sync.Partial || history != 1 {
+		t.Fatalf("want %d partial live roots and one history failure, got broken=%d partial=%t history=%d", len(pods), broken, page.Sync.Partial, history)
+	}
+}
+
+func TestLiveIssuesReturnCallerCancellationDuringOccurrenceLookup(t *testing.T) {
+	service, store, _ := reviewHistoryService(t)
+	reviewHistoryCycle(t, service)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reads := &atomic.Int32{}
+	service.SetChangeStorage(slowOccurrenceStore{Provider: service.usageProvider(), EvidenceStore: store, delay: time.Minute, cause: context.DeadlineExceeded, reads: reads, onRead: cancel})
+	page, err := service.Issues(liveBrokenPodsContext(ctx, "api-0", "api-1"), IssueOptions{})
+	if !errors.Is(err, context.Canceled) || len(page.Items) != 0 {
+		t.Fatalf("a cancelled caller got a partial page instead of its error: items=%d err=%v", len(page.Items), err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("lookups continued after the caller cancelled: %d reads", got)
+	}
+}
+
+func TestLiveIssuesReturnCallerDeadlineDuringOccurrenceLookup(t *testing.T) {
+	service, store, _ := reviewHistoryService(t)
+	reviewHistoryCycle(t, service)
+	reads := &atomic.Int32{}
+	service.SetChangeStorage(slowOccurrenceStore{Provider: service.usageProvider(), EvidenceStore: store, delay: time.Minute, cause: context.DeadlineExceeded, reads: reads})
+	ctx := liveBrokenPodsContext(t.Context(), "api-0")
+	// The live snapshot is built first; the caller's deadline then ends during
+	// the slow lookup, well before the per-lookup bound.
+	deadline, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	page, err := service.Issues(deadline, IssueOptions{})
+	if !errors.Is(err, context.DeadlineExceeded) || len(page.Items) != 0 {
+		t.Fatalf("a caller past its deadline got a partial page instead of its error: items=%d err=%v", len(page.Items), err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("the caller's deadline did not end the page during the occurrence lookup: %d reads", got)
+	}
+}
+
+// A slow history store warns once per throttle window while the Issues page
+// keeps degrading, and a healthy page afterwards writes nothing a default
+// install shows. The standard logger is process-wide, so this never runs in
+// parallel.
+func TestLiveIssuesSlowHistoryWarnsOncePerWindow(t *testing.T) {
+	logs := captureLogLines(t, "debug")
+	clock := newFakeClock()
+	isolateProblems(t, 10*time.Minute, clock.Now)
+	service, store, _ := reviewHistoryService(t)
+	reviewHistoryCycle(t, service)
+	healthy := service.usageProvider()
+	reads := &atomic.Int32{}
+	service.SetChangeStorage(slowOccurrenceStore{Provider: healthy, EvidenceStore: store, delay: 10 * time.Millisecond, cause: context.DeadlineExceeded, reads: reads})
+	ctx := liveBrokenPodsContext(t.Context(), "api-0")
+	logs.reset()
+	for range 2 {
+		if _, err := service.Issues(ctx, IssueOptions{}); err != nil {
+			t.Fatalf("slow history failed the live page: %v", err)
+		}
+		clock.advance(time.Minute)
+	}
+	warnings := visible(logs.all())
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "WARN ") || !strings.Contains(warnings[0], `cluster "cluster"`) || !strings.Contains(warnings[0], "check that the history storage backend is reachable") {
+		t.Fatalf("want one warning naming the cluster and what to check, got %q", warnings)
+	}
+	logs.reset()
+	service.SetChangeStorage(healthy)
+	if _, err := service.Issues(ctx, IssueOptions{}); err != nil {
+		t.Fatalf("healthy history failed the live page: %v", err)
+	}
+	if shown := visible(logs.all()); len(shown) != 0 {
+		t.Fatalf("a healthy page wrote %d lines at info or above: %q", len(shown), shown)
 	}
 }
 

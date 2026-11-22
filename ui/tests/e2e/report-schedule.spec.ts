@@ -13,7 +13,7 @@ import { openApp, reportCard, signInWithGatewaySecret, waitForToast } from "./he
 //     a save + reload;
 //   * Save persists across a reload.
 //
-// Selectors: stable data-testids landed (QA-043) — `report-schedule-enabled`,
+// Selectors: stable data-testids — `report-schedule-enabled`,
 // `report-send-time`, `report-timezone-utc`, `report-timezone-local`,
 // `report-settings-save`. The scoped "Incidents report" card is kept only for
 // the card-visibility check.

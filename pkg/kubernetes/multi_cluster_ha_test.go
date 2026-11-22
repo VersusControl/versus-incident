@@ -116,7 +116,7 @@ func TestClusterOwnershipIsPerClusterAcrossReplicas(t *testing.T) {
 	}
 	westPublishes := broker.count(leaderWest.key)
 	westLists := west.listCount("pods")
-	westHealthBefore := buildSyncHealth(syncHealthKinds(westBefore), westBefore.FirstReadyAt)
+	westHealthBefore := buildSyncHealth(syncHealthKinds(westBefore), westBefore.FirstReadyAt, time.Time{})
 	t.Logf("west baseline: revision=%s state=%s pending=%d failing=%d publications=%d podLists=%d", westBefore.Revision, westHealthBefore.State, westHealthBefore.PendingKinds, westHealthBefore.FailingKinds, westPublishes, westLists)
 
 	// Only the east lease expires, and its owner can no longer claim it. The
@@ -143,7 +143,7 @@ func TestClusterOwnershipIsPerClusterAcrossReplicas(t *testing.T) {
 	// The cluster that stayed put is undisturbed: no republication, no relist.
 	if publishes := broker.count(leaderWest.key); publishes != westPublishes {
 		after, present := publishedGeneration(base, leaderWest.service.ActiveScope())
-		afterHealth := buildSyncHealth(syncHealthKinds(after), after.FirstReadyAt)
+		afterHealth := buildSyncHealth(syncHealthKinds(after), after.FirstReadyAt, time.Time{})
 		t.Fatalf("cluster west republished %d times during another cluster's takeover: present=%t beforeRev=%s afterRev=%s before=%s/pending%d/failing%d after=%s/pending%d/failing%d podListsBefore=%d after=%d ownerBefore=%s after=%s", publishes-westPublishes, present, westBefore.Revision, after.Revision, westHealthBefore.State, westHealthBefore.PendingKinds, westHealthBefore.FailingKinds, afterHealth.State, afterHealth.PendingKinds, afterHealth.FailingKinds, westLists, west.listCount("pods"), westLease.Owner, leaseRecord(t, base, leaderWest.service.ActiveScope()).Owner)
 	}
 	westAfter, ok := publishedGeneration(base, leaderWest.service.ActiveScope())

@@ -427,6 +427,50 @@ describe("History save delay on saved-history views", () => {
     expect(screen.queryByText("Grouped issues are unavailable.")).toBeNull();
   });
 
+  it("lists live issues as partial with a reason when saved break history does not answer", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+    const live: KubernetesIssue = { ...issue, broke_at: undefined, occurrence_id: undefined, partial: true };
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [live], totals: { warning: 1 }, truncated: false, sync: { ...sync, partial: true }, partial_failures: [{ resource_id: "kubernetes.history", class: "historical_evidence_unavailable" }] });
+    vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
+    mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    const section = await screen.findByRole("region", { name: "Kubernetes issues" });
+    const row = await within(section).findByRole("article", { name: "Deployment checkout" });
+    expect(within(row).getByText("Break time unknown").getAttribute("title")).toContain("Saved break history is temporarily unavailable");
+    expect(within(row).getByText("Saved history unavailable")).toBeTruthy();
+    expect(row.textContent).not.toMatch(/Broke|Time unavailable/);
+    expect(within(section).getAllByText("Issues are live, but saved break history is temporarily unavailable, so break times and occurrence links are hidden. It is retried on the next refresh.")).toHaveLength(1);
+    expect(section.textContent).not.toMatch(/Change history|change capture/i);
+    const badge = within(section.querySelector("header")!).getByText("partial");
+    expect(badge.classList.contains("pill-warn")).toBe(true);
+    expect(within(section.querySelector("header")!).queryByText("ready")).toBeNull();
+    expect(within(section).getByLabelText("warning count").textContent).toBe("1");
+  });
+
+  it("does not blame saved history for a row that is partial for another reason", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+    const scoped: KubernetesIssue = { ...issue, broke_at: undefined, partial: true };
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [scoped], totals: { warning: 1 }, truncated: false, sync: { ...sync, partial: true }, partial_failures: [{ resource_id: "core~v1~nodes", class: "forbidden" }, { resource_id: "core~v1~pods", class: "namespace_scope" }] });
+    vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
+    mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    const section = await screen.findByRole("region", { name: "Kubernetes issues" });
+    const row = await within(section).findByRole("article", { name: "Deployment checkout" });
+    expect(within(row).getByText("Break time unknown").getAttribute("title")).toBe("The cluster did not report when this broke.");
+    expect(within(row).queryByText("Saved history unavailable")).toBeNull();
+    expect(section.textContent).not.toContain("saved break history");
+  });
+
+  it("keeps the badge ready for a complete issues page", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [issue], totals: { warning: 1 }, truncated: false, sync });
+    vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
+    mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    const section = await screen.findByRole("region", { name: "Kubernetes issues" });
+    const row = await within(section).findByRole("article", { name: "Deployment checkout" });
+    expect(row.textContent).toContain("Broke");
+    expect(within(row).queryByText("Saved history unavailable")).toBeNull();
+    expect(within(section.querySelector("header")!).getByText("ready").classList.contains("pill-good")).toBe(true);
+  });
+
   it("keeps the root lane and crash evidence when a later page reports a rejected save", async () => {
     window.history.replaceState(null, "", `/agent/kubernetes?view=timeline&root_uid=checkout-uid&namespace=shop&center=${issue.broke_at}`);
     vi.spyOn(api, "kubernetesIssues").mockImplementation(rootIssueResponses({ items: [issue], totals: {}, truncated: false, sync }));
@@ -996,5 +1040,91 @@ describe("Filter rows", () => {
     const traffic = await namespaceInput("Traffic namespace");
     expect(traffic.className).toBe("input w-full min-w-0");
     expect(traffic.closest("label")).toBeNull();
+  });
+});
+
+describe("Expired page links on the Issues and Timeline pagers", () => {
+  const expired = () => new ApiError(400, "The list changed since this page was loaded.", { error: "The list changed since this page was loaded.", code: "cursor_expired" });
+  const alerts = () => vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
+  const later: KubernetesIssue = { ...issue, root: { ...issue.root, name: "ledger", uid: "ledger-uid" } };
+
+  it("returns the Issues pager to page 1 when a page that never loaded has an expired link", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+    alerts();
+    const reads = vi.spyOn(api, "kubernetesIssues").mockImplementation(async (options) => {
+      if (options?.cursor) throw expired();
+      return { items: [issue], totals: { warning: 40 }, total: 40, limit: 20, next: "issues-p2", truncated: false, sync };
+    });
+    mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    const section = await screen.findByRole("region", { name: "Kubernetes issues" });
+    await within(section).findByRole("article", { name: "Deployment checkout" });
+    fireEvent.click(within(section).getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(reads.mock.calls.some(([options]) => options?.cursor === "issues-p2")).toBe(true));
+    await waitFor(() => expect((within(section).getByRole("button", { name: "Previous page" }) as HTMLButtonElement).disabled).toBe(true));
+    expect(within(section).queryByText("This list changed since this page loaded.")).toBeNull();
+    expect(within(section).queryByText("Grouped issues are unavailable.")).toBeNull();
+    expect(within(section).getByRole("article", { name: "Deployment checkout" })).toBeTruthy();
+  });
+
+  it("keeps a shown Issues page with the list-changed notice when its refresh finds the link expired", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+    alerts();
+    let secondPageReads = 0;
+    vi.spyOn(api, "kubernetesIssues").mockImplementation(async (options) => {
+      if (options?.cursor) {
+        secondPageReads += 1;
+        if (secondPageReads > 1) throw expired();
+        return { items: [later], totals: { warning: 40 }, total: 40, limit: 20, truncated: false, sync };
+      }
+      return { items: [issue], totals: { warning: 40 }, total: 40, limit: 20, next: "issues-p2", truncated: false, sync };
+    });
+    const { client } = mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    const section = await screen.findByRole("region", { name: "Kubernetes issues" });
+    await within(section).findByRole("article", { name: "Deployment checkout" });
+    fireEvent.click(within(section).getByRole("button", { name: "Next page" }));
+    await within(section).findByRole("article", { name: "Deployment ledger" });
+    await act(async () => { await client.refetchQueries({ type: "active" }); });
+    expect(await within(section).findByText("This list changed since this page loaded.")).toBeTruthy();
+    expect(within(section).getByRole("article", { name: "Deployment ledger" })).toBeTruthy();
+    expect(within(section).queryByText("Grouped issues are unavailable.")).toBeNull();
+  });
+
+  it("returns the Timeline pager to page 1 when a page that never loaded has an expired link", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+    const reads = vi.spyOn(api, "kubernetesTimeline").mockImplementation(async (options) => {
+      if (options.cursor) throw expired();
+      return timelinePage([{ type: "change", id: change.id, at: change.at, change }], { next: "timeline-p2", total: 300, limit: 100 });
+    });
+    mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    const pager = await screen.findByRole("navigation", { name: "Timeline pages" });
+    await waitFor(() => expect((within(pager).getByRole("button", { name: "Next page" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(pager).getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(reads.mock.calls.some(([options]) => options.cursor === "timeline-p2")).toBe(true));
+    await waitFor(() => expect((within(screen.getByRole("navigation", { name: "Timeline pages" })).getByRole("button", { name: "Previous page" }) as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.queryByText("This list changed since this page loaded.")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Restart Timeline|Retry Timeline/ })).toBeNull();
+  });
+
+  it("keeps a shown Timeline page with the list-changed notice when its refresh finds the link expired", async () => {
+    window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+    let secondPageReads = 0;
+    vi.spyOn(api, "kubernetesTimeline").mockImplementation(async (options) => {
+      if (options.cursor) {
+        secondPageReads += 1;
+        if (secondPageReads > 1) throw expired();
+        return timelinePage([{ type: "change", id: "older", at: change.at, change: { ...change, id: "older", name: "ledger" } }], { total: 300, limit: 100 });
+      }
+      return timelinePage([{ type: "change", id: change.id, at: change.at, change }], { next: "timeline-p2", total: 300, limit: 100 });
+    });
+    const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
+    const pager = await screen.findByRole("navigation", { name: "Timeline pages" });
+    await waitFor(() => expect((within(pager).getByRole("button", { name: "Next page" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(pager).getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(secondPageReads).toBe(1));
+    await screen.findByText(/ledger/);
+    await act(async () => { await client.refetchQueries({ type: "active" }); });
+    expect(await screen.findByText("This list changed since this page loaded.")).toBeTruthy();
+    expect(screen.getAllByText(/ledger/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /Restart Timeline|Retry Timeline/ })).toBeNull();
   });
 });

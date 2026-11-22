@@ -1027,6 +1027,13 @@ func blobEvidenceCommitUnfenced(ctx context.Context, p Provider, policy Evidence
 	if !ok {
 		return ErrUnsupported
 	}
+	// The whole history is one document here, so a capture larger than the
+	// store keeps is cut to its newest records before it is built into it.
+	offered := len(batch.Records)
+	dropped, newestDropped := trimCaptureToPolicy(&batch, policy)
+	if dropped > 0 {
+		warnCaptureTrimmed(inProcessCaptureTrimmed, scope, policy, offered, dropped)
+	}
 	for attempt := 0; attempt < 8; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1086,15 +1093,20 @@ func blobEvidenceCommitUnfenced(ctx context.Context, p Provider, policy Evidence
 			a, b := state.Records[i], state.Records[j]
 			return evidenceRetentionTime(a).Before(evidenceRetentionTime(b)) || evidenceRetentionTime(a).Equal(evidenceRetentionTime(b)) && a.ID < b.ID
 		})
-		if policy.Retention > 0 {
-			cutoff := batch.At.Add(-policy.Retention)
-			for len(state.Records) > 0 && (evidenceRetentionTime(state.Records[0]).Before(cutoff) || len(state.Records) > policy.MaxRecords) {
-				if state.Records[0].At.After(state.Checkpoint.PrunedThrough) {
-					state.Checkpoint.PrunedThrough = state.Records[0].At
-				}
-				state.Checkpoint.PruneRevision++
-				state.Records = state.Records[1:]
+		if dropped > 0 {
+			// The records cut from the capture count as pruned.
+			if newestDropped.At.After(state.Checkpoint.PrunedThrough) {
+				state.Checkpoint.PrunedThrough = newestDropped.At
 			}
+			state.Checkpoint.PruneRevision += uint64(dropped)
+		}
+		cutoff := batch.At.Add(-policy.Retention)
+		for len(state.Records) > 0 && (policy.Retention > 0 && evidenceRetentionTime(state.Records[0]).Before(cutoff) || policy.MaxRecords > 0 && len(state.Records) > policy.MaxRecords) {
+			if state.Records[0].At.After(state.Checkpoint.PrunedThrough) {
+				state.Checkpoint.PrunedThrough = state.Records[0].At
+			}
+			state.Checkpoint.PruneRevision++
+			state.Records = state.Records[1:]
 		}
 		pruneOccurrenceHistory(&state, policy, batch.At)
 		pruneEvidenceLatest(&state)
@@ -1338,6 +1350,7 @@ func projectEvidenceAuthority(record EvidenceRecord, query EvidenceQuery) Eviden
 func (p *fileProvider) EvidencePolicy() EvidencePolicy {
 	return EvidencePolicy{Mode: "bounded_file", Retention: 24 * time.Hour, MaxRecords: 5000, MaxBytes: 4 << 20}
 }
+
 func (p *memoryProvider) EvidencePolicy() EvidencePolicy {
 	return EvidencePolicy{Mode: "ephemeral"}
 }

@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { notifyManager, useQueries, useQuery, useQueryClient, type Query } from "@tanstack/react-query";
+import { scrollRailMask, useScrollRail } from "@/lib/useScrollRail";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { KubernetesFirstReadyContext, useBrokenIssues, useKubernetesCluster, useKubernetesCursorReset, useKubernetesQuery, useKubernetesCommitEvents } from "@/lib/useKubernetesCluster";
 import { KubernetesClusterProvider } from "@/components/KubernetesClusterProvider";
@@ -690,6 +691,19 @@ function KubernetesDashboard() {
     enabled: clusterQueriesEnabled && selected !== null,
     retry: false,
   });
+  // The drawer only renders panels for a resource it actually has. A describe
+  // answer without a resource, or a plain 404, means the object is gone
+  // (deleted, or replaced by a new instance). A 404 the server labels
+  // resource_unavailable can be a deleted object or a kind this connector does
+  // not read, so it is worded as unavailable. A refusal (401, 403, or the
+  // cluster not being visible to the caller) is an access problem, not a
+  // missing object. None of these is retried.
+  const detailResource = detail.isError ? undefined : detail.data?.resource ?? undefined;
+  const detailFailure = detail.error instanceof ApiError ? { status: detail.error.status, code: kubernetesFailureCode(detail.error) } : undefined;
+  const detailDenied = Boolean(detailFailure && ([401, 403].includes(detailFailure.status) || detailFailure.code === "cluster_not_found"));
+  const detailUnavailable = !detailDenied && detailFailure?.status === 404 && detailFailure.code === "resource_unavailable";
+  const detailGone = !detailDenied && !detailUnavailable && (detailFailure?.status === 404 || detail.isSuccess && !detail.data?.resource);
+  const detailMissing = detailDenied || detailUnavailable || detailGone;
   const workloadDetailEnabled =
     clusterQueriesEnabled && selected !== null && workloadKinds.has(selected.kind);
   const workloadDetail = useQuery({
@@ -1051,26 +1065,7 @@ function KubernetesDashboard() {
       />
       <div className="kubernetes-explorer-content mx-auto min-w-0 max-w-7xl space-y-3 overflow-x-hidden p-3 sm:space-y-5 sm:p-6" data-drawer={clusterReachable && selected !== null ? "open" : undefined}>
         {multiple && <nav aria-label="Cluster breadcrumb" className="flex min-w-0 items-center gap-2 text-xs text-ink-400"><Link to="/agent/kubernetes" className="text-link">Clusters</Link><ChevronRight size={12} className="shrink-0" /><span className="truncate text-ink-200">{clusters.find((entry) => entry.id === cluster)?.display_name || cluster}</span></nav>}
-        <nav role="tablist" aria-label="Kubernetes views" className="flex min-w-0 gap-1 overflow-x-auto rounded-card border border-ink-500/60 bg-surface p-1 shadow-card" onKeyDown={(event) => {
-          if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-          event.preventDefault();
-          const current = kubernetesExplorerTabs.findIndex((item) => item.id === view);
-          const offset = event.key === "ArrowRight" ? 1 : -1;
-          const next = kubernetesExplorerTabs[(current + offset + kubernetesExplorerTabs.length) % kubernetesExplorerTabs.length];
-          selectView(next.id);
-          window.requestAnimationFrame(() => document.getElementById(`kubernetes-tab-${next.id}`)?.focus());
-        }}>
-          {kubernetesExplorerTabs.map((item) => {
-            const TabIcon = explorerTabIcons[item.id];
-            const active = view === item.id;
-            return (
-              <button type="button" id={`kubernetes-tab-${item.id}`} role="tab" aria-controls="kubernetes-view-panel" aria-selected={active} tabIndex={active ? 0 : -1} onClick={() => selectView(item.id)} key={item.id} className={`inline-flex shrink-0 items-center gap-1.5 rounded-control px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${active ? "bg-accent-subtle text-ink-50 shadow-card ring-1 ring-inset ring-accent/40" : "text-ink-300 hover:bg-ink-600/50 hover:text-ink-100"}`}>
-                <TabIcon size={13} aria-hidden="true" className={active ? "text-link" : "text-ink-400"} />
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
+        <KubernetesViewTabs view={view} onSelect={selectView} />
         <div role="tabpanel" id="kubernetes-view-panel" aria-labelledby={`kubernetes-tab-${view}`} className="space-y-3 sm:space-y-5">
         {!syncPanelShown && (overview.isPending || overviewWarming && !overview.data && Boolean(health.firstReadyAt)) && (
           <div aria-label="Loading Kubernetes overview">
@@ -1392,12 +1387,12 @@ function KubernetesDashboard() {
         appearance="resource"
         expandable
         headingLabel={selected ? `${selected.kind} ${selected.namespace ? `${selected.namespace}/` : ""}${selected.name}` : undefined}
-        headerActions={clusterQueriesEnabled && selected && (
+        headerActions={clusterQueriesEnabled && selected && !detailMissing && (
           <button type="button" aria-label="Investigate" title="Investigate" className="btn btn-primary" onClick={() => {
             if (!selected) return;
             const query = new URLSearchParams({ provider: "kubernetes", cluster: cluster ?? overview.data?.cluster_id ?? "", resource_id: selected.resource_id, name: selected.name, include_changes: "true" });
             if (selected.namespace) query.set("namespace", selected.namespace);
-            const uid = detail.data?.resource.uid ?? selected.uid;
+            const uid = detailResource?.uid ?? selected.uid;
             if (uid) query.set("uid", uid);
             navigate(`/agent/chat?${query}`);
           }}>
@@ -1406,7 +1401,7 @@ function KubernetesDashboard() {
         )}
         title={
           selected && clusterQueriesEnabled
-            ? <ResourceHeader resource={!detail.isError && detail.data?.resource || selected} workload={!workloadDetail.isError ? workloadDetail.data : undefined} />
+            ? <ResourceHeader resource={detailResource || selected} workload={!workloadDetail.isError ? workloadDetail.data : undefined} />
             : "Resource detail"
         }
       >
@@ -1445,20 +1440,23 @@ function KubernetesDashboard() {
           </div>
           <div role="tabpanel" className="resource-tabpanel" data-view={drawerTab} id="kubernetes-drawer-panel" aria-labelledby={`kubernetes-drawer-tab-${drawerTab}`}>
           {(detail.isPending || (workloadDetailEnabled && workloadDetail.isPending)) && <ResourcePreparing resource={selected} readingRelated={!detail.isPending} />}
-          {detail.isError && <RetryableError error={detail.error} onRetry={() => detail.refetch()} retrying={detail.isRefetching} context="Couldn't load resource detail" />}
-          {detail.data && !detail.isError && <>
+          {detailGone && <p role="status" className="p-4 text-sm text-ink-300">This {selected.kind} no longer exists in the cluster. It may have been deleted or replaced.</p>}
+          {detailUnavailable && <p role="status" className="p-4 text-sm text-ink-300">This {selected.kind} is unavailable. It may have been deleted, or its kind is not read by this connector.</p>}
+          {detailDenied && <p role="status" className="p-4 text-sm text-ink-300">This {selected.kind} can't be read with the current access to this cluster.</p>}
+          {detail.isError && !detailMissing && <RetryableError error={detail.error} onRetry={() => detail.refetch()} retrying={detail.isRefetching} context="Couldn't load resource detail" />}
+          {detail.data && detailResource && <>
             <div hidden={drawerTab !== "overview"} className="resource-overview space-y-4">
-              <ResourceMetrics resource={detail.data.resource} workload={workloadDetail.isError ? undefined : workloadDetail.data} liveSamples={liveMetrics} onCrash={openCrashLogs} />
-              <ResourceFacts resource={detail.data.resource} workload={workloadDetail.isError ? undefined : workloadDetail.data} onOpen={selectResource} />
+              <ResourceMetrics resource={detailResource} workload={workloadDetail.isError ? undefined : workloadDetail.data} liveSamples={liveMetrics} onCrash={openCrashLogs} />
+              <ResourceFacts resource={detailResource} workload={workloadDetail.isError ? undefined : workloadDetail.data} onOpen={selectResource} />
             </div>
             {drawerTab === "events" && <ResourceEvents events={detail.data.events ?? []} />}
-            {drawerTab === "yaml" && <ResourceYaml resource={detail.data.resource} />}
-            {drawerTab === "related" && <ResourceRelations resource={detail.data.resource} related={detail.data.related_resources} onOpen={selectResource} />}
-            {drawerTab === "timeline" && <ResourceTimeline resource={detail.data.resource} onCrash={openCrashLogs} />}
+            {drawerTab === "yaml" && <ResourceYaml resource={detailResource} />}
+            {drawerTab === "related" && <ResourceRelations resource={detailResource} related={detail.data.related_resources} onOpen={selectResource} />}
+            {drawerTab === "timeline" && <ResourceTimeline resource={detailResource} onCrash={openCrashLogs} />}
           </>}
           {/* Logs read straight from the list row, so the tab paints without
               waiting for the describe call to finish. */}
-          {canStreamLogs(selected) ? <div hidden={drawerTab !== "overview" && drawerTab !== "logs"} className="resource-log-slot" data-full={drawerTab === "logs"}><PodLogViewer key={`${cluster}:${selected.resource_id}/${selected.namespace}/${selected.name}/${selected.uid ?? ""}`} resource={logViewResource(selected, detail.data?.resource)} compact={drawerTab !== "logs"} onOpenFull={() => selectDrawerTab("logs")} previousRequest={previousLogRequest} resourcePending={detail.isLoading} /></div> : drawerTab === "logs" && <p className="text-xs text-ink-400">Live logs are available for Pods, Deployments and StatefulSets.</p>}
+          {!detailMissing && (canStreamLogs(selected) ? <div hidden={drawerTab !== "overview" && drawerTab !== "logs"} className="resource-log-slot" data-full={drawerTab === "logs"}><PodLogViewer key={`${cluster}:${selected.resource_id}/${selected.namespace}/${selected.name}/${selected.uid ?? ""}`} resource={logViewResource(selected, detailResource)} compact={drawerTab !== "logs"} onOpenFull={() => selectDrawerTab("logs")} previousRequest={previousLogRequest} resourcePending={detail.isLoading} /></div> : drawerTab === "logs" && <p className="text-xs text-ink-400">Live logs are available for Pods, Deployments and StatefulSets.</p>)}
           </div>
         </div>}
       </PeekPanel>
@@ -1480,6 +1478,38 @@ function KubernetesDashboard() {
     </KubernetesNamespaceAccessContext.Provider>
     </KubernetesFirstReadyContext.Provider>
   );
+}
+
+/**
+ * The explorer's view tabs. On a narrow screen the rail scrolls sideways: the
+ * active tab is kept in view and an edge that still hides tabs fades out, so a
+ * label cut by the edge always reads as "more this way".
+ */
+function KubernetesViewTabs({ view, onSelect }: { view: KubernetesExplorerTab; onSelect: (next: KubernetesExplorerTab) => void }) {
+  const rail = useScrollRail<HTMLElement>(view);
+  const mask = scrollRailMask(rail.edges);
+  return <div className="min-w-0 rounded-card border border-ink-500/60 bg-surface shadow-card">
+    <nav ref={rail.ref} role="tablist" aria-label="Kubernetes views" data-overflow-start={rail.edges.start || undefined} data-overflow-end={rail.edges.end || undefined} className="flex min-w-0 gap-1 overflow-x-auto p-1" style={mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined} onKeyDown={(event) => {
+      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+      event.preventDefault();
+      const current = kubernetesExplorerTabs.findIndex((item) => item.id === view);
+      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const next = kubernetesExplorerTabs[(current + offset + kubernetesExplorerTabs.length) % kubernetesExplorerTabs.length];
+      onSelect(next.id);
+      window.requestAnimationFrame(() => document.getElementById(`kubernetes-tab-${next.id}`)?.focus());
+    }}>
+      {kubernetesExplorerTabs.map((item) => {
+        const TabIcon = explorerTabIcons[item.id];
+        const active = view === item.id;
+        return (
+          <button type="button" id={`kubernetes-tab-${item.id}`} role="tab" aria-controls="kubernetes-view-panel" aria-selected={active} tabIndex={active ? 0 : -1} onClick={() => onSelect(item.id)} key={item.id} className={`inline-flex shrink-0 items-center gap-1.5 rounded-control px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${active ? "bg-accent-subtle text-ink-50 shadow-card ring-1 ring-inset ring-accent/40" : "text-ink-300 hover:bg-ink-600/50 hover:text-ink-100"}`}>
+            <TabIcon size={13} aria-hidden="true" className={active ? "text-link" : "text-ink-400"} />
+            {item.label}
+          </button>
+        );
+      })}
+    </nav>
+  </div>;
 }
 
 function CommandPalette({

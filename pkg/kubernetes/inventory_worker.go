@@ -164,6 +164,11 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 	var loadedRevision string
 	var evidenceCommitted string
 	backoff := 100 * time.Millisecond
+	// startRevision is the generation this process served once its first
+	// restore ended: the one saved before it started. The restart grace ends
+	// when a later publication replaces it, by this process or by the
+	// replica that holds the lease.
+	startRevision, startRead, graceEnded := "", false, false
 	for ctx.Err() == nil {
 		if err := waitRecovery(ctx, service.recovery); err != nil {
 			return
@@ -228,6 +233,15 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				cache.mu.Unlock()
 			}
 		}
+		// Only a restore that ended tells which generation was saved before
+		// this process started; after a failed one the next pass would read
+		// that same old generation and take it for a new publication.
+		if !startRead && err == nil {
+			startRead = true
+			cache.mu.RLock()
+			startRevision = cache.generation.Revision
+			cache.mu.RUnlock()
+		}
 		var payloadFault inventoryPayloadError
 		if errors.As(err, &payloadFault) || errors.Is(err, kubeindex.ErrInvalidRecord) {
 			lease, owned, claimErr := service.claimInventory(ctx, provider, owner)
@@ -271,20 +285,11 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			if err == nil && owned {
 				ownedLease = lease
 				if generation.EvidenceBatch != nil && evidenceCommitted != generation.Revision && !service.historySaveAbandoned(cache, generation.EvidenceBatch.ID) {
-					lease.mu.Lock()
-					guard := append([]byte(nil), lease.expected...)
-					lease.mu.Unlock()
-					pending := *generation.EvidenceBatch
-					pending.GuardKey = inventoryKey(service.scope)
-					pending.GuardExpected = guard
-					pendingGeneration := generation
-					pendingGeneration.EvidenceBatch = &pending
-					// A retried save is a storage stage like the first attempt: its
-					// failure must not reach the credential recovery gate.
-					started := time.Now()
-					err = service.commitEvidence(ctx, pendingGeneration)
-					service.recovery.stage("journal", started, err)
-					err = service.abandonRejectedHistorySave(cache, generation.EvidenceBatch.ID, err)
+					// A retried save is fenced like the first attempt: it
+					// renews the lease between its transactions and stops when
+					// the lease runs out. Its failure is a storage stage, so it
+					// does not reach the credential recovery gate.
+					err = lease.commitJournal(ctx, service, generation)
 					if err == nil {
 						evidenceCommitted = generation.Revision
 					}
@@ -354,6 +359,16 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			service.recovery.reportConnected(service.scope.ClusterID, generation.View.Kinds)
 			backoff = 100 * time.Millisecond
 		}
+		if startRead && !graceEnded {
+			// A cycle that ended without the lease, or failed, has listed
+			// nothing new; only a new publication makes the observation
+			// times current again. A failure is reported meanwhile.
+			cache.mu.Lock()
+			if revision := cache.generation.Revision; revision != "" && revision != startRevision {
+				cache.publishedSinceStart, graceEnded = true, true
+			}
+			cache.mu.Unlock()
+		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -362,6 +377,38 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 		case <-cache.wake:
 			timer.Stop()
 		case <-timer.C:
+		}
+	}
+}
+
+// keepInventoryLease renews lease while a collection cycle runs, until ctx
+// ends. It renews once a quarter of the lease is used and retries a failed
+// renewal every retry step, so a slow or failing write has three quarters of
+// the lease to succeed. It gives up only when the lease is lost to another owner
+// or has run out, or when a renewal fails with less than one retry step left:
+// the owner then stops before another replica may claim the lease.
+func (service *Service) keepInventoryLease(ctx context.Context, lease *inventoryLease) error {
+	ttl := lease.leaseTTL()
+	step := inventoryLeaseRetryStep(ttl)
+	ticker := time.NewTicker(step)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+		if time.Until(lease.expiresAt()) > ttl-inventoryLeaseRenewAfter(ttl) {
+			continue
+		}
+		started := time.Now()
+		err := lease.renew(ctx, service)
+		service.recovery.stage("lease", started, err)
+		if err == nil || ctx.Err() != nil {
+			continue
+		}
+		if errors.Is(err, errInventoryLeaseLost) || time.Until(lease.expiresAt()) <= step {
+			return err
 		}
 	}
 }
@@ -417,22 +464,9 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 
 	go func() {
 		defer close(renewDone)
-		timer := time.NewTicker(time.Minute)
-		defer timer.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-timer.C:
-				renewStarted := time.Now()
-				err := lease.renew(ctx, service)
-				service.recovery.stage("lease", renewStarted, err)
-				if err != nil {
-					renewErrors <- err
-					cancel()
-					return
-				}
-			}
+		if err := service.keepInventoryLease(ctx, lease); err != nil {
+			renewErrors <- err
+			cancel()
 		}
 	}()
 	defer func() { cancel(); <-renewDone }()
@@ -521,6 +555,17 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	cache.mu.RUnlock()
 	baseline := newInventoryAuthorityBaseline(committedBinding, service.inventoryAuthorityBinding(generation.EvidenceScope.ClusterUID), *generation)
 	committedKinds := maps.Clone(generation.View.Kinds)
+	// proofKinds collects the kinds whose new denial ran the authority proof
+	// in this cycle. They are recorded however the cycle ends; the kinds it
+	// read without a proof end their streaks only once both stages decided.
+	proofKinds, proofsDecided := map[string]bool{}, false
+	defer func() {
+		read := map[string]bool{}
+		if proofsDecided {
+			read = readInventoryKinds(*generation, now)
+		}
+		service.noteAuthorityProofs(cache, proofKinds, read)
+	}()
 	var err error
 	kinds := []string{}
 	cache.mu.Lock()
@@ -747,6 +792,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		return false, err
 	}
 	if materialDenied && generation.EvidenceScope.ClusterUID != "" {
+		questionedKindNames(questioned, proofKinds)
 		questionInventoryAuthority(cache, questioned)
 		readIdentity()
 		if err := ctx.Err(); err != nil {
@@ -890,6 +936,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 		generation.liveAuthorityOnly = true
 	}
 	scopedQuestioned := newlyDeniedInventory(baseline, *generation, now)
+	newlyDenied := scopedQuestioned
 	if baseline.binding == "" && !hasCurrentInventoryRead(ctx) {
 		// No baseline tells a steady gap from lost authority, and the cycle
 		// read nothing that proves its identity, so every denial is in
@@ -900,7 +947,12 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	if err := collectionEnvelopeAuthorityError(ctx, cache, scopedMaterial); err != nil {
 		return false, err
 	}
+	proofsDecided = true
 	if scopedMaterial {
+		// A connector with no baseline that read nothing questions every
+		// denial; that is a missing grant, warned about per kind elsewhere,
+		// not a permission that keeps changing.
+		questionedKindNames(newlyDenied, proofKinds)
 		questionInventoryAuthority(cache, scopedQuestioned)
 		readIdentity()
 		if err := ctx.Err(); err != nil {

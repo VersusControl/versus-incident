@@ -1,15 +1,16 @@
-// K22 logs-header-and-drawer browser acceptance (contract that replaced K21's
-// Follow / chip-row / "Load earlier" header).
+// Logs header and drawer browser acceptance (the contract that replaced the
+// older Follow / chip-row / "Load earlier" header).
 //
-// Proves S1-S4 at 1440, 1024 and 390 in both themes, plus the K21 checks that
-// still hold on the K22 markup: honest first paint, ended and stopped reads,
+// Proves the header and drawer contract at 1440, 1024 and 390 in both themes,
+// plus the earlier log checks that still hold on the current markup: honest
+// first paint, ended and stopped reads,
 // the Live dot and reduced motion, Jump to latest only while scrolled up, a
 // row Logs paint under 300ms, the drawer Preparing content, zero-crash copy,
-// pager rules and the Issues subject (QA-196).
+// pager rules and the Issues subject.
 //
 // Evidence classes:
 //   live    — the real versus + fakekube stack started by
-//             tests/kubernetes/k22-visual-seed.mjs.
+//             the harness's Kubernetes visual seed for this spec.
 //   fixture — an in-page SSE stream (quiet/limit/ended/bulk), a route-forced
 //             /sync report, a delayed describe, or the controller's exact 403
 //             refusal for a caller without infrastructure:view, because fakekube
@@ -25,10 +26,10 @@ import * as path from "node:path";
 import { openApp, signInWithGatewaySecret } from "./helpers";
 import { capturePath, harnessResultsDir } from "./support/capture";
 
-const cluster = process.env.E2E_K22_CLUSTER || "k22";
-const controlURL = process.env.E2E_K22_CONTROL_URL || "";
-const longPod = process.env.E2E_K22_LONG_POD || "checkout-orchestrator-canary-rollout-verification-worker-2026-10-26";
-const bulkDeployment = process.env.E2E_K22_BULK_DEPLOYMENT || "bulk-app";
+const cluster = process.env.E2E_LIVE_LOGS_CLUSTER || "live-logs";
+const controlURL = process.env.E2E_LIVE_LOGS_CONTROL_URL || "";
+const longPod = process.env.E2E_LIVE_LOGS_LONG_POD || "checkout-orchestrator-canary-rollout-verification-worker-2026-10-26";
+const bulkDeployment = process.env.E2E_LIVE_LOGS_BULK_DEPLOYMENT || "bulk-app";
 
 const viewports = [
   { name: "desktop", width: 1440, height: 900 },
@@ -41,7 +42,7 @@ type Viewport = (typeof viewports)[number];
 
 type SseMode = "quiet" | "limit" | "ended" | "bulk" | "error";
 
-const checksFile = path.join(harnessResultsDir(), "k22-checks.jsonl");
+const checksFile = path.join(harnessResultsDir(), "kubernetes-live-checks.jsonl");
 fs.mkdirSync(harnessResultsDir(), { recursive: true });
 
 function record(item: string, viewport: number, theme: string, check: string, pass: boolean, detail: unknown) {
@@ -83,8 +84,8 @@ async function newPage(browser: Browser, viewport: Viewport, theme: Theme, fixtu
         if (mode === "error") return new Response(JSON.stringify({ error: "Log read unavailable in this controlled fixture." }), { status: 403, headers: { "Content-Type": "application/json" } });
         // Counting starts here, not on the network: this fixture answers the
         // stream itself, so a Playwright request listener cannot see it.
-        const counter = window as Window & { __k22FixtureStreams?: number };
-        counter.__k22FixtureStreams = (counter.__k22FixtureStreams ?? 0) + 1;
+        const counter = window as Window & { __liveLogsFixtureStreams?: number };
+        counter.__liveLogsFixtureStreams = (counter.__liveLogsFixtureStreams ?? 0) + 1;
         const encoder = new TextEncoder();
         const timers: Array<ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>> = [];
         let closed = false;
@@ -277,7 +278,7 @@ type Box = {
 } | null;
 
 /**
- * The S1 measurement the plan asked for before the fix: the header box and the
+ * The compact-logs measurement taken before the fix: the header box and the
  * body box, the top row that is actually visible inside the body, and whether
  * the body can escape the panel. The first DOM row is not used because a live
  * read scrolls to the bottom, which legitimately parks earlier rows above the
@@ -321,23 +322,23 @@ async function compactGeometry(page: Page) {
   });
 }
 
-/** QA-209: the body and the footer must not paint past the compact card. */
+/** The body and the footer must not paint past the compact card. */
 async function assertContainment(page: Page, viewport: Viewport, theme: Theme, label: string) {
   const g = await compactGeometry(page);
   const bodyBottom = g.body?.bottom ?? Number.NaN;
   const footerBottom = g.footer?.bottom ?? Number.NaN;
   const cardBottom = g.viewer?.bottom ?? Number.NaN;
   const slotBottom = g.slot?.bottom ?? Number.NaN;
-  soft("QA-209", viewport.width, theme, `${label}: body bottom is at or above the card bottom`,
+  soft("compact-fit", viewport.width, theme, `${label}: body bottom is at or above the card bottom`,
     Number.isFinite(bodyBottom) && bodyBottom <= cardBottom + 0.5,
     { bodyBottom, cardBottom, overflow: bodyBottom - cardBottom });
-  soft("QA-209", viewport.width, theme, `${label}: footer bottom is at or above the card bottom`,
+  soft("compact-fit", viewport.width, theme, `${label}: footer bottom is at or above the card bottom`,
     Number.isFinite(footerBottom) && footerBottom <= cardBottom + 0.5,
     { footerBottom, cardBottom, overflow: footerBottom - cardBottom });
-  soft("QA-209", viewport.width, theme, `${label}: the card itself stays inside its slot`,
+  soft("compact-fit", viewport.width, theme, `${label}: the card itself stays inside its slot`,
     Number.isFinite(cardBottom) && Number.isFinite(slotBottom) && cardBottom <= slotBottom + 0.5,
     { cardBottom, slotBottom });
-  record("QA-209", viewport.width, theme, `${label}: geometry`, true, { bodyBottom, footerBottom, cardBottom, slotBottom });
+  record("compact-fit", viewport.width, theme, `${label}: geometry`, true, { bodyBottom, footerBottom, cardBottom, slotBottom });
 }
 
 async function assertCompact(page: Page, viewport: Viewport, theme: Theme, label: string) {
@@ -358,19 +359,19 @@ async function assertCompact(page: Page, viewport: Viewport, theme: Theme, label
   const headerBottom = g.header?.bottom ?? Number.NaN;
   const bodyTop = g.body?.top ?? Number.NaN;
   const bodyBottom = g.body?.bottom ?? Number.NaN;
-  soft("S1", viewport.width, theme, `${label}: header and body do not overlap`, headerBottom <= bodyTop + 0.5, { headerBottom, bodyTop });
-  soft("S1", viewport.width, theme, `${label}: first visible line is below the header and fully inside the body`,
+  soft("compact-logs", viewport.width, theme, `${label}: header and body do not overlap`, headerBottom <= bodyTop + 0.5, { headerBottom, bodyTop });
+  soft("compact-logs", viewport.width, theme, `${label}: first visible line is below the header and fully inside the body`,
     Boolean(g.topVisible) && g.topVisible!.top >= headerBottom - 0.5 && g.topVisible!.top >= bodyTop - 0.5 && g.topVisible!.bottom <= bodyBottom + 0.5,
     { headerBottom, bodyTop, bodyBottom, topVisible: g.topVisible });
-  soft("S1", viewport.width, theme, `${label}: body scrolls inside its own box`, Boolean(g.bodyScroll) && g.bodyScroll!.scrollHeight > g.bodyScroll!.clientHeight, g.bodyScroll);
-  soft("S1", viewport.width, theme, `${label}: body has no horizontal overflow`, Boolean(g.bodyScroll) && g.bodyScroll!.scrollWidth <= g.bodyScroll!.clientWidth + 1, g.bodyScroll);
-  soft("S1", viewport.width, theme, `${label}: panel has no horizontal overflow`, Boolean(g.viewer) && g.viewer!.scrollWidth <= g.viewer!.clientWidth + 1 && g.docOverflow <= 1, { viewerScroll: g.viewerScroll, docOverflow: g.docOverflow });
-  record("S1", viewport.width, theme, `${label}: geometry`, true, g);
+  soft("compact-logs", viewport.width, theme, `${label}: body scrolls inside its own box`, Boolean(g.bodyScroll) && g.bodyScroll!.scrollHeight > g.bodyScroll!.clientHeight, g.bodyScroll);
+  soft("compact-logs", viewport.width, theme, `${label}: body has no horizontal overflow`, Boolean(g.bodyScroll) && g.bodyScroll!.scrollWidth <= g.bodyScroll!.clientWidth + 1, g.bodyScroll);
+  soft("compact-logs", viewport.width, theme, `${label}: panel has no horizontal overflow`, Boolean(g.viewer) && g.viewer!.scrollWidth <= g.viewer!.clientWidth + 1 && g.docOverflow <= 1, { viewerScroll: g.viewerScroll, docOverflow: g.docOverflow });
+  record("compact-logs", viewport.width, theme, `${label}: geometry`, true, g);
   await assertContainment(page, viewport, theme, label);
 }
 
 // ---------------------------------------------------------------------------
-// S2: the Logs tab header, one control row, and the read it drives.
+// The Logs tab header, one control row, and the read it drives.
 // ---------------------------------------------------------------------------
 
 type ToolbarState = {
@@ -463,7 +464,7 @@ const left = (box: Box) => (box ? Math.round(box.left * 100) / 100 : null);
 const delta = (value: number | null, base: number) => (value === null ? null : Math.round((value - base) * 100) / 100);
 
 // ---------------------------------------------------------------------------
-// S3: the drawer overlays; the list geometry must be identical.
+// The drawer overlays; the list geometry must be identical.
 // ---------------------------------------------------------------------------
 
 async function listGeometry(page: Page, cardName: string) {
@@ -514,7 +515,7 @@ function listShape(g: Awaited<ReturnType<typeof listGeometry>>) {
 }
 
 // ---------------------------------------------------------------------------
-// S4: the sync report fixture. The stack's real report supplies the durable
+// The sync report fixture. The stack's real report supplies the durable
 // first_ready_at and the kind rows; the forced state is a labelled fixture.
 // ---------------------------------------------------------------------------
 
@@ -611,46 +612,46 @@ function syncRoute(page: Page, state: { report?: SyncReport }) {
 }
 
 // ===========================================================================
-// S1: compact live logs on a Pod Overview and a Deployment Overview.
+// Compact live logs on a Pod Overview and a Deployment Overview.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`S1 compact live logs ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Compact live logs ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme);
       await openKubernetes(page, "nodes");
       await openPodLogs(page, "multi-container-pod");
       await openDrawerTab(page, "overview", "Overview");
       await expect(compactLogSlot(page).locator('.resource-log-viewer[data-compact="true"]')).toBeVisible({ timeout: 20_000 });
-      await saveCapture(page, "k22-compact", viewport.width, theme, "pod");
+      await saveCapture(page, "kubernetes-live-compact", viewport.width, theme, "pod");
       await assertCompact(page, viewport, theme, "Pod Overview");
       // The founder's break was at the panel's bottom edge, so capture the card
       // with the drawer scrolled to it as well as the initial paint.
       await drawer(page).locator(".resource-tabpanel").evaluate((panel) => { panel.scrollTop = panel.scrollHeight; });
       await page.waitForTimeout(300);
       await assertContainment(page, viewport, theme, "Pod Overview scrolled to the card bottom");
-      await saveCapture(page, "k22-compact", viewport.width, theme, "pod-bottom");
+      await saveCapture(page, "kubernetes-live-compact", viewport.width, theme, "pod-bottom");
       await closeDrawer(page);
 
       await openWorkloadLogs(page, bulkDeployment);
       await openDrawerTab(page, "overview", "Overview");
       await expect(compactLogSlot(page).locator('.resource-log-viewer[data-compact="true"]')).toBeVisible({ timeout: 20_000 });
-      await saveCapture(page, "k22-compact", viewport.width, theme, "deployment");
+      await saveCapture(page, "kubernetes-live-compact", viewport.width, theme, "deployment");
       await assertCompact(page, viewport, theme, "Deployment Overview");
       await drawer(page).locator(".resource-tabpanel").evaluate((panel) => { panel.scrollTop = panel.scrollHeight; });
       await page.waitForTimeout(300);
       await assertContainment(page, viewport, theme, "Deployment Overview scrolled to the card bottom");
-      await saveCapture(page, "k22-compact", viewport.width, theme, "deployment-bottom");
+      await saveCapture(page, "kubernetes-live-compact", viewport.width, theme, "deployment-bottom");
     });
   }
 }
 
 // ===========================================================================
-// S2: row 1 is one line, the container is a select, Current|Previous is one
+// Row 1 is one line, the container is a select, Current|Previous is one
 // segmented control, Follow and the chip row are gone, Since+Load prepends.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`S2 logs header ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Logs header ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme);
       const streams = sseRequests(page);
       await openKubernetes(page, "nodes");
@@ -661,7 +662,7 @@ for (const viewport of viewports) {
       await page.waitForTimeout(500);
 
       const g = await toolbarState(page);
-      // QA-208, revised rule: no control is graded against another field. The
+      // No control is graded against another field. The
       // panel's content edge, row 1's first control and row 2's first control
       // share one x. Per-control offsets are recorded as evidence only.
       const panelLeft = g.panelLeft;
@@ -678,55 +679,55 @@ for (const viewport of viewports) {
       const segmentDeltas = { current: delta(left(g.current), panelLeft), previous: delta(left(g.previous), panelLeft) };
       const loadDelta = delta(left(g.load), panelLeft);
 
-      soft("S2", viewport.width, theme, "row 1 is one visual line at 1440/1024", viewport.width === 390 ? true : oneLine(g.primaryChildren), { primary: g.primary, children: g.primaryChildren });
-      soft("S2", viewport.width, theme, "row 2 is one visual line at 1440/1024", viewport.width === 390 ? true : Boolean(g.levels && g.filter && g.levels.top < g.filter.bottom && g.filter.top < g.levels.bottom), { levels: g.levels, filter: g.filter });
+      soft("logs-header", viewport.width, theme, "row 1 is one visual line at 1440/1024", viewport.width === 390 ? true : oneLine(g.primaryChildren), { primary: g.primary, children: g.primaryChildren });
+      soft("logs-header", viewport.width, theme, "row 2 is one visual line at 1440/1024", viewport.width === 390 ? true : Boolean(g.levels && g.filter && g.levels.top < g.filter.bottom && g.filter.top < g.levels.bottom), { levels: g.levels, filter: g.filter });
       const order = g.primaryChildren
         .map((child) => ["log-status", "log-container", "log-instance", "log-since"].find((name) => child.cls.split(/\s+/).includes(name)))
         .join(",");
-      soft("S2", viewport.width, theme, "row 1 order is status, container, Current|Previous, Since+Load",
+      soft("logs-header", viewport.width, theme, "row 1 order is status, container, Current|Previous, Since+Load",
         order === "log-status,log-container,log-instance,log-since", { order, classes: g.primaryChildren.map((child) => child.cls) });
-      soft("S2", viewport.width, theme, "container is a select with one option per container",
+      soft("logs-header", viewport.width, theme, "container is a select with one option per container",
         g.containerOptions.length === 2 && g.containerOptions.some((option) => option.text === "app") && g.containerOptions.some((option) => option.text === "metrics-sidecar"),
         g.containerOptions);
-      soft("S2", viewport.width, theme, "Current|Previous is exactly one segmented control with two segments",
+      soft("logs-header", viewport.width, theme, "Current|Previous is exactly one segmented control with two segments",
         Boolean(g.instance) && (await logs.locator(".log-instance").count()) === 1 && (await logs.locator(".log-instance button").count()) === 2,
         { groups: await logs.locator(".log-instance").count(), buttons: await logs.locator(".log-instance button").count() });
-      soft("S2", viewport.width, theme, "no Follow control and no chip row in the full panel",
+      soft("logs-header", viewport.width, theme, "no Follow control and no chip row in the full panel",
         g.chips === 0 && g.follow === 0 && g.followButtons === 0
           && (await drawer(page).getByRole("button", { name: "Follow", exact: true }).count()) === 0,
         { chips: g.chips, follow: g.follow, followButtons: g.followButtons });
 
-      record("S2", viewport.width, theme, "segments", true, segmentDeltas);
-      record("S2", viewport.width, theme, "alignment", true, {
+      record("logs-header", viewport.width, theme, "segments", true, segmentDeltas);
+      record("logs-header", viewport.width, theme, "alignment", true, {
         panelLeft, filterLeft, statusLeft, levelLeft, row1Delta, row2Delta, rowsDelta, primaryDelta, secondaryDelta,
         deltas, segmentDeltas, loadDelta,
       });
-      soft("QA-208", viewport.width, theme, "row 1's first control (the Live pill) is flush to the panel content edge",
+      soft("header-alignment", viewport.width, theme, "row 1's first control (the Live pill) is flush to the panel content edge",
         row1Delta !== null && Math.abs(row1Delta) <= 1, { panelLeft, statusLeft, row1Delta });
-      soft("QA-208", viewport.width, theme, "row 2's first control (the first level pill) is flush to the panel content edge",
+      soft("header-alignment", viewport.width, theme, "row 2's first control (the first level pill) is flush to the panel content edge",
         row2Delta !== null && Math.abs(row2Delta) <= 1, { panelLeft, levelLeft, row2Delta });
-      soft("QA-208", viewport.width, theme, "both rows share one left edge (0px delta)",
+      soft("header-alignment", viewport.width, theme, "both rows share one left edge (0px delta)",
         rowsDelta !== null && Math.abs(rowsDelta) <= 1, { statusLeft, levelLeft, rowsDelta });
-      soft("QA-208", viewport.width, theme, "neither row container is indented from the panel content edge",
+      soft("header-alignment", viewport.width, theme, "neither row container is indented from the panel content edge",
         primaryDelta !== null && Math.abs(primaryDelta) <= 1 && secondaryDelta !== null && Math.abs(secondaryDelta) <= 1,
         { primaryDelta, secondaryDelta, panelLeft });
-      await saveCapture(page, "k22-logs-header", viewport.width, theme, "row1");
+      await saveCapture(page, "kubernetes-live-logs-header", viewport.width, theme, "row1");
 
       // The container select drives the read.
       const containerSelect = logs.locator('select[aria-label="Log container"]');
       await containerSelect.selectOption("metrics-sidecar");
       await expect(logOutput(page)).toContainText("container=metrics-sidecar", { timeout: 20_000 });
-      soft("S2", viewport.width, theme, "switching the container reissues the stream for it",
+      soft("logs-header", viewport.width, theme, "switching the container reissues the stream for it",
         streams.some((entry) => /container=metrics-sidecar/.test(entry.url)), streams.slice(-2).map((entry) => entry.url.slice(-120)));
-      await saveCapture(page, "k22-logs-header", viewport.width, theme, "container-switched");
+      await saveCapture(page, "kubernetes-live-logs-header", viewport.width, theme, "container-switched");
 
       // Previous switches the instance and shows the previous container read.
       await logs.getByRole("button", { name: "Previous container logs", exact: true }).click();
       await waitStatus(page, "Previous");
       await expect(logOutput(page)).toContainText(/fakekube previous .*container=metrics-sidecar/, { timeout: 20_000 });
-      soft("S2", viewport.width, theme, "Previous asks the server for the previous instance",
+      soft("logs-header", viewport.width, theme, "Previous asks the server for the previous instance",
         streams.some((entry) => /previous=true/.test(entry.url) && /container=metrics-sidecar/.test(entry.url)), streams.slice(-2).map((entry) => entry.url.slice(-140)));
-      await saveCapture(page, "k22-logs-header", viewport.width, theme, "previous");
+      await saveCapture(page, "kubernetes-live-logs-header", viewport.width, theme, "previous");
       await logs.getByRole("button", { name: "Current", exact: true }).click();
       await waitStatus(page, "Live");
       await expect(logOutput(page)).not.toContainText("fakekube previous", { timeout: 20_000 });
@@ -743,11 +744,11 @@ for (const viewport of viewports) {
       await waitStatus(page, "Live");
       await page.waitForTimeout(500);
       const wg = await toolbarState(page);
-      soft("S2", viewport.width, theme, "workload row 1 is one visual line at 1440/1024", viewport.width === 390 ? true : oneLine(wg.primaryChildren), wg.primaryChildren);
-      soft("QA-210", viewport.width, theme, "workload container select lists All containers first",
+      soft("logs-header", viewport.width, theme, "workload row 1 is one visual line at 1440/1024", viewport.width === 390 ? true : oneLine(wg.primaryChildren), wg.primaryChildren);
+      soft("workload-containers", viewport.width, theme, "workload container select lists All containers first",
         wg.containerOptions[0]?.text === "All containers" && wg.containerOptions[0]?.value === "*", wg.containerOptions);
-      soft("S2", viewport.width, theme, "workload read has no chip row or Follow", wg.chips === 0 && wg.follow === 0 && wg.followButtons === 0, { chips: wg.chips, follow: wg.follow });
-      await saveCapture(page, "k22-logs-header", viewport.width, theme, "workload-row1");
+      soft("logs-header", viewport.width, theme, "workload read has no chip row or Follow", wg.chips === 0 && wg.follow === 0 && wg.followButtons === 0, { chips: wg.chips, follow: wg.follow });
+      await saveCapture(page, "kubernetes-live-logs-header", viewport.width, theme, "workload-row1");
 
       const output = logOutput(page);
       await expect(output.locator("[data-log-key]").first()).toBeVisible({ timeout: 20_000 });
@@ -762,20 +763,20 @@ for (const viewport of viewports) {
       const requestURL = earlierRequests.at(-1) ?? "";
       const tail = Number(new URL(requestURL, "http://x").searchParams.get("tail_lines") ?? "0");
       await page.waitForTimeout(1_500);
-      soft("S2", viewport.width, theme, "Since+Load prepends lines", after > before + 50, { before, after });
-      soft("S2", viewport.width, theme, "Since+Load is one bounded read", tail > 0 && tail <= 1000, { tail, requestURL: requestURL.replace(/^https?:\/\/[^/]+/, "").slice(0, 260) });
-      soft("S2", viewport.width, theme, "Since+Load does not restart the live read", streams.length === streamCountBefore, { before: streamCountBefore, after: streams.length });
-      await saveCapture(page, "k22-logs-header", viewport.width, theme, "load");
+      soft("logs-header", viewport.width, theme, "Since+Load prepends lines", after > before + 50, { before, after });
+      soft("logs-header", viewport.width, theme, "Since+Load is one bounded read", tail > 0 && tail <= 1000, { tail, requestURL: requestURL.replace(/^https?:\/\/[^/]+/, "").slice(0, 260) });
+      soft("logs-header", viewport.width, theme, "Since+Load does not restart the live read", streams.length === streamCountBefore, { before: streamCountBefore, after: streams.length });
+      await saveCapture(page, "kubernetes-live-logs-header", viewport.width, theme, "load");
     });
   }
 }
 
 // ===========================================================================
-// S3: opening the drawer overlays; the list is untouched and opaque-covered.
+// Opening the drawer overlays; the list is untouched and opaque-covered.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`S3 drawer overlay ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Drawer overlay ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme);
       await openKubernetes(page, "resources");
       await selectView(page, "Workloads");
@@ -784,39 +785,39 @@ for (const viewport of viewports) {
       await page.waitForTimeout(500);
 
       const closed = await listGeometry(page, "Workloads");
-      await saveCapture(page, "k22-drawer", viewport.width, theme, "workloads-closed");
+      await saveCapture(page, "kubernetes-live-drawer", viewport.width, theme, "workloads-closed");
       const logButton = page.getByRole("button", { name: `Logs for ${bulkDeployment}`, exact: true });
       await expect(logButton).toBeVisible({ timeout: 30_000 });
       await logButton.click();
       await expect(drawer(page)).toBeVisible({ timeout: 10_000 });
       await page.waitForTimeout(600);
       const open = await listGeometry(page, "Workloads");
-      await saveCapture(page, "k22-drawer", viewport.width, theme, "workloads-open");
+      await saveCapture(page, "kubernetes-live-drawer", viewport.width, theme, "workloads-open");
 
-      soft("S3", viewport.width, theme, "Workloads list geometry is identical while the drawer is open",
+      soft("drawer-overlay", viewport.width, theme, "Workloads list geometry is identical while the drawer is open",
         listShape(closed) === listShape(open), { closed: listShape(closed), open: listShape(open) });
-      soft("S3", viewport.width, theme, "Workloads tab row has no horizontal scrollbar",
+      soft("drawer-overlay", viewport.width, theme, "Workloads tab row has no horizontal scrollbar",
         Boolean(open.tabRow) && open.tabRow!.scrollWidth <= open.tabRow!.clientWidth + 1 && Boolean(closed.tabRow) && closed.tabRow!.scrollWidth <= closed.tabRow!.clientWidth + 1,
         { open: open.tabRow, closed: closed.tabRow });
-      soft("S3", viewport.width, theme, "no Workloads column folds under the drawer",
+      soft("drawer-overlay", viewport.width, theme, "no Workloads column folds under the drawer",
         open.rows.length > 0 && open.rows.every((row) => row.cells.filter((cell) => cell.display !== "none" && cell.text !== "").length >= 3),
         open.rows.map((row) => row.cells));
-      soft("S3", viewport.width, theme, "drawer surface is opaque with a shadow",
+      soft("drawer-overlay", viewport.width, theme, "drawer surface is opaque with a shadow",
         Boolean(open.aside) && open.aside!.opacity === "1" && /^rgb\(/.test(open.aside!.background ?? "") && (open.aside!.shadow ?? "none") !== "none",
         open.aside);
-      soft("S3", viewport.width, theme, "a dimming backdrop covers the list",
+      soft("drawer-overlay", viewport.width, theme, "a dimming backdrop covers the list",
         Boolean(open.backdrop) && /rgba\([^)]*,\s*0?\.[0-9]+\)/.test(open.backdrop!.background ?? ""),
         open.backdrop);
-      soft("S3", viewport.width, theme, "drawer opening adds no horizontal overflow",
+      soft("drawer-overlay", viewport.width, theme, "drawer opening adds no horizontal overflow",
         open.docOverflow <= 1 && Boolean(open.cardScroll) && open.cardScroll!.scrollWidth <= open.cardScroll!.clientWidth + 1,
         { docOverflow: open.docOverflow, cardScroll: open.cardScroll });
 
       await closeDrawer(page);
       await page.waitForTimeout(500);
       const reclosed = await listGeometry(page, "Workloads");
-      soft("S3", viewport.width, theme, "closing restores the identical Workloads layout",
+      soft("drawer-overlay", viewport.width, theme, "closing restores the identical Workloads layout",
         listShape(reclosed) === listShape(closed), { closed: listShape(closed), reclosed: listShape(reclosed) });
-      await saveCapture(page, "k22-drawer", viewport.width, theme, "workloads-closed-again");
+      await saveCapture(page, "kubernetes-live-drawer", viewport.width, theme, "workloads-closed-again");
 
       // Node Pods, same contract.
       await selectView(page, "Nodes");
@@ -829,25 +830,25 @@ for (const viewport of viewports) {
       await expect.poll(async () => nodes.locator('[role="listitem"]').count(), { timeout: 30_000 }).toBeGreaterThan(2);
       await page.waitForTimeout(400);
       const nodeClosed = await listGeometry(page, "Nodes");
-      await saveCapture(page, "k22-drawer", viewport.width, theme, "nodes-closed");
+      await saveCapture(page, "kubernetes-live-drawer", viewport.width, theme, "nodes-closed");
       await nodes.locator('[role="listitem"]').filter({ hasText: "multi-container-pod" }).first()
         .getByRole("button", { name: "Logs for multi-container-pod", exact: true }).click();
       await expect(drawer(page)).toBeVisible({ timeout: 10_000 });
       await page.waitForTimeout(600);
       const nodeOpen = await listGeometry(page, "Nodes");
-      await saveCapture(page, "k22-drawer", viewport.width, theme, "nodes-open");
-      soft("S3", viewport.width, theme, "Node Pods geometry is identical while the drawer is open",
+      await saveCapture(page, "kubernetes-live-drawer", viewport.width, theme, "nodes-open");
+      soft("drawer-overlay", viewport.width, theme, "Node Pods geometry is identical while the drawer is open",
         listShape(nodeClosed) === listShape(nodeOpen), { closed: listShape(nodeClosed), open: listShape(nodeOpen) });
-      soft("S3", viewport.width, theme, "Node Pods tab row has no horizontal scrollbar",
+      soft("drawer-overlay", viewport.width, theme, "Node Pods tab row has no horizontal scrollbar",
         !nodeOpen.tabRow || nodeOpen.tabRow!.scrollWidth <= nodeOpen.tabRow!.clientWidth + 1,
         nodeOpen.tabRow);
-      soft("S3", viewport.width, theme, "drawer surface stays opaque over Node Pods",
+      soft("drawer-overlay", viewport.width, theme, "drawer surface stays opaque over Node Pods",
         Boolean(nodeOpen.aside) && nodeOpen.aside!.opacity === "1" && /^rgb\(/.test(nodeOpen.aside!.background ?? ""),
         nodeOpen.aside);
       await closeDrawer(page);
       await page.waitForTimeout(400);
       const nodeReclosed = await listGeometry(page, "Nodes");
-      soft("S3", viewport.width, theme, "closing restores the identical Node Pods layout",
+      soft("drawer-overlay", viewport.width, theme, "closing restores the identical Node Pods layout",
         listShape(nodeReclosed) === listShape(nodeClosed), { closed: listShape(nodeClosed), reclosed: listShape(nodeReclosed) });
     });
   }
@@ -858,7 +859,7 @@ for (const viewport of viewports) {
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`S4 sync states ${viewport.width} ${theme}`, async ({ browser, request }) => {
+    test(`Sync states ${viewport.width} ${theme}`, async ({ browser, request }) => {
       const real = await realSyncReport(request);
       expect(real.first_ready_at, "the stack must have published before the strip proof").toBeTruthy();
       const forced: { report?: SyncReport } = {};
@@ -910,10 +911,10 @@ for (const viewport of viewports) {
         route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ...preparingOverview, sync: { ...preparingOverview.sync, progress: detailedProgress ? preparingOverview.sync.progress : undefined } }) }));
       await openKubernetes(page, "overview");
       await expect(page.locator("[data-preparing-panel]")).toBeVisible({ timeout: 60_000 });
-      soft("S4", viewport.width, theme, "never-published cluster shows Preparing", (await page.locator("body").innerText()).includes("Preparing") || (await page.locator("[data-preparing-panel]").isVisible()), "preparing");
-      soft("S4", viewport.width, theme, "Preparing shows progress", await page.getByRole("progressbar", { name: "Listing resource types: 12 / 20", exact: true }).isVisible(), "progressbar");
-      soft("S4", viewport.width, theme, "never-published cluster has no data view", (await page.getByRole("region", { name: "Workloads", exact: true }).count()) === 0, "workloads card");
-      await saveCapture(page, "k22-sync", viewport.width, theme, "preparing");
+      soft("sync-states", viewport.width, theme, "never-published cluster shows Preparing", (await page.locator("body").innerText()).includes("Preparing") || (await page.locator("[data-preparing-panel]").isVisible()), "preparing");
+      soft("sync-states", viewport.width, theme, "Preparing shows progress", await page.getByRole("progressbar", { name: "Listing resource types: 12 / 20", exact: true }).isVisible(), "progressbar");
+      soft("sync-states", viewport.width, theme, "never-published cluster has no data view", (await page.getByRole("region", { name: "Workloads", exact: true }).count()) === 0, "workloads card");
+      await saveCapture(page, "kubernetes-live-sync", viewport.width, theme, "preparing");
       await closeDrawer(page);
 
       await expect(page.locator("[data-preparing-panel] [data-step]")).toHaveCount(4);
@@ -941,7 +942,7 @@ for (const viewport of viewports) {
       expect(await page.locator("[data-preparing-panel] [data-preparing-motion]").evaluateAll((nodes) => nodes.every((node) => getComputedStyle(node).display === "none" || getComputedStyle(node).animationName === "none"))).toBe(true);
       await expect(page.locator("[data-preparing-panel] [aria-live], [data-preparing-panel] [role=status]")).toHaveCount(0);
       await expect(page.locator("[data-preparing-panel] [role=progressbar]")).toHaveCount(1);
-      await saveCapture(page, "k22-sync", viewport.width, theme, "unknown-progress");
+      await saveCapture(page, "kubernetes-live-sync", viewport.width, theme, "unknown-progress");
 
       // Published failures retain their warning; routine syncing stays quiet.
       const states = [
@@ -959,21 +960,21 @@ for (const viewport of viewports) {
         if (item.state === "syncing") {
           await expect(page.locator("[data-sync-state]")).toHaveText("Syncing");
           await expect(page.locator("[data-sync-strip], [data-preparing-panel]")).toHaveCount(0);
-          await saveCapture(page, "k22-sync", viewport.width, theme, "silent-syncing");
+          await saveCapture(page, "kubernetes-live-sync", viewport.width, theme, "silent-syncing");
           continue;
         }
         const strip = page.locator(`[data-sync-strip="${item.strip}"]`);
         await expect(strip).toBeVisible({ timeout: 20_000 });
         const stripText = (await strip.innerText()).replace(/\s+/g, " ");
-        soft("S4", viewport.width, theme, `${item.state}: Preparing never renders`, (await page.locator("[data-sync-health]").count()) === 0 && !(await page.locator("body").innerText()).includes("Preparing the cluster"), stripText.slice(0, 160));
-        soft("S4", viewport.width, theme, `${item.state}: strip names the state`, stripText.includes(item.headline), stripText.slice(0, 160));
-        soft("S4", viewport.width, theme, `${item.state}: strip carries Retry`, (await strip.locator("[data-sync-retry]").count()) === 1, "retry");
-        soft("S4", viewport.width, theme, `${item.state}: data age is visible`, (await strip.locator("[data-sync-age]").count()) === 1 && /Showing data from \d/.test(stripText), stripText.slice(0, 200));
-        soft("S4", viewport.width, theme, `${item.state}: the view keeps its data`, (await rows.count()) > 0, await rows.count());
+        soft("sync-states", viewport.width, theme, `${item.state}: Preparing never renders`, (await page.locator("[data-sync-health]").count()) === 0 && !(await page.locator("body").innerText()).includes("Preparing the cluster"), stripText.slice(0, 160));
+        soft("sync-states", viewport.width, theme, `${item.state}: strip names the state`, stripText.includes(item.headline), stripText.slice(0, 160));
+        soft("sync-states", viewport.width, theme, `${item.state}: strip carries Retry`, (await strip.locator("[data-sync-retry]").count()) === 1, "retry");
+        soft("sync-states", viewport.width, theme, `${item.state}: data age is visible`, (await strip.locator("[data-sync-age]").count()) === 1 && /Showing data from \d/.test(stripText), stripText.slice(0, 200));
+        soft("sync-states", viewport.width, theme, `${item.state}: the view keeps its data`, (await rows.count()) > 0, await rows.count());
         if (item.state === "partial" || item.state === "error") {
-          soft("S4", viewport.width, theme, `${item.state}: the strip names the failing kind`, (await strip.locator("[data-sync-problem]").count()) >= 1, stripText.slice(0, 240));
+          soft("sync-states", viewport.width, theme, `${item.state}: the strip names the failing kind`, (await strip.locator("[data-sync-problem]").count()) >= 1, stripText.slice(0, 240));
         }
-        await saveCapture(page, "k22-sync", viewport.width, theme, item.state);
+        await saveCapture(page, "kubernetes-live-sync", viewport.width, theme, item.state);
       }
 
       // Reload mid-resync: data and the existing indicator, never Preparing.
@@ -985,11 +986,11 @@ for (const viewport of viewports) {
       await expect.poll(async () => page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]').count(), { timeout: 45_000 }).toBeGreaterThan(0);
       await expect(page.locator("[data-sync-state]")).toHaveText("Syncing", { timeout: 20_000 });
       await expect(page.locator("[data-sync-strip], [data-preparing-panel]")).toHaveCount(0);
-      soft("S4", viewport.width, theme, "reload mid-resync shows data with no extra loading surface",
+      soft("sync-states", viewport.width, theme, "reload mid-resync shows data with no extra loading surface",
         (await page.locator("[data-sync-health]").count()) === 0 && !(await page.locator("body").innerText()).includes("Preparing the cluster"),
         "reload");
       expect(await page.evaluate(() => sessionStorage.getItem("unexpected-preparation"))).toBeNull();
-      await saveCapture(page, "k22-sync", viewport.width, theme, "reload-mid-resync");
+      await saveCapture(page, "kubernetes-live-sync", viewport.width, theme, "reload-mid-resync");
 
       // Retry still reaches the server.
       const retry = page.getByRole("button", { name: "Refresh Kubernetes data", exact: true });
@@ -1000,7 +1001,7 @@ for (const viewport of viewports) {
       await expect(retry).toBeFocused();
       await page.keyboard.press("Enter");
       await expect.poll(() => syncCalls.count, { timeout: 15_000 }).toBeGreaterThan(before);
-      soft("S4", viewport.width, theme, "Retry re-reads the sync report", syncCalls.count > before, { before, after: syncCalls.count });
+      soft("sync-states", viewport.width, theme, "Retry re-reads the sync report", syncCalls.count > before, { before, after: syncCalls.count });
     });
   }
 }
@@ -1054,7 +1055,7 @@ for (const viewport of viewports.filter((entry) => entry.width !== 1024)) {
       expect(emptyReads).toBeGreaterThan(0);
       await expect(page.locator("[data-sync-state]")).toHaveText("Syncing");
       await expect(page.locator("[data-preparing-panel], [data-sync-strip]")).toHaveCount(0);
-      await saveCapture(page, "k22-warming", viewport.width, theme, "empty-after-restart");
+      await saveCapture(page, "kubernetes-live-warming", viewport.width, theme, "empty-after-restart");
       // Do not forge readiness before the restarted worker actually publishes.
       await expect.poll(async () => (await realSyncReport(request)).state, { timeout: 60_000 }).toBe("ready");
       warming = false;
@@ -1067,7 +1068,7 @@ for (const viewport of viewports.filter((entry) => entry.width !== 1024)) {
       await expect(page.locator("[data-preparing-panel], [data-sync-strip]")).toHaveCount(0);
       expect(await page.evaluate(() => sessionStorage.getItem("unexpected-preparation"))).toBeNull();
       expect((await realSyncReport(request)).first_ready_at).toBe(before.first_ready_at);
-      await saveCapture(page, "k22-warming", viewport.width, theme, "recovered-without-refresh");
+      await saveCapture(page, "kubernetes-live-warming", viewport.width, theme, "recovered-without-refresh");
     });
 
     test(`Independent cluster publication classifications ${viewport.width} ${theme}`, async ({ browser, request }) => {
@@ -1086,13 +1087,13 @@ for (const viewport of viewports.filter((entry) => entry.width !== 1024)) {
       await expect(freshRow.locator("[data-sync-state-label]")).toHaveText("Preparing");
       await expect(freshRow.locator("[data-first-sync]")).toHaveCount(1);
       await verifyThemeAndQuietPage(page, theme);
-      await page.screenshot({ path: capturePath("k22-isolation", viewport.width, theme, "fleet"), animations: "disabled" });
+      await page.screenshot({ path: capturePath("kubernetes-live-isolation", viewport.width, theme, "fleet"), animations: "disabled" });
       await openKubernetes(page, "resources");
       await selectView(page, "Workloads");
       await expect.poll(() => page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]').count(), { timeout: 45_000 }).toBeGreaterThan(0);
       await expect(page.locator("[data-sync-state]")).toHaveText("Syncing");
       await expect(page.locator("[data-preparing-panel], [data-sync-strip]")).toHaveCount(0);
-      await saveCapture(page, "k22-isolation", viewport.width, theme, "published-usable");
+      await saveCapture(page, "kubernetes-live-isolation", viewport.width, theme, "published-usable");
       // This fixture proves independent presentation, not authorization for a
       // server-unknown cluster. The real server must still refuse that cluster.
       await openApp(page, "/agent/kubernetes");
@@ -1105,10 +1106,10 @@ for (const viewport of viewports.filter((entry) => entry.width !== 1024)) {
 }
 
 // ===========================================================================
-// S4 durability: first_ready_at survives a versus restart.
+// Sync states durability: first_ready_at survives a versus restart.
 // ===========================================================================
 for (const viewport of viewports.filter((entry) => entry.width !== 1024)) for (const theme of themes) {
-test(`S4 first_ready_at survives a versus restart ${viewport.width} ${theme}`, async ({ browser, request }, testInfo) => {
+test(`first_ready_at survives a versus restart ${viewport.width} ${theme}`, async ({ browser, request }, testInfo) => {
   test.setTimeout(240_000);
   const page = await newPage(browser, viewport, theme);
   await openKubernetes(page, "resources");
@@ -1137,14 +1138,14 @@ test(`S4 first_ready_at survives a versus restart ${viewport.width} ${theme}`, a
     record("restart", viewport.width, theme, `${stage} sync report`, true, await realSyncReport(request));
   };
   const provenance = async (stage: string, proofs = false) => {
-    if (process.env.E2E_K22_PROVENANCE !== "1") return;
+    if (process.env.E2E_LIVE_LOGS_PROVENANCE !== "1") return;
     const response = await page.request.get(`${controlURL}/restart-provenance${proofs ? "?proof=1" : ""}`);
     expect(response.ok(), "run-owned provenance capture must be observable").toBe(true);
     await testInfo.attach(`restart-provenance-${stage}`, { body: JSON.stringify(await response.json()), contentType: "application/json" });
   };
   await sample("before");
-  if (!controlURL) throw new Error("E2E_K22_CONTROL_URL is required for the restart proof");
-  if (process.env.E2E_K22_PROVENANCE === "1") {
+  if (!controlURL) throw new Error("E2E_LIVE_LOGS_CONTROL_URL is required for the restart proof");
+  if (process.env.E2E_LIVE_LOGS_PROVENANCE === "1") {
     // Recreate the preceding successful epoch-changing case once, then admit
     // the same-token restart on rendered recovery rather than a global sleep.
     expect((await page.request.post(`${controlURL}/renew-credential`, { timeout: 120_000 })).ok()).toBe(true);
@@ -1161,7 +1162,7 @@ test(`S4 first_ready_at survives a versus restart ${viewport.width} ${theme}`, a
   const restart = await page.request.post(`${controlURL}/restart`, { timeout: 120_000 });
   expect(restart.ok(), `restart HTTP ${restart.status()}`).toBe(true);
   const after = await restart.json() as { restarted?: boolean; first_ready_at?: string | null };
-  soft("S4", viewport.width, theme, "first_ready_at survives the versus restart", Boolean(after.restarted) && after.first_ready_at === before.first_ready_at, { before: before.first_ready_at, after });
+  soft("sync-states", viewport.width, theme, "first_ready_at survives the versus restart", Boolean(after.restarted) && after.first_ready_at === before.first_ready_at, { before: before.first_ready_at, after });
   await provenance("before-response");
   await sample("after");
   await openKubernetes(page, "resources");
@@ -1189,11 +1190,11 @@ test(`S4 first_ready_at survives a versus restart ${viewport.width} ${theme}`, a
       await page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]').count());
     await saveCapture(page, "published-restart", viewport.width, theme, "manual-refresh");
   }
-  soft("S4", viewport.width, theme, "Preparing does not come back after the restart",
+  soft("sync-states", viewport.width, theme, "Preparing does not come back after the restart",
     (await page.locator("[data-sync-health]").count()) === 0 && !(await page.locator("body").innerText()).includes("Preparing the cluster"),
     "after restart");
   expect(await page.evaluate(() => sessionStorage.getItem("unexpected-preparation"))).toBeNull();
-  await saveCapture(page, "k22-sync", viewport.width, theme, "after-restart");
+  await saveCapture(page, "kubernetes-live-sync", viewport.width, theme, "after-restart");
 });
 }
 
@@ -1263,7 +1264,7 @@ type AdmittedPublication = {
 
 for (const width of [1440, 390]) {
   test(`published capacity, issues and timeline survive a real multi-wave capture hold at ${width}`, async ({ browser }, testInfo) => {
-    test.skip(process.env.E2E_K22_CAPTURE_HOLD !== "1", "requires the isolated hold-only60s request profile");
+    test.skip(process.env.E2E_LIVE_LOGS_CAPTURE_HOLD !== "1", "requires the isolated hold-only60s request profile");
     test.setTimeout(240_000);
     const viewport = { name: width === 1440 ? "desktop" : "mobile", width, height: width === 1440 ? 900 : 844 };
     const overview = await newPage(browser, viewport as Viewport, "dark");
@@ -1435,11 +1436,11 @@ function scopedPartialAdmission(input: PartialAdmissionInput) {
   return { admitted: reasons.length === 0, reasons: [...new Set(reasons)] };
 }
 
-const phaseAdmittedCompletion = process.env.E2E_K22_PHASE_COMPLETION === "1";
+const phaseAdmittedCompletion = process.env.E2E_LIVE_LOGS_PHASE_COMPLETION === "1";
 test(phaseAdmittedCompletion
   ? "phase-admitted warm authority collection commits then rendered recovery completes"
   : "warm same-scope authority loss clears protected views and recovers without restart", async ({ browser, request }, testInfo) => {
-  test.skip(process.env.E2E_K22_RESTART_CONTROLS !== "1", "requires the existing isolated synthetic authority fixture");
+  test.skip(process.env.E2E_LIVE_LOGS_RESTART_CONTROLS !== "1", "requires the existing isolated synthetic authority fixture");
   test.setTimeout(phaseAdmittedCompletion ? 15 * 60_000 : 180_000);
   if (phaseAdmittedCompletion) {
     // Pure observer checks only; none of these fixtures enter app/cache state.
@@ -1574,7 +1575,7 @@ test(phaseAdmittedCompletion
   expect(fencedReads.filter((path) => path !== "/api/admin/kubernetes/sync")).toEqual([]);
   await testInfo.attach("protected-fence-status-only-poll", { body: JSON.stringify(fencedReads), contentType: "application/json" });
   const audit = await (await page.request.get(`${controlURL}/fixture-authority`)).json();
-  expect(audit.identity_uid).toBe("k22-physical-cluster");
+  expect(audit.identity_uid).toBe("live-logs-physical-cluster");
   expect(audit.namespace_list_uid).toBe(audit.identity_uid);
   // Natural cached discovery need not perform another discovery request:
   // require an actual material/identity denial, not forced cache expiry.
@@ -1760,7 +1761,7 @@ test(phaseAdmittedCompletion
 });
 
 test("restart authority, physical identity and complete-empty controls", async ({ browser, request }, testInfo) => {
-  test.skip(process.env.E2E_K22_RESTART_CONTROLS !== "1", "requires the existing isolated synthetic authority fixture");
+  test.skip(process.env.E2E_LIVE_LOGS_RESTART_CONTROLS !== "1", "requires the existing isolated synthetic authority fixture");
   test.setTimeout(300_000);
   const page = await newPage(browser, viewports[0], "light");
   await openKubernetes(page, "resources");
@@ -1797,7 +1798,7 @@ test("restart authority, physical identity and complete-empty controls", async (
   await expect.poll(() => rows().count()).toBeGreaterThan(0);
   const identityResponse = await page.request.get(`${controlURL}/fixture-authority`);
   const identity = await identityResponse.json();
-  expect(identity.identity_uid).toBe("k22-physical-cluster");
+  expect(identity.identity_uid).toBe("live-logs-physical-cluster");
   expect(identity.namespace_list_uid).toBe(identity.identity_uid);
   const missing = await page.request.get(`/api/admin/kubernetes/workloads/Pod/definitely-absent?cluster=${cluster}&namespace=payments`);
   expect(missing.status()).toBe(404);
@@ -1852,7 +1853,7 @@ test("restart authority, physical identity and complete-empty controls", async (
   }
   await attachErrors("changed-physical-identity-no-replay", changed);
   const changedIdentity = await (await page.request.get(`${controlURL}/fixture-authority`)).json();
-  expect(changedIdentity.identity_uid).toBe("k22-replacement-physical-cluster");
+  expect(changedIdentity.identity_uid).toBe("live-logs-replacement-physical-cluster");
   expect(changedIdentity.namespace_list_uid).toBe(changedIdentity.identity_uid);
   await phase("authorized");
   await restart();
@@ -1860,7 +1861,7 @@ test("restart authority, physical identity and complete-empty controls", async (
   await page.getByRole("button", { name: "Refresh Kubernetes data", exact: true }).click();
   await expect.poll(() => rows().count()).toBeGreaterThan(0);
   const capture = await (await page.request.get(`${controlURL}/restart-provenance`)).json();
-  expect(capture.after.snapshots.some((item: { scope: { cluster_uid?: string } }) => item.scope.cluster_uid === "k22-replacement-physical-cluster")).toBe(true);
+  expect(capture.after.snapshots.some((item: { scope: { cluster_uid?: string } }) => item.scope.cluster_uid === "live-logs-replacement-physical-cluster")).toBe(true);
   await testInfo.attach("fresh-replacement-identity-capture", { body: JSON.stringify(capture), contentType: "application/json" });
   await saveCapture(page, "restart-controls", 1440, "light", "recollected-new-identity");
 
@@ -1890,14 +1891,14 @@ test("restart authority, physical identity and complete-empty controls", async (
 });
 
 // ===========================================================================
-// F2: a background resync keeps the rows and the Related tab on screen.
+// A background resync keeps the rows and the Related tab on screen.
 // The per-view `syncing` envelope is a labelled fixture layered over the real
 // rows; first_ready_at is the stack's real value, which is the condition the
 // founder complained about.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`F2 background resync ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Background resync ${viewport.width} ${theme}`, async ({ browser }) => {
       test.setTimeout(180_000);
       const page = await newPage(browser, viewport, theme);
       await openKubernetes(page, "resources");
@@ -1937,13 +1938,13 @@ for (const viewport of viewports) {
       await page.waitForTimeout(800);
       const rowsAfter = await rows.count();
       const skeletons = await page.getByRole("region", { name: "Workloads", exact: true }).locator(".sk").count();
-      soft("F2", viewport.width, theme, "Workloads rows stay during a forced per-view syncing",
+      soft("background-resync", viewport.width, theme, "Workloads rows stay during a forced per-view syncing",
         rowsAfter > 0 && rowsAfter >= Math.min(5, rowsBefore) && skeletons === 0,
         { rowsBefore, rowsAfter, skeletons });
-      soft("F2", viewport.width, theme, "no Preparing panel replaces the Workloads view",
+      soft("background-resync", viewport.width, theme, "no Preparing panel replaces the Workloads view",
         (await page.locator("[data-sync-health]").count()) === 0 && !(await page.locator("body").innerText()).includes("Preparing the cluster"),
         "preparing");
-      await saveCapture(page, "k22-resync", viewport.width, theme, "workloads-syncing");
+      await saveCapture(page, "kubernetes-live-resync", viewport.width, theme, "workloads-syncing");
 
       // Re-open Related: the same rows are already in hand and must come back
       // unchanged, with no skeleton while the view settles.
@@ -1953,15 +1954,15 @@ for (const viewport of viewports) {
       await expect(relatedAgain).toBeVisible({ timeout: 20_000 });
       await expect.poll(async () => (await relatedAgain.innerText()).trim().length, { timeout: 20_000 }).toBeGreaterThan(20);
       const relatedAfter = (await relatedAgain.innerText()).replace(/\s+/g, " ").trim();
-      soft("F2", viewport.width, theme, "Related keeps its content during the forced syncing",
+      soft("background-resync", viewport.width, theme, "Related keeps its content during the forced syncing",
         relatedAfter.length > 20 && relatedAfter === relatedBefore,
         { before: relatedBefore.slice(0, 200), after: relatedAfter.slice(0, 200) });
-      soft("F2", viewport.width, theme, "Related shows no loading skeleton or Preparing panel",
+      soft("background-resync", viewport.width, theme, "Related shows no loading skeleton or Preparing panel",
         (await relatedAgain.locator('[aria-label="Loading related resources"]').count()) === 0
           && (await relatedAgain.locator(".sk").count()) === 0
           && (await relatedAgain.locator("[data-sync-health]").count()) === 0,
         "related");
-      await saveCapture(page, "k22-resync", viewport.width, theme, "related-syncing");
+      await saveCapture(page, "kubernetes-live-resync", viewport.width, theme, "related-syncing");
       await closeDrawer(page);
 
       // A fresh related query with the per-view envelope forced to syncing:
@@ -1973,23 +1974,23 @@ for (const viewport of viewports) {
       const freshRelated = drawer(page).locator('section[aria-label="Related resources"]');
       await expect(freshRelated).toBeVisible({ timeout: 20_000 });
       await expect.poll(async () => (await freshRelated.innerText()).trim().length, { timeout: 20_000 }).toBeGreaterThan(20);
-      soft("F2", viewport.width, theme, "a fresh Related read with a syncing envelope still renders its content",
+      soft("background-resync", viewport.width, theme, "a fresh Related read with a syncing envelope still renders its content",
         (await freshRelated.locator('[aria-label="Loading related resources"]').count()) === 0
           && (await freshRelated.locator(".sk").count()) === 0
           && (await freshRelated.locator("[data-sync-health]").count()) === 0,
         "fresh related");
-      await saveCapture(page, "k22-resync", viewport.width, theme, "related-fresh-syncing");
+      await saveCapture(page, "kubernetes-live-resync", viewport.width, theme, "related-fresh-syncing");
     });
   }
 }
 
 // ===========================================================================
-// F3: returning to the newest line by scrolling resumes following, with no
+// Returning to the newest line by scrolling resumes following, with no
 // Jump press and no lost tail.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`F3 scroll down resumes follow ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Scroll down resumes follow ${viewport.width} ${theme}`, async ({ browser }) => {
       test.setTimeout(120_000);
       const page = await newPage(browser, viewport, theme, { "scroll-pod": "bulk" });
       await openKubernetes(page, "nodes");
@@ -2000,19 +2001,19 @@ for (const viewport of viewports) {
       await expect.poll(async () => output.locator("[data-log-key]").count(), { timeout: 20_000 }).toBeGreaterThanOrEqual(300);
       await output.evaluate((element) => { element.scrollTop = element.scrollHeight; element.dispatchEvent(new Event("scroll", { bubbles: true })); });
       await page.waitForTimeout(300);
-      soft("F3", viewport.width, theme, "at the newest line there is no Jump", await logs.getByRole("button", { name: "Jump to latest", exact: true }).count() === 0, "count");
+      soft("follow-resume", viewport.width, theme, "at the newest line there is no Jump", await logs.getByRole("button", { name: "Jump to latest", exact: true }).count() === 0, "count");
 
       await output.hover();
       await page.mouse.wheel(0, -6000);
       await expect(logs.getByRole("button", { name: "Jump to latest", exact: true })).toBeVisible({ timeout: 10_000 });
-      soft("F3", viewport.width, theme, "scrolling away from the newest line offers Jump", true, "count");
-      await saveCapture(page, "k22-follow", viewport.width, theme, "scrolled-up");
+      soft("follow-resume", viewport.width, theme, "scrolling away from the newest line offers Jump", true, "count");
+      await saveCapture(page, "kubernetes-live-follow", viewport.width, theme, "scrolled-up");
 
       await output.hover();
       await page.mouse.wheel(0, 60000);
       await expect(logs.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0, { timeout: 10_000 });
       const gap = await output.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight);
-      soft("F3", viewport.width, theme, "scrolling down to the newest line resumes following without a click",
+      soft("follow-resume", viewport.width, theme, "scrolling down to the newest line resumes following without a click",
         await logs.getByRole("button", { name: "Jump to latest", exact: true }).count() === 0 && gap <= 48,
         { gap });
       const lastKey = () => output.evaluate((element) => {
@@ -2023,23 +2024,23 @@ for (const viewport of viewports) {
       await page.waitForTimeout(2_500);
       const afterKey = await lastKey();
       const settledGap = await output.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight);
-      soft("F3", viewport.width, theme, "the resumed read keeps following new lines",
+      soft("follow-resume", viewport.width, theme, "the resumed read keeps following new lines",
         afterKey !== beforeKey && settledGap <= 48 && await logs.getByRole("button", { name: "Jump to latest", exact: true }).count() === 0,
         { beforeKey, afterKey, settledGap });
-      await saveCapture(page, "k22-follow", viewport.width, theme, "resumed");
+      await saveCapture(page, "kubernetes-live-follow", viewport.width, theme, "resumed");
     });
   }
 }
 
 // ===========================================================================
-// F4: a rollout removes the selected container; the select moves to one that
+// A rollout removes the selected container; the select moves to one that
 // still exists and the read follows it.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`F4 rollout container fallback ${viewport.width} ${theme}`, async ({ browser, request }) => {
+    test(`Rollout container fallback ${viewport.width} ${theme}`, async ({ browser, request }) => {
       test.setTimeout(180_000);
-      if (!controlURL) throw new Error("E2E_K22_CONTROL_URL is required for the rollout fixture");
+      if (!controlURL) throw new Error("E2E_LIVE_LOGS_CONTROL_URL is required for the rollout fixture");
       const ready = await request.post(`${controlURL}/rollout/two`, { timeout: 30_000 });
       expect(ready.ok(), `rollout/two HTTP ${ready.status()}`).toBe(true);
       const page = await newPage(browser, viewport, theme);
@@ -2055,9 +2056,9 @@ for (const viewport of viewports) {
 
       await select.selectOption("metrics-sidecar");
       await expect(logOutput(page)).toContainText("metrics-sidecar", { timeout: 20_000 });
-      soft("F4", viewport.width, theme, "the selected container is the one being read",
+      soft("rollout-fallback", viewport.width, theme, "the selected container is the one being read",
         streams.some((entry) => /container=metrics-sidecar/.test(entry.url)), streams.slice(-2).map((entry) => entry.url.slice(-120)));
-      await saveCapture(page, "k22-rollout", viewport.width, theme, "selected-sidecar");
+      await saveCapture(page, "kubernetes-live-rollout", viewport.width, theme, "selected-sidecar");
 
       const breakAt = Date.now();
       const removed = await request.post(`${controlURL}/rollout/one`, { timeout: 30_000 });
@@ -2065,26 +2066,26 @@ for (const viewport of viewports) {
       await expect.poll(async () => select.inputValue(), { timeout: 30_000 }).not.toBe("metrics-sidecar");
       const selected = await select.inputValue();
       const options = await select.locator("option").evaluateAll((items) => items.map((item) => (item as HTMLOptionElement).value));
-      soft("F4", viewport.width, theme, "the select moves to a container that still exists",
+      soft("rollout-fallback", viewport.width, theme, "the select moves to a container that still exists",
         options.includes(selected) && selected !== "metrics-sidecar", { selected, options });
       await expect.poll(() => streams.some((entry) => entry.at >= breakAt && !/container=metrics-sidecar/.test(entry.url)), { timeout: 20_000 }).toBe(true);
-      soft("F4", viewport.width, theme, "the live read follows the container that remains",
+      soft("rollout-fallback", viewport.width, theme, "the live read follows the container that remains",
         streams.some((entry) => entry.at >= breakAt && !/container=metrics-sidecar/.test(entry.url)) && (await statusText(page)) === "Live",
         streams.filter((entry) => entry.at >= breakAt).slice(-2).map((entry) => entry.url.slice(-140)));
-      await saveCapture(page, "k22-rollout", viewport.width, theme, "fallback-container");
+      await saveCapture(page, "kubernetes-live-rollout", viewport.width, theme, "fallback-container");
     });
   }
 }
 
 // ===========================================================================
-// F5: a safety-limit-stopped compact read can start a new read from the card.
+// A safety-limit-stopped compact read can start a new read from the card.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`F5 compact limited reload ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Compact limited reload ${viewport.width} ${theme}`, async ({ browser }) => {
       test.setTimeout(120_000);
       const page = await newPage(browser, viewport, theme, { "limit-pod": "limit" });
-      const fixtureStreams = () => page.evaluate(() => (window as Window & { __k22FixtureStreams?: number }).__k22FixtureStreams ?? 0);
+      const fixtureStreams = () => page.evaluate(() => (window as Window & { __liveLogsFixtureStreams?: number }).__liveLogsFixtureStreams ?? 0);
       await openKubernetes(page, "nodes");
       await openPodLogs(page, "limit-pod");
       await openDrawerTab(page, "overview", "Overview");
@@ -2093,24 +2094,24 @@ for (const viewport of viewports) {
       await expect.poll(async () => (await compact.locator(".log-status").innerText()).trim(), { timeout: 20_000 }).toBe("Stopped");
       const reload = compact.getByRole("button", { name: "Reload logs", exact: true });
       await expect(reload).toBeVisible();
-      soft("F5", viewport.width, theme, "a limited compact read offers Reload in the card", await reload.isVisible(), "reload");
-      await saveCapture(page, "k22-compact", viewport.width, theme, "limited");
+      soft("compact-reload", viewport.width, theme, "a limited compact read offers Reload in the card", await reload.isVisible(), "reload");
+      await saveCapture(page, "kubernetes-live-compact", viewport.width, theme, "limited");
       const before = await fixtureStreams();
       await reload.click();
       await expect.poll(fixtureStreams, { timeout: 20_000 }).toBeGreaterThan(before);
-      soft("F5", viewport.width, theme, "Reload starts a new read", (await fixtureStreams()) > before, { before, after: await fixtureStreams() });
+      soft("compact-reload", viewport.width, theme, "Reload starts a new read", (await fixtureStreams()) > before, { before, after: await fixtureStreams() });
       await expect.poll(async () => (await compact.locator(".log-status").innerText()).trim(), { timeout: 20_000 }).toBe("Stopped");
-      await saveCapture(page, "k22-compact", viewport.width, theme, "limited-reloaded");
+      await saveCapture(page, "kubernetes-live-compact", viewport.width, theme, "limited-reloaded");
     });
   }
 }
 
 // ===========================================================================
-// F6: no dot separator anywhere, including the events and crashes counts.
+// No dot separator anywhere, including the events and crashes counts.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`F6 no dot separator ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`No dot separator ${viewport.width} ${theme}`, async ({ browser }) => {
       test.setTimeout(120_000);
       const page = await newPage(browser, viewport, theme);
       await openKubernetes(page, "nodes");
@@ -2121,30 +2122,30 @@ for (const viewport of viewports) {
       await openDrawerTab(page, "events", "Events");
       await expect(drawer(page).locator('section[aria-label="Object-scoped events"]')).toBeVisible({ timeout: 20_000 });
       await scan("events");
-      await saveCapture(page, "k22-no-dot", viewport.width, theme, "events");
+      await saveCapture(page, "kubernetes-live-no-dot", viewport.width, theme, "events");
       await openDrawerTab(page, "timeline", "Timeline");
       await expect(drawer(page).locator('section[aria-label="Resource change history"]')).toBeVisible({ timeout: 30_000 });
       await page.waitForTimeout(800);
       await scan("timeline");
-      await saveCapture(page, "k22-no-dot", viewport.width, theme, "timeline");
+      await saveCapture(page, "kubernetes-live-no-dot", viewport.width, theme, "timeline");
       await openDrawerTab(page, "overview", "Overview");
       await scan("overview");
       const dotted = scans.filter((entry) => /[·•]/.test(entry.text)).map((entry) => entry.surface);
-      soft("F6", viewport.width, theme, "no dot separator in logs, events, timeline or overview", dotted.length === 0, dotted);
+      soft("no-dot-separator", viewport.width, theme, "no dot separator in logs, events, timeline or overview", dotted.length === 0, dotted);
       const timelineText = (scans.find((entry) => entry.surface === "timeline")?.text ?? "").replace(/\s+/g, " ");
       const countLine = timelineText.match(/(\d+)\s+events?\s+and\s+(\d+)\s+crash(?:es)?/);
-      soft("F6", viewport.width, theme, "the events and crashes count is separated by words",
+      soft("no-dot-separator", viewport.width, theme, "the events and crashes count is separated by words",
         Boolean(countLine) || !/\d+\s*[·•]\s*\d+/.test(timelineText), { countLine: countLine?.[0] ?? null, sample: timelineText.slice(0, 240) });
     });
   }
 }
 
 // ===========================================================================
-// Still-valid K21 checks on the K22 markup.
+// Earlier log checks that still hold on the current markup.
 // ===========================================================================
 for (const viewport of [viewports[0], viewports[2]] as const) {
   for (const theme of themes) {
-    test(`K21 first paint ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Logs first paint ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme, { "quiet-pod": "quiet" });
       await openKubernetes(page, "nodes");
       await openPodLogs(page, "quiet-pod");
@@ -2154,24 +2155,24 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
       const waitingText = await logs.innerText();
       soft("A2", viewport.width, theme, "first paint says waiting", waitingText.includes("Waiting for the first log line…"), waitingText.slice(0, 200));
       soft("A2", viewport.width, theme, "never says selected time", !waitingText.includes("No log lines in the selected time"), waitingText.slice(0, 200));
-      soft("QA-207", viewport.width, theme, "quiet sentence absent before the heartbeat window", !waitingText.includes("No new log lines yet. The container is quiet."), waitingText.slice(0, 200));
-      await saveCapture(page, "k21-logs-first-paint", viewport.width, theme, "waiting");
+      soft("quiet-and-ended", viewport.width, theme, "quiet sentence absent before the heartbeat window", !waitingText.includes("No new log lines yet. The container is quiet."), waitingText.slice(0, 200));
+      await saveCapture(page, "kubernetes-live-logs-first-paint", viewport.width, theme, "waiting");
       await expect(logs.getByText("No new log lines yet. The container is quiet.", { exact: true })).toBeVisible({ timeout: 15_000 });
-      soft("QA-207", viewport.width, theme, "quiet sentence on a live heartbeat-only read", (await statusText(page)) === "Live", await statusText(page));
-      await saveCapture(page, "k21-logs-first-paint", viewport.width, theme, "quiet");
+      soft("quiet-and-ended", viewport.width, theme, "quiet sentence on a live heartbeat-only read", (await statusText(page)) === "Live", await statusText(page));
+      await saveCapture(page, "kubernetes-live-logs-first-paint", viewport.width, theme, "quiet");
     });
 
-    test(`K21 ended and stopped ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Logs ended and stopped ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme, { "ended-pod": "ended", "limit-pod": "limit" });
       await openKubernetes(page, "nodes");
       await openPodLogs(page, "ended-pod");
       await waitStatus(page, "Ended");
       const endedOutput = await logOutput(page).innerText();
-      soft("QA-207", viewport.width, theme, "ended empty state uses ended wording", /ended/i.test(endedOutput) && /No further lines will arrive/i.test(endedOutput), endedOutput.slice(0, 240));
-      soft("QA-207", viewport.width, theme, "ended empty state is not the quiet sentence", !/container is quiet/i.test(endedOutput), endedOutput.slice(0, 240));
+      soft("quiet-and-ended", viewport.width, theme, "ended empty state uses ended wording", /ended/i.test(endedOutput) && /No further lines will arrive/i.test(endedOutput), endedOutput.slice(0, 240));
+      soft("quiet-and-ended", viewport.width, theme, "ended empty state is not the quiet sentence", !/container is quiet/i.test(endedOutput), endedOutput.slice(0, 240));
       soft("A4", viewport.width, theme, "ended Pod has no Follow", await drawer(page).getByRole("button", { name: "Follow", exact: true }).count() === 0, await statusText(page));
       soft("A4", viewport.width, theme, "ended Pod is not Unavailable", (await statusText(page)) !== "Unavailable", await statusText(page));
-      await saveCapture(page, "k21-logs-ended", viewport.width, theme, "ended");
+      await saveCapture(page, "kubernetes-live-logs-ended", viewport.width, theme, "ended");
       await closeDrawer(page);
 
       await openPodLogs(page, "limit-pod");
@@ -2179,10 +2180,10 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
       soft("A4", viewport.width, theme, "limit-stopped reads Stopped", (await statusText(page)) === "Stopped", await statusText(page));
       soft("A4", viewport.width, theme, "limit-stopped is not Ended", (await statusText(page)) !== "Ended", await statusText(page));
       soft("A4", viewport.width, theme, "limit-stopped has no Follow", await drawer(page).getByRole("button", { name: "Follow", exact: true }).count() === 0, await statusText(page));
-      await saveCapture(page, "k21-logs-ended", viewport.width, theme, "stopped");
+      await saveCapture(page, "kubernetes-live-logs-ended", viewport.width, theme, "stopped");
     });
 
-    test(`K21 live dot and jump ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Logs live dot and jump ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme, { "scroll-pod": "bulk" });
       await openKubernetes(page, "nodes");
       await openPodLogs(page, "checkout-api-0");
@@ -2195,14 +2196,14 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
         return { name: style.animationName, duration: style.animationDuration };
       });
       soft("A5", viewport.width, theme, "Live dot animates", moving.name === "log-dot-pulse", moving);
-      await saveCapture(page, "k21-logs-live-dot", viewport.width, theme, "animated");
+      await saveCapture(page, "kubernetes-live-logs-live-dot", viewport.width, theme, "animated");
       await page.emulateMedia({ reducedMotion: "reduce", colorScheme: theme });
       const still = await dot.evaluate((element) => {
         const style = getComputedStyle(element);
         return { name: style.animationName, duration: style.animationDuration };
       });
       soft("A5", viewport.width, theme, "reduced motion stops the dot", still.name === "none", still);
-      await saveCapture(page, "k21-logs-live-dot", viewport.width, theme, "reduced-motion");
+      await saveCapture(page, "kubernetes-live-logs-live-dot", viewport.width, theme, "reduced-motion");
       await page.emulateMedia({ reducedMotion: "no-preference", colorScheme: theme });
       soft("A5", viewport.width, theme, "no retained/evicted stats", !/\bretained\b|\bevicted\b/i.test(await fullLogSlot(page).innerText()), "stats");
       await closeDrawer(page);
@@ -2217,14 +2218,14 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
       await scrolling.locator('summary[aria-label="More log actions"]').click();
       const menuLatest = scrolling.getByRole("button", { name: "Scroll to latest", exact: true });
       soft("A5", viewport.width, theme, "menu Scroll to latest appears when scrolled up", await menuLatest.count() === 1, "count");
-      await saveCapture(page, "k21-logs-jump", viewport.width, theme, "scrolled-up");
+      await saveCapture(page, "kubernetes-live-logs-jump", viewport.width, theme, "scrolled-up");
       await scrolling.getByRole("button", { name: "Jump to latest", exact: true }).click();
       await expect(scrolling.getByRole("button", { name: "Jump to latest", exact: true })).toHaveCount(0, { timeout: 5_000 });
       soft("A5", viewport.width, theme, "menu Scroll to latest gone at bottom", await scrolling.getByRole("button", { name: "Scroll to latest", exact: true }).count() === 0, "count");
-      await saveCapture(page, "k21-logs-jump", viewport.width, theme, "at-bottom");
+      await saveCapture(page, "kubernetes-live-logs-jump", viewport.width, theme, "at-bottom");
     });
 
-    test(`K21 row logs under 300ms ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Row logs under 300ms ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme);
       await openKubernetes(page, "resources");
       let describeStarted = false;
@@ -2250,7 +2251,7 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
       soft("A7", viewport.width, theme, "Preparing names the resource", preparing.includes("checkout-api"), preparing.slice(0, 200));
       soft("A7", viewport.width, theme, "Preparing names the kind", preparing.includes("Deployment"), preparing.slice(0, 200));
       soft("A7", viewport.width, theme, "Preparing is not a bare skeleton", await drawer(page).locator(".sk").count() === 0, "skeletons");
-      await saveCapture(page, "k21-detail-preparing", viewport.width, theme, "logs-open");
+      await saveCapture(page, "kubernetes-live-detail-preparing", viewport.width, theme, "logs-open");
       await expect.poll(() => describeFinished, { timeout: 15_000 }).toBe(true);
       await expect(page.locator("[data-resource-preparing]")).toHaveCount(0, { timeout: 10_000 });
       await closeDrawer(page);
@@ -2267,10 +2268,10 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
       const streamable = page.locator('[role="listitem"]').filter({ hasText: bulkDeployment }).first();
       await expect(streamable).toBeVisible({ timeout: 20_000 });
       soft("A7", viewport.width, theme, "Deployment row has a Logs action", await streamable.locator('[data-row-action="logs"]').count() === 1, "count");
-      await saveCapture(page, "k21-workloads-actions", viewport.width, theme, "non-stream-kinds");
+      await saveCapture(page, "kubernetes-live-workloads-actions", viewport.width, theme, "non-stream-kinds");
     });
 
-    test(`K21 zero crashes ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Zero crashes ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme);
       await openKubernetes(page, "nodes");
       await openPodLogs(page, "long-container-pod");
@@ -2279,10 +2280,10 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
       const panels = await drawer(page).innerText();
       soft("A8", viewport.width, theme, "no crash section at zero crashes", !/captured crashes/i.test(panels), panels.slice(0, 200));
       soft("A8", viewport.width, theme, "no crash pager on a single page", await drawer(page).getByRole("navigation", { name: "Captured crash pages", exact: true }).count() === 0, "count");
-      await saveCapture(page, "k21-detail-crashes", viewport.width, theme, "zero");
+      await saveCapture(page, "kubernetes-live-detail-crashes", viewport.width, theme, "zero");
     });
 
-    test(`QA-196 issue subject ${viewport.width} ${theme}`, async ({ browser }) => {
+    test(`Issue subject ${viewport.width} ${theme}`, async ({ browser }) => {
       const page = await newPage(browser, viewport, theme);
       await openKubernetes(page, "issues");
       const namespace = page.getByRole("combobox", { name: "Issue namespace", exact: true });
@@ -2303,19 +2304,19 @@ for (const viewport of [viewports[0], viewports[2]] as const) {
           docOverflow: document.documentElement.scrollWidth - window.innerWidth,
         };
       });
-      soft("QA-196", viewport.width, theme, "subject shows the full name in title", geometry.title === `payments/${longPod}`, geometry.title);
-      soft("QA-196", viewport.width, theme, "subject is one nowrap ellipsis line", geometry.overflow === "ellipsis" && geometry.whiteSpace === "nowrap" && geometry.height <= Math.max(geometry.lineHeight * 1.6, 20), geometry);
+      soft("issue-subject", viewport.width, theme, "subject shows the full name in title", geometry.title === `payments/${longPod}`, geometry.title);
+      soft("issue-subject", viewport.width, theme, "subject is one nowrap ellipsis line", geometry.overflow === "ellipsis" && geometry.whiteSpace === "nowrap" && geometry.height <= Math.max(geometry.lineHeight * 1.6, 20), geometry);
       if (viewport.width === 390) {
-        soft("QA-196", viewport.width, theme, "subject is clipped, not wrapped mid-word", geometry.scrollWidth > geometry.clientWidth, { clientWidth: geometry.clientWidth, scrollWidth: geometry.scrollWidth });
+        soft("issue-subject", viewport.width, theme, "subject is clipped, not wrapped mid-word", geometry.scrollWidth > geometry.clientWidth, { clientWidth: geometry.clientWidth, scrollWidth: geometry.scrollWidth });
       }
-      soft("QA-196", viewport.width, theme, "subject stays inside the viewport", geometry.right <= geometry.viewport + 1 && geometry.docOverflow <= 1, { right: geometry.right, viewport: geometry.viewport, docOverflow: geometry.docOverflow });
-      await saveCapture(page, "k21-issues-subject", viewport.width, theme, "long-subject");
+      soft("issue-subject", viewport.width, theme, "subject stays inside the viewport", geometry.right <= geometry.viewport + 1 && geometry.docOverflow <= 1, { right: geometry.right, viewport: geometry.viewport, docOverflow: geometry.docOverflow });
+      await saveCapture(page, "kubernetes-live-issues-subject", viewport.width, theme, "long-subject");
     });
   }
 }
 
 for (const width of [1440, 390] as const) {
-  test(`QA-206 pager ${width} light`, async ({ browser }) => {
+  test(`Workloads pager ${width} light`, async ({ browser }) => {
     const viewport = viewports.find((item) => item.width === width)!;
     const theme: Theme = "light";
     const page = await newPage(browser, viewport, theme);
@@ -2326,12 +2327,12 @@ for (const width of [1440, 390] as const) {
     const pager = page.getByRole("navigation", { name: "Page navigation", exact: true });
     await expect(pager).toBeVisible({ timeout: 10_000 });
     const next = page.getByRole("button", { name: "Next page", exact: true });
-    soft("QA-206", width, theme, "multi-page list keeps a pager", await pager.isVisible(), true);
-    soft("QA-206", width, theme, "multi-page pager can move forward", await next.isEnabled(), await next.isDisabled());
-    await saveCapture(page, "k21-pager", width, theme, "multi-page");
+    soft("pager", width, theme, "multi-page list keeps a pager", await pager.isVisible(), true);
+    soft("pager", width, theme, "multi-page pager can move forward", await next.isEnabled(), await next.isDisabled());
+    await saveCapture(page, "kubernetes-live-pager", width, theme, "multi-page");
     await next.click();
     await expect(pager.getByText("Page 2", { exact: true })).toBeVisible({ timeout: 20_000 });
-    soft("QA-206", width, theme, "second page renders", (await rows.count()) > 0, await rows.count());
+    soft("pager", width, theme, "second page renders", (await rows.count()) > 0, await rows.count());
     await pager.getByRole("button", { name: "Previous page", exact: true }).click();
     await expect(pager.getByText("Page 1", { exact: true })).toBeVisible({ timeout: 20_000 });
 
@@ -2339,22 +2340,22 @@ for (const width of [1440, 390] as const) {
     await search.fill("bulk-app");
     await expect.poll(async () => rows.count(), { timeout: 30_000 }).toBeGreaterThan(0);
     await expect.poll(async () => pager.count(), { timeout: 30_000 }).toBe(0);
-    soft("QA-206", width, theme, "single-page Workloads list has no pager", await pager.count() === 0, { rows: await rows.count() });
-    await saveCapture(page, "k21-pager", width, theme, "single-page");
+    soft("pager", width, theme, "single-page Workloads list has no pager", await pager.count() === 0, { rows: await rows.count() });
+    await saveCapture(page, "kubernetes-live-pager", width, theme, "single-page");
   });
 }
 
 // ===========================================================================
-// F1: the real revoked-credential path. No /sync route fixture: fakekube
+// The real revoked-credential path. No /sync route fixture: fakekube
 // revokes the token at the API server (every call answers 401) while the token
 // file stays readable, so the connector still resolves and the server itself
 // answers 200 with state=error and the durable first_ready_at. Declared last.
 // ===========================================================================
 for (const viewport of viewports) {
   for (const theme of themes) {
-    test(`F1 revoked credential ${viewport.width} ${theme}`, async ({ browser, request }) => {
+    test(`Revoked credential ${viewport.width} ${theme}`, async ({ browser, request }) => {
       test.setTimeout(300_000);
-      if (!controlURL) throw new Error("E2E_K22_CONTROL_URL is required for the credential proof");
+      if (!controlURL) throw new Error("E2E_LIVE_LOGS_CONTROL_URL is required for the credential proof");
       const baseURL = process.env.E2E_BASE_URL || "http://127.0.0.1:8080";
       const headers = { "X-Gateway-Secret": process.env.E2E_GATEWAY_SECRET ?? "" };
       const syncURL = `${baseURL}/api/admin/kubernetes/sync?cluster=${encodeURIComponent(cluster)}`;
@@ -2372,7 +2373,7 @@ for (const viewport of viewports) {
       await selectView(page, "Workloads");
       const rows = page.getByRole("region", { name: "Workloads", exact: true }).locator('[role="listitem"]');
       await expect.poll(async () => rows.count(), { timeout: 60_000 }).toBeGreaterThan(5);
-      await saveCapture(page, "k22-credential", viewport.width, theme, "before-break");
+      await saveCapture(page, "kubernetes-live-credential", viewport.width, theme, "before-break");
 
       const broken = await request.post(`${controlURL}/break-credential`, { timeout: 30_000 });
       expect(broken.ok(), `break-credential HTTP ${broken.status()}`).toBe(true);
@@ -2381,7 +2382,7 @@ for (const viewport of viewports) {
       await expect.poll(async () => (await request.get(syncURL, { headers, timeout: 20_000 })).json().then((body) => body.state), { timeout: 60_000 }).toBe("error");
       const liveSync = await request.get(syncURL, { headers, timeout: 30_000 });
       const liveBody = await liveSync.json() as { state?: string; first_ready_at?: string };
-      soft("F1", viewport.width, theme, "the server answers 200 with state error and first_ready_at",
+      soft("revoked-credential", viewport.width, theme, "the server answers 200 with state error and first_ready_at",
         liveSync.status() === 200 && liveBody.state === "error" && liveBody.first_ready_at === before.first_ready_at,
         { status: liveSync.status(), state: liveBody.state, first_ready_at: liveBody.first_ready_at, before: before.first_ready_at });
 
@@ -2399,29 +2400,29 @@ for (const viewport of viewports) {
       const indicatorVisible = await indicator.isVisible().catch(() => false);
       const indicatorText = indicatorVisible ? (await indicator.innerText()).trim() : "";
       const dotClass = indicatorVisible ? (await indicator.locator('[aria-hidden="true"]').getAttribute("class") ?? "") : "";
-      soft("F1", viewport.width, theme, "the sync indicator says Failed and is not green",
+      soft("revoked-credential", viewport.width, theme, "the sync indicator says Failed and is not green",
         indicatorVisible && indicatorText === "Failed" && /bg-sev-critical/.test(dotClass) && !/bg-sev-ok/.test(dotClass),
         { indicatorVisible, indicatorText, dotClass });
       const stripText = stripVisible ? (await strip.innerText()).replace(/\s+/g, " ") : "";
-      soft("F1", viewport.width, theme, "the strip names the failure", stripVisible && stripText.includes("Cluster sync failed"), { stripVisible, stripText: stripText.slice(0, 220) });
-      soft("F1", viewport.width, theme, "the data stays on screen", (await rows.count()) > 5, await rows.count());
+      soft("revoked-credential", viewport.width, theme, "the strip names the failure", stripVisible && stripText.includes("Cluster sync failed"), { stripVisible, stripText: stripText.slice(0, 220) });
+      soft("revoked-credential", viewport.width, theme, "the data stays on screen", (await rows.count()) > 5, await rows.count());
       const retry = strip.getByRole("button", { name: "Retry sync", exact: true });
-      soft("QA-211", viewport.width, theme, "the failed strip carries Retry",
+      soft("failure-age-and-setup", viewport.width, theme, "the failed strip carries Retry",
         (await retry.count()) === 1 && await retry.isVisible() && await retry.isEnabled(),
         { count: await retry.count() });
       const ageNode = strip.locator("[data-sync-age]");
       const ageText = (await ageNode.count()) ? (await ageNode.innerText()).trim() : "";
-      soft("QA-211", viewport.width, theme, "the data kept on screen carries a real age",
+      soft("failure-age-and-setup", viewport.width, theme, "the data kept on screen carries a real age",
         /^Showing data from \d+ (second|seconds|minute|minutes|hour|hours) ago\.$/.test(ageText), ageText);
-      soft("QA-211", viewport.width, theme, "the strip never calls the retained data just now",
+      soft("failure-age-and-setup", viewport.width, theme, "the strip never calls the retained data just now",
         !/just now|loaded just now|0 seconds ago/i.test(stripText), stripText.slice(0, 220));
       const liveCard = page.locator("article[aria-labelledby='kubernetes-connector-title']");
-      soft("F1", viewport.width, theme, "the live page does not replace the cluster with a connector-missing card",
+      soft("revoked-credential", viewport.width, theme, "the live page does not replace the cluster with a connector-missing card",
         (await liveCard.count()) === 0, { connectorCard: (await liveCard.count()) > 0 ? (await liveCard.innerText()).replace(/\s+/g, " ").slice(0, 200) : null });
-      soft("F1", viewport.width, theme, "Preparing does not reappear after the failure",
+      soft("revoked-credential", viewport.width, theme, "Preparing does not reappear after the failure",
         (await page.locator("[data-sync-health]").count()) === 0 && !(await page.locator("body").innerText()).includes("Preparing the cluster"),
         "preparing");
-      await saveCapture(page, "k22-credential", viewport.width, theme, "live-error");
+      await saveCapture(page, "kubernetes-live-credential", viewport.width, theme, "live-error");
 
       // Cold reload: the same failure must be named on a non-Overview view.
       await page.reload();
@@ -2445,45 +2446,45 @@ for (const viewport of viewports) {
       const panelText = (await page.locator("#kubernetes-view-panel").count())
         ? (await page.locator("#kubernetes-view-panel").innerText()).replace(/\s+/g, " ")
         : "";
-      soft("F1", viewport.width, theme, "a cold reload names the failure on a non-Overview view instead of rendering blank",
+      soft("revoked-credential", viewport.width, theme, "a cold reload names the failure on a non-Overview view instead of rendering blank",
         tabsVisible && coldStripVisible && (panelText.includes("Cluster sync failed") || mainText.includes("Cluster sync failed")),
         { tabsVisible, coldStripVisible, main: mainText.slice(0, 260) });
-      soft("F1", viewport.width, theme, "a cold reload does not replace the sync failure with a connector-missing card",
+      soft("revoked-credential", viewport.width, theme, "a cold reload does not replace the sync failure with a connector-missing card",
         (await coldCard.count()) === 0, { connectorCard: coldCardText.slice(0, 200) });
-      soft("F1", viewport.width, theme, "a cold reload does not bring Preparing back",
+      soft("revoked-credential", viewport.width, theme, "a cold reload does not bring Preparing back",
         (await page.locator("[data-sync-health]").count()) === 0 && !mainText.includes("Preparing the cluster"),
         "preparing");
       const coldRetry = coldStrip.getByRole("button", { name: "Retry sync", exact: true });
-      soft("QA-211", viewport.width, theme, "the cold failed strip carries Retry",
+      soft("failure-age-and-setup", viewport.width, theme, "the cold failed strip carries Retry",
         (await coldStrip.locator("[data-sync-retry]").count()) === 1 && await coldRetry.isVisible(),
         { count: await coldStrip.locator("[data-sync-retry]").count() });
-      soft("QA-211", viewport.width, theme, "a cold reload claims no age for data it does not have",
+      soft("failure-age-and-setup", viewport.width, theme, "a cold reload claims no age for data it does not have",
         (await page.locator("[data-sync-age]").count()) === 0
           && !/Showing data from/i.test(mainText)
           && !/just now|loaded just now|0 seconds ago/i.test(mainText),
         { main: mainText.slice(0, 260) });
       const coldSync = await request.get(syncURL, { headers, timeout: 30_000 });
       const coldBody = await coldSync.json() as { state?: string; first_ready_at?: string };
-      soft("F1", viewport.width, theme, "first_ready_at still arrives on the cold path",
+      soft("revoked-credential", viewport.width, theme, "first_ready_at still arrives on the cold path",
         coldSync.status() === 200 && coldBody.state === "error" && coldBody.first_ready_at === before.first_ready_at,
         { status: coldSync.status(), state: coldBody.state, first_ready_at: coldBody.first_ready_at });
-      await saveCapture(page, "k22-credential", viewport.width, theme, "cold-reload-error");
+      await saveCapture(page, "kubernetes-live-credential", viewport.width, theme, "cold-reload-error");
     });
   }
 }
 
 // ===========================================================================
-// QA-211, the other half of the distinction: a deployment that truly has no
+// The other half of the dead-credential distinction: a deployment that truly has no
 // connector must still get the setup card, and a configured cluster whose
 // credential never resolved has never published, so it owes no age at all.
 // Both are separate real versus processes on their own ports and state dirs,
-// started by k22-visual-seed.mjs. No route fixtures.
+// started by the harness visual seed. No route fixtures.
 // ===========================================================================
 for (const width of [1440, 390] as const) {
   for (const theme of themes) {
-    test(`QA-211 genuine not configured ${width} ${theme}`, async ({ browser }) => {
-      const setupURL = process.env.E2E_K22_SETUP_URL;
-      if (!setupURL) throw new Error("E2E_K22_SETUP_URL is required for the connector distinction");
+    test(`Genuine not-configured cluster ${width} ${theme}`, async ({ browser }) => {
+      const setupURL = process.env.E2E_LIVE_LOGS_SETUP_URL;
+      if (!setupURL) throw new Error("E2E_LIVE_LOGS_SETUP_URL is required for the connector distinction");
       const viewport = viewports.find((item) => item.width === width)!;
       const page = await newPage(browser, viewport, theme);
       await page.goto(`${setupURL}/agent/kubernetes?view=overview`);
@@ -2491,51 +2492,51 @@ for (const width of [1440, 390] as const) {
       const card = page.locator("article[aria-labelledby='kubernetes-connector-title']");
       await expect(card).toBeVisible({ timeout: 60_000 });
       const cardText = (await card.innerText()).replace(/\s+/g, " ");
-      soft("QA-211", width, theme, "the genuine not-configured cluster shows the setup card",
+      soft("failure-age-and-setup", width, theme, "the genuine not-configured cluster shows the setup card",
         /Kubernetes connector/.test(cardText) && /Kubernetes connector is not configured\./.test(cardText), cardText.slice(0, 240));
-      soft("QA-211", width, theme, "setup is not dressed as a sync failure",
+      soft("failure-age-and-setup", width, theme, "setup is not dressed as a sync failure",
         (await page.locator("[data-sync-strip]").count()) === 0 && (await page.locator("[data-sync-health]").count()) === 0,
         { strip: await page.locator("[data-sync-strip]").count(), health: await page.locator("[data-sync-health]").count() });
-      soft("QA-211", width, theme, "setup shows no view tabs and claims no age",
+      soft("failure-age-and-setup", width, theme, "setup shows no view tabs and claims no age",
         (await page.getByRole("tablist", { name: "Kubernetes views", exact: true }).count()) === 0
           && (await page.locator("[data-sync-age]").count()) === 0
           && !/Showing data from/i.test(cardText),
         { tabs: await page.getByRole("tablist", { name: "Kubernetes views", exact: true }).count() });
-      await saveCapture(page, "k22-connector-distinction", width, theme, "not-configured");
+      await saveCapture(page, "kubernetes-live-connector-distinction", width, theme, "not-configured");
     });
 
-    test(`QA-211 never-published dead credential ${width} ${theme}`, async ({ browser, request }) => {
-      const neverURL = process.env.E2E_K22_NEVER_PUBLISHED_URL;
-      if (!neverURL) throw new Error("E2E_K22_NEVER_PUBLISHED_URL is required for the age-honesty proof");
+    test(`Never-published cluster with a dead credential ${width} ${theme}`, async ({ browser, request }) => {
+      const neverURL = process.env.E2E_LIVE_LOGS_NEVER_PUBLISHED_URL;
+      if (!neverURL) throw new Error("E2E_LIVE_LOGS_NEVER_PUBLISHED_URL is required for the age-honesty proof");
       const headers = { "X-Gateway-Secret": process.env.E2E_GATEWAY_SECRET ?? "" };
       const viewport = viewports.find((item) => item.width === width)!;
 
       // The server's own answer: a failure report for a cluster that never
       // published a snapshot carries no first_ready_at and no age_s.
-      const answer = await request.get(`${neverURL}/api/admin/kubernetes/sync?cluster=k22-never`, { headers, timeout: 30_000 });
+      const answer = await request.get(`${neverURL}/api/admin/kubernetes/sync?cluster=live-logs-never`, { headers, timeout: 30_000 });
       const report = await answer.json() as { state?: string; first_ready_at?: string; age_s?: number };
-      soft("QA-211", width, theme, "a never-published cluster's report claims no age",
+      soft("failure-age-and-setup", width, theme, "a never-published cluster's report claims no age",
         answer.status() === 200 && report.state === "error" && report.first_ready_at == null && report.age_s == null,
         { status: answer.status(), state: report.state, first_ready_at: report.first_ready_at ?? null, age_s: report.age_s ?? null });
 
       const page = await newPage(browser, viewport, theme);
-      await page.goto(`${neverURL}/agent/kubernetes?cluster=k22-never&view=nodes`);
+      await page.goto(`${neverURL}/agent/kubernetes?cluster=live-logs-never&view=nodes`);
       await signInWithGatewaySecret(page);
       const surface = page.locator('[data-sync-health="failed"]');
       await expect(surface).toBeVisible({ timeout: 60_000 });
       const mainText = (await page.locator("main").innerText()).replace(/\s+/g, " ");
-      soft("QA-211", width, theme, "a never-published failure names itself and blocks the views",
+      soft("failure-age-and-setup", width, theme, "a never-published failure names itself and blocks the views",
         /Cluster sync failed/.test(mainText) && (await page.locator("[data-sync-strip]").count()) === 0,
         { main: mainText.slice(0, 260), strip: await page.locator("[data-sync-strip]").count() });
-      soft("QA-211", width, theme, "no age is claimed when nothing was ever published",
+      soft("failure-age-and-setup", width, theme, "no age is claimed when nothing was ever published",
         (await page.locator("[data-sync-age]").count()) === 0
           && !/Showing data from/i.test(mainText)
           && !/loaded just now|just now|0 seconds ago/i.test(mainText),
         { main: mainText.slice(0, 260), ageNodes: await page.locator("[data-sync-age]").count() });
-      soft("QA-211", width, theme, "the never-published failure offers the same Retry",
+      soft("failure-age-and-setup", width, theme, "the never-published failure offers the same Retry",
         (await surface.locator("[data-sync-retry]").count()) === 1 && await surface.getByRole("button", { name: "Retry sync", exact: true }).isVisible(),
         { retry: await surface.locator("[data-sync-retry]").count() });
-      await saveCapture(page, "k22-connector-distinction", width, theme, "never-published");
+      await saveCapture(page, "kubernetes-live-connector-distinction", width, theme, "never-published");
     });
   }
 }
@@ -2592,7 +2593,7 @@ for (const width of [1440, 390] as const) {
       record("SEC-PERM", width, theme, "evidence class", true, {
         class: "fixture", reason: "403 body is the controller's exact refusal; a community gateway session always holds infrastructure:view",
       });
-      await saveCapture(page, "k22-permission", width, theme, "denied");
+      await saveCapture(page, "kubernetes-live-permission", width, theme, "denied");
     });
   }
 }

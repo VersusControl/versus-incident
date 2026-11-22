@@ -62,7 +62,7 @@ func currentChatServiceFactory() ChatServiceFactory {
 	return chatFactory
 }
 
-// SetAgentApprovalServiceFactory installs the org-scoped H4 approval service factory.
+// SetAgentApprovalServiceFactory installs the org-scoped agent approval service factory.
 func SetAgentApprovalServiceFactory(factory AgentApprovalServiceFactory) {
 	approvalFactoryMu.Lock()
 	approvalFactory = factory

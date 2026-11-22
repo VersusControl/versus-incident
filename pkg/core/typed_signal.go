@@ -20,8 +20,6 @@ import (
 // implement them and register via agent.RegisterTypedBrain. OSS ships the LOG
 // brain (drain-miner catalog Learner + frequency-novelty Detector) as the
 // built-in default; OSS never imports the enterprise implementations.
-//
-// See plans/productization/sre/phase-8-per-type-ai-flow.md §2 for the design.
 // -----------------------------------------------------------------------------
 
 // Observation is one keyed unit a typed pipeline learns/scores for a tick.

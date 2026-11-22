@@ -588,9 +588,11 @@ func TestDefaultFileStorageEstablishesHistoryAfterFirstCapture(t *testing.T) {
 	defer registry.Close()
 	since := time.Now().UTC().Add(-time.Hour)
 	var page TimelinePage
-	waitUntil(t, 8*time.Second, "history established on default file storage", func() bool {
+	// The wait returns as soon as the first capture's break is readable; the
+	// budget only bounds a hung run on a loaded machine.
+	waitUntil(t, 30*time.Second, "history established on default file storage", func() bool {
 		page, err = service.Timeline(t.Context(), TimelineQuery{Since: since, Until: time.Now().UTC(), Namespace: "default", BreaksOnly: true})
-		return err == nil
+		return err == nil && page.Total > 0
 	})
 	if page.Total != 1 || len(page.Items) != 1 {
 		t.Fatalf("default file storage history=%+v", page)

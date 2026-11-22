@@ -479,3 +479,152 @@ func TestPostgresLeaseTakeoverBetweenSavePartsFencesTheOldOwner(t *testing.T) {
 		t.Fatalf("checkpoint moved back to %q", latest.ID)
 	}
 }
+
+// savePartsHistory reads a scope's whole change history page by page, as an
+// unfiltered list does. It answers the first page's total and every item, by
+// ID, with its stored value.
+func savePartsHistory(t *testing.T, store EvidenceStore, scope EvidenceScope, since time.Time) (int, map[string]string) {
+	t.Helper()
+	query := EvidenceQuery{Type: "change", Since: since, Until: time.Now().UTC(), Limit: 500}
+	total, items := -1, map[string]string{}
+	for {
+		page, err := store.QueryEvidence(t.Context(), scope, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if total < 0 {
+			total = page.Total
+		}
+		for _, item := range page.Items {
+			var payload struct{ Value string }
+			if err = json.Unmarshal(item.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if _, seen := items[item.ID]; seen {
+				t.Fatalf("change %s listed twice", item.ID)
+			}
+			items[item.ID] = payload.Value
+		}
+		if page.Next == "" {
+			return total, items
+		}
+		query.Cursor = page.Next
+	}
+}
+
+// A save abandoned after some of its parts leaves their journal rows and its
+// in-progress marker behind. Until the next save lands, readers see none of
+// those rows, and the unfiltered total is counted from what they do see, not
+// from the scope's counters, which the parts already moved. The next save
+// adopts the parts: its checkpoint covers them, so they read as history, each
+// once, beside the new capture, and the exact total from the counters matches
+// what a reader lists.
+func TestPostgresNextSaveAdoptsTheRowsOfAnAbandonedSave(t *testing.T) {
+	p := worstCaseProvider(t, worstCaseDatabase(t), PostgresOptions{EvidenceRetention: "0"})
+	p.evidenceSaveChunk = 100
+	scope := EvidenceScope{OrgID: "default", ClusterID: "save-adopted", ClusterUID: "physical"}
+	key, err := evidenceScopeKey(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	since := origin.Add(-time.Hour)
+
+	// The cluster's first capture: 50 changes, saved in one transaction.
+	steady := savePartsBatch(t, p, scope, "steady", origin, 50)
+	if err = p.CommitEvidence(t.Context(), scope, steady); err != nil {
+		t.Fatal(err)
+	}
+
+	// The next capture carries new versions of those 50 changes and 950 new
+	// ones. It is abandoned when its fourth part is rejected.
+	at := origin.Add(time.Minute)
+	abandoned := savePartsBatch(t, p, scope, "abandoned", at, 1000)
+	for i := range steady.Records {
+		abandoned.Records[i] = worstChange(steady.Records[i].ID, "revised", at, at, 0)
+	}
+	rejected := errors.New("part rejected")
+	p.evidenceChunkFault = func(ctx context.Context, tx *sql.Tx, part, size int) error {
+		if part == 4 {
+			return rejected
+		}
+		return nil
+	}
+	if err = p.CommitEvidence(t.Context(), scope, abandoned); !errors.Is(err, rejected) {
+		t.Fatalf("the abandoned save answered %v", err)
+	}
+	p.evidenceChunkFault = nil
+	var orphans int
+	var orphanHigh int64
+	if err = p.db.QueryRow(`SELECT COUNT(*),COALESCE(MAX(e.sequence),0) FROM kubernetes_evidence_events e JOIN kubernetes_evidence_scopes s ON s.scope_key=e.scope_key WHERE e.scope_key=$1 AND e.sequence>s.high_sequence`, key).Scan(&orphans, &orphanHigh); err != nil {
+		t.Fatal(err)
+	}
+	if orphans != 300 {
+		t.Fatalf("the abandoned save left %d rows past the checkpoint, want its three parts of 100", orphans)
+	}
+	checkpoint, err := p.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.ID != steady.ID || checkpoint.Saving != abandoned.ID || checkpoint.SavingHigh != uint64(orphanHigh) {
+		t.Fatalf("checkpoint after the abandoned save: id %q saving %q up to %d, want %q saving %q up to %d", checkpoint.ID, checkpoint.Saving, checkpoint.SavingHigh, steady.ID, abandoned.ID, orphanHigh)
+	}
+	var counted int
+	if err = p.db.QueryRow(`SELECT COALESCE(SUM(value::bigint),0) FROM kubernetes_evidence_scopes s,jsonb_each_text(s.event_counts) WHERE s.scope_key=$1`, key).Scan(&counted); err != nil {
+		t.Fatal(err)
+	}
+	total, items := savePartsHistory(t, p, scope, since)
+	if total != len(steady.Records) || len(items) != len(steady.Records) {
+		t.Fatalf("readers see %d changes with a total of %d while the save is abandoned, want the first capture's %d", len(items), total, len(steady.Records))
+	}
+	for id, value := range items {
+		if value != "created" {
+			t.Fatalf("change %s reads %q before the next save, want the first capture's version", id, value)
+		}
+	}
+	if counted <= total {
+		t.Fatalf("the scope's counters hold %d changes, want more than the %d readers see: the parts moved them", counted, total)
+	}
+
+	// The next capture brings 200 other changes and does not re-offer the
+	// abandoned ones.
+	pinned := checkpoint.HighSequence
+	next := savePartsBatch(t, p, scope, "next", at.Add(time.Minute), 200)
+	if err = p.CommitEvidence(t.Context(), scope, next); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err = p.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.ID != next.ID || checkpoint.Saving != "" || checkpoint.SavingHigh != 0 || checkpoint.HighSequence < uint64(orphanHigh) {
+		t.Fatalf("checkpoint after the next save: id %q saving %q up to %d, pinned to %d; want %q pinned past %d", checkpoint.ID, checkpoint.Saving, checkpoint.SavingHigh, checkpoint.HighSequence, next.ID, orphanHigh)
+	}
+	revised, adoptedNew := 0, 0
+	if err = p.db.QueryRow(`SELECT COUNT(*) FILTER (WHERE payload->>'value'='revised'),COUNT(*) FILTER (WHERE payload->>'value'='created') FROM kubernetes_evidence_events WHERE scope_key=$1 AND sequence>$2 AND sequence<=$3`, key, int64(pinned), orphanHigh).Scan(&revised, &adoptedNew); err != nil {
+		t.Fatal(err)
+	}
+	if revised+adoptedNew != orphans {
+		t.Fatalf("the abandoned parts hold %d revised and %d new changes, want %d rows", revised, adoptedNew, orphans)
+	}
+	total, items = savePartsHistory(t, p, scope, since)
+	want := len(steady.Records) + adoptedNew + len(next.Records)
+	if len(items) != want || total != want {
+		t.Fatalf("after the next save readers list %d changes with an exact total of %d, want %d: %d first, %d adopted new, %d next", len(items), total, want, len(steady.Records), adoptedNew, len(next.Records))
+	}
+	versions := 0
+	for _, record := range steady.Records {
+		if items[record.ID] == "revised" {
+			versions++
+		}
+	}
+	if versions != revised {
+		t.Fatalf("%d of the first capture's changes read the abandoned save's version, want the %d it wrote", versions, revised)
+	}
+	for _, record := range next.Records {
+		if _, ok := items[record.ID]; !ok {
+			t.Fatalf("the next capture's change %s is missing", record.ID)
+		}
+	}
+	worstJournalConsistent(t, p, scope)
+}

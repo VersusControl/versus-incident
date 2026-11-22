@@ -121,9 +121,10 @@ jobs:
           }
           detect "$force"
 
-          # Groups that never reach the release image: the docs pages and the
-          # docs site build. Any other group on counts as a code change.
-          not_code='^(docs|docs-build|full|go|go_packages)='
+          # Groups that never reach the release image: the docs pages, the
+          # docs site build and repository housekeeping files. Any other group
+          # on counts as a code change.
+          not_code='^(docs|docs-build|metadata|full|go|go_packages)='
 
           # A push to main that changed code runs the full suite before its
           # image is built.

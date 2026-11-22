@@ -1484,7 +1484,7 @@ func TestSyncHealthOneFailingKindIsPartialNotAClusterError(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			kinds := fullySyncedKinds(now)
 			test.with(kinds)
-			health := buildSyncHealth(kinds, time.Time{})
+			health := buildSyncHealth(kinds, time.Time{}, time.Time{})
 			if health.State != test.want || !health.Partial {
 				t.Fatalf("state = %q partial=%t, want %q: failing=%+v", health.State, health.Partial, test.want, health.Failing)
 			}

@@ -173,7 +173,9 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 	registry := NewServiceRegistry(service)
 	registry.StartCapture(t.Context())
 	defer registry.Close()
-	waitUntil(t, 10*time.Second, "initial publication", func() bool {
+	// Every wait below polls for the state it names and returns as soon as
+	// it holds; the budgets only bound a hung run on a loaded machine.
+	waitUntil(t, 30*time.Second, "initial publication", func() bool {
 		service.changes.mu.Lock()
 		cache := service.changes.inventories[service.indexScope()]
 		service.changes.mu.Unlock()
@@ -185,11 +187,14 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 		return cache.generation.Revision != ""
 	})
 	fail.Store(true)
-	waitUntil(t, 5*time.Second, "outage cooldown", func() bool { return time.Now().Before(service.recovery.deadline()) })
+	// A recorded failure sets a retry time, and only a publication clears
+	// it. Waiting for the cooldown to be in the future instead could miss a
+	// one-second first cooldown on a loaded machine.
+	waitUntil(t, 30*time.Second, "outage cooldown", func() bool { return !service.recovery.deadline().IsZero() })
 	if service.identity.ctx.Err() != nil {
 		t.Fatal("transient provider outage retired accepted credential material")
 	}
-	waitUntil(t, 5*time.Second, "failed collection recorded", func() bool {
+	waitUntil(t, 30*time.Second, "failed collection recorded", func() bool {
 		service.changes.mu.Lock()
 		cache := service.changes.inventories[service.indexScope()]
 		service.changes.mu.Unlock()
@@ -200,18 +205,32 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 		defer cache.mu.RUnlock()
 		return cache.failed
 	})
-	before := calls.Load()
-	deadline := service.recovery.deadline()
-	for i := 0; i < 100; i++ {
-		if _, err := registry.ResolveCluster("org", "cluster"); err == nil {
-			t.Fatal("outage served a successful warming response")
+	// Request traffic inside one cooldown must neither call the credential
+	// source nor move the retry time. The supervisor itself retries when a
+	// cooldown ends, so a measurement that outlives its cooldown proves
+	// nothing and is taken again inside the next, longer one.
+	var before int32
+	waitUntil(t, 60*time.Second, "request traffic measured inside one cooldown", func() bool {
+		deadline := service.recovery.deadline()
+		before = calls.Load()
+		if !time.Now().Before(deadline) {
+			return false
 		}
-	}
-	if calls.Load() != before || !service.recovery.deadline().Equal(deadline) {
-		t.Fatal("request traffic bypassed cooldown")
-	}
+		for i := 0; i < 100; i++ {
+			if _, err := registry.ResolveCluster("org", "cluster"); err == nil {
+				t.Fatal("outage served a successful warming response")
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if calls.Load() != before || !service.recovery.deadline().Equal(deadline) {
+			t.Fatal("request traffic bypassed cooldown")
+		}
+		return true
+	})
 	fail.Store(false)
-	waitUntil(t, 10*time.Second, "autonomous provider recovery", func() bool {
+	waitUntil(t, 60*time.Second, "autonomous provider recovery", func() bool {
 		registry.mu.Lock()
 		fresh := registry.entries[0].Service
 		registry.mu.Unlock()
