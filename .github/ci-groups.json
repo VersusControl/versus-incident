@@ -107,19 +107,39 @@
       "enables": ["go-*"]
     },
     {
+      "name": "metadata",
+      "description": "Repository housekeeping that no build, test or image reads: git ignore lists, editor settings, macOS folder files, code owners and the GitHub issue, pull request and funding forms. Turns on nothing. A file inside another group's folder still turns that group on too.",
+      "paths": [
+        "**/.gitignore",
+        ".editorconfig",
+        "**/.DS_Store",
+        "CODEOWNERS",
+        ".github/CODEOWNERS",
+        ".github/ISSUE_TEMPLATE/**",
+        ".github/pull_request_template.md",
+        ".github/FUNDING.yml"
+      ]
+    },
+    {
       "name": "image",
       "description": "The release image. Runs no job on a pull request; with any other code group it lets a push to dev or main build its image.",
       "paths": ["Dockerfile", ".dockerignore"]
     },
     {
       "name": "ci",
-      "description": "CI definitions and this change-detection tool. Turns on everything. The docs site workflow and page list belong to docs-build.",
+      "description": "CI definitions, this change-detection tool, the test lint and the CI scripts (race shards, local CI run). Turns on everything. The docs site workflow and page list belong to docs-build; code owners and the GitHub forms belong to metadata.",
       "paths": [
         ".github/**",
         "!.github/workflows/docs.yml",
         "!.github/dev-docs.json",
+        "!.github/CODEOWNERS",
+        "!.github/ISSUE_TEMPLATE/**",
+        "!.github/pull_request_template.md",
+        "!.github/FUNDING.yml",
         "tools/cichanges/**",
-        "tools/docscheck/**"
+        "tools/docscheck/**",
+        "tools/testlint/**",
+        "scripts/ci-*.sh"
       ],
       "all": true
     }

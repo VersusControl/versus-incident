@@ -2,23 +2,30 @@ package breaklogs
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
 // Level returns the severity of one log line: "error", "warning", "info" or
-// "debug". It reads, in order, a JSON level field (level, severity, or the
-// one-letter MongoDB "s" field), the klog header, the first word of the line,
-// and the first word after a leading application timestamp. A line with no
-// recognisable level is "info". It runs once per shown line, so it scans by
-// hand instead of using regular expressions.
+// "debug". It reads, in order, a JSON level field (level, severity, the
+// one-letter MongoDB "s" field, or the pino/bunyan numeric level), the klog
+// header, the first word of the line, and the line after a leading
+// application timestamp: its first word, an nginx "[level]", or a Python
+// logging " - name - LEVEL - " field. Last it reads a logfmt "level=" or
+// "lvl=" key on a line made of key=value pairs. A line with no recognisable
+// level is "info". It runs once per shown line, so it scans by hand instead
+// of using regular expressions.
 func Level(text string) string {
 	trimmed := strings.TrimLeftFunc(text, unicode.IsSpace)
 	if strings.HasPrefix(trimmed, "{") {
+		// Words inside a JSON line belong to its values, so only the JSON
+		// fields decide its level.
 		if level := jsonLevel(trimmed); level != "" {
 			return level
 		}
+		return "info"
 	}
 	if level := klogLevel(trimmed); level != "" {
 		return level
@@ -26,10 +33,24 @@ func Level(text string) string {
 	if level := normalizeLevel(firstToken(trimmed)); level != "" {
 		return level
 	}
-	if rest, ok := skipTimestamp(trimmed); ok {
+	if rest, slashDate, ok := skipTimestamp(trimmed); ok {
 		if level := normalizeLevel(firstToken(rest)); level != "" {
 			return level
 		}
+		if slashDate {
+			if level := nginxLevel(rest); level != "" {
+				return level
+			}
+		}
+		if level := pythonLevel(rest); level != "" {
+			return level
+		}
+		if level := logfmtLevel(rest); level != "" {
+			return level
+		}
+	}
+	if level := logfmtLevel(trimmed); level != "" {
+		return level
 	}
 	return "info"
 }
@@ -46,12 +67,59 @@ func jsonLevel(text string) string {
 			}
 		}
 	}
+	// pino and bunyan write the level as a number, and some shippers turn
+	// that number into a string. A bare number named "level" may mean
+	// anything (a zoom or game level), so it is read only next to a field
+	// both loggers always write.
+	if !pinoLike(object) {
+		return ""
+	}
+	switch value := object["level"].(type) {
+	case float64:
+		if level := numericLevel(value); level != "" {
+			return level
+		}
+	case string:
+		if number, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil {
+			if level := numericLevel(number); level != "" {
+				return level
+			}
+		}
+	}
 	// MongoDB structured logs carry the severity as a single letter in "s"
 	// next to a "msg" field; other JSON may use "s" for something else.
 	if value, ok := object["s"].(string); ok {
 		if _, hasMsg := object["msg"]; hasMsg {
 			return mongoLevel(value)
 		}
+	}
+	return ""
+}
+
+// pinoLike reports whether a JSON object carries a field pino and bunyan
+// write on every line: the message, the time, bunyan's format version, or
+// the process and host.
+func pinoLike(object map[string]any) bool {
+	for _, key := range []string{"msg", "time", "v", "pid", "hostname"} {
+		if _, ok := object[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// numericLevel maps the pino and bunyan level numbers. Other numbers are
+// left unread, because a JSON "level" number may mean something else.
+func numericLevel(value float64) string {
+	switch value {
+	case 60, 50:
+		return "error"
+	case 40:
+		return "warning"
+	case 30:
+		return "info"
+	case 20, 10:
+		return "debug"
 	}
 	return ""
 }
@@ -112,18 +180,23 @@ func firstToken(text string) string {
 }
 
 // skipTimestamp removes a leading application timestamp, such as
-// "2026-11-21T08:44:15.976Z", "2026-11-21 08:44:20,879" or
-// "[2026-11-21 08:44:20:879]", and returns the rest of the line. The
-// timestamp must be followed by whitespace or the end of the line.
-func skipTimestamp(text string) (string, bool) {
+// "2026-11-21T08:44:15.976Z", "2026-11-21 08:44:20,879",
+// "[2026-11-21 08:44:20:879]" or nginx's "2026/11/21 08:44:20", and returns
+// the rest of the line and whether the date used slashes. The timestamp must
+// be followed by whitespace or the end of the line.
+func skipTimestamp(text string) (string, bool, bool) {
 	bracket := strings.HasPrefix(text, "[")
 	s := text
 	if bracket {
 		s = s[1:]
 	}
-	if len(s) < 19 || !digits(s[0:4]) || s[4] != '-' || !digits(s[5:7]) || s[7] != '-' || !digits(s[8:10]) ||
-		(s[10] != 'T' && s[10] != ' ') || !clock(s[11:19]) {
-		return "", false
+	if len(s) < 19 || !digits(s[0:4]) || !digits(s[5:7]) || !digits(s[8:10]) || !clock(s[11:19]) {
+		return "", false, false
+	}
+	dash := s[4] == '-' && s[7] == '-' && (s[10] == 'T' || s[10] == ' ')
+	slash := s[4] == '/' && s[7] == '/' && s[10] == ' '
+	if !dash && !slash {
+		return "", false, false
 	}
 	s = s[19:]
 	if len(s) > 1 && (s[0] == '.' || s[0] == ',' || s[0] == ':') && isDigit(s[1]) {
@@ -136,14 +209,131 @@ func skipTimestamp(text string) (string, bool) {
 	s = skipZone(s)
 	if bracket {
 		if !strings.HasPrefix(s, "]") {
-			return "", false
+			return "", false, false
 		}
 		s = s[1:]
 	}
 	if first, _ := utf8.DecodeRuneInString(s); s != "" && !unicode.IsSpace(first) {
-		return "", false
+		return "", false, false
 	}
-	return s, true
+	return s, slash, true
+}
+
+// nginxLevel reads the bracketed level nginx writes after its timestamp,
+// including the syslog words nginx uses for its most severe entries. These
+// words are read only here: as the first word of an ordinary line, "alert"
+// is more often a message than a level.
+func nginxLevel(rest string) string {
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	if !strings.HasPrefix(rest, "[") {
+		return ""
+	}
+	switch strings.ToLower(firstToken(rest)) {
+	case "emerg", "alert", "crit":
+		return "error"
+	}
+	return ""
+}
+
+// pythonLevel reads the level of Python's logging format
+// "asctime - name - LEVEL - message", or "asctime - LEVEL - message", given
+// the text after the timestamp. The level is a whole " - " separated field.
+// A first field that is a level word is the level: logger names are module
+// names, while a message often holds " - " and a level-like word, as in
+// "ts - INFO - Warning - disk ok".
+func pythonLevel(rest string) string {
+	rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	if !strings.HasPrefix(rest, "- ") {
+		return ""
+	}
+	fields := strings.SplitN(rest[2:], " - ", 3)
+	if len(fields) < 2 {
+		return ""
+	}
+	if level := normalizeLevel(strings.TrimSpace(fields[0])); level != "" {
+		return level
+	}
+	if len(fields) >= 3 {
+		return normalizeLevel(strings.TrimSpace(fields[1]))
+	}
+	return ""
+}
+
+// logfmtScanLimit bounds how much of a logfmt line is scanned for the level
+// key; loggers write it near the start.
+const logfmtScanLimit = 4096
+
+// logfmtLevel reads a "level=" or "lvl=" key, with a bare or double-quoted
+// value, from a logfmt line such as logrus's
+// `time="2026-11-21T08:44:20Z" level=error msg="push failed"`. The line must
+// start with a key=value pair, so a sentence that happens to contain
+// "level=error" is not read, and quoted values are skipped whole, so a key
+// written inside a message is not read either.
+func logfmtLevel(text string) string {
+	text = strings.TrimLeftFunc(text, unicode.IsSpace)
+	if len(text) > logfmtScanLimit {
+		text = text[:logfmtScanLimit]
+	}
+	first := true
+	for text != "" {
+		keyEnd := 0
+		for keyEnd < len(text) && isKeyByte(text[keyEnd]) {
+			keyEnd++
+		}
+		if keyEnd == 0 || keyEnd == len(text) || text[keyEnd] != '=' {
+			if first {
+				return ""
+			}
+			text = skipLogfmtWord(text)
+			continue
+		}
+		first = false
+		key := text[:keyEnd]
+		value, rest := logfmtValue(text[keyEnd+1:])
+		if strings.EqualFold(key, "level") || strings.EqualFold(key, "lvl") {
+			return normalizeLevel(value)
+		}
+		text = strings.TrimLeftFunc(rest, unicode.IsSpace)
+	}
+	return ""
+}
+
+func isKeyByte(b byte) bool {
+	return b == '_' || b == '.' || b == '-' || isDigit(b) || (b|0x20 >= 'a' && b|0x20 <= 'z')
+}
+
+// logfmtValue splits a bare or double-quoted value from the rest of the line.
+func logfmtValue(text string) (string, string) {
+	if strings.HasPrefix(text, `"`) {
+		for i := 1; i < len(text); i++ {
+			switch text[i] {
+			case '\\':
+				i++
+			case '"':
+				return text[1:i], text[i+1:]
+			}
+		}
+		return text[1:], ""
+	}
+	end := strings.IndexFunc(text, unicode.IsSpace)
+	if end < 0 {
+		return text, ""
+	}
+	return text[:end], text[end:]
+}
+
+// skipLogfmtWord drops one word that is not a key=value pair, skipping a
+// quoted span whole.
+func skipLogfmtWord(text string) string {
+	if strings.HasPrefix(text, `"`) {
+		_, rest := logfmtValue(text)
+		return strings.TrimLeftFunc(rest, unicode.IsSpace)
+	}
+	end := strings.IndexFunc(text, unicode.IsSpace)
+	if end < 0 {
+		return ""
+	}
+	return strings.TrimLeftFunc(text[end:], unicode.IsSpace)
 }
 
 // skipZone removes "Z", "+hh:mm", "+hhmm" or "-hh" right after the time.

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,8 +48,7 @@ func TestInventoryReplicasShareOwnerGeneration(t *testing.T) {
 		t.Cleanup(service.StopCapture)
 	}
 	first.startInventory(t.Context())
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	for wait := polling(t, "first sync did not complete"); ; wait.next() {
 		view, status, err := first.CachedIndexSnapshot(t.Context(), "Pod")
 		if err != nil {
 			t.Fatal(err)
@@ -56,25 +56,16 @@ func TestInventoryReplicasShareOwnerGeneration(t *testing.T) {
 		if status.State == "ready" && len(view.Records) == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("first sync did not complete: %+v", status)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	second.startInventory(t.Context())
 	var view kubeindex.Snapshot
 	var status kubeindex.Status
 	var err error
-	deadline = time.Now().Add(3 * time.Second)
-	for {
+	for wait := polling(t, "replica background hydration did not finish"); ; wait.next() {
 		view, status, err = second.CachedIndexSnapshot(t.Context(), "Pod")
 		if err != nil || status.State == "ready" {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("replica background hydration did not finish")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	if err != nil || status.State != "ready" || len(view.Records) != 1 || view.Records[0].UID != "pod" {
 		t.Fatalf("replica did not consume scoped generation: %+v %+v %v", view, status, err)
@@ -105,8 +96,7 @@ func TestInventoryUpgradeSyncFailureRetainsArchiveGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.startInventory(t.Context())
-	deadline := time.Now().Add(8 * time.Second)
-	for {
+	for wait := polling(t, "failed sync did not publish truthful status"); ; wait.next() {
 		view, status, err := service.CachedIndexSnapshot(t.Context(), "Pod")
 		if err != nil {
 			t.Fatal(err)
@@ -117,10 +107,6 @@ func TestInventoryUpgradeSyncFailureRetainsArchiveGeneration(t *testing.T) {
 			}
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("failed sync did not publish truthful status: %+v", status)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	after, err := provider.ReadBlob(inventoryKey(archiveScope))
 	if err != nil || string(after) != string(raw) {
@@ -146,9 +132,10 @@ func (probe *inventoryCASProbe) CompareAndSwapBlob(key string, expected, replace
 
 func TestInventoryExpiredOwnerCannotPublishOverSuccessor(t *testing.T) {
 	podRead, releasePod := make(chan struct{}), make(chan struct{})
+	var podReadOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/pods" {
-			close(podRead)
+			podReadOnce.Do(func() { close(podRead) })
 			select {
 			case <-releasePod:
 			case <-r.Context().Done():
@@ -173,11 +160,7 @@ func TestInventoryExpiredOwnerCannotPublishOverSuccessor(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no lease claim")
 	}
-	select {
-	case <-podRead:
-	case <-time.After(5 * time.Second):
-		t.Fatal("no Pod list")
-	}
+	waitFor(t, podRead, "no Pod list")
 	// A successor's atomically published lease invalidates the previous
 	// generation's expected bytes, even while the old read is still in flight.
 	raw, err := base.ReadBlob(inventoryKey(service.ActiveScope()))

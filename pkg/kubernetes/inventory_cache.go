@@ -85,8 +85,19 @@ type inventoryCache struct {
 	// authorityChecks counts the authority checks collection has run, so a
 	// steady permission gap can be shown never to trigger one.
 	authorityChecks atomic.Int64
-	started         bool
-	namespaces      map[string]bool
+	// startedAt is when this process started collecting the scope, and
+	// publishedSinceStart is set once a generation published after that
+	// start is served, whoever published it. Until then a kind's
+	// pre-restart observation time does not make the view stale; see
+	// inventoryFreshFloor.
+	startedAt           time.Time
+	publishedSinceStart bool
+	// proofStreaks counts, per kind, the reads in a row that ran the
+	// authority proof, for the warning about a kind whose access keeps
+	// changing.
+	proofStreaks authorityProofStreaks
+	started      bool
+	namespaces   map[string]bool
 	// namespacesSeeded is set once this process has probed the namespaces it
 	// remembers, after the identity was found unable to list namespaces.
 	namespacesSeeded bool
@@ -140,6 +151,9 @@ func (service *Service) startInventory(parent context.Context) {
 		cache = &inventoryCache{}
 	}
 	cache.done, cache.cancel, cache.started = make(chan struct{}), func() { stop(); cancel() }, true
+	cache.mu.Lock()
+	cache.startedAt, cache.publishedSinceStart = time.Now().UTC(), false
+	cache.mu.Unlock()
 	if cache.namespaces == nil {
 		cache.namespaces = make(map[string]bool)
 	}
@@ -517,8 +531,9 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 		}
 	}
 	if status.State == "ready" || status.State == "partial" && onlyPending {
+		floor := service.inventoryFreshFloor()
 		for kind, state := range status.Kinds {
-			if state.State == "ready" && !state.ObservedAt.IsZero() && time.Since(state.ObservedAt) > max(3*time.Minute, 2*inventoryCadence(kind)) {
+			if state.State == "ready" && !state.ObservedAt.IsZero() && syncKindStale(kind, state, floor) {
 				status.State, status.Partial = "stale", true
 			}
 		}
@@ -577,6 +592,35 @@ func (generation inventoryGeneration) pendingResources(kinds []string) []string 
 		}
 	}
 	return pending
+}
+
+// inventoryFreshFloor is the earliest observation time the stale rule uses
+// for this scope. After a restart the served generation is the stored one,
+// whose observation times predate the restart. Until a generation published
+// after this process started is served (its own, or the lease holder's),
+// ages are counted from when it started, so a restart alone, or waiting out
+// a crashed process's lease, does not read as stale. An observation already
+// stale when the process started is not covered (see restartAge). A failing cycle is
+// reported as a failure meanwhile. The grace is bounded: the start time ages
+// like any observation, and the stale limit is longer than the worst-case
+// lease takeover (inventoryTakeoverBound). It is zero once a new generation
+// is served, and for a scope this process does not collect.
+func (service *Service) inventoryFreshFloor() time.Time {
+	if service == nil || service.changes == nil {
+		return time.Time{}
+	}
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	if cache == nil {
+		return time.Time{}
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if cache.publishedSinceStart {
+		return time.Time{}
+	}
+	return cache.startedAt
 }
 
 func (service *Service) runInventory(ctx context.Context, cache *inventoryCache) {

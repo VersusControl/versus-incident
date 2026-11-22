@@ -330,9 +330,10 @@ func TestGKENativeRequestsRespectCancellation(t *testing.T) {
 		})
 		t.Run(test.name+" canceled during request", func(t *testing.T) {
 			started := make(chan struct{})
+			var startedOnce sync.Once
 			release := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-				close(started)
+				startedOnce.Do(func() { close(started) })
 				<-release
 			}))
 			defer server.Close()
@@ -380,6 +381,7 @@ func TestGKEExternalAccountUsesOneDeadlineAcrossBothHops(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			secondHopStarted := make(chan struct{})
+			var secondHopStartedOnce sync.Once
 			releaseSecondHop := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				switch request.URL.Path {
@@ -390,7 +392,7 @@ func TestGKEExternalAccountUsesOneDeadlineAcrossBothHops(t *testing.T) {
 					case <-request.Context().Done():
 					}
 				case "/impersonate":
-					close(secondHopStarted)
+					secondHopStartedOnce.Do(func() { close(secondHopStarted) })
 					<-releaseSecondHop
 				default:
 					http.NotFound(writer, request)

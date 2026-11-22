@@ -52,8 +52,7 @@ func TestScopedInventoryCollectsCompleteNamespaceWithoutGlobalListPermission(t *
 	service.client.namespace = "shop"
 	service.startInventory(t.Context())
 	defer service.StopCapture()
-	deadline := time.Now().Add(8 * time.Second)
-	for {
+	for wait := polling(t, "scoped collection unavailable"); ; wait.next() {
 		view, status, err := service.CachedNamespaceSnapshot(t.Context(), "shop", "Pod")
 		if err != nil {
 			t.Fatal(err)
@@ -64,17 +63,12 @@ func TestScopedInventoryCollectsCompleteNamespaceWithoutGlobalListPermission(t *
 			}
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("scoped collection unavailable: %+v", status)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	namespaces, err := service.Namespaces(t.Context())
 	if err != nil || len(namespaces.Items) != 1 || namespaces.Items[0] != "shop" {
 		t.Fatalf("readable namespace missing: %+v %v", namespaces, err)
 	}
-	deadline = time.Now().Add(8 * time.Second)
-	for {
+	for wait := polling(t, "scoped usage sample did not complete"); ; wait.next() {
 		usage, err := service.cachedUsage(t.Context(), "shop", true)
 		if err != nil {
 			t.Fatal(err)
@@ -82,10 +76,6 @@ func TestScopedInventoryCollectsCompleteNamespaceWithoutGlobalListPermission(t *
 		if usage.PodMetrics.Complete && usage.PodMetrics.Total == 1501 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("scoped usage sample did not complete: %+v", usage.PodMetrics)
-		}
-		time.Sleep(time.Millisecond)
 	}
 	before := reads.Load()
 	workloads, err := service.Workloads(t.Context(), WorkloadListOptions{Namespace: "shop", Kind: "Pod", Limit: 200})
@@ -192,8 +182,7 @@ func TestInventoryHydrationFailureRetriesAndWorkerCancels(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	service.startInventory(ctx)
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	for wait := polling(t, "registered worker did not recover"); ; wait.next() {
 		view, status, err := service.CachedIndexSnapshot(t.Context(), "Pod")
 		if err != nil {
 			t.Fatal(err)
@@ -201,20 +190,12 @@ func TestInventoryHydrationFailureRetriesAndWorkerCancels(t *testing.T) {
 		if status.State == "ready" && len(view.Records) == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("registered worker did not recover: %+v", status)
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	cancel()
 	service.changes.mu.Lock()
 	done := service.changes.inventories[service.indexScope()].done
 	service.changes.mu.Unlock()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("retry worker ignored cancellation")
-	}
+	waitFor(t, done, "retry worker ignored cancellation")
 }
 
 func TestInventoryPreferredVersionAndCadenceAreNotEveryPoll(t *testing.T) {

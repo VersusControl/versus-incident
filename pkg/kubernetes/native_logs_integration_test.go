@@ -105,7 +105,7 @@ func TestNativeRoleRenewalWithPermittedPodDeploymentStreamsAndLaterOutageIntegra
 	// Use the actual file provider so this integration proves journal capture too.
 	cluster.service.SetChangeStorage(provider)
 	cluster.service.SetScrubber(replacingScrubber{})
-	fleet.startWithin(time.Second)
+	fleet.start()
 	current := func() *Service {
 		fleet.registry.mu.Lock()
 		defer fleet.registry.mu.Unlock()
@@ -116,8 +116,8 @@ func TestNativeRoleRenewalWithPermittedPodDeploymentStreamsAndLaterOutageIntegra
 		g, ok := publishedGeneration(fleet.view, s.ActiveScope())
 		return ok && len(podNames(g)) == 2
 	}
-	waitUntil(t, 12*time.Second, "actual autonomous nonzero publication", ready)
-	waitUntil(t, 8*time.Second, "complete first publication before renewal", func() bool { return !current().recordedFirstReadyAt().IsZero() })
+	eventually(t, "actual autonomous nonzero publication", ready)
+	eventually(t, "complete first publication before renewal", func() bool { return !current().recordedFirstReadyAt().IsZero() })
 	first := current()
 	firstReady := first.recordedFirstReadyAt()
 	assertBodies := func() {
@@ -187,7 +187,7 @@ func TestNativeRoleRenewalWithPermittedPodDeploymentStreamsAndLaterOutageIntegra
 	}
 	readStreams("baseline")
 	clock.Add(int64(13 * time.Minute))
-	waitUntil(t, 15*time.Second, "native bearer renewal/recollection without page reads", func() bool { return current().identity != first.identity && ready() })
+	eventually(t, "native bearer renewal/recollection without page reads", func() bool { return current().identity != first.identity && ready() })
 	assertBodies()
 	readStreams("after-13minute-native-renewal")
 	renewed := current()
@@ -207,7 +207,7 @@ func TestNativeRoleRenewalWithPermittedPodDeploymentStreamsAndLaterOutageIntegra
 	if logErr == nil {
 		t.Fatal("later rejected native log read succeeded")
 	}
-	waitUntil(t, 12*time.Second, "actual SDK provider outage observed", func() bool { return stsCalls.Load() >= 2 })
+	eventually(t, "actual SDK provider outage observed", func() bool { return stsCalls.Load() >= 2 })
 	before := mints.Load()
 	for i := 0; i < 100; i++ {
 		_, _ = fleet.registry.ResolveCluster("synthetic-native", "native")
@@ -217,7 +217,7 @@ func TestNativeRoleRenewalWithPermittedPodDeploymentStreamsAndLaterOutageIntegra
 	}
 	providerDown.Store(false)
 	clock.Add(int64(2 * time.Second))
-	waitUntil(t, 20*time.Second, "autonomous later-outage recovery", func() bool { return current().identity != renewed.identity && ready() })
+	eventually(t, "autonomous later-outage recovery", func() bool { return current().identity != renewed.identity && ready() })
 	assertBodies()
 	readStreams("after-later-provider-outage-recovery")
 	if !firstReady.IsZero() && !current().recordedFirstReadyAt().Equal(firstReady) {

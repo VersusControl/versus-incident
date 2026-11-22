@@ -1,4 +1,4 @@
-// K18 fleet-first-sync browser acceptance.
+// Fleet first-sync browser acceptance.
 //
 // One cluster (prod-eks) is held in its first sync by the fixture, so the
 // Clusters page shows four rows: preparing, unreachable, attention, healthy.
@@ -14,9 +14,9 @@ import * as path from "node:path";
 import { openApp } from "./helpers";
 import { capturePath, harnessResultsDir } from "./support/capture";
 
-const mode = process.env.E2E_K18_MODE || "fakekube";
-const heldURL = process.env.E2E_K18_HELD_FAKEKUBE_URL || "";
-const heldCA = process.env.E2E_K18_HELD_FAKEKUBE_CA || "";
+const mode = process.env.E2E_FLEET_MODE || "fakekube";
+const heldURL = process.env.E2E_FLEET_HELD_FAKEKUBE_URL || "";
+const heldCA = process.env.E2E_FLEET_HELD_FAKEKUBE_CA || "";
 
 const viewports = [
   { name: "desktop", width: 1440, height: 900 },
@@ -151,7 +151,7 @@ async function progressLineReport(page: Page) {
   });
 }
 
-test.describe("K18 fleet first sync", () => {
+test.describe("Kubernetes fleet first sync", () => {
   test.skip(mode !== "fakekube", "runs in isolated fakekube mode");
   test.setTimeout(300_000);
 
@@ -243,15 +243,15 @@ test.describe("K18 fleet first sync", () => {
       expect(report.outside).toEqual([]);
       expect(report.scrollWidth).toBeLessThanOrEqual(report.clientWidth + 1);
 
-      await saveCapture(page, "k18-fleet", vp.width, theme, "preparing");
-      const linePath = capturePath("k18-progress-line", vp.width, theme, "preparing");
+      await saveCapture(page, "kubernetes-fleet-first-sync", vp.width, theme, "preparing");
+      const linePath = capturePath("kubernetes-fleet-first-sync-progress-line", vp.width, theme, "preparing");
       await preparing.locator("[data-first-sync]").screenshot({ path: linePath, animations: "disabled" });
 
       if (vp.width === 390) {
         // The fleet table scrolls horizontally on a narrow viewport; bring the
         // whole health column into view and capture the wrapped line again.
         await page.locator('[aria-label="Cluster rows"]').evaluate((region) => { region.scrollLeft = 230; });
-        await saveCapture(page, "k18-fleet", vp.width, theme, "preparing-progress");
+        await saveCapture(page, "kubernetes-fleet-first-sync", vp.width, theme, "preparing-progress");
       }
 
       // 6. Settled rows and actions unchanged.
@@ -384,7 +384,7 @@ test.describe("K18 fleet first sync", () => {
         expect((await page.locator("body").innerText())).not.toMatch(/Session expired|Unhandled Runtime Error|Couldn't load Kubernetes overview/i);
 
         await chipsContainer.scrollIntoViewIfNeeded();
-        await saveCapture(page, "k18-preparing-panel", vp.width, theme, "listing");
+        await saveCapture(page, "kubernetes-fleet-first-sync-preparing-panel", vp.width, theme, "listing");
         await context.close();
         const index = openContexts.indexOf(context);
         if (index >= 0) openContexts.splice(index, 1);
@@ -424,9 +424,9 @@ test.describe("K18 fleet first sync", () => {
     samples.sort((left, right) => left.at - right.at);
     const preparing = samples.filter((sample) => sample.syncing);
     const preparingGaps = preparing.slice(1).map((sample, index) => sample.at - preparing[index].at);
-    console.log(`[k18] catalog samples: ${samples.map((sample) => `${sample.at}:${sample.syncing ? "preparing" : "settled"}:${sample.clusters}`).join(",")}`);
-    console.log(`[k18] preparing catalog timestamps: ${preparing.map((sample) => sample.at).join(",")}`);
-    console.log(`[k18] preparing catalog gaps ms: ${preparingGaps.join(",")}`);
+    console.log(`[fleet-first-sync] catalog samples: ${samples.map((sample) => `${sample.at}:${sample.syncing ? "preparing" : "settled"}:${sample.clusters}`).join(",")}`);
+    console.log(`[fleet-first-sync] preparing catalog timestamps: ${preparing.map((sample) => sample.at).join(",")}`);
+    console.log(`[fleet-first-sync] preparing catalog gaps ms: ${preparingGaps.join(",")}`);
     expect(preparing.length).toBeGreaterThanOrEqual(3);
     expect(preparingGaps.length).toBeGreaterThanOrEqual(2);
     for (const gap of preparingGaps) {
@@ -450,8 +450,8 @@ test.describe("K18 fleet first sync", () => {
     while (Date.now() < deadline && samples.length <= settledIndex + 1) await page.waitForTimeout(250);
     expect(samples.length).toBeGreaterThan(settledIndex + 1);
     const settledGap = samples[settledIndex + 1].at - samples[settledIndex].at;
-    console.log(`[k18] settled catalog timestamps: ${samples.map((sample) => `${sample.at}:${sample.syncing ? "preparing" : "settled"}`).join(",")}`);
-    console.log(`[k18] settled catalog gap ms: ${settledGap} (release ${releaseAt}, settled ${settledAt})`);
+    console.log(`[fleet-first-sync] settled catalog timestamps: ${samples.map((sample) => `${sample.at}:${sample.syncing ? "preparing" : "settled"}`).join(",")}`);
+    console.log(`[fleet-first-sync] settled catalog gap ms: ${settledGap} (release ${releaseAt}, settled ${settledAt})`);
     expect(settledGap).toBeGreaterThanOrEqual(25_000);
     expect(settledGap).toBeLessThanOrEqual(36_000);
 
@@ -466,15 +466,15 @@ test.describe("K18 fleet first sync", () => {
       samples,
       navigations,
     };
-    const evidenceDir = path.join(harnessResultsDir(), "k18-cadence");
+    const evidenceDir = path.join(harnessResultsDir(), "fleet-first-sync-cadence");
     fs.mkdirSync(evidenceDir, { recursive: true });
     fs.writeFileSync(path.join(evidenceDir, "catalog-cadence.json"), `${JSON.stringify(evidence, null, 2)}\n`);
 
     // The row settled in place: the document was never reloaded after openFleet.
     const loads = await page.evaluate(() => (window as unknown as { __k18Loads?: number }).__k18Loads);
     expect(loads).toBe(1);
-    console.log(`[k18] main-frame navigations: ${navigations.join(",")}`);
-    await saveCapture(page, "k18-fleet", 1440, "dark", "settled");
+    console.log(`[fleet-first-sync] main-frame navigations: ${navigations.join(",")}`);
+    await saveCapture(page, "kubernetes-fleet-first-sync", 1440, "dark", "settled");
     await expect(page.locator('[aria-label="Cluster rows"] article')).toHaveCount(4);
     await context.close();
     const index = openContexts.indexOf(context);

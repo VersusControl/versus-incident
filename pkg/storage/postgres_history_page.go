@@ -236,7 +236,10 @@ type journalWalk struct {
 // a month a range covers, so sorting is discouraged: rows come in index order
 // and a step stops at its limit instead of reading a month to sort it. A read
 // that has no index order, such as the few gaps of a range, still sorts.
-const journalWalkSettings = `SET LOCAL plan_cache_mode=force_generic_plan; SET LOCAL enable_sort=off`
+// With sorting off, the planner's cost of a forced sort is huge, which would
+// trigger just-in-time compilation of the statement; JIT is switched off here
+// too, so no caller can run a walk with sorting off and JIT on.
+const journalWalkSettings = `SET LOCAL plan_cache_mode=force_generic_plan; SET LOCAL enable_sort=off; SET LOCAL jit=off`
 
 // journalWindowMonths is the most months one step of a walk covers. Steps
 // start at one month and double, so a page that the newest month fills reads

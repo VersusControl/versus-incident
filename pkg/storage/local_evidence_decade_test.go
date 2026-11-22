@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -172,4 +173,67 @@ func TestFileEvidenceStaysFlatUnderEndlessChurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("FILE journal_mode=%s plans=%v", journal, plans)
+}
+
+// BenchmarkLocalEvidencePublish measures the local index's per-record write
+// path: each operation swaps a scope between two stored states that differ by
+// one busy capture (600 change versions of known events, 120 changed issues
+// and their samples), so one direction inserts and supersedes those rows and
+// the other deletes them again, against a window of 3,000 changes.
+func BenchmarkLocalEvidencePublish(b *testing.B) {
+	provider, err := NewFile(FileOptions{DataDir: b.TempDir()})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = provider.Close() })
+	store := provider.(EvidenceStore)
+	scope := EvidenceScope{OrgID: "default", ClusterID: "publish-bench", ClusterUID: "physical"}
+	origin := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	name := ""
+	capture := func(id string, round int, changes, issues int) []byte {
+		cp, err := store.EvidenceCheckpoint(b.Context(), scope)
+		if err != nil {
+			b.Fatal(err)
+		}
+		at := origin.Add(time.Duration(round) * time.Minute)
+		batch := EvidenceBatch{ID: id, Expected: cp.ID, Generation: cp.Generation, At: at, CoveredThrough: at, Epoch: "stable"}
+		for i := 0; i < changes; i++ {
+			payload, _ := json.Marshal(map[string]any{"name": fmt.Sprintf("obj-%d", i), "value": round})
+			batch.Records = append(batch.Records, EvidenceRecord{ID: fmt.Sprintf("change:%d", i), Type: "change", At: at, ObservedAt: at,
+				Namespace: fmt.Sprintf("ns-%d", i%10), Name: fmt.Sprintf("obj-%d", i), Kind: "Deployment", AuthorizationKind: "Deployment", UID: fmt.Sprintf("uid-%d", i), RootUID: fmt.Sprintf("uid-%d", i), Epoch: "stable", Payload: payload})
+		}
+		for i := 0; i < issues; i++ {
+			uid := fmt.Sprintf("pod-%d", i)
+			payload, _ := json.Marshal(map[string]any{"severity": "warning", "restarts": round})
+			batch.Issues = append(batch.Issues, EvidenceIssue{Key: uid, Kind: "Pod", UID: uid, Namespace: "shop", Rule: "pod.crash_loop", FirstSeen: origin, LastSeen: at, Payload: payload})
+		}
+		if err = store.CommitEvidence(b.Context(), scope, batch); err != nil {
+			b.Fatal(err)
+		}
+		blobs, err := provider.ListBlobs(localEvidencePrefix)
+		if err != nil || len(blobs) != 1 {
+			b.Fatalf("stored evidence: %d blobs, %v", len(blobs), err)
+		}
+		name = blobs[0].Name
+		return blobs[0].Data
+	}
+	capture("window", 0, 3000, 120)
+	before := capture("before", 1, 600, 120)
+	after := capture("after", 2, 600, 120)
+	index, err := provider.(*fileProvider).evidenceIndex()
+	if err != nil {
+		b.Fatal(err)
+	}
+	if current, err := index.raw(b.Context(), name); err != nil || !bytes.Equal(current, after) {
+		b.Fatalf("stored state is not the last capture: %v", err)
+	}
+	states := [2][]byte{after, before}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		won, err := index.swap(b.Context(), name, states[i%2], states[(i+1)%2], false)
+		if err != nil || !won {
+			b.Fatalf("swap %d: won %t, %v", i, won, err)
+		}
+	}
 }

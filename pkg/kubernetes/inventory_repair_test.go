@@ -24,8 +24,7 @@ func warmTestInventory(t *testing.T, service *Service, namespaces ...string) {
 	}
 	service.startInventory(t.Context())
 	t.Cleanup(service.StopCapture)
-	deadline := time.Now().Add(scaledTimeout(30 * time.Second))
-	for {
+	for wait := polling(t, "background inventory did not complete its first attempt"); ; wait.next() {
 		service.changes.mu.Lock()
 		cache := service.changes.inventories[service.indexScope()]
 		service.changes.mu.Unlock()
@@ -38,10 +37,6 @@ func warmTestInventory(t *testing.T, service *Service, namespaces ...string) {
 		if loaded || failed {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("background inventory did not complete its first attempt")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 

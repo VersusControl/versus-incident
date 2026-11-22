@@ -204,11 +204,7 @@ func TestBreakLogLinkedGapClosesOnlyOnCompleteRead(t *testing.T) {
 	logDone := service.changes.logDone[service.indexScope()]
 	service.changes.mu.Unlock()
 	if logDone != nil {
-		select {
-		case <-logDone:
-		case <-time.After(35 * time.Second):
-			t.Fatal("capture did not drain for clock isolation")
-		}
+		waitFor(t, logDone, "capture did not drain for clock isolation")
 	}
 	concurrent := item
 	concurrent.RootUID, concurrent.PodUID, concurrent.Pod = "independent-root", "independent-pod", "independent"

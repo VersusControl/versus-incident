@@ -749,7 +749,7 @@ describe("Pod log viewer", () => {
     expect(screen.getByLabelText("Pod log output").textContent).toBe("No new log lines yet. The container is quiet.");
   });
 
-  // F3: a reader who scrolls up and then back down is following again. Nothing
+  // A reader who scrolls up and then back down is following again. Nothing
   // has to be clicked to resume: the newest line is where they are.
   it("resumes following when the reader scrolls back down to the newest line", async () => {
     vi.useFakeTimers();
@@ -785,7 +785,7 @@ describe("Pod log viewer", () => {
     expect(output.scrollTop).toBe(1000);
   });
 
-  // F4: a rollout can remove or rename the container being read. The selector
+  // A rollout can remove or rename the container being read. The selector
   // must not hold a name no option offers, and the read must not keep asking
   // for a container that is gone.
   it("moves off a container a rollout removed and reads one that is still there", async () => {
@@ -810,7 +810,7 @@ describe("Pod log viewer", () => {
     await waitFor(() => expect(stream).toHaveBeenLastCalledWith("Deployment", "shop", "checkout", "workload-uid", expect.objectContaining({ container: "app" }), expect.any(Function), expect.any(AbortSignal)));
   });
 
-  // F5: the compact card has no toolbar, so a limit-stopped read needs its own
+  // The compact card has no toolbar, so a limit-stopped read needs its own
   // way back instead of a message naming a control that is not on the card.
   it("offers Reload in the compact card for a read the safety limit stopped", async () => {
     const stream = vi.spyOn(api, "kubernetesPodLogStream").mockImplementation(async (_namespace, _pod, _options, emit) => {
@@ -825,7 +825,7 @@ describe("Pod log viewer", () => {
     await waitFor(() => expect(stream).toHaveBeenCalledTimes(2));
   });
 
-  // QA-210: all containers is the widest read, so it is the first option.
+  // All containers is the widest read, so it is the first option.
   it("lists All containers first in a workload's container selector", async () => {
     vi.spyOn(api, "kubernetesWorkloadLogStream").mockImplementation((_kind, _namespace, _name, _uid, _options, emit, signal) => {
       emit({ event: "sources", text: "", container: "", sources: [], pods: [{ uid: "pod-a", name: "checkout-a", containers: ["app", "proxy"], init_containers: [], admitted: true }], truncated: false });

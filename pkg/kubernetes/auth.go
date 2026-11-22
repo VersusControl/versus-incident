@@ -313,6 +313,13 @@ func (service *Service) validateCredential(ctx context.Context) error {
 // token endpoint cause when the token host gave no answer.
 func retiredEpochErrorLocked(epoch *credentialEpoch) error {
 	epoch.retired = true
+	return retiredEpochCauseLocked(epoch)
+}
+
+// retiredEpochCauseLocked is the cause a retired epoch reports: the token
+// endpoint fault when the epoch was retired because the token host gave no
+// answer, so a cycle that races the retirement reports the same cause.
+func retiredEpochCauseLocked(epoch *credentialEpoch) error {
 	if epoch.unreachable {
 		return credentialFault(fmt.Errorf("%w: %w", ErrCredentialUnavailable, ErrTokenEndpointUnavailable))
 	}
@@ -377,7 +384,7 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 		return err
 	}
 	if epoch.retired || epoch.ctx.Err() != nil {
-		return commitConflictError{cause: ErrCredentialUnavailable}
+		return commitConflictError{cause: retiredEpochCauseLocked(epoch)}
 	}
 	if credentials {
 		if authErr != nil {
@@ -401,7 +408,7 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 		service.client.authMu.Lock()
 		defer service.client.authMu.Unlock()
 		if epoch.ctx.Err() != nil {
-			return commitConflictError{cause: ErrCredentialUnavailable}
+			return commitConflictError{cause: retiredEpochCauseLocked(epoch)}
 		}
 	}
 	if err := ctx.Err(); err != nil {

@@ -15,8 +15,8 @@ import { captureDir } from "./support/capture";
 //   3. the incident detail (peek) renders the promoted typed columns;
 //   4. resolving from the UI updates the row + decrements the unresolved badge.
 //
-// Bring the stack up first (plans/harness-run/harness.sh up oss) and run via
-// `plans/harness-run/harness.sh e2e ui incidents-list-perf`.
+// Bring the stack up first with the local test harness (`harness.sh up oss`) and run via
+// `harness.sh e2e ui incidents-list-perf`.
 // ---------------------------------------------------------------------------
 
 const SHOTS = captureDir();

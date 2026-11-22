@@ -69,11 +69,7 @@ func runIssueAlertCaptureCycle(t *testing.T, s *Service, snapshot kubeindex.Snap
 		if done == nil {
 			continue
 		}
-		select {
-		case <-done:
-		case <-time.After(35 * time.Second):
-			t.Fatal("capture worker did not finish")
-		}
+		waitFor(t, done, "capture worker did not finish")
 	}
 }
 
@@ -763,11 +759,7 @@ func TestIssueAlertWorkerBoundAndCancellation(t *testing.T) {
 		t.Fatal(calls.Load())
 	}
 	s.StopCapture()
-	select {
-	case <-finished:
-	case <-time.After(time.Second):
-		t.Fatal("worker leaked")
-	}
+	waitFor(t, finished, "worker leaked")
 }
 
 // crashingDeploymentSnapshot is a ready snapshot in which each named

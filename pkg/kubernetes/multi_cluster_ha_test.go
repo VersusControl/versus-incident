@@ -86,13 +86,13 @@ func TestClusterOwnershipIsPerClusterAcrossReplicas(t *testing.T) {
 	}
 
 	origin := time.Now()
-	leader.startWithin(2 * time.Second)
-	leader.waitPublished(leaderEast, origin, 10*time.Second)
-	leader.waitPublished(leaderWest, origin, 10*time.Second)
-	follower.startWithin(2 * time.Second)
+	leader.start()
+	leader.waitPublished(leaderEast, origin)
+	leader.waitPublished(leaderWest, origin)
+	follower.start()
 	// The follower hydrates both clusters from the shared store and publishes
 	// neither of them.
-	waitUntil(t, 10*time.Second, "the follower to serve both clusters from the store", func() bool {
+	eventually(t, "the follower to serve both clusters from the store", func() bool {
 		for _, cluster := range []*bootedCluster{followerEast, followerWest} {
 			overview, err := follower.resolve(cluster).Overview(t.Context())
 			if err != nil || overview.Pods != 1 {
@@ -107,7 +107,7 @@ func TestClusterOwnershipIsPerClusterAcrossReplicas(t *testing.T) {
 	if published := broker.replicas(leaderWest.key); len(published) != 1 || published[0] != "replica-1" {
 		t.Fatalf("cluster west was published by %v, want exactly one owner", published)
 	}
-	leader.settle(leaderWest, 1200*time.Millisecond, 20*time.Second)
+	leader.settle(leaderWest, 1200*time.Millisecond)
 	eastLease := leaseRecord(t, base, leaderEast.service.ActiveScope())
 	westLease := leaseRecord(t, base, leaderWest.service.ActiveScope())
 	westBefore, ok := publishedGeneration(base, leaderWest.service.ActiveScope())
@@ -116,14 +116,14 @@ func TestClusterOwnershipIsPerClusterAcrossReplicas(t *testing.T) {
 	}
 	westPublishes := broker.count(leaderWest.key)
 	westLists := west.listCount("pods")
-	westHealthBefore := buildSyncHealth(syncHealthKinds(westBefore), westBefore.FirstReadyAt)
+	westHealthBefore := buildSyncHealth(syncHealthKinds(westBefore), westBefore.FirstReadyAt, time.Time{})
 	t.Logf("west baseline: revision=%s state=%s pending=%d failing=%d publications=%d podLists=%d", westBefore.Revision, westHealthBefore.State, westHealthBefore.PendingKinds, westHealthBefore.FailingKinds, westPublishes, westLists)
 
 	// Only the east lease expires, and its owner can no longer claim it. The
 	// follower must take east over without touching west.
 	leader.view.refuse(leaderEast.key)
 	expireLease(t, base, leaderEast.service.ActiveScope())
-	waitUntil(t, 15*time.Second, "the follower to take over the expired cluster", func() bool {
+	eventually(t, "the follower to take over the expired cluster", func() bool {
 		at, ok := broker.first("replica-2", leaderEast.key)
 		return ok && !at.IsZero()
 	})
@@ -143,7 +143,7 @@ func TestClusterOwnershipIsPerClusterAcrossReplicas(t *testing.T) {
 	// The cluster that stayed put is undisturbed: no republication, no relist.
 	if publishes := broker.count(leaderWest.key); publishes != westPublishes {
 		after, present := publishedGeneration(base, leaderWest.service.ActiveScope())
-		afterHealth := buildSyncHealth(syncHealthKinds(after), after.FirstReadyAt)
+		afterHealth := buildSyncHealth(syncHealthKinds(after), after.FirstReadyAt, time.Time{})
 		t.Fatalf("cluster west republished %d times during another cluster's takeover: present=%t beforeRev=%s afterRev=%s before=%s/pending%d/failing%d after=%s/pending%d/failing%d podListsBefore=%d after=%d ownerBefore=%s after=%s", publishes-westPublishes, present, westBefore.Revision, after.Revision, westHealthBefore.State, westHealthBefore.PendingKinds, westHealthBefore.FailingKinds, afterHealth.State, afterHealth.PendingKinds, afterHealth.FailingKinds, westLists, west.listCount("pods"), westLease.Owner, leaseRecord(t, base, leaderWest.service.ActiveScope()).Owner)
 	}
 	westAfter, ok := publishedGeneration(base, leaderWest.service.ActiveScope())

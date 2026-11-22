@@ -18,11 +18,10 @@ import (
 
 // sampleUntil checks invariant every few milliseconds until done reports true,
 // failing on the first sample where the invariant does not hold.
-func sampleUntil(t *testing.T, budget time.Duration, describe string, done func() bool, invariant func() error) {
+func sampleUntil(t *testing.T, describe string, done func() bool, invariant func() error) {
 	t.Helper()
-	deadline := time.Now().Add(scaledTimeout(budget))
 	samples := 0
-	for {
+	for wait := polling(t, describe); ; wait.next() {
 		samples++
 		if err := invariant(); err != nil {
 			t.Fatalf("sample %d: %v", samples, err)
@@ -30,10 +29,6 @@ func sampleUntil(t *testing.T, budget time.Duration, describe string, done func(
 		if done() {
 			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out after %d samples waiting for %s", samples, describe)
-		}
-		time.Sleep(3 * time.Millisecond)
 	}
 }
 
@@ -58,7 +53,7 @@ func TestNamespaceOnlyRestartShowsNoWholeClusterFailure(t *testing.T) {
 	cluster.registry.StartCapture(t.Context())
 	ctx := t.Context()
 	var last SyncHealth
-	sampleUntil(t, 10*time.Second, "the namespace-only view after the restart", func() bool {
+	sampleUntil(t, "the namespace-only view after the restart", func() bool {
 		return readsAsNamespaceAccess(last) && last.State == "ready"
 	}, func() error {
 		report, err := cluster.service.SyncHealth(ctx)
@@ -94,7 +89,7 @@ func TestRestartAfterNamespaceOnlyPeriodIsNeverUnreachable(t *testing.T) {
 	cluster.registry.StartCapture(t.Context())
 	ctx := t.Context()
 	var last SyncHealth
-	sampleUntil(t, 10*time.Second, "the first sync after the restart", func() bool {
+	sampleUntil(t, "the first sync after the restart", func() bool {
 		return last.State == "ready" || last.State == "partial"
 	}, func() error {
 		report, err := cluster.service.SyncHealth(ctx)
@@ -414,7 +409,7 @@ func TestGrantOnAShownAPIReachesCoverageWithoutDiscoveryChange(t *testing.T) {
 	if err != nil || len(apps.Items) == 0 {
 		t.Fatalf("the live GitOps list did not read the granted API: items=%d err=%v", len(apps.Items), err)
 	}
-	waitUntil(t, 5*time.Second, "the live list to end the denial", func() bool {
+	eventually(t, "the live list to end the denial", func() bool {
 		state := cluster.optionalState(argoApplications)
 		return state.State == "ready" && state.Error == ""
 	})
@@ -523,7 +518,7 @@ func TestRestartAfterLostNamespaceGrantServesNoStoredRows(t *testing.T) {
 	cluster.registry.StartCapture(t.Context())
 	ctx := t.Context()
 	var last SyncHealth
-	sampleUntil(t, 10*time.Second, "the first sync under the narrower role", func() bool {
+	sampleUntil(t, "the first sync under the narrower role", func() bool {
 		return last.ClusterWide != nil && !*last.ClusterWide && strings.Join(last.ReadableNamespaces, ",") == "shop"
 	}, func() error {
 		if report, err := cluster.service.SyncHealth(ctx); err == nil {
@@ -601,7 +596,7 @@ func TestConfiguredNamespacesHoldFromTheFirstSync(t *testing.T) {
 		}
 		cluster.registry.StartCapture(ctx)
 		var last SyncHealth
-		sampleUntil(t, 10*time.Second, "the namespace-only view from the first sync", func() bool {
+		sampleUntil(t, "the namespace-only view from the first sync", func() bool {
 			return readsAsNamespaceAccess(last) && last.State == "ready"
 		}, func() error {
 			report, err := cluster.service.SyncHealth(ctx)
@@ -723,7 +718,7 @@ func TestNamespaceOnlySetupReachesFirstReadyForThePageRequests(t *testing.T) {
 	ctx := t.Context()
 	var last SyncHealth
 	step, done := 0, 0
-	sampleUntil(t, 10*time.Second, "the first ready moment", func() bool { return !last.FirstReadyAt.IsZero() }, func() error {
+	sampleUntil(t, "the first ready moment", func() bool { return !last.FirstReadyAt.IsZero() }, func() error {
 		report, err := cluster.service.SyncHealth(ctx)
 		if err != nil {
 			return fmt.Errorf("sync health failed (%s): %w", DiagnoseError(err).Code, err)
@@ -852,9 +847,25 @@ func TestFailingNamespaceIsNotReportedReadyThroughAnother(t *testing.T) {
 		t.Fatalf("the Pod age follows the fresh namespace %s, not the failing one %s", shop.ObservedAt, committed.View.Kinds["Pod"].ObservedAt)
 	}
 	cluster.failNamespace.Store(nil)
-	cluster.cycle(nil, "Pod")
-	if report, err := cluster.service.SyncHealth(ctx); err != nil || report.State != "ready" {
-		t.Fatalf("after the namespace recovered the report did not return to ready: state=%s failing=%+v err=%v", report.State, report.Failing, err)
+	// A recovery cycle publishes as soon as its witness kind is read; on a
+	// loaded machine the namespace's other kinds can still be waiting for
+	// their own read, so the report stays partial until each of them has been
+	// read again. Drive cycles until it is ready, within a bound, and require
+	// every kind still failing meanwhile to name the namespace that failed.
+	for wait := polling(t, "the report to return to ready after the namespace recovered"); ; wait.next() {
+		cluster.cycle(nil, "Pod")
+		report, err := cluster.service.SyncHealth(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.State == "ready" {
+			break
+		}
+		for _, problem := range report.Failing {
+			if problem.Namespace != "payments" || problem.Class == "namespace_scope" {
+				t.Fatalf("while the namespace recovered a kind failed outside it: %+v", problem)
+			}
+		}
 	}
 }
 

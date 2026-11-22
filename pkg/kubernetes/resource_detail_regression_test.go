@@ -374,22 +374,13 @@ func TestInventoryCorePublicationDoesNotWaitForUsageCollection(t *testing.T) {
 	service.SetChangeStorage(storage.NewMemory())
 	service.startInventory(t.Context())
 	defer service.StopCapture()
-	select {
-	case <-metrics:
-	case <-time.After(time.Second):
-		t.Fatal("usage collection did not start")
-	}
-	deadline := time.Now().Add(200 * time.Millisecond)
-	for {
+	waitFor(t, metrics, "usage collection did not start")
+	// The usage request is still held, so a ready snapshot proves inventory
+	// does not wait for it.
+	eventually(t, "completed inventory published while usage is held", func() bool {
 		_, status, err := service.CachedIndexSnapshot(t.Context(), "Pod")
-		if err == nil && status.State == "ready" {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("completed inventory remained blocked behind usage: %+v %v", status, err)
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return err == nil && status.State == "ready"
+	})
 }
 
 func TestCaptureProgressDoesNotWaitForMetricsSampler(t *testing.T) {
@@ -465,22 +456,11 @@ func TestCaptureProgressDoesNotWaitForMetricsSampler(t *testing.T) {
 			t.Error("inventory sampler did not join")
 		}
 	}()
-	select {
-	case <-metricsStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("metrics sampler never started")
-	}
-	deadline := time.Now().Add(time.Second)
-	for {
+	waitFor(t, metricsStarted, "metrics sampler never started")
+	eventually(t, "inventory publication while usage is slow", func() bool {
 		view, _, err := service.CachedIndexSnapshot(context.WithValue(t.Context(), cachedCaptureContextKey{}, true), "Pod")
-		if err == nil && !view.Kinds["Pod"].ObservedAt.IsZero() {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("inventory publication waited for slow usage")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return err == nil && !view.Kinds["Pod"].ObservedAt.IsZero()
+	})
 	select {
 	case <-podRead:
 	default:
@@ -489,19 +469,11 @@ func TestCaptureProgressDoesNotWaitForMetricsSampler(t *testing.T) {
 	loop.next["Pod"] = now.Add(-time.Second)
 	loop.mu.Unlock()
 	ticks <- time.Now()
-	deadline = time.Now().Add(time.Second)
-	for {
+	eventually(t, "cached capture coverage while the metrics API is slow", func() bool {
 		loop.mu.Lock()
-		completed := !loop.completed["Pod"].IsZero()
-		loop.mu.Unlock()
-		if completed {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("slow metrics API blocked cached capture coverage")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		defer loop.mu.Unlock()
+		return !loop.completed["Pod"].IsZero()
+	})
 	page, err := store.ReadWindow(now.Add(-time.Minute), time.Now().UTC(), time.Now().UTC())
 	if err != nil || page.Coverage["Pod"].To.IsZero() {
 		t.Fatalf("main capture did not commit coverage: %+v %v", page, err)
@@ -576,12 +548,12 @@ func TestUsageHistoryBridgeSamplesHealthyPodOpenedOnAnotherReplica(t *testing.T)
 	}
 	waitUsageInterestCount(t, viewer, 1)
 	owner.sampleUsageHistory(context.Background(), now)
-	history, err := viewer.UsageHistory(logStreamTestContext(), "shop", "api-00")
-	deadline := time.Now().Add(2 * time.Second)
-	for err == nil && len(history.Samples) == 0 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
+	var history UsageHistory
+	var err error
+	eventually(t, "owner samples reach the non-owner drawer", func() bool {
 		history, err = viewer.UsageHistory(logStreamTestContext(), "shop", "api-00")
-	}
+		return err != nil || len(history.Samples) > 0
+	})
 	if err != nil || calls.Load() != 1 || len(history.Samples) != 1 || history.Samples[0].CPUMilli != 250 {
 		t.Fatalf("non-owner drawer never got owner samples: %+v calls=%d err=%v", history, calls.Load(), err)
 	}

@@ -219,7 +219,7 @@ func TestAutonomousConfiguredNamespaceLiveDataUsesItsSuccessfulScope(t *testing.
 	service.client.namespace = "shop"
 	service.startInventory(t.Context())
 	defer service.StopCapture()
-	waitUntil(t, 8*time.Second, "authorized configured namespace", func() bool {
+	eventually(t, "authorized configured namespace", func() bool {
 		view, status, err := service.CachedNamespaceSnapshot(t.Context(), "shop", "Pod")
 		if err != nil {
 			var unknown *inventoryAuthorityUnavailable

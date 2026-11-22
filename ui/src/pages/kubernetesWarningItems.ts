@@ -37,9 +37,18 @@ function failureName(failure: PartialFailure): string {
   return failure.scope ? kindNames[failure.scope.toLowerCase()] ?? failure.scope : "A Kubernetes resource";
 }
 
+/** Why a live issues page has no break times: saved history did not answer. */
+export const savedBreakHistoryUnavailable = "Issues are live, but saved break history is temporarily unavailable, so break times and occurrence links are hidden. It is retried on the next refresh.";
+
+/** Whether a page was answered live while its saved break history was unavailable. */
+export function breakHistoryUnavailable(failures?: readonly unknown[] | null): boolean {
+  return Boolean(failures?.some((failure) => typeof failure === "object" && failure !== null && (failure as { class?: unknown }).class === "historical_evidence_unavailable"));
+}
+
 /** One read in plain words, worded like the server's own sentences. */
 function failureSentence(name: string, failureClass: string): string {
   switch (failureClass) {
+    case "historical_evidence_unavailable": return savedBreakHistoryUnavailable;
     case "forbidden": return `${name} is not readable with this connector's permissions.`;
     case "namespace_scope": return `${name} is read only in the namespaces this connector can access.`;
     case "unauthorized":

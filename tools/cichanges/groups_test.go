@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -253,6 +254,17 @@ func TestCommittedOSSConfig(t *testing.T) {
 		{"group map", []string{".github/ci-groups.json"}, nil, true},
 		{"other workflow", []string{".github/workflows/release.yaml"}, nil, true},
 		{"link checker", []string{"tools/docscheck/main.go"}, nil, true},
+		{"test lint", []string{"tools/testlint/lint.go"}, nil, true},
+		{"race shard script and lists", []string{"scripts/ci-tests.sh", ".github/race-shards/kubernetes-rbac.txt"}, nil, true},
+		{"local CI script", []string{"scripts/ci-local.sh"}, nil, true},
+		{"root ignore list only", []string{".gitignore"}, []string{"metadata"}, false},
+		{"editor settings and a stray macOS file", []string{".editorconfig", ".DS_Store", "examples/.DS_Store"}, []string{"docs", "metadata"}, false},
+		{"ignore list inside the ui keeps the ui group", []string{"ui/.gitignore"}, []string{"image", "metadata", "ui"}, false},
+		{"github forms and code owners", []string{".github/ISSUE_TEMPLATE/bug_report.yml", ".github/pull_request_template.md", ".github/FUNDING.yml", ".github/CODEOWNERS", "CODEOWNERS"}, []string{"metadata"}, false},
+		{"image ignore list builds the image", []string{".dockerignore"}, []string{"image"}, false},
+		{"dependabot config is still CI", []string{".github/dependabot.yml"}, nil, true},
+		{"git attributes can change checked-out bytes", []string{".gitattributes"}, nil, true},
+		{"unknown root file", []string{"src/a.md", "Makefile"}, nil, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -270,6 +282,129 @@ func TestCommittedOSSConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCommittedOSSConfigDocsAndMetadataPush replays a merged docs change that
+// also edited the root ignore list and deleted a committed macOS folder file.
+// It runs the tool on the committed group map and then applies the
+// workflow's own not_code pattern, read from dev.yml, the way the push-to-main
+// step does: no group outside not_code may be on, or main reruns everything.
+func TestCommittedOSSConfigDocsAndMetadataPush(t *testing.T) {
+	files := []string{
+		".gitignore",
+		"src/_sidebar.md",
+		"src/docs/.DS_Store",
+		"src/docs/images/anomaly-baseline-ewma.svg",
+		"src/docs/images/anomaly-grouping.svg",
+		"src/docs/images/anomaly-hard-to-catch.svg",
+		"src/docs/images/anomaly-learning-timeline.svg",
+		"src/docs/images/anomaly-memory-trend.svg",
+		"src/docs/images/anomaly-sibling-mad.svg",
+		"src/docs/images/anomaly-six-layers.svg",
+		"src/docs/images/anomaly-version-compare.svg",
+		"src/docs/images/anomaly-worker-ha.svg",
+		"src/in-development/kubernetes-anomaly-detection.md",
+	}
+	notCode := workflowNotCode(t)
+
+	decide := func(t *testing.T, files []string) string {
+		t.Helper()
+		dir := t.TempDir()
+		list := filepath.Join(dir, "files.txt")
+		if err := os.WriteFile(list, []byte(strings.Join(files, "\n")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfgPath, err := filepath.Abs(filepath.Join("..", "..", ".github", "ci-groups.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GITHUB_OUTPUT", "")
+		var out, errOut strings.Builder
+		// The module dir holds no Go source, so the package list stays empty.
+		args := []string{"--config", cfgPath, "--module-dir", t.TempDir(), "--files", list}
+		if err := run(args, &out, &errOut); err != nil {
+			t.Fatalf("run: %v\nstderr: %s", err, errOut.String())
+		}
+		return out.String()
+	}
+	codeGroupsOn := func(decision string) []string {
+		var on []string
+		for _, line := range strings.Split(strings.TrimSpace(decision), "\n") {
+			if !notCode.MatchString(line) && strings.HasSuffix(line, "=true") {
+				on = append(on, line)
+			}
+		}
+		return on
+	}
+
+	t.Run("merged docs change", func(t *testing.T) {
+		got := decide(t, files)
+		for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
+			name, value, _ := strings.Cut(line, "=")
+			want := "false"
+			switch name {
+			case "docs", "metadata":
+				want = "true"
+			case "go_packages":
+				want = ""
+			}
+			if value != want {
+				t.Errorf("%s=%s, want %s\nfull decision:\n%s", name, value, want, got)
+			}
+		}
+		if on := codeGroupsOn(got); len(on) != 0 {
+			t.Errorf("push to main would rerun the full suite; code groups on: %v", on)
+		}
+	})
+
+	t.Run("ignore list only", func(t *testing.T) {
+		got := decide(t, []string{".gitignore"})
+		if !strings.Contains(got, "metadata=true\n") || !strings.Contains(got, "full=false\n") || !strings.Contains(got, "go=false\n") {
+			t.Errorf("want metadata only, no full run and no Go jobs, got:\n%s", got)
+		}
+		if on := codeGroupsOn(got); len(on) != 0 {
+			t.Errorf("an ignore-list change counts as code: %v", on)
+		}
+	})
+
+	t.Run("unclaimed file still runs everything", func(t *testing.T) {
+		cfg := mustConfig(t, readCommittedConfig(t))
+		sel := Select(cfg, []string{"src/_sidebar.md", ".gitignore", "build.unknown"}, false, "")
+		if !sel.Full || !reflect.DeepEqual(sel.Unmatched, []string{"build.unknown"}) {
+			t.Errorf("full = %t, unmatched = %v, want a full run blamed on build.unknown", sel.Full, sel.Unmatched)
+		}
+		if on := codeGroupsOn(decide(t, []string{"build.unknown"})); len(on) == 0 {
+			t.Error("a full run is not seen as code by the workflow's not_code check")
+		}
+	})
+}
+
+// workflowNotCode reads the not_code pattern from the committed workflow so
+// the test and the push-to-main check cannot drift apart.
+func workflowNotCode(t *testing.T) *regexp.Regexp {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "dev.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*not_code='([^']*)'\s*$`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("dev.yml has no not_code='...' line")
+	}
+	re, err := regexp.Compile(string(m[1]))
+	if err != nil {
+		t.Fatalf("not_code pattern %q: %v", m[1], err)
+	}
+	return re
+}
+
+func readCommittedConfig(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "ci-groups.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 // TestCommittedOSSConfigDocsBuild follows a change to the docs site build

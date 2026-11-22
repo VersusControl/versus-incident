@@ -151,12 +151,7 @@ func nativeResourceService(t *testing.T, backend *nativeResourceBackend) *Servic
 
 func waitNativeCount(t *testing.T, value *atomic.Int32, want int32) {
 	t.Helper()
-	deadline := time.Now().Add(scaledTimeout(4 * time.Second))
-	for value.Load() != want {
-		if time.Now().After(deadline) {
-			t.Fatalf("native counter=%d want=%d", value.Load(), want)
-		}
-		time.Sleep(5 * time.Millisecond)
+	for wait := polling(t, "the native read counter to reach its expected value"); value.Load() != want; wait.next() {
 	}
 }
 
@@ -309,8 +304,7 @@ func TestNativeWorkloadWindowBoundsAndTimestampResume(t *testing.T) {
 
 func awaitNativeHistory(t *testing.T, service *Service, samples int) UsageHistory {
 	t.Helper()
-	deadline := time.Now().Add(scaledTimeout(3 * time.Second))
-	for {
+	for wait := polling(t, "the expected number of usage history samples"); ; wait.next() {
 		history, err := service.UsageHistory(logStreamTestContext(), "shop", "api-00")
 		if err != nil {
 			t.Fatal(err)
@@ -318,10 +312,6 @@ func awaitNativeHistory(t *testing.T, service *Service, samples int) UsageHistor
 		if len(history.Samples) == samples {
 			return history
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("eventual history samples=%d want%d", len(history.Samples), samples)
-		}
-		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -344,8 +334,7 @@ func TestNativeHistoryReplicaInterestAndRetention(t *testing.T) {
 	if _, err := viewer.UsageHistory(logStreamTestContext(), "shop", "api-00"); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	for wait := polling(t, "off-request drawer interest was not persisted"); ; wait.next() {
 		manifest, _, err := readUsageManifest(owner.usageProvider(), usageBridgePrefix(owner.cacheKey())+"interest")
 		if err != nil {
 			t.Fatal(err)
@@ -353,10 +342,6 @@ func TestNativeHistoryReplicaInterestAndRetention(t *testing.T) {
 		if len(manifest) == 1 {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("off-request drawer interest was not persisted")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 	owner.sampleUsageHistory(logStreamTestContext(), now)
 	owner.sampleUsageHistory(logStreamTestContext(), now.Add(10*time.Second))
@@ -476,7 +461,7 @@ func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 	// listed kinds before its optional metrics read, which this backend holds
 	// open, so the Pod listing is there to refresh from while metrics blocks.
 	service.startInventory(ctx)
-	waitUntil(t, 5*time.Second, "inventory worker to publish the Pod listing", func() bool {
+	eventually(t, "inventory worker to publish the Pod listing", func() bool {
 		generation, err := service.readInventory(context.WithValue(ctx, cachedCaptureContextKey{}, true))
 		return err == nil && generation.View.Kinds["Pod"].ObservedAt.After(now)
 	})
@@ -506,7 +491,7 @@ func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 			t.Error("owner or blocked metrics goroutine leaked")
 		}
 	}()
-	waitUntil(t, 2*time.Second, "the owner's sampler to open a metrics request", func() bool { return backend.metrics.Load() > metricsBefore })
+	eventually(t, "the owner's sampler to open a metrics request", func() bool { return backend.metrics.Load() > metricsBefore })
 	index, _ := service.indexes.ForScope(service.indexScope())
 	// The actual owner must refresh a stale Pod index while metrics is blocked.
 	if err := index.Refresh(ctx, "Pod", 0, now.Add(-time.Minute), func(context.Context) ([]kubeindex.Record, bool, error) { return backend.records[1:], true, nil }); err != nil {
@@ -520,7 +505,7 @@ func TestNativeBlockedMetricsDoesNotBlockCaptureOwner(t *testing.T) {
 	// The worker relists Pods on its own cycles too, so a fresh index alone
 	// does not prove the owner ran: only an owner capture cycle records a
 	// completed Pod capture.
-	waitUntil(t, time.Second, "owner Pod capture while metrics is blocked", func() bool {
+	eventually(t, "owner Pod capture while metrics is blocked", func() bool {
 		loop.mu.Lock()
 		completed := loop.completed["Pod"]
 		loop.mu.Unlock()
