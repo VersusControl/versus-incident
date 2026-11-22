@@ -138,7 +138,8 @@ func CheckDiff(r io.Reader) ([]Finding, error) {
 			}
 			continue
 		}
-		if !strings.HasSuffix(file, "_test.go") {
+		// The lint's own tests hold example lines it must flag.
+		if !strings.HasSuffix(file, "_test.go") || strings.HasPrefix(file, "tools/testlint/") {
 			continue
 		}
 		switch {

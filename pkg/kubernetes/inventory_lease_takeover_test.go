@@ -161,7 +161,7 @@ func TestCrashedOwnerLeaseIsTakenOverWhenItRunsOut(t *testing.T) {
 				if restarted.inventoryFreshFloor().IsZero() {
 					t.Fatal("the restarted replica lost its grace before anyone published")
 				}
-				time.Sleep(20 * time.Millisecond)
+				time.Sleep(20 * time.Millisecond) // testlint:allow sampling interval for a "never" check across the lease window
 			}
 			eventually(t, "takeover publication", func() bool {
 				record := fixture.record()
@@ -230,7 +230,7 @@ func (cas *slowCAS) CompareAndSwapBlob(name string, expected, replacement []byte
 		if cas.fail {
 			return false, errors.New("database unavailable")
 		}
-		time.Sleep(wait)
+		time.Sleep(wait) // testlint:allow simulates a slow lease write
 	}
 	return cas.BlobCAS.CompareAndSwapBlob(name, expected, replacement)
 }
@@ -272,7 +272,7 @@ func TestDelayedLeaseRenewalKeepsOwnership(t *testing.T) {
 				if _, stolen, err := other.claimInventory(t.Context(), provider, "other"); err == nil && stolen {
 					t.Fatalf("another replica claimed the lease %s after a delayed renewal began", time.Since(claimed))
 				}
-				time.Sleep(50 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond) // testlint:allow sampling interval for a "never" check during the delayed renewal
 			}
 			cancel()
 			if err := <-result; err != nil {
@@ -296,7 +296,7 @@ func TestOnlyOneReplicaClaimsTheInventoryLease(t *testing.T) {
 	}
 	for round := range 12 {
 		// Let the previous round's lease run out.
-		time.Sleep(520 * time.Millisecond)
+		time.Sleep(520 * time.Millisecond) // testlint:allow lets the shortened test lease expire between rounds
 		var winners atomic.Int32
 		var group sync.WaitGroup
 		for i, service := range services {

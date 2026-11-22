@@ -61,7 +61,7 @@ func (wait *poll) next() {
 	if time.Now().After(wait.deadline) {
 		failHung(wait.t, wait.guard, wait.what)
 	}
-	time.Sleep(wait.pause)
+	time.Sleep(wait.pause) // testlint:allow the shared wait helper's own poll pause
 	if wait.pause < 10*time.Millisecond {
 		wait.pause *= 2
 	}

@@ -1579,7 +1579,7 @@ func TestLiveIssuesReturnCallerDeadlineDuringOccurrenceLookup(t *testing.T) {
 	ctx := liveBrokenPodsContext(t.Context(), "api-0")
 	// The live snapshot is built first; the caller's deadline then ends during
 	// the slow lookup, well before the per-lookup bound.
-	deadline, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	deadline, cancel := context.WithTimeout(ctx, 100*time.Millisecond) // testlint:allow the caller deadline is the behaviour under test
 	defer cancel()
 	page, err := service.Issues(deadline, IssueOptions{})
 	if !errors.Is(err, context.DeadlineExceeded) || len(page.Items) != 0 {
