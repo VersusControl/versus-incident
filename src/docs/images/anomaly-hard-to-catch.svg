@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="484" viewBox="0 0 760 484" style="max-width:100%;height:auto" role="img" aria-label="Five problems that fixed alert rules miss and a learned normal catches; in each one the rule reports OK and learning flags an anomaly; quiet bad replica: one of twelve replicas runs far higher while the workload average barely moves; new error in v2: version 2 adds an error type version 1 never had, while the total error rate stays under the SLO line; 3 AM surge: at 03:00 the value jumps to its usual noon level, far above the learned night band but still under the static threshold; noisy node: nine Pods from four workloads on node-3 are all slightly off, while the same workloads on node-1 and node-2 are fine; slow leak: memory rises slowly for three days under the limit, and its trend reaches the limit tonight, an OOM ahead">
+  <title>Kubernetes Anomaly Detection - Problems Alert Rules Miss</title>
+  <desc>Five small panels, each marked rule OK and learned anomaly: a quiet bad replica, a new error in v2, a 3 AM surge, a noisy node and a slow memory leak</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .h{font-size:15px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}.end{text-anchor:end}.wt{fill:#FFFFFF}
+      .card{fill:#F2F5F8}
+      .axis{fill:none;stroke:#9AA9B6;stroke-width:1.5}
+      .acc{fill:#E8590C}
+      .accT{fill:#FDE7D8;stroke:#E8590C}
+      .w1{fill:#BACFE3}.w2{fill:#CFE3C0}.w3{fill:#F3DFB2}.w4{fill:#DCCFEA}
+    </style>
+    <g id="badges">
+      <rect x="0" y="0" width="78" height="22" rx="11" fill="#FFFFFF" stroke="#C3CED8" stroke-width="1.5"/>
+      <path d="M10 11.5l3.5 3.5 6.5-7" fill="none" stroke="#5B6B78" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="26" y="15" class="f11 sec">rule: OK</text>
+      <rect x="84" y="0" width="124" height="22" rx="11" class="accT" stroke-width="1.5"/>
+      <circle cx="96" cy="11" r="4" class="acc"/>
+      <text x="106" y="15" class="f11 nm">learned: <tspan class="b">anomaly</tspan></text>
+    </g>
+  </defs>
+
+  <rect width="760" height="484" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">Kubernetes Anomaly Detection - Problems Alert Rules Miss</text>
+  <text x="24" y="56" class="f13 sec">Fixed rules stay quiet; a learned normal flags all five</text>
+
+  <!-- cards -->
+  <rect class="card" x="20" y="76" width="232" height="188" rx="12"/>
+  <rect class="card" x="264" y="76" width="232" height="188" rx="12"/>
+  <rect class="card" x="508" y="76" width="232" height="188" rx="12"/>
+  <rect class="card" x="20" y="276" width="354" height="188" rx="12"/>
+  <rect class="card" x="386" y="276" width="354" height="188" rx="12"/>
+
+  <!-- quiet bad replica -->
+  <text x="34" y="104" class="h">Quiet bad replica</text>
+  <g class="w1">
+    <rect x="37" y="186" width="10" height="26" rx="2"/>
+    <rect x="53.5" y="182" width="10" height="30" rx="2"/>
+    <rect x="70" y="184" width="10" height="28" rx="2"/>
+    <rect x="86.5" y="180" width="10" height="32" rx="2"/>
+    <rect x="103" y="185" width="10" height="27" rx="2"/>
+    <rect x="119.5" y="181" width="10" height="31" rx="2"/>
+    <rect x="136" y="183" width="10" height="29" rx="2"/>
+    <rect x="152.5" y="182" width="10" height="30" rx="2"/>
+    <rect x="185.5" y="184" width="10" height="28" rx="2"/>
+    <rect x="202" y="181" width="10" height="31" rx="2"/>
+    <rect x="218.5" y="185" width="10" height="27" rx="2"/>
+  </g>
+  <rect x="169" y="128" width="10" height="84" rx="2" class="acc"/>
+  <path class="axis" d="M34 212H238"/>
+  <path d="M34 178H238" fill="none" stroke="#12222F" stroke-width="2"/>
+  <text x="34" y="170" class="f11 sec">workload average</text>
+  <use href="#badges" x="32" y="228"/>
+
+  <!-- new error in v2 -->
+  <text x="278" y="104" class="h">New error in v2</text>
+  <path d="M284 134H482" fill="none" stroke="#12222F" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <text x="482" y="128" class="f11 sec end">SLO</text>
+  <g class="w1">
+    <rect x="292" y="180" width="44" height="20" rx="2"/>
+    <rect x="292" y="164" width="44" height="14" rx="2"/>
+    <rect x="292" y="152" width="44" height="10" rx="2"/>
+    <rect x="356" y="184" width="44" height="16" rx="2"/>
+    <rect x="356" y="170" width="44" height="12" rx="2"/>
+    <rect x="356" y="160" width="44" height="8" rx="2"/>
+  </g>
+  <rect x="356" y="144" width="44" height="14" rx="2" class="acc"/>
+  <path class="axis" d="M284 200H482"/>
+  <text x="410" y="155" class="f12 b nm">new error</text>
+  <text x="314" y="215" class="f12 b nm mid">v1</text>
+  <text x="378" y="215" class="f12 b nm mid">v2</text>
+  <use href="#badges" x="276" y="228"/>
+
+  <!-- noisy node -->
+  <text x="522" y="104" class="h">Noisy node</text>
+  <rect x="522" y="124" width="56" height="82" rx="8" fill="#FFFFFF" stroke="#9AA9B6" stroke-width="1.5"/>
+  <rect x="586" y="124" width="56" height="82" rx="8" fill="#FFFFFF" stroke="#9AA9B6" stroke-width="1.5"/>
+  <rect x="650" y="124" width="76" height="82" rx="8" class="accT" stroke-width="2"/>
+  <text x="550" y="140" class="c f11 sec mid">node-1</text>
+  <text x="614" y="140" class="c f11 sec mid">node-2</text>
+  <text x="688" y="140" class="c f11 b mid">node-3</text>
+  <rect x="529.5" y="157" width="18" height="14" rx="3" class="w1"/>
+  <rect x="552.5" y="157" width="18" height="14" rx="3" class="w2"/>
+  <rect x="529.5" y="176" width="18" height="14" rx="3" class="w3"/>
+  <rect x="552.5" y="176" width="18" height="14" rx="3" class="w4"/>
+  <rect x="593.5" y="157" width="18" height="14" rx="3" class="w2"/>
+  <rect x="616.5" y="157" width="18" height="14" rx="3" class="w3"/>
+  <rect x="593.5" y="176" width="18" height="14" rx="3" class="w4"/>
+  <rect x="616.5" y="176" width="18" height="14" rx="3" class="w1"/>
+  <g stroke="#E8590C" stroke-width="1.5">
+    <rect x="656" y="148" width="18" height="14" rx="3" class="w1"/>
+    <rect x="679" y="148" width="18" height="14" rx="3" class="w1"/>
+    <rect x="702" y="148" width="18" height="14" rx="3" class="w2"/>
+    <rect x="656" y="167" width="18" height="14" rx="3" class="w2"/>
+    <rect x="679" y="167" width="18" height="14" rx="3" class="w3"/>
+    <rect x="702" y="167" width="18" height="14" rx="3" class="w3"/>
+    <rect x="656" y="186" width="18" height="14" rx="3" class="w4"/>
+    <rect x="679" y="186" width="18" height="14" rx="3" class="w4"/>
+    <rect x="702" y="186" width="18" height="14" rx="3" class="w1"/>
+  </g>
+  <circle cx="726" cy="124" r="8" class="acc"/>
+  <text x="726" y="128.5" class="f12 b mid wt">!</text>
+  <use href="#badges" x="520" y="228"/>
+
+  <!-- 3 AM surge -->
+  <text x="34" y="304" class="h">3 AM surge</text>
+  <path d="M44 322H350" fill="none" stroke="#12222F" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="350" y="316" class="f11 sec end">threshold</text>
+  <polygon fill="#BACFE3" fill-opacity="0.6" points="44,380 69.5,382 95,382 120.5,378 146,366 171.5,352 197,344 222.5,344 248,348 273.5,358 299,368 324.5,376 350,380 350,392 324.5,388 299,382 273.5,372 248,362 222.5,358 197,358 171.5,366 146,380 120.5,390 95,394 69.5,394 44,392"/>
+  <text x="197" y="338" class="f11 sec mid">learned normal</text>
+  <polyline fill="none" stroke="#000000" stroke-width="2" stroke-linejoin="round" points="44,386 56.75,387 69.5,388 79.06,388 82.25,350 88.63,352 91.81,387 95,388 107.75,387 120.5,384 133.25,378 146,373 158.75,366 171.5,358 184.25,353 197,351 209.75,350 222.5,352 235.25,353 248,355 260.75,360 273.5,365 286.25,370 299,375 311.75,379 324.5,382 337.25,385 350,386"/>
+  <polyline fill="none" stroke="#E8590C" stroke-width="2.5" stroke-linejoin="round" points="79.06,388 82.25,350 88.63,352 91.81,387"/>
+  <circle cx="85.4" cy="351" r="4.5" class="acc"/>
+  <path class="axis" d="M44 400H350M82.25 400V404M197 400V404"/>
+  <text x="82.25" y="414" class="f11 b nm mid">03:00</text>
+  <text x="197" y="414" class="f11 sec mid">12:00</text>
+  <use href="#badges" x="32" y="428"/>
+
+  <!-- slow leak -->
+  <text x="400" y="304" class="h">Slow leak</text>
+  <rect x="590" y="340" width="130" height="60" fill="#FFFFFF"/>
+  <path d="M410 336H720" fill="none" stroke="#12222F" stroke-width="2"/>
+  <text x="410" y="330" class="f11 sec">limit</text>
+  <path d="M590 344V400" fill="none" stroke="#9AA9B6" stroke-width="1.5" stroke-dasharray="3 3"/>
+  <polyline fill="none" stroke="#000000" stroke-width="2" stroke-linejoin="round" points="410,392 425,386 440,387 455,381 470,382 485,374 500,375 515,369 530,370 545,362 560,363 575,357 590,356"/>
+  <path d="M590 356L690 336" fill="none" stroke="#E8590C" stroke-width="2" stroke-dasharray="5 4"/>
+  <circle cx="690" cy="336" r="6" class="acc" stroke="#FFFFFF" stroke-width="2"/>
+  <text x="722" y="328" class="f12 b nm end">OOM at night</text>
+  <path class="axis" d="M410 400H720"/>
+  <text x="410" y="414" class="f11 sec">3 days ago</text>
+  <text x="590" y="414" class="f11 b nm mid">now</text>
+  <use href="#badges" x="398" y="428"/>
+</svg>
