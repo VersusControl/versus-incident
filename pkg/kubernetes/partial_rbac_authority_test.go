@@ -394,8 +394,7 @@ func (cluster *partialRoleCluster) start() {
 	t := cluster.t
 	t.Helper()
 	cluster.registry.StartCapture(t.Context())
-	deadline := time.Now().Add(scaledTimeout(15 * time.Second))
-	for {
+	for wait := polling(t, "complete initial publication"); ; wait.next() {
 		report, err := cluster.service.SyncHealth(t.Context())
 		// A role that reads Pods only inside namespaces never reports the
 		// cluster fully ready, so its first complete publication is partial.
@@ -405,10 +404,6 @@ func (cluster *partialRoleCluster) start() {
 		if (err == nil || cluster.namespaceOnly.Load()) && report.PendingKinds == 0 && published {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for complete initial publication: state=%s pending=%d first=%s err=%v", report.State, report.PendingKinds, report.FirstReadyAt, err)
-		}
-		time.Sleep(2 * time.Millisecond)
 	}
 	cluster.service.changes.mu.Lock()
 	cluster.cache = cluster.service.changes.inventories[cluster.service.indexScope()]
@@ -438,7 +433,7 @@ func (cluster *partialRoleCluster) wake() {
 func (cluster *partialRoleCluster) settle() {
 	before := cluster.attempts()
 	cluster.wake()
-	waitUntil(cluster.t, 15*time.Second, "worker iteration to finish", func() bool { return cluster.attempts() > before })
+	eventually(cluster.t, "worker iteration to finish", func() bool { return cluster.attempts() > before })
 }
 
 func (cluster *partialRoleCluster) committed() inventoryGeneration {
@@ -486,29 +481,58 @@ func (cluster *partialRoleCluster) force(due map[string]bool) time.Time {
 }
 
 // cycle forces a cycle, waits for its publication, then for the worker to
-// finish it. The cycle is retried if a cycle already running absorbed it.
+// finish it. A cycle the worker started on its own before the force, for
+// example to read a discovered API whose cadence came due, publishes the
+// candidate it cloned before the force and so drops the forced marks; that
+// absorbed force is seen on the publication itself and forced again at once.
+// When every kind is made due an absorbed force cannot be told apart, so a
+// force that has not published after a while is made again; forcing twice is
+// harmless. Only the hang guard fails the wait.
 func (cluster *partialRoleCluster) cycle(due map[string]bool, witness string) {
 	t := cluster.t
 	t.Helper()
-	for attempt := 0; ; attempt++ {
+	wait := polling(t, "forced cycle published (witness kind "+witness+")")
+	absorbed := 0
+	for {
+		before := cluster.committed().Revision
 		forced := cluster.force(due)
-		deadline := time.Now().Add(scaledTimeout(5 * time.Second))
-		published := false
-		for time.Now().Before(deadline) {
-			if cluster.committed().View.Kinds[witness].LastAttemptAt.After(forced) {
-				published = true
+		nudge := time.Now().Add(scaledTimeout(5 * time.Second))
+		for {
+			committed := cluster.committed()
+			if committed.View.Kinds[witness].LastAttemptAt.After(forced) {
+				cluster.settle()
+				return
+			}
+			if committed.Revision != before && predatesForce(committed, due, forced) {
+				absorbed++
+				t.Logf("a cycle already running absorbed forced cycle %d (witness kind %s); forcing again", absorbed, witness)
+				if absorbed == 20 {
+					t.Fatalf("every forced cycle was absorbed by a cycle already running (witness kind %s)", witness)
+				}
 				break
 			}
-			time.Sleep(2 * time.Millisecond)
-		}
-		if published {
-			break
-		}
-		if attempt == 3 {
-			t.Fatalf("forced cycle was never published (witness kind %s)", witness)
+			if time.Now().After(nudge) {
+				break
+			}
+			wait.next()
 		}
 	}
-	cluster.settle()
+}
+
+// predatesForce reports whether a published generation was cloned before a
+// force made at forced: the force marks every kind it did not make due as
+// attempted at forced, so a generation holding an older attempt for such a
+// kind never saw the force. It cannot tell when every kind was made due.
+func predatesForce(generation inventoryGeneration, due map[string]bool, forced time.Time) bool {
+	if due == nil {
+		return false
+	}
+	for kind, state := range generation.View.Kinds {
+		if !due[kind] && state.LastAttemptAt.Before(forced) {
+			return true
+		}
+	}
+	return false
 }
 
 func (cluster *partialRoleCluster) refusal() string {
@@ -650,11 +674,7 @@ func TestReadersKeepLastGenerationWhileANewDenialIsProven(t *testing.T) {
 				due[kind] = true
 			}
 			cluster.force(due)
-			select {
-			case <-started:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the new denial did not start an authority proof")
-			}
+			waitFor(t, started, "the new denial did not start an authority proof")
 			ctx := t.Context()
 			for i := 0; i < 20; i++ {
 				if err := cluster.readable(); err != nil {
@@ -692,7 +712,7 @@ func TestReadersKeepLastGenerationWhileANewDenialIsProven(t *testing.T) {
 			revision := cluster.committed().Revision
 			released = true
 			close(release)
-			waitUntil(t, 10*time.Second, "publication after the proof passed", func() bool {
+			eventually(t, "publication after the proof passed", func() bool {
 				return cluster.committed().Revision != revision
 			})
 			cluster.settle()
@@ -752,11 +772,7 @@ func TestLostReadAuthorityStillHidesDataAndRefusesCapture(t *testing.T) {
 	checks := cluster.cache.authorityChecks.Load()
 	cluster.denyAll.Store(true)
 	cluster.force(nil)
-	select {
-	case <-started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the lost read authority did not start an authority proof")
-	}
+	waitFor(t, started, "the lost read authority did not start an authority proof")
 	ctx := t.Context()
 	pods, _, err := cluster.service.CachedIndexSnapshot(ctx, "Pod")
 	if err == nil {
@@ -772,17 +788,24 @@ func TestLostReadAuthorityStillHidesDataAndRefusesCapture(t *testing.T) {
 	}
 	released = true
 	close(release)
-	waitUntil(t, 10*time.Second, "failed proof to fail the cycle", func() bool {
+	// The cycle is marked failed before the denial it proved is classified,
+	// so the wait covers both: the failed cycle and the read it refuses.
+	var denied WorkloadPage
+	eventually(t, "the failed proof to fail the cycle and refuse reads as forbidden", func() bool {
 		cluster.cache.mu.RLock()
-		defer cluster.cache.mu.RUnlock()
-		return cluster.cache.failed
+		failed := cluster.cache.failed
+		cluster.cache.mu.RUnlock()
+		if !failed {
+			return false
+		}
+		denied, err = cluster.service.Workloads(ctx, WorkloadListOptions{})
+		if len(denied.Items) != 0 {
+			t.Fatalf("data stayed readable after the proof failed: items=%d err=%v", len(denied.Items), err)
+		}
+		return errors.Is(err, ErrForbidden)
 	})
 	if cluster.cache.authorityChecks.Load() == checks {
 		t.Fatal("the lost read authority ran no authority check")
-	}
-	denied, err := cluster.service.Workloads(ctx, WorkloadListOptions{})
-	if !errors.Is(err, ErrForbidden) || len(denied.Items) != 0 {
-		t.Fatalf("data stayed readable after the proof failed: items=%d err=%v", len(denied.Items), err)
 	}
 	if cluster.committed().Revision != committed.Revision {
 		t.Fatal("a failed proof published a new generation")
@@ -919,11 +942,7 @@ func TestLosingANamespaceGrantStillRunsTheProof(t *testing.T) {
 	cluster.denyNamespacedPods.Store(true)
 	cluster.denyProbes.Store(true)
 	cluster.force(map[string]bool{"Pod": true})
-	select {
-	case <-started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("losing a namespace grant did not start an authority proof")
-	}
+	waitFor(t, started, "losing a namespace grant did not start an authority proof")
 	ctx := t.Context()
 	view, _, err := cluster.service.CachedNamespaceSnapshot(ctx, namespace, "Pod")
 	if err == nil {
@@ -935,7 +954,7 @@ func TestLosingANamespaceGrantStillRunsTheProof(t *testing.T) {
 	}
 	released = true
 	close(release)
-	waitUntil(t, 10*time.Second, "failed proof to fail the cycle", func() bool {
+	eventually(t, "failed proof to fail the cycle", func() bool {
 		cluster.cache.mu.RLock()
 		defer cluster.cache.mu.RUnlock()
 		return cluster.cache.failed || cluster.cache.authorityFailure != nil
@@ -1002,10 +1021,13 @@ func TestServedGatewayKindsStayListedWhileDiscoveryWalksManyGroups(t *testing.T)
 	t.Parallel()
 	cluster := newPartialRoleCluster(t, true)
 	cluster.extraGroups.Store(150)
-	// The LIST pace admits about 100 reads within the ten-second discovery
-	// bound, fewer than the groups the cluster serves. Discovery keeps the
-	// pace a running install gives it.
-	cluster.service.client.indexLimiter = rate.NewLimiter(10, 4)
+	// The cluster serves about 170 discovery documents. At this LIST pace a
+	// walk paced by LISTs needs about 28 seconds and never reaches the
+	// Gateway group within the 25-second walk bound the fixture gives, while
+	// the discovery pace a running install uses walks them in about three
+	// seconds, so a loaded run keeps eight times headroom.
+	cluster.service.client.discoveryBound = 25 * time.Second
+	cluster.service.client.indexLimiter = rate.NewLimiter(6, 4)
 	cluster.start()
 	started := time.Now().UTC()
 	holdsOnEveryCycle(t, 4, func(int) { cluster.cycle(map[string]bool{"Gateway": true, "HTTPRoute": true}, "Gateway") }, func() error {
@@ -1071,7 +1093,7 @@ func TestAPIServerOutageIsAClusterError(t *testing.T) {
 	cluster.outage.Store(true)
 	before := cluster.attempts()
 	cluster.force(map[string]bool{"Pod": true, "Event": true})
-	waitUntil(t, 15*time.Second, "the outage cycle to finish", func() bool { return cluster.attempts() >= before+2 })
+	eventually(t, "the outage cycle to finish", func() bool { return cluster.attempts() >= before+2 })
 	report, err := cluster.service.SyncHealth(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -1169,7 +1191,7 @@ func namespaceOnlyCluster(t *testing.T) *partialRoleCluster {
 		cluster.service.queueInventoryNamespace(namespace)
 	}
 	cluster.wake()
-	waitUntil(t, 20*time.Second, "namespaced kinds read inside the granted namespaces", func() bool {
+	eventually(t, "namespaced kinds read inside the granted namespaces", func() bool {
 		committed := cluster.committed()
 		return len(committed.View.Kinds) == len(indexedResourceIDs) && committed.View.Kinds["Deployment"].Error == "namespace_scope" && committed.View.Kinds["Pod"].Error == "namespace_scope"
 	})

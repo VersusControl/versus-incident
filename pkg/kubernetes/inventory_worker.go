@@ -637,7 +637,7 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 	var discovery Discovery
 	discoveryStarted := time.Now()
 	degradedDiscovery := false
-	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, discoveryWalkBound)
+	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, service.client.discoveryWalkTimeout())
 	if cold {
 		discovery, err = service.coreDiscovery(discoveryCtx)
 	} else {

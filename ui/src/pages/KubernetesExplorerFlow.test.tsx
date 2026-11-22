@@ -427,23 +427,29 @@ describe("History save delay on saved-history views", () => {
     expect(screen.queryByText("Grouped issues are unavailable.")).toBeNull();
   });
 
-  it("lists live issues as partial with a reason when saved break history does not answer", async () => {
+  it("lists live issues with a row reason and hands the saved-history warning to the top bar", async () => {
     window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
     const live: KubernetesIssue = { ...issue, broke_at: undefined, occurrence_id: undefined, partial: true };
     vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [live], totals: { warning: 1 }, truncated: false, sync: { ...sync, partial: true }, partial_failures: [{ resource_id: "kubernetes.history", class: "historical_evidence_unavailable" }] });
     vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
-    mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
+    const onPageWarnings = vi.fn();
+    const { unmount } = mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} onPageWarnings={onPageWarnings} /></ToastProvider>);
     const section = await screen.findByRole("region", { name: "Kubernetes issues" });
     const row = await within(section).findByRole("article", { name: "Deployment checkout" });
     expect(within(row).getByText("Break time unknown").getAttribute("title")).toContain("Saved break history is temporarily unavailable");
     expect(within(row).getByText("Saved history unavailable")).toBeTruthy();
     expect(row.textContent).not.toMatch(/Broke|Time unavailable/);
-    expect(within(section).getAllByText("Issues are live, but saved break history is temporarily unavailable, so break times and occurrence links are hidden. It is retried on the next refresh.")).toHaveLength(1);
+    const sentence = "Issues are live, but saved break history is temporarily unavailable, so break times and occurrence links are hidden. It is retried on the next refresh.";
+    // The page sentence lives in the top bar's warning list, not in the card.
+    await waitFor(() => expect(onPageWarnings).toHaveBeenLastCalledWith([sentence]));
+    expect(within(section).queryByText(sentence)).toBeNull();
+    expect(section.querySelector(':scope > button[aria-label="Resource coverage"]')).toBeNull();
     expect(section.textContent).not.toMatch(/Change history|change capture/i);
-    const badge = within(section.querySelector("header")!).getByText("partial");
-    expect(badge.classList.contains("pill-warn")).toBe(true);
-    expect(within(section.querySelector("header")!).queryByText("ready")).toBeNull();
+    // No state pill on an incomplete page: neither "ready" nor "partial".
+    expect(section.querySelector("header .pill")).toBeNull();
     expect(within(section).getByLabelText("warning count").textContent).toBe("1");
+    unmount();
+    expect(onPageWarnings).toHaveBeenLastCalledWith([]);
   });
 
   it("does not blame saved history for a row that is partial for another reason", async () => {

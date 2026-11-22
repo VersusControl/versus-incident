@@ -263,16 +263,11 @@ func TestInventoryPermanentPayloadFaultRecollectsOnlyAfterFencedClaim(t *testing
 			if err := provider.WriteBlob(inventoryKey(service.ActiveScope()), raw); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(2 * time.Second)
-			for {
+			for wait := polling(t, "permanent payload fault prevented fenced re-collection"); ; wait.next() {
 				view, status, err := service.CachedIndexSnapshot(context.Background(), "Pod")
 				if err == nil && status.State == "ready" && len(view.Records) == 1 && view.Records[0].UID == "recovered" {
 					break
 				}
-				if time.Now().After(deadline) {
-					t.Fatalf("permanent payload fault prevented fenced re-collection: %+v %v", status, err)
-				}
-				time.Sleep(10 * time.Millisecond)
 			}
 		})
 	}

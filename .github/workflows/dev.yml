@@ -57,6 +57,8 @@ jobs:
       go: ${{ steps.groups.outputs.go }}
       code: ${{ steps.groups.outputs.code }}
       race_shards: ${{ steps.groups.outputs.race_shards }}
+      plain_packages: ${{ steps.groups.outputs.plain_packages }}
+      base: ${{ steps.groups.outputs.base }}
       aws_emulator: ${{ steps.groups.outputs.aws_emulator }}
     steps:
       # Full history, so the diff can find the merge base of any range.
@@ -139,16 +141,11 @@ jobs:
           code=false
           if grep -v -E "$not_code" "$decision" | grep -q '=true$'; then code=true; fi
 
-          shards=""
-          add_shard() { shards="${shards:+$shards,}\"$1\""; }
-          skip_shard() { echo "::notice::Race shard $1: skipped, no changes in $2"; }
-          # pkg/kubernetes runs as two shards: its slowest top-level tests, and
-          # everything else under pkg/kubernetes.
-          if on go-kubernetes; then add_shard kubernetes-slow; add_shard kubernetes; else skip_shard kubernetes-slow "pkg/kubernetes"; skip_shard kubernetes "pkg/kubernetes"; fi
-          if on go-storage || on go-controllers; then add_shard storage-controllers; else skip_shard storage-controllers "pkg/storage, pkg/controllers, pkg/routes"; fi
-          if on go-aws; then add_shard aws; else skip_shard aws "pkg/aws, pkg/awsauth, pkg/finops"; fi
-          # pkg/routes runs under -race in the rest shard.
-          if on go-agent || on go-controllers || on go-shared; then add_shard rest; else skip_shard rest "pkg/agent, pkg/core, pkg/services, pkg/controllers, pkg/routes or the shared Go code"; fi
+          # The race shards for the changed groups, and the changed packages
+          # that no running shard covers (the Test job runs those without
+          # -race).
+          plan="$RUNNER_TEMP/race-plan.out"
+          bash scripts/ci-tests.sh plan "$decision" > "$plan"
 
           # The emulator contract tests exist only on branches that carry the
           # AWS harness.
@@ -157,11 +154,13 @@ jobs:
 
           {
             cat "$decision"
+            cat "$plan"
             echo "code=$code"
-            echo "race_shards=[$shards]"
             echo "aws_emulator=$aws_emulator"
+            echo "base=$base"
           } >> "$GITHUB_OUTPUT"
-          echo "code=$code race_shards=[$shards] aws_emulator=$aws_emulator"
+          echo "code=$code aws_emulator=$aws_emulator"
+          cat "$plan"
 
   test:
     name: Test
@@ -170,8 +169,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Full history, so the test lint can diff against the change's base.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -215,39 +217,45 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # The changed packages and every package that depends on them, or
-      # ./... on a full run. Coverage runs without the race detector so
-      # wall-clock waits in tests stay realistic; the race job covers -race.
+      # New wall-clock waits in changed test files: time.Sleep, or a
+      # time.After or WithTimeout with a literal bound under 30 seconds. A
+      # line with a "testlint:allow" comment passes.
+      - name: Test lint
+        env:
+          BASE: ${{ needs.changes.outputs.base }}
+        run: go run ./tools/testlint --base "$BASE" --head "$GITHUB_SHA"
+
+      # Changed packages, and packages that depend on them, that no running
+      # race shard covers. Every other changed package runs once, under
+      # -race, in its shard, which also writes its coverage.
       - name: Test
         env:
-          GO_PACKAGES: ${{ needs.changes.outputs.go_packages }}
+          PLAIN_PACKAGES: ${{ needs.changes.outputs.plain_packages }}
+          CI_COVER_DIR: ${{ runner.temp }}/coverage
         run: |
-          if [ -z "$GO_PACKAGES" ]; then
-            echo "::notice::Unit tests: skipped, the change touches a Go group but no Go package (vet and build still ran)"
+          if [ -z "$PLAIN_PACKAGES" ]; then
+            echo "::notice::Plain unit tests: skipped, the race shards cover every changed package (vet and build still ran)"
             exit 0
           fi
           # Word splitting of the package list is intended.
           # shellcheck disable=SC2086
-          go test -short -count=1 -timeout 13m -coverprofile=coverage.out -covermode=set $GO_PACKAGES
+          bash scripts/ci-tests.sh plain $PLAIN_PACKAGES
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: coverage
-          path: coverage.out
+          name: coverage-plain
+          path: ${{ runner.temp }}/coverage/plain.out
           if-no-files-found: ignore
           retention-days: 7
 
   # Race detector run, split into shards that run in parallel so each one
-  # finishes inside its timeout on a default hosted runner. The slowest
-  # packages under -race get their own shard; "rest" is every other package.
-  # Only the shards whose groups changed run.
-  #
-  # pkg/kubernetes is split by test name. "kubernetes-slow" runs only the
-  # top-level tests in RACE_SLOW_KUBERNETES_TESTS from the pkg/kubernetes
-  # package; "kubernetes" skips exactly those and runs everything else under
-  # pkg/kubernetes, so a new test lands there without a list change.
+  # finishes inside its timeout on a default hosted runner. Only the shards
+  # whose groups changed run. scripts/ci-tests.sh holds the shard map, the
+  # flags and the Kubernetes test lists' guard; scripts/ci-local.sh runs the
+  # same script on a laptop. Each shard writes its coverage profile; the
+  # coverage job merges them.
   race:
     name: Race (${{ matrix.shard }})
     needs: changes
@@ -258,24 +266,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.changes.outputs.race_shards) }}
-    env:
-      GORACE: halt_on_error=1
-      # Exact top-level test names in package pkg/kubernetes, one per line.
-      RACE_SLOW_KUBERNETES_TESTS: |
-        TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica
-        TestWidenedGrantReachesReadyWithinTwoCycles
-        TestWidenedGrantStaysClusterWide
-        TestStableNamespaceGrantIsNotRecheckedEveryCycle
-        TestMixedRoleReachesFirstReadyWithANamespaceScopedKind
-        TestServedGatewayKindsStayListedWhileDiscoveryWalksManyGroups
-        TestCustomOwnerCrashHistoryUsesPodAuthorityAcrossStorageBackends
-        TestFailingNamespaceIsNotReportedReadyThroughAnother
-        TestAutonomousMixedAuthorityFiniteCompletion
-        TestSteadyPermissionGapNeverFlapsTheClusterView
-        TestOverviewGraphFailsClosed
-        TestPublishedInventoryReportsCurrentAuthorityLossWithoutDiscardingLastGood
-        TestNamespaceOnlyRoleHoldsOneSyncReport
-        TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -297,84 +287,58 @@ jobs:
       - name: Race test
         env:
           SHARD: ${{ matrix.shard }}
+          CI_COVER_DIR: ${{ runner.temp }}/coverage
+        run: bash scripts/ci-tests.sh run "$SHARD"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: coverage-race-${{ matrix.shard }}
+          path: ${{ runner.temp }}/coverage/race-${{ matrix.shard }}.out
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # One coverage profile for the change: the race shards' profiles plus the
+  # plain run's, with the counts of a block that several shards ran added up.
+  coverage:
+    name: Coverage
+    needs: [changes, test, race]
+    if: ${{ !cancelled() && needs.changes.outputs.go == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download coverage profiles
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: coverage-*
+          path: profiles
+          merge-multiple: true
+
+      - name: Merge profiles
         run: |
           set -euo pipefail
-          # Anchored alternation of the slow list: ^(A|B|...)$. Names hold
-          # only letters, digits and underscores, so none needs escaping.
-          slow_names=$(printf '%s\n' "${RACE_SLOW_KUBERNETES_TESTS:-}" | tr -d ' \t\r' | grep -v '^$' || true)
-          slow_pattern="^($(printf '%s\n' "$slow_names" | paste -sd '|' -))\$"
-          flags=()
-          case "$SHARD" in
-            kubernetes-slow)
-              if [ ! -d pkg/kubernetes ]; then
-                echo "::notice::Race shard $SHARD: skipped, pkg/kubernetes is not in this branch"
-                exit 0
-              fi
-              # Here-strings, not pipes: grep -q stops reading at its first
-              # match, and with pipefail the writer's broken pipe would turn
-              # a match into a failure.
-              if [ -z "$slow_names" ] || grep -qv '^Test[A-Za-z0-9_]*$' <<< "$slow_names"; then
-                echo "::error::RACE_SLOW_KUBERNETES_TESTS must list top-level test names, one per line"
-                exit 1
-              fi
-              # A stale name would leave its test in neither shard's intent;
-              # fail rather than run fewer tests than the list claims.
-              listed=$(go test -short -count=1 -list '.*' ./pkg/kubernetes | grep -E '^Test' || true)
-              stale=""
-              while IFS= read -r name; do
-                if ! grep -qxF -- "$name" <<< "$listed"; then
-                  stale="${stale:+$stale, }$name"
-                fi
-              done <<< "$slow_names"
-              if [ -n "$stale" ]; then
-                echo "::error::RACE_SLOW_KUBERNETES_TESTS names tests that do not exist in pkg/kubernetes: $stale"
-                exit 1
-              fi
-              go test -short -race -count=1 -timeout 13m -parallel 16 -run "$slow_pattern" ./pkg/kubernetes
-              exit 0
-              ;;
-            kubernetes)
-              dirs="pkg/kubernetes"
-              flags=(-parallel 16)
-              if [ -n "$slow_names" ]; then flags+=(-skip "$slow_pattern"); fi
-              ;;
-            storage-controllers) dirs="pkg/storage pkg/controllers" ;;
-            aws) dirs="pkg/aws pkg/awsauth pkg/finops" ;;
-            rest) dirs="" ;;
-            *)
-              echo "::error::Unknown race shard: $SHARD"
-              exit 1
-              ;;
-          esac
-          if [ "$SHARD" = rest ]; then
-            packages=$(go list ./... | grep -v -E '/pkg/(kubernetes|storage|controllers|aws|awsauth|finops)(/|$)')
-            if [ -z "$packages" ]; then
-              echo "::error::Race shard rest selected no packages"
-              exit 1
-            fi
-          else
-            patterns=""
-            missing=""
-            for dir in $dirs; do
-              if [ -d "$dir" ]; then
-                patterns="$patterns ./$dir/..."
-              else
-                missing="${missing:+$missing, }$dir"
-              fi
-            done
-            if [ -z "$patterns" ]; then
-              echo "::notice::Race shard $SHARD: skipped, its packages ($missing) are not in this branch"
-              exit 0
-            fi
-            if [ -n "$missing" ]; then
-              echo "Race shard $SHARD: $missing not in this branch, testing the rest"
-            fi
-            # shellcheck disable=SC2086
-            packages=$(go list $patterns)
+          shopt -s nullglob
+          profiles=(profiles/*.out)
+          if [ "${#profiles[@]}" -eq 0 ]; then
+            echo "::notice::Coverage: no profiles, no Go tests ran"
+            exit 0
           fi
-          # Word splitting of the package list is intended.
-          # shellcheck disable=SC2086
-          go test -short -race -count=1 -timeout 13m "${flags[@]}" $packages
+          # Block lines are "file:range statements count"; every profile is
+          # in atomic mode.
+          awk 'FNR == 1 && /^mode:/ { next }
+            { key = $1 " " $2; if (!(key in count)) order[++n] = key; count[key] += $3 }
+            END { print "mode: atomic"; for (i = 1; i <= n; i++) print order[i], count[order[i]] }' "${profiles[@]}" > coverage.out
+          awk 'NR > 1 { total += $2; if ($3 > 0) hit += $2 } END { if (total) printf "Coverage: %.1f%% of %d statements\n", 100 * hit / total, total }' coverage.out
+          echo "Merged ${#profiles[@]} profile(s)"
+
+      - name: Upload merged coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Helm chart checks: the chart version must follow the release version,
   # the committed one-file kubectl manifest must match a fresh render of the
@@ -737,7 +701,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, test, race, chart, ui, docs-check, aws-emulator]
+    needs: [changes, test, race, coverage, chart, ui, docs-check, aws-emulator]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -13,7 +13,7 @@ import { useQueryClient, type Query } from "@tanstack/react-query";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { SegmentedControl } from "@/components/SegmentedControl";
 import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
-import { evidenceLoading, pendingKindNames, settledSync } from "@/lib/kubernetesPending";
+import { evidenceLoading, pendingKindNames } from "@/lib/kubernetesPending";
 import { KubernetesPendingNote } from "@/components/KubernetesPendingNote";
 import { KubernetesHistorySaveNotice } from "@/components/KubernetesHistorySaveNotice";
 import { KubernetesHistoryOffNotice, KubernetesHelmAccessNotice, KubernetesMetricsServerNotice } from "@/components/KubernetesAccessNotices";
@@ -207,7 +207,7 @@ function statusTone(value: string): string {
   const normalized = value.toLowerCase().replaceAll("_", " ");
     if (/healthy|ready|synced|fresh|succeeded|completed|available|deployed|current/.test(normalized)) return "pill-good";
     if (/failed|degraded|unhealthy|stale|error|missing|out.?of.?sync/.test(normalized)) return "pill-bad";
-  if (/warning|progress|pending|suspend|partial/.test(normalized)) return "pill-warn";
+  if (/warning|progress|pending|suspend/.test(normalized)) return "pill-warn";
   return "pill-accent";
 }
 
@@ -415,11 +415,11 @@ function TopUsageRows({ data, compact = false }: { data: KubernetesTopPage; comp
   );
 }
 
-export function KubernetesExplorerTabContent({ tab, onSelectResource, clusterId }: { tab: KubernetesExplorerTab; onSelectResource: ResourceSelection; clusterId?: string }) {
+export function KubernetesExplorerTabContent({ tab, onSelectResource, clusterId, onPageWarnings }: { tab: KubernetesExplorerTab; onSelectResource: ResourceSelection; clusterId?: string; onPageWarnings?: (warnings: string[]) => void }) {
   switch (tab) {
     case "overview": return null;
     case "nodes": return null;
-    case "issues": return <IssuesView onSelectResource={onSelectResource} clusterId={clusterId} />;
+    case "issues": return <IssuesView onSelectResource={onSelectResource} clusterId={clusterId} onPageWarnings={onPageWarnings} />;
     case "resources": return <ResourcesView onSelectResource={onSelectResource} />;
     case "releases": return <ReleasesView />;
     case "gitops": return <GitOpsView />;
@@ -770,7 +770,7 @@ function KubernetesGraphView({ onSelectResource, preview = false, onFullTopology
   </section>;
 }
 
-function IssuesView({ onSelectResource, clusterId }: { onSelectResource: ResourceSelection; clusterId?: string }) {
+function IssuesView({ onSelectResource, clusterId, onPageWarnings }: { onSelectResource: ResourceSelection; clusterId?: string; onPageWarnings?: (warnings: string[]) => void }) {
   const { client: api } = useKubernetesCluster();
   const firstReadyAt = useKubernetesFirstReady();
   const [severity, setSeverity] = useState("");
@@ -799,16 +799,16 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
   const access = useKubernetesNamespaceAccess();
   const totalsKnown = Boolean(current && (current.items.length > 0 || countsKnown(access, current, currentFault)));
   const totals = totalsKnown && current ? current.totals : {};
-  // A ready page that still lacks part of its evidence (for example saved
-  // break history that did not answer) is partial, not ready. Evidence that
-  // is only still loading is settled first, and a namespace-only identity's
-  // by-design gap stays ready, so neither counts.
-  const issuesSync = issues.data ? settledSync(issues.data.sync, issues.data.partial_failures) ?? issues.data.sync : undefined;
-  const gapByDesign = access.partialByDesign && (issues.data?.partial_failures ?? []).every((failure) => ["forbidden", "namespace_scope"].includes(failure.class));
-  const issuesState = issuesSync?.state === "ready" && issuesSync.partial && !gapByDesign ? "partial" : issuesSync?.state ?? "";
+  // Live issues listed while saved break history did not answer: the page
+  // warning goes to the top bar with the page's other warnings, and the card
+  // shows no "ready" state for a page that is not complete.
+  const historyMissing = Boolean(issues.data && breakHistoryUnavailable(issues.data.partial_failures));
+  const historyWarning = historyMissing ? savedBreakHistoryUnavailable : "";
+  useEffect(() => { onPageWarnings?.(historyWarning ? [historyWarning] : []); }, [historyWarning, onPageWarnings]);
+  useEffect(() => () => onPageWarnings?.([]), [onPageWarnings]);
   return (
     <section className="card overflow-hidden transition-[border-color,box-shadow] duration-200 motion-reduce:transition-none" aria-label="Kubernetes issues">
-      <ExplorerHeader icon={<AlertTriangle size={15} />} title="Issues" trailing={!denied && issues.data && <span className={`pill ${statusTone(issuesFault ? "error" : issuesState)}`}>{issuesFault ? "unavailable" : issuesState}</span>} />
+      <ExplorerHeader icon={<AlertTriangle size={15} />} title="Issues" trailing={!denied && issues.data && (issuesFault || !historyMissing) && <span className={`pill ${statusTone(issuesFault ? "error" : issues.data.sync.state)}`}>{issuesFault ? "unavailable" : issues.data.sync.state}</span>} />
       <KubernetesIssueAlerts />
       <div className={`${filterRowClass} border-b border-ink-700 p-3`}>
         <KubernetesFilterField label="Severity"><select aria-label="Issue severity" className={filterFieldControlClass} value={severity} onChange={(event) => setSeverity(event.target.value)}><option value="">All severities</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option></select></KubernetesFilterField>
@@ -824,7 +824,6 @@ function IssuesView({ onSelectResource, clusterId }: { onSelectResource: Resourc
         <KubernetesHistorySaveNotice pages={[issues.data]} className="border-b border-ink-700 px-4 py-2" />
         <div className="flex flex-wrap gap-2 border-b border-ink-700 px-4 py-3">{(severity ? [severity] : ["critical", "warning", "info"]).map((key) => <span className={`pill inline-flex gap-1.5 ${severityTone(key)}`} key={key}><span>{key}</span><span aria-label={`${key} count`}>{totalsKnown ? historyCount(totals[key] ?? 0, current?.count_capped) : "Unknown"}</span></span>)}</div>
         {current?.count_capped && <p className="px-4 py-2 text-xs text-ink-400">Counts are lower bounds from a bounded sample.</p>}
-        {breakHistoryUnavailable(issues.data.partial_failures) && <p role="status" className="flex items-start gap-1.5 border-b border-ink-700 px-4 py-2 text-xs text-sev-warning"><AlertTriangle size={12} className="mt-0.5 shrink-0" aria-hidden="true" />{savedBreakHistoryUnavailable}</p>}
         <div className="max-h-[min(55vh,36rem)] divide-y divide-ink-700 overflow-y-auto">{issues.data.items.map((issue, index) => <BreakRow key={`${issue.rule}:${issue.root.uid ?? issue.root.name}:${index}`} issue={issue} resource={issueResource(issue)} onSelectResource={onSelectResource} clusterId={clusterId} warningScope={JSON.stringify([namespace, severity, paging.cursor])} sourceSync={issuesFault ? undefined : issues.data?.sync} sourceFailures={issues.data?.partial_failures} collapsed />)}</div>
         {issues.data.items.length === 0 && !issues.data.next && !incompleteKubernetesSnapshot(issues.data) && !issuesFault && <p className="p-6 text-center text-sm text-ink-400">No issues match these filters.</p>}
         <PartialFailuresDisclosure failures={issues.data.partial_failures?.filter((failure) => !breakHistoryUnavailable([failure]))} />

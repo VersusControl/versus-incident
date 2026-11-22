@@ -602,6 +602,9 @@ function KubernetesDashboard() {
       clearTimeout(timer);
     };
   }, [clusterQueriesEnabled, health.firstReadyAt, key, queryClient]);
+  // Page-level warnings a view reports for the top bar (the Issues view's
+  // saved-history notice), shown alongside the overview's own warnings.
+  const [issuesPageWarnings, setIssuesPageWarnings] = useState<string[]>([]);
   const brokenIssues = useBrokenIssues(view === "overview" && clusterQueriesEnabled && !overviewAccessDenied);
   // The warnings chip opens Issues, so it counts what Issues counts: the same
   // current-counts read the Issues view makes, shared through the cache.
@@ -975,7 +978,7 @@ function KubernetesDashboard() {
     ...failureWarnings(overview.data?.partial_failures).map((warning) => warning.content),
     ...timelineWarnings(overviewAccessDenied ? undefined : brokenIssues.data, overviewAccessDenied ? undefined : overviewChanges).map((warning) => warning.content),
     ...failureWarnings(brokenIssuesDenial).map((warning) => warning.content),
-  ] : [];
+  ] : view === "issues" && clusterQueriesEnabled ? issuesPageWarnings : [];
   if (clusterUnavailable) return <p role="status" className="p-4 text-sm text-sev-warning">This cluster is no longer available.</p>;
   if (connectorUndecided) {
     return (
@@ -1375,7 +1378,7 @@ function KubernetesDashboard() {
         </SectionFrame>
         )}
         {!["overview", "resources", "nodes"].includes(view) && clusterQueriesEnabled && (
-          <KubernetesExplorerTabContent tab={view} onSelectResource={selectResource} clusterId={overview.data?.cluster_id} />
+          <KubernetesExplorerTabContent tab={view} onSelectResource={selectResource} clusterId={overview.data?.cluster_id} onPageWarnings={setIssuesPageWarnings} />
         )}
         </div>
       </div>

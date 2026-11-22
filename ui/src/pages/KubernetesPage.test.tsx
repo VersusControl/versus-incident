@@ -1511,6 +1511,20 @@ describe("KubernetesPage", () => {
 		expect(new URLSearchParams(window.location.search).get("r")).toBe("apps~v1~deployments/payments/checkout");
 	});
 
+	it("puts the saved-history warning of a live Issues page in the top bar, not the Issues card", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+		vi.mocked(api.kubernetesIssues).mockResolvedValue({ items: [{ root: { kind: "Deployment", namespace: "shop", name: "checkout", uid: "checkout-uid" }, rule: "pod.crash_loop", severity: "critical", count: 2, broken: true, partial: true }], totals: { critical: 1 }, truncated: false, sync: { state: "ready", age_s: 0, partial: true }, partial_failures: [{ resource_id: "kubernetes.history", class: "historical_evidence_unavailable" }] });
+		renderPage();
+		const section = await screen.findByRole("region", { name: "Kubernetes issues" });
+		await within(section).findByRole("button", { name: "Open resource checkout" });
+		const sentence = "Issues are live, but saved break history is temporarily unavailable, so break times and occurrence links are hidden. It is retried on the next refresh.";
+		expect(within(section).queryByText(sentence)).toBeNull();
+		const markers = screen.getAllByRole("button", { name: "Resource coverage" }).filter((button) => !section.contains(button));
+		expect(markers).toHaveLength(1);
+		fireEvent.click(markers[0]);
+		expect(within(await screen.findByRole("region", { name: "Resource coverage details" })).getByText(sentence)).toBeTruthy();
+	});
+
 	it.each([401, 403])("hides cached Issues roots and counts after HTTP %s", async (status) => {
 		window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

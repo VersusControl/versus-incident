@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode"
@@ -330,11 +331,12 @@ func TestClientCertificateCredentialReloadsRotatedFiles(t *testing.T) {
 
 func TestClientTLSDeadlineBodyCapAndBoundedForbidden(t *testing.T) {
 	slowCanceled := make(chan struct{})
+	var slowCanceledOnce sync.Once
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/slow":
 			<-request.Context().Done()
-			close(slowCanceled)
+			slowCanceledOnce.Do(func() { close(slowCanceled) })
 		case "/large":
 			_, _ = writer.Write([]byte(`{"value":"` + strings.Repeat("x", 256) + `"}`))
 		case "/forbidden":
@@ -399,11 +401,7 @@ func TestClientTLSDeadlineBodyCapAndBoundedForbidden(t *testing.T) {
 	if elapsed := time.Since(started); elapsed >= 4*time.Second {
 		t.Fatalf("caller deadline took %s; must finish before the five-second client timeout", elapsed)
 	}
-	select {
-	case <-slowCanceled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("deadline did not cancel the upstream request")
-	}
+	waitFor(t, slowCanceled, "deadline did not cancel the upstream request")
 }
 
 func encodeBase64Lines(data []byte) string {

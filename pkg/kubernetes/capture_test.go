@@ -817,26 +817,14 @@ func TestStopCaptureDrainsForegroundRefresh(t *testing.T) {
 	}
 	service.StartCapture(t.Context())
 	go service.IndexSnapshot(t.Context(), "Pod")
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("foreground refresh did not start")
-	}
+	waitFor(t, started, "foreground refresh did not start")
 	service.changes.mu.Lock()
 	call := service.changes.refreshes[indexRefreshKey{scope: service.indexScope()}]
 	service.changes.mu.Unlock()
 	stopped := make(chan struct{})
 	go func() { service.StopCapture(); close(stopped) }()
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("stop did not drain foreground refresh")
-	}
-	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("upstream read survived stop")
-	}
+	waitFor(t, stopped, "stop did not drain foreground refresh")
+	waitFor(t, canceled, "upstream read survived stop")
 	select {
 	case <-call.done:
 	default:
@@ -848,15 +836,17 @@ type namespaceFallbackTransport struct {
 	started  chan struct{}
 	canceled chan struct{}
 	drain    chan struct{}
+	// A retried read reaches the same signals, so each closes once.
+	startedOnce, canceledOnce *sync.Once
 }
 
 func (transport namespaceFallbackTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if request.URL.Path != "/api/v1/namespaces/default/pods" {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"items":[]}`)), Request: request}, nil
 	}
-	close(transport.started)
+	transport.startedOnce.Do(func() { close(transport.started) })
 	<-request.Context().Done()
-	close(transport.canceled)
+	transport.canceledOnce.Do(func() { close(transport.canceled) })
 	<-transport.drain
 	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"items":[{"apiVersion":"v1","kind":"Pod","metadata":{"uid":"stale","name":"stale","namespace":"default"}}]}`)), Request: request}, nil
 }
@@ -867,7 +857,7 @@ func TestNamespaceFallbackScopeCancellationDrainsBeforeReturn(t *testing.T) {
 			service := newTestService(t, "http://127.0.0.1:12345", Scope{ClusterID: "cluster"})
 			_ = service.SetCaptureMode("demand")
 			registry := NewServiceRegistry(service)
-			transport := namespaceFallbackTransport{started: make(chan struct{}), canceled: make(chan struct{}), drain: make(chan struct{})}
+			transport := namespaceFallbackTransport{started: make(chan struct{}), canceled: make(chan struct{}), drain: make(chan struct{}), startedOnce: &sync.Once{}, canceledOnce: &sync.Once{}}
 			var drainOnce sync.Once
 			drain := func() { drainOnce.Do(func() { close(transport.drain) }) }
 			defer registry.Close()
@@ -885,11 +875,7 @@ func TestNamespaceFallbackScopeCancellationDrainsBeforeReturn(t *testing.T) {
 				snapshot, _ := service.namespaceIssueSnapshot(t.Context(), "default", []string{"Pod"})
 				result <- snapshot
 			}()
-			select {
-			case <-transport.started:
-			case <-time.After(time.Second):
-				t.Fatal("namespace fallback did not start")
-			}
+			waitFor(t, transport.started, "namespace fallback did not start")
 			cancelOwned()
 			select {
 			case <-transport.canceled:
@@ -905,22 +891,14 @@ func TestNamespaceFallbackScopeCancellationDrainsBeforeReturn(t *testing.T) {
 				}
 				close(stopped)
 			}()
-			select {
-			case <-transport.canceled:
-			case <-time.After(time.Second):
-				t.Fatal("scope teardown did not cancel fallback")
-			}
+			waitFor(t, transport.canceled, "scope teardown did not cancel fallback")
 			select {
 			case <-stopped:
 				t.Fatal("scope teardown returned before fallback drained")
 			case <-time.After(20 * time.Millisecond):
 			}
 			drain()
-			select {
-			case <-stopped:
-			case <-time.After(time.Second):
-				t.Fatal("scope teardown did not finish after fallback drained")
-			}
+			waitFor(t, stopped, "scope teardown did not finish after fallback drained")
 			select {
 			case snapshot := <-result:
 				if len(snapshot.Records) != 0 {
@@ -1002,11 +980,7 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 		}
 	}
 	go first.IndexSnapshot(t.Context(), "Pod")
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("old credential read did not start")
-	}
+	waitFor(t, started, "old credential read did not start")
 	if err := os.WriteFile(tokenFile, []byte("principal-b-canary"), 0o600); err != nil {
 		t.Fatal("could not replace token fixture")
 	}
@@ -1017,11 +991,7 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 	if sources := replacement.configuredLogSources(); len(sources) != 1 || sources[0].Name != "logs-first" {
 		t.Fatalf("replacement lost scoped log sources: %+v", sources)
 	}
-	select {
-	case <-canceled:
-	case <-time.After(time.Second):
-		t.Fatal("old credential upstream read survived replacement")
-	}
+	waitFor(t, canceled, "old credential upstream read survived replacement")
 	for _, stale := range []*Service{first, alias} {
 		if page, err := stale.Changes(t.Context(), ChangeQuery{}); err == nil || len(page.Items) != 0 {
 			t.Fatal("stale alias served old history")
@@ -1088,19 +1058,11 @@ func TestDeregisterDrainsDemandAndContinuousAliases(t *testing.T) {
 			registry.StartCapture(t.Context())
 			for _, alias := range aliases {
 				go alias.IndexSnapshot(t.Context(), "Service")
-				select {
-				case <-started:
-				case <-time.After(time.Second):
-					t.Fatal("alias foreground list did not start")
-				}
+				waitFor(t, started, "alias foreground list did not start")
 			}
 			registry.DeregisterCluster("cluster")
 			for _, alias := range aliases {
-				select {
-				case <-canceled:
-				case <-time.After(time.Second):
-					t.Fatal("deregister left alias upstream read active")
-				}
+				waitFor(t, canceled, "deregister left alias upstream read active")
 				if _, _, err := alias.IndexSnapshot(t.Context(), "Service"); err == nil {
 					t.Fatal("retired scope admitted another refresh")
 				}
@@ -1140,11 +1102,7 @@ func TestRegistrySlowCredentialRefreshDoesNotBlockOtherCluster(t *testing.T) {
 	blocked.Store(true)
 	done := make(chan error, 1)
 	go func() { _, err := registry.ResolveCluster("org", "slow"); done <- err }()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("credential refresh did not start")
-	}
+	waitFor(t, started, "credential refresh did not start")
 	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
 	defer cancel()
 	if _, err := registry.resolveCluster(ctx, "org", "fast", nil); err != nil {
@@ -1184,11 +1142,7 @@ func TestRegistryRebuildDrainIsolationAndCloseRace(t *testing.T) {
 			rotated.Store(true)
 			done := make(chan error, 1)
 			go func() { _, err := registry.ResolveCluster("org", "slow"); done <- err }()
-			select {
-			case <-ctx.Done():
-			case <-time.After(time.Second):
-				t.Fatal("rebuild drain did not start")
-			}
+			waitFor(t, ctx.Done(), "rebuild drain did not start")
 			lookup, cancelLookup := context.WithTimeout(t.Context(), 200*time.Millisecond)
 			defer cancelLookup()
 			if _, err := registry.resolveCluster(lookup, "org", "fast", nil); err != nil {
@@ -1279,11 +1233,7 @@ func TestRegistryCloseSharesAliasDrain(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(gate)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("alias drain did not join")
-	}
+	waitFor(t, done, "alias drain did not join")
 	registry.Close()
 }
 
@@ -1304,11 +1254,7 @@ func TestCaptureLeaseRenewalIndependentOfLongScan(t *testing.T) {
 	service.changes.captures[service.indexScope()] = loop
 	service.startInventory(ctx)
 	go service.capture(loop)
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("capture never started")
-	}
+	waitFor(t, started, "capture never started")
 	timer := time.NewTimer(700 * time.Millisecond)
 	defer timer.Stop()
 	<-timer.C
@@ -1435,7 +1381,7 @@ func TestCaptureDemandAndNoCASShutdown(t *testing.T) {
 	// A capture loop claims its history lease before anything else; by the
 	// time the inventory worker has begun its second cycle, one started by
 	// mistake would have written it.
-	waitUntil(t, 30*time.Second, "inventory worker's second cycle", func() bool {
+	eventually(t, "inventory worker's second cycle", func() bool {
 		service.recovery.mu.Lock()
 		defer service.recovery.mu.Unlock()
 		return service.recovery.attempts >= 2
@@ -1604,11 +1550,7 @@ func TestIndexRefreshRetainsInitiatingReadOwnership(t *testing.T) {
 				_, _, err := service.IndexSnapshot(ctx, "Pod")
 				result <- err
 			}()
-			select {
-			case <-started:
-			case <-time.After(time.Second):
-				t.Fatal("initiating discovery did not start")
-			}
+			waitFor(t, started, "initiating discovery did not start")
 			service.changes.mu.Lock()
 			call := service.changes.refreshes[indexRefreshKey{scope: service.indexScope(), background: background}]
 			service.changes.mu.Unlock()
@@ -1642,11 +1584,7 @@ func TestIndexRefreshRetainsInitiatingReadOwnership(t *testing.T) {
 				}
 			}
 			releaseRefresh()
-			select {
-			case <-call.done:
-			case <-time.After(time.Second):
-				t.Fatal("refresh did not drain")
-			}
+			waitFor(t, call.done, "refresh did not drain")
 			if !background {
 				snapshot, status, err := service.IndexSnapshot(t.Context(), "Pod")
 				if err != nil || status.State != "ready" || len(snapshot.Records) != 1 {
@@ -1846,11 +1784,7 @@ func TestForegroundPodRetriesCanceledCaptureLoad(t *testing.T) {
 	owned, cancelOwned := context.WithCancel(t.Context())
 	defer cancelOwned()
 	go service.IndexSnapshot(captureReadContext(owned, "owner"), "Pod")
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("capture Pod list did not start")
-	}
+	waitFor(t, started, "capture Pod list did not start")
 	result := make(chan error, 1)
 	go func() {
 		snapshot, status, err := service.IndexSnapshot(t.Context(), "Pod")
@@ -2010,11 +1944,7 @@ func TestCaptureRenewFailureAllowsInteractiveRefreshAndReclaim(t *testing.T) {
 				t.Fatal("cached capture performed a live inventory read")
 			}
 			go service.IndexSnapshot(owned, "Pod")
-			select {
-			case <-canceled:
-			case <-time.After(3 * time.Second):
-				t.Fatal("renewal failure did not cancel owned read")
-			}
+			waitFor(t, canceled, "renewal failure did not cancel owned read")
 			if ctx.Err() != nil {
 				t.Fatal("renewal failure canceled capture lifetime")
 			}
@@ -2034,11 +1964,7 @@ func TestCaptureRenewFailureAllowsInteractiveRefreshAndReclaim(t *testing.T) {
 			refresh := service.changes.refreshes[indexRefreshKey{scope: service.indexScope(), background: true}]
 			service.changes.mu.Unlock()
 			if refresh != nil {
-				select {
-				case <-refresh.done:
-				case <-time.After(3 * time.Second):
-					t.Fatal("lost-owner refresh did not drain")
-				}
+				waitFor(t, refresh.done, "lost-owner refresh did not drain")
 			}
 			snapshot, status, err := service.IndexSnapshot(t.Context(), "Pod")
 			if err != nil || status.Kinds["Pod"].State != "ready" || len(snapshot.Records) == 0 {

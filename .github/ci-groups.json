@@ -127,7 +127,7 @@
     },
     {
       "name": "ci",
-      "description": "CI definitions and this change-detection tool. Turns on everything. The docs site workflow and page list belong to docs-build; code owners and the GitHub forms belong to metadata.",
+      "description": "CI definitions, this change-detection tool, the test lint and the CI scripts (race shards, local CI run). Turns on everything. The docs site workflow and page list belong to docs-build; code owners and the GitHub forms belong to metadata.",
       "paths": [
         ".github/**",
         "!.github/workflows/docs.yml",
@@ -137,7 +137,9 @@
         "!.github/pull_request_template.md",
         "!.github/FUNDING.yml",
         "tools/cichanges/**",
-        "tools/docscheck/**"
+        "tools/docscheck/**",
+        "tools/testlint/**",
+        "scripts/ci-*.sh"
       ],
       "all": true
     }

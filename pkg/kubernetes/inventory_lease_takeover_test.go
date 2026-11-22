@@ -117,17 +117,7 @@ func (fixture *leaseFixture) crash() time.Time {
 func (fixture *leaseFixture) published(service *Service) {
 	t := fixture.t
 	t.Helper()
-	deadline := time.Now().Add(scaledTimeout(30 * time.Second))
-	for fixture.record().Revision == "" {
-		if time.Now().After(deadline) {
-			service.changes.mu.Lock()
-			cache := service.changes.inventories[service.indexScope()]
-			service.changes.mu.Unlock()
-			cache.mu.RLock()
-			defer cache.mu.RUnlock()
-			t.Fatalf("no publication: record %+v, failed=%t class=%s kinds=%d revision=%q", fixture.record(), cache.failed, cache.failedClass, len(cache.generation.View.Kinds), cache.generation.Revision)
-		}
-		time.Sleep(10 * time.Millisecond)
+	for wait := polling(t, "the first inventory publication"); fixture.record().Revision == ""; wait.next() {
 	}
 }
 
@@ -173,7 +163,7 @@ func TestCrashedOwnerLeaseIsTakenOverWhenItRunsOut(t *testing.T) {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			waitUntil(t, 10*time.Second, "takeover publication", func() bool {
+			eventually(t, "takeover publication", func() bool {
 				record := fixture.record()
 				return record.Revision != before && record.Owner != "crashed-process" && record.Owner != ""
 			})
@@ -186,13 +176,13 @@ func TestCrashedOwnerLeaseIsTakenOverWhenItRunsOut(t *testing.T) {
 				if service == nil {
 					continue
 				}
-				waitUntil(t, 10*time.Second, "replica serving the new generation", func() bool {
+				eventually(t, "replica serving the new generation", func() bool {
 					return servedRevision(service) != before && servedRevision(service) != ""
 				})
 				if service == restarted {
 					// The worker ends the grace when its pass that served
 					// the publication finishes.
-					waitUntil(t, 10*time.Second, "restart grace to end after the publication", func() bool {
+					eventually(t, "restart grace to end after the publication", func() bool {
 						return service.inventoryFreshFloor().IsZero()
 					})
 				}
@@ -214,14 +204,14 @@ func TestReleasedLeaseIsTakenOverWithinSeconds(t *testing.T) {
 	before := fixture.record()
 	stopped := time.Now()
 	owner.StopCapture()
-	waitUntil(t, 10*time.Second, "takeover after a clean stop", func() bool {
+	eventually(t, "takeover after a clean stop", func() bool {
 		record := fixture.record()
 		return record.Owner != "" && record.Owner != before.Owner && record.Revision != before.Revision
 	})
 	if took := time.Since(stopped); took > scaledTimeout(3*time.Second) {
 		t.Fatalf("takeover after a clean stop took %s", took)
 	}
-	waitUntil(t, 10*time.Second, "running replica serving the new generation", func() bool {
+	eventually(t, "running replica serving the new generation", func() bool {
 		return servedRevision(running) != before.Revision
 	})
 }
@@ -367,7 +357,7 @@ func TestRestartGraceSurvivesAFailedFirstRestore(t *testing.T) {
 	view := &failingFirstReads{Provider: fixture.provider, key: inventoryKey(fixture.scope)}
 	view.fails.Store(2)
 	restarted := fixture.startWith(view)
-	waitUntil(t, 30*time.Second, "the saved generation to be served after the failed restore", func() bool {
+	eventually(t, "the saved generation to be served after the failed restore", func() bool {
 		// Several passes after the failed ones, each reading the lease.
 		return servedRevision(restarted) == saved && view.reads.Load() >= 10
 	})

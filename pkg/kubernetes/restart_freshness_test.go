@@ -181,7 +181,7 @@ func TestInventoryWorkerEndsTheRestartGraceWhenItsFirstCycleEnds(t *testing.T) {
 	close(release)
 	// The cycle's failure is reported as soon as it ends, grace or not.
 	state := ""
-	waitUntil(t, 30*time.Second, "the failed first cycle to be reported", func() bool {
+	eventually(t, "the failed first cycle to be reported", func() bool {
 		health, err := service.SyncHealth(t.Context())
 		if err != nil {
 			var failure *syncHealthFailure

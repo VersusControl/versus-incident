@@ -136,11 +136,7 @@ func TestInventoryOwnerGCRetriesConcurrentReaderAndCleansLateWriter(t *testing.T
 					result <- err
 				}
 			}()
-			select {
-			case <-barrier.started:
-			case <-time.After(time.Second):
-				t.Fatal("barrier not reached")
-			}
+			waitFor(t, barrier.started, "barrier not reached")
 			expireInventoryLease(t, base, service.ActiveScope())
 			replica := NewService(nil, service.ActiveScope(), 0)
 			second, owned, err := replica.claimInventory(t.Context(), barrier, "second")

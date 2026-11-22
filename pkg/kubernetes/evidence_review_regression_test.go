@@ -1075,7 +1075,10 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 							}
 						}))
 						defer server.Close()
-						client, err := NewClient(Config{Endpoint: server.URL, AllowLoopbackHTTP: true, Timeout: 250 * time.Millisecond})
+						// The request timeout ends the held Gateway reads; it is long
+						// enough that an answered read never reaches it on a loaded
+						// run and is retried.
+						client, err := NewClient(Config{Endpoint: server.URL, AllowLoopbackHTTP: true, Timeout: scaledTimeout(time.Second)})
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -1137,7 +1140,7 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 						page, err := service.queryEvidence(t.Context(), query)
 						detail := DiagnoseError(err)
 						expected := errHistoryAuthority
-						if status == http.StatusUnauthorized && (!errors.Is(err, expected) || detail.Code != DiagnoseError(expected).Code || detail.Retryable || len(page.Items) != 0) || status == http.StatusForbidden && (err != nil || page.Counts["change"] != 2 || page.Counts["coverage_gap"] != 2 || len(page.Items) != 1 || page.Items[0].Type != "coverage_gap" && page.Items[0].AuthorizationKind != "Gateway") || secretCalls.Load() != 1 || status == http.StatusForbidden && gatewayCalls.Load() == 0 || upstreamCalls.Load() != before {
+						if status == http.StatusUnauthorized && (!errors.Is(err, expected) || detail.Code != DiagnoseError(expected).Code || detail.Retryable || len(page.Items) != 0) || status == http.StatusForbidden && (err != nil || page.Counts["change"] != 2 || page.Counts["coverage_gap"] != 2 || len(page.Items) != 1 || page.Items[0].Type != "coverage_gap" && page.Items[0].AuthorizationKind != "Gateway") || !sourceReads(secretCalls.Load()) || status == http.StatusForbidden && gatewayCalls.Load() == 0 || upstreamCalls.Load() != before {
 							t.Fatalf("denial lost to transient/cache traversal: code=%s err=%v counts=%v items=%+v secretProofs=%d gatewayProofs=%d", detail.Code, err, page.Counts, page.Items, secretCalls.Load(), gatewayCalls.Load())
 						}
 						if status == http.StatusUnauthorized {
@@ -1147,7 +1150,7 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 						// blanket denial of an independently authorized good row.
 						query.RootUID = "unrelated-root"
 						page, err = service.queryEvidence(t.Context(), query)
-						if err != nil || len(page.Items) != 1 || page.Items[0].Type != "change" || page.Counts["change"] != 1 || secretCalls.Load() != 1 || gatewayCalls.Load() == 0 || upstreamCalls.Load() != before {
+						if err != nil || len(page.Items) != 1 || page.Items[0].Type != "change" || page.Counts["change"] != 1 || !sourceReads(secretCalls.Load()) || gatewayCalls.Load() == 0 || upstreamCalls.Load() != before {
 							t.Fatal("unrelated denied checkpoint source poisoned authorized scoped evidence")
 						}
 					})
@@ -1156,6 +1159,12 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 		}
 	}
 }
+
+// sourceReads reports whether the denied source was read by the guarded
+// collection: at least once, and at most once more if a slow answer was
+// retried. The history query itself reads nothing upstream, which the caller
+// checks on the total.
+func sourceReads(calls int32) bool { return calls >= 1 && calls <= 2 }
 
 func TestHistoricalIssuesSinceOnlyContinuationUsesPinnedWindow(t *testing.T) {
 	service, store, scope := reviewHistoryService(t)

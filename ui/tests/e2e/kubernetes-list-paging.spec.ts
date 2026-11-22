@@ -671,7 +671,7 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
     }
   });
 
-  test("live issues listed while saved break history is unavailable read as partial with a reason", async ({ page }, testInfo) => {
+  test("live issues listed while saved break history is unavailable give a row reason and a top bar warning", async ({ page }, testInfo) => {
     test.setTimeout(240_000);
     const sentence = "Issues are live, but saved break history is temporarily unavailable, so break times and occurrence links are hidden. It is retried on the next refresh.";
     for (const viewport of viewports) {
@@ -681,14 +681,13 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
         await open(page, state, viewport, theme, "/agent/kubernetes?view=issues");
         const section = issuesSection(page);
         await expectRows(page, ["Deployment checkout", "Deployment ledger", "Deployment payments", "Deployment search", "Deployment email"]);
-        // One visible sentence for the page, never the change-capture wording.
-        await expect(section.getByRole("status").filter({ hasText: sentence })).toHaveCount(1);
+        // The page sentence is in the top bar's warning list, never in the
+        // Issues card, and never the change-capture wording.
+        await expect(section.getByText(sentence)).toHaveCount(0);
         await expect(section).not.toContainText("Change history");
-        await expect(section.locator(':scope > button[aria-label="Resource coverage"]'), "the reason is shown, not hidden behind the list marker").toHaveCount(0);
-        // The header badge says partial, not ready.
-        const badge = section.locator(":scope > header .pill");
-        await expect(badge).toHaveText("partial");
-        await expect(badge).toHaveClass(/pill-warn/);
+        await expect(section.locator(':scope > button[aria-label="Resource coverage"]'), "no list-level marker in the card").toHaveCount(0);
+        // The card shows no state pill for an incomplete page: neither ready nor partial.
+        await expect(section.locator(":scope > header .pill")).toHaveCount(0);
         // Every broken row reads as unknown and gives its reason.
         const payments = section.locator('article[aria-label="Deployment payments"]');
         await expect(payments).toContainText("Break time unknown");
@@ -700,10 +699,18 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
         await noHorizontalOverflow(page, `history-unavailable issues ${viewport.name} ${theme}`);
         await testInfo.attach(`history-unavailable-${viewport.name}-${theme}`, { body: JSON.stringify({ section: await section.innerText() }, null, 2), contentType: "application/json" });
         await page.screenshot({ path: capturePath("kubernetes-issues-saved-history-unavailable", viewport.width, theme, "partial-page"), fullPage: true, animations: "disabled" });
-        // The header badge, in view at every width, and the text contrast of
-        // the new copy against what it sits on.
-        await badge.scrollIntoViewIfNeeded();
-        await section.locator(":scope > header").screenshot({ path: capturePath("kubernetes-issues-saved-history-unavailable-header", viewport.width, theme, "partial-badge"), animations: "disabled" });
+        // The top bar's coverage marker is the only one on the page, and it
+        // carries the saved-history sentence.
+        const topBarMarker = page.getByRole("button", { name: "Resource coverage" });
+        await expect(topBarMarker).toHaveCount(1);
+        await topBarMarker.click();
+        const panel = page.getByRole("region", { name: "Resource coverage details" });
+        await expect(panel.getByRole("list", { name: "Coverage reasons" }).getByRole("listitem")).toHaveText([sentence]);
+        await noHorizontalOverflow(page, `history-unavailable top bar warning ${viewport.name} ${theme}`);
+        await page.screenshot({ path: capturePath("kubernetes-issues-saved-history-unavailable", viewport.width, theme, "top-bar-warning"), fullPage: false, animations: "disabled" });
+        await page.keyboard.press("Escape");
+        await expect(panel).toHaveCount(0);
+        // The text contrast of the row copy against what it sits on.
         const contrast = await page.evaluate(() => {
           const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
           const lum = ([r, g, b]: number[]) => { const c = [r, g, b].map(v => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; }); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
@@ -711,8 +718,6 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
           const ratio = (el: Element | null) => { if (!el) return null; const a = lum(rgb(getComputedStyle(el).color)), b = lum(background(el)); return Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100; };
           const section = document.querySelector('section[aria-label="Kubernetes issues"]');
           return {
-            sentence: ratio([...(section?.querySelectorAll('[role="status"]') ?? [])].find(el => el.textContent?.includes("saved break history")) ?? null),
-            badge: ratio(section?.querySelector(":scope > header .pill") ?? null),
             rowReason: ratio(section?.querySelector("[data-row-reason]") ?? null),
             breakTimeUnknown: ratio([...(section?.querySelectorAll("article span") ?? [])].find(el => el.textContent === "Break time unknown") ?? null),
           };

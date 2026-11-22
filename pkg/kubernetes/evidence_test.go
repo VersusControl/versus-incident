@@ -590,7 +590,7 @@ func TestDefaultFileStorageEstablishesHistoryAfterFirstCapture(t *testing.T) {
 	var page TimelinePage
 	// The wait returns as soon as the first capture's break is readable; the
 	// budget only bounds a hung run on a loaded machine.
-	waitUntil(t, 30*time.Second, "history established on default file storage", func() bool {
+	eventually(t, "history established on default file storage", func() bool {
 		page, err = service.Timeline(t.Context(), TimelineQuery{Since: since, Until: time.Now().UTC(), Namespace: "default", BreaksOnly: true})
 		return err == nil && page.Total > 0
 	})
@@ -618,7 +618,7 @@ func TestRegistryFileCaptureCommitsIssuesWithNoBrowserAndRestoresHistory(t *test
 	defer registry.Close()
 	scope := storage.EvidenceScope{OrgID: "org", ClusterID: "cluster", ClusterUID: "physical-cluster"}
 	since := time.Now().UTC().Add(-time.Hour)
-	waitUntil(t, 8*time.Second, "background-only issue journal commit", func() bool {
+	eventually(t, "background-only issue journal commit", func() bool {
 		page, err := provider.(storage.EvidenceStore).QueryEvidence(t.Context(), scope, storage.EvidenceQuery{Since: since, Until: time.Now().UTC(), Type: "issue_opened", Rule: "pod.crash_loop"})
 		return err == nil && len(page.Items) == 1
 	})
@@ -1043,20 +1043,14 @@ func TestFirstCaptureIsBaselineAndRestartComparesWithCommittedGeneration(t *test
 			cache := restarted.changes.inventories[restarted.indexScope()]
 			restarted.changes.mu.Unlock()
 			restored := false
-			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			eventually(t, "the restarted worker to restore the later generation", func() bool {
 				cache.mu.RLock()
+				defer cache.mu.RUnlock()
 				restored = cache.generation.Revision == later.Revision
-				cache.mu.RUnlock()
-				if restored {
-					break
-				}
-			}
+				return restored
+			})
 			stopWorker()
-			select {
-			case <-cache.done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("restarted worker ignored cancellation")
-			}
+			waitFor(t, cache.done, "restarted worker ignored cancellation")
 			if !restored {
 				t.Fatal("the restarted worker did not restore the committed generation")
 			}

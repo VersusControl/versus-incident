@@ -218,18 +218,13 @@ func TestClusterSummaryRetriesUnreachableWithoutCachingFailure(t *testing.T) {
 	case cache.wake <- struct{}{}:
 	default:
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	for wait := polling(t, "background reader did not retry upstream failure"); ; wait.next() {
 		cache.mu.RLock()
 		recovered := !cache.failed && len(cache.generation.View.Kinds) > 0
 		cache.mu.RUnlock()
 		if recovered {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("background reader did not retry upstream failure")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 	second := registry.Summaries(context.Background(), "default", nil)
 	if len(second) != 1 || second[0].Health == "unreachable" || reads.Load() <= before {

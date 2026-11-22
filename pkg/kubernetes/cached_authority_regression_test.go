@@ -135,7 +135,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 					}
 					return report, err
 				}
-				waitUntil(t, 20*time.Second, "complete initial natural publication", func() bool {
+				eventually(t, "complete initial natural publication", func() bool {
 					report, err := health()
 					return err == nil && report.State == "ready" && report.PendingKinds == 0 && !report.FirstReadyAt.IsZero()
 				})
@@ -167,7 +167,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 				// checkpoint belonging to this exact head before revoking permission;
 				// an authorized baseline commit is not a denied-cycle publication.
 				var checkpoint storage.EvidenceCheckpoint
-				waitUntil(t, 8*time.Second, "baseline data-head journal committed", func() bool {
+				eventually(t, "baseline data-head journal committed", func() bool {
 					checkpoint, err = store.EvidenceCheckpoint(t.Context(), evidenceScope)
 					return err == nil && before.EvidenceBatch != nil && checkpoint.ID == before.EvidenceBatch.ID
 				})
@@ -185,7 +185,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 					t.Fatal("normal material cadence never observed the changed permissions")
 				}
 				if scenario == "multiple-kinds" {
-					waitUntil(t, 8*time.Second, "partial-permission candidate publication", func() bool {
+					eventually(t, "partial-permission candidate publication", func() bool {
 						report, err := health()
 						return err == nil && report.Kinds["Pod"].Error == "forbidden" && report.Kinds["Deployment"].Error == "forbidden"
 					})
@@ -210,7 +210,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 				// Admit a current producer proof or the old incorrect publication, not an
 				// arbitrary delay. No cache invalidation or cadence override is used.
 				var release chan struct{}
-				waitUntil(t, 8*time.Second, "current proof or a forbidden candidate checkpoint", func() bool {
+				eventually(t, "current proof or a forbidden candidate checkpoint", func() bool {
 					select {
 					case release = <-proofSeen:
 						return true
@@ -232,7 +232,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 					t.Error("an unverified current authority probe claimed ready")
 				}
 				close(release)
-				waitUntil(t, 8*time.Second, "confirmed whole-authority failure", func() bool {
+				eventually(t, "confirmed whole-authority failure", func() bool {
 					report, _ := health()
 					return report.State == "error" && report.FailingKinds > 0 && report.Kinds["Pod"].Error == "forbidden" && report.Kinds["Pod"].CycleFailure
 				})
@@ -272,7 +272,7 @@ func TestAutonomousCachedCatalogClassifiesCurrentMaterialAuthority(t *testing.T)
 					t.Fatal("proof depended on catalog refresh, credential rotation or scope replacement")
 				}
 				mode.Store(0)
-				waitUntil(t, 15*time.Second, "same-scope authorized recovery", func() bool {
+				eventually(t, "same-scope authorized recovery", func() bool {
 					report, err := health()
 					if err != nil || report.State != "ready" || report.FailingKinds != 0 {
 						return false

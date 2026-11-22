@@ -200,7 +200,7 @@ func (fixture *proofFixture) settle() {
 // settleProofs waits until no proof of client is running.
 func settleProofs(t *testing.T, client *Client) {
 	t.Helper()
-	waitUntil(t, 5*time.Second, "proofs to finish", func() bool {
+	eventually(t, "proofs to finish", func() bool {
 		proofs := client.proofCache()
 		proofs.mu.Lock()
 		defer proofs.mu.Unlock()
@@ -359,7 +359,7 @@ func TestProofUnavailableServesThePreviousTokenUntilTheBound(t *testing.T) {
 	// renewed token serves, with no rebuild.
 	fixture.cluster.setReview(reviewFor("principal-value-reader"))
 	fixture.clock.advance(proofBackoffCap)
-	waitUntil(t, 5*time.Second, "reads to resume", func() bool {
+	eventually(t, "reads to resume", func() bool {
 		err := fixture.read()
 		fixture.settle()
 		return err == nil
@@ -527,7 +527,7 @@ func TestProofOfADifferentPrincipalRetiresAtOnce(t *testing.T) {
 				// Inside the window: the first retry is due after one second.
 				fixture.clock.advance(2 * time.Second)
 			}
-			waitUntil(t, 5*time.Second, "the epoch to retire", func() bool {
+			eventually(t, "the epoch to retire", func() bool {
 				err := fixture.read()
 				fixture.settle()
 				return errors.Is(err, ErrCredentialUnavailable) && !fixture.alive()
@@ -833,7 +833,7 @@ func TestProofBasedEpochSurvivesAThreeHourProofOutage(t *testing.T) {
 	}
 	down.Store(false)
 	clock.advance(proofBackoffCap)
-	waitUntil(t, 5*time.Second, "reads to resume", func() bool {
+	eventually(t, "reads to resume", func() bool {
 		err := fixture.read()
 		fixture.settle()
 		return err == nil
@@ -869,7 +869,7 @@ func TestProofLogsAndErrorsCarryNoSecretValues(t *testing.T) {
 	}
 	fixture.settle()
 	fixture.clock.advance(2 * time.Second)
-	waitUntil(t, 5*time.Second, "the candidate to be promoted", func() bool {
+	eventually(t, "the candidate to be promoted", func() bool {
 		_ = fixture.read()
 		fixture.settle()
 		return fixture.service.identity.servingHeader == fmt.Sprintf("Bearer token-value-%04d", fixture.issued.Load())
@@ -886,7 +886,7 @@ func TestProofLogsAndErrorsCarryNoSecretValues(t *testing.T) {
 	failure := fixture.read()
 	fixture.cluster.setReview(reviewFor("principal-value-other"))
 	fixture.clock.advance(proofBackoffCap)
-	waitUntil(t, 5*time.Second, "the epoch to retire", func() bool {
+	eventually(t, "the epoch to retire", func() bool {
 		_ = fixture.read()
 		fixture.settle()
 		return !fixture.alive()
@@ -975,7 +975,7 @@ func (c *lateProofCase) prove(t *testing.T) *Service {
 	t.Helper()
 	c.down.Store(false)
 	c.fixture.clock.advance(proofBackoffCap)
-	waitUntil(t, 5*time.Second, "the late proof", func() bool {
+	eventually(t, "the late proof", func() bool {
 		if err := c.first.validateCredential(t.Context()); err != nil {
 			t.Fatalf("the late proof failed a request: %v", err)
 		}
@@ -1119,7 +1119,7 @@ func TestLateProofHandoverWithCaptureRunningKeepsTheInventory(t *testing.T) {
 	c.down.Store(false)
 	c.fixture.clock.advance(proofBackoffCap)
 	var successor *Service
-	waitUntil(t, 10*time.Second, "the supervisor to hand over", func() bool {
+	eventually(t, "the supervisor to hand over", func() bool {
 		c.fixture.settle()
 		c.registry.mu.Lock()
 		defer c.registry.mu.Unlock()
@@ -1135,7 +1135,7 @@ func TestLateProofHandoverWithCaptureRunningKeepsTheInventory(t *testing.T) {
 	if err != nil || resolved.identity != successor.identity {
 		t.Fatalf("the request after the handover did not get the successor: %v", err)
 	}
-	waitUntil(t, 10*time.Second, "the successor to capture continuously", func() bool { return resolved.CaptureStatus().Mode == "continuous" })
+	eventually(t, "the successor to capture continuously", func() bool { return resolved.CaptureStatus().Mode == "continuous" })
 	resolved.changes.mu.Lock()
 	cache := resolved.changes.inventories[resolved.indexScope()]
 	resolved.changes.mu.Unlock()
@@ -1238,7 +1238,7 @@ func TestLateProofSuccessorInheritsOnlyUnderTheSameIdentity(t *testing.T) {
 				return test.answer()
 			})
 			c.fixture.clock.advance(proofBackoffCap)
-			waitUntil(t, 5*time.Second, "the late proof", func() bool {
+			eventually(t, "the late proof", func() bool {
 				if err := c.first.validateCredential(t.Context()); err != nil {
 					t.Fatalf("the late proof failed a request: %v", err)
 				}
@@ -1506,7 +1506,7 @@ func TestUnknownEpochProvenBeforeAnyCommitRestartsUnderTheFreshKey(t *testing.T)
 	}
 	fixture.cluster.setReview(reviewFor("principal-value-reader"))
 	fixture.clock.advance(time.Minute)
-	waitUntil(t, 5*time.Second, "the proof to land", func() bool {
+	eventually(t, "the proof to land", func() bool {
 		if err := first.validateCredential(t.Context()); err != nil {
 			t.Fatalf("a read failed for the upgrade: %v", err)
 		}
@@ -1565,7 +1565,7 @@ func TestReplicasConvergeWhenReviewWasDownAtOneBoot(t *testing.T) {
 	}
 	fixture.cluster.setReview(reviewFor("principal-value-reader"))
 	fixture.clock.advance(time.Minute)
-	waitUntil(t, 5*time.Second, "the degraded replica to converge", func() bool {
+	eventually(t, "the degraded replica to converge", func() bool {
 		if err := degraded.validateCredential(t.Context()); err != nil {
 			t.Fatalf("a read failed while review recovered: %v", err)
 		}
@@ -1872,7 +1872,7 @@ func TestProvenAfterStartUpgradeIsInvisibleToRequests(t *testing.T) {
 		var out map[string]any
 		return service.client.GetJSON(ctx, "/api/v1/namespaces", &out)
 	}
-	waitUntil(t, 5*time.Second, "the proof to land", func() bool {
+	eventually(t, "the proof to land", func() bool {
 		if err := read(first); err != nil {
 			t.Fatalf("a read on the unknown epoch failed: %v", err)
 		}
@@ -1929,7 +1929,7 @@ func TestUpgradeRestartRaceStillHandsOverTheSuccessor(t *testing.T) {
 	t.Cleanup(registry.Close)
 	fixture.cluster.setReview(reviewFor("principal-value-reader"))
 	fixture.clock.advance(time.Minute)
-	waitUntil(t, 5*time.Second, "the proof to land", func() bool {
+	eventually(t, "the proof to land", func() bool {
 		if err := first.validateCredential(t.Context()); err != nil {
 			t.Fatal(err)
 		}
