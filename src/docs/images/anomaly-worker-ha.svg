@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="480" viewBox="0 0 760 480" style="max-width:100%;height:auto" role="img" aria-label="Four clusters, prod-eu, staging, prod-us and dev, are read only by two anomaly workers that are all active; worker 1 holds the leases for prod-eu and staging, worker 2 for prod-us and dev, and if one worker stops the other takes over its clusters; both workers read and write checkpoints and leases in the main Postgres, which also holds findings and incidents; when configured they also write history to an optional S3 compatible bucket; notified findings go through the shared alert path, the same as the main process, to Slack, Telegram or PagerDuty; the Versus main process runs the UI, toggles and status, reads status and findings from Postgres, and runs no learning">
+  <title>Anomaly workers in high availability</title>
+  <desc>Active anomaly workers split clusters between them by lease, read the clusters read only, keep checkpoints in the main Postgres and optional history in object storage, and send alerts through the shared alert path, while the main process shows status from Postgres</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .c{font-family:SFMono-Regular,Menlo,Consolas,monospace;fill:#12222F}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f15{font-size:15px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .opt{fill:none;stroke:#000000;stroke-width:2.5;stroke-dasharray:6 4}
+      .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+      .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
+      .panel{fill:#F2F5F8}
+      .pill{fill:#FFFFFF;stroke:#12222F;stroke-width:1.5}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="480" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">Anomaly workers: all active, split by cluster</text>
+  <text x="24" y="56" class="f13 sec">Each cluster has exactly one owner at a time; if a worker stops, another takes its clusters</text>
+
+  <!-- workers panel -->
+  <rect class="panel" x="196" y="72" width="256" height="300" rx="12"/>
+  <text x="212" y="92" class="zone">ANOMALY WORKERS, ALL ACTIVE</text>
+
+  <!-- clusters -->
+  <text x="20" y="92" class="zone">CLUSTERS, READ ONLY</text>
+  <rect class="blk" x="20" y="108" width="130" height="44" rx="12"/>
+  <text x="85" y="135" class="c f13 mid">prod-eu</text>
+  <rect class="blk" x="20" y="162" width="130" height="44" rx="12"/>
+  <text x="85" y="189" class="c f13 mid">staging</text>
+  <rect class="blk" x="20" y="250" width="130" height="44" rx="12"/>
+  <text x="85" y="277" class="c f13 mid">prod-us</text>
+  <rect class="blk" x="20" y="304" width="130" height="44" rx="12"/>
+  <text x="85" y="331" class="c f13 mid">dev</text>
+
+  <!-- worker 1 -->
+  <rect class="sub" x="238" y="104" width="180" height="100" rx="12"/>
+  <text x="328" y="130" class="f15 b nm mid">Anomaly worker 1</text>
+  <text x="328" y="150" class="f12 nm mid">one lease per cluster</text>
+  <rect class="pill" x="252" y="164" width="72" height="24" rx="12"/>
+  <text x="288" y="180" class="c f11 mid">prod-eu</text>
+  <rect class="pill" x="332" y="164" width="72" height="24" rx="12"/>
+  <text x="368" y="180" class="c f11 mid">staging</text>
+
+  <!-- worker 2 -->
+  <rect class="sub" x="238" y="244" width="180" height="100" rx="12"/>
+  <text x="328" y="270" class="f15 b nm mid">Anomaly worker 2</text>
+  <text x="328" y="290" class="f12 nm mid">one lease per cluster</text>
+  <rect class="pill" x="252" y="304" width="72" height="24" rx="12"/>
+  <text x="288" y="320" class="c f11 mid">prod-us</text>
+  <rect class="pill" x="332" y="304" width="72" height="24" rx="12"/>
+  <text x="368" y="320" class="c f11 mid">dev</text>
+
+  <text x="340" y="228" class="f12 sec">takeover</text>
+
+  <!-- main process -->
+  <rect class="blk" x="500" y="80" width="240" height="76" rx="12"/>
+  <text x="620" y="106" class="f15 b nm mid">Versus main process</text>
+  <text x="620" y="126" class="f12 sec mid">UI, toggles, status</text>
+  <text x="620" y="144" class="f12 sec mid">no learning runs here</text>
+  <text x="632" y="180" class="f12 sec">status, findings</text>
+
+  <!-- postgres -->
+  <path d="M500,204 a120,8 0 0 1 240,0 v72 a120,8 0 0 1 -240,0 z" fill="#FFFFFF" stroke="#000000" stroke-width="2"/>
+  <path d="M500,204 a120,8 0 0 0 240,0" fill="none" stroke="#000000" stroke-width="2"/>
+  <text x="620" y="234" class="f15 b nm mid">Main Postgres</text>
+  <text x="620" y="252" class="f12 sec mid">checkpoints, leases</text>
+  <text x="620" y="268" class="f12 sec mid">findings, incidents</text>
+
+  <!-- history, optional -->
+  <path d="M500,318 a120,8 0 0 1 240,0 v60 a120,8 0 0 1 -240,0 z" fill="#FFFFFF" stroke="#000000" stroke-width="2" stroke-dasharray="6 4"/>
+  <path d="M500,318 a120,8 0 0 0 240,0" fill="none" stroke="#000000" stroke-width="2" stroke-dasharray="6 4"/>
+  <text x="620" y="348" class="f15 b nm mid">History, optional</text>
+  <text x="620" y="366" class="f12 sec mid">any S3 compatible bucket</text>
+
+  <!-- alerts -->
+  <text x="340" y="392" class="f12 sec">notified findings</text>
+  <rect class="blk" x="238" y="404" width="180" height="56" rx="12"/>
+  <text x="328" y="428" class="f15 b nm mid">Shared alert path</text>
+  <text x="328" y="447" class="f12 sec mid">same as the main process</text>
+
+  <rect class="blk" x="500" y="404" width="240" height="56" rx="12"/>
+  <text x="620" y="428" class="f15 b nm mid">Your channels</text>
+  <text x="620" y="447" class="f12 sec mid">Slack, Telegram, PagerDuty</text>
+
+  <!-- flows -->
+  <path class="flow" d="M154 130H233" marker-end="url(#a)"/>
+  <path class="flow" d="M154 184H233" marker-end="url(#a)"/>
+  <path class="flow" d="M154 272H233" marker-end="url(#a)"/>
+  <path class="flow" d="M154 326H233" marker-end="url(#a)"/>
+  <path d="M328 209V239" fill="none" stroke="#000000" stroke-width="2" stroke-dasharray="5 4" marker-start="url(#a)" marker-end="url(#a)"/>
+  <path class="flow" d="M620 160V191" marker-start="url(#a)" marker-end="url(#a)"/>
+  <path class="flow" d="M456 240H495" marker-start="url(#a)" marker-end="url(#a)"/>
+  <path class="opt" d="M456 348H495" marker-end="url(#a)"/>
+  <path class="flow" d="M328 348V399" marker-end="url(#a)"/>
+  <path class="flow" d="M422 432H495" marker-end="url(#a)"/>
+</svg>

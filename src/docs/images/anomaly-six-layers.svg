@@ -1,0 +1,187 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="612" viewBox="0 0 760 612" style="max-width:100%;height:auto" role="img" aria-label="Four signals from each cluster, metrics, events, logs and rollouts, feed six layers that always run; layer one, hard failures such as OOMKilled and crash loops, alerts directly in every mode; layers two to five, siblings, versions, learned baseline and memory trend, feed layer six, grouping, which gathers flagged Pods into one finding; every finding is stored; a gate then checks the agent mode, whether the layer may alert and whether the cluster is past its first grace; if all pass the finding becomes an alert, otherwise it is held as a shadow finding, stored but not sent">
+  <title>Six detection layers and one delivery gate</title>
+  <desc>Glyph cards for four cluster signals, six always running layers, the finding store and a delivery gate whose two outputs are an alert bell and a shadow archive; hard failures alert directly in every mode</desc>
+  <defs>
+    <style>
+      text{font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;fill:#000000}
+      .f11{font-size:11px}.f12{font-size:12px}.f13{font-size:13px}.f14{font-size:14px}.f15{font-size:15px}
+      .b{font-weight:700}.nm{fill:#12222F}.sec{fill:#5B6B78}.wt{fill:#FFFFFF}
+      .zone{font-size:11px;font-weight:700;fill:#5B6B78;letter-spacing:1.5px}
+      .pt{font-size:18px;font-weight:700;fill:#12222F}
+      .mid{text-anchor:middle}
+      .flow{fill:none;stroke:#000000;stroke-width:2.5}
+      .blk{fill:#FFFFFF;stroke:#000000;stroke-width:2}
+      .sub{fill:#BACFE3;stroke:#000000;stroke-width:2}
+      .panel{fill:#F2F5F8}
+      .ink{fill:none;stroke:#12222F;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+      .accS{fill:none;stroke:#E8590C;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
+      .acc{fill:#E8590C}
+      .accT{fill:#FDE7D8;stroke:#E8590C;stroke-width:2}
+      .num{fill:#12222F}
+    </style>
+    <marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#000000"/>
+    </marker>
+  </defs>
+
+  <rect width="760" height="612" fill="#FFFFFF"/>
+
+  <text x="24" y="34" class="pt">Six layers, one gate</text>
+  <text x="24" y="56" class="f13 sec">Detection never stops; the gate decides only what alerts</text>
+
+  <!-- panels -->
+  <rect class="panel" x="20" y="72" width="720" height="68" rx="12"/>
+  <text x="36" y="110" class="zone">SIGNALS</text>
+  <rect class="panel" x="20" y="168" width="720" height="240" rx="12"/>
+  <text x="36" y="188" class="zone">SIX LAYERS, ALWAYS RUNNING</text>
+  <path d="M171 200V394" fill="none" stroke="#C3CED8" stroke-width="1.5"/>
+
+  <!-- signals -->
+  <rect class="blk" x="112" y="86" width="40" height="40" rx="10"/>
+  <g fill="#BACFE3" stroke="#12222F" stroke-width="1.5">
+    <rect x="121" y="108" width="6" height="10" rx="1"/>
+    <rect x="130" y="102" width="6" height="16" rx="1"/>
+    <rect x="139" y="96" width="6" height="22" rx="1"/>
+  </g>
+  <text x="162" y="111" class="f14 b nm">Metrics</text>
+
+  <rect class="blk" x="267" y="86" width="40" height="40" rx="10"/>
+  <path class="ink" d="M287 94L299 116H275Z"/>
+  <path class="ink" d="M287 101V108"/>
+  <circle cx="287" cy="112" r="1.3" class="num"/>
+  <text x="317" y="111" class="f14 b nm">Events</text>
+
+  <rect class="blk" x="422" y="86" width="40" height="40" rx="10"/>
+  <path class="ink" d="M430 96H454M430 102H450M430 108H454M430 114H446"/>
+  <text x="472" y="111" class="f14 b nm">Logs</text>
+
+  <rect class="blk" x="577" y="86" width="40" height="40" rx="10"/>
+  <rect x="581" y="100" width="10" height="12" rx="2" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <rect x="603" y="100" width="10" height="12" rx="2" fill="#BACFE3" stroke="#12222F" stroke-width="1.5"/>
+  <path d="M593 106H597" fill="none" stroke="#12222F" stroke-width="1.5"/>
+  <path d="M597 103.5L601 106L597 108.5Z" class="num"/>
+  <text x="627" y="111" class="f14 b nm">Rollouts</text>
+
+  <!-- layer cards -->
+  <rect class="blk" x="36" y="198" width="120" height="102" rx="12"/>
+  <rect class="blk" x="186" y="198" width="124" height="102" rx="12"/>
+  <rect class="blk" x="324" y="198" width="124" height="102" rx="12"/>
+  <rect class="blk" x="462" y="198" width="124" height="102" rx="12"/>
+  <rect class="blk" x="600" y="198" width="124" height="102" rx="12"/>
+  <rect class="blk" x="355" y="338" width="200" height="56" rx="12"/>
+
+  <!-- layer numbers -->
+  <circle cx="54" cy="216" r="10" class="num"/>
+  <circle cx="204" cy="216" r="10" class="num"/>
+  <circle cx="342" cy="216" r="10" class="num"/>
+  <circle cx="480" cy="216" r="10" class="num"/>
+  <circle cx="618" cy="216" r="10" class="num"/>
+  <circle cx="373" cy="366" r="10" class="num"/>
+  <text x="54" y="220.5" class="f12 b wt mid">1</text>
+  <text x="204" y="220.5" class="f12 b wt mid">2</text>
+  <text x="342" y="220.5" class="f12 b wt mid">3</text>
+  <text x="480" y="220.5" class="f12 b wt mid">4</text>
+  <text x="618" y="220.5" class="f12 b wt mid">5</text>
+  <text x="373" y="370.5" class="f12 b wt mid">6</text>
+
+  <!-- 1 hard failures: crash -->
+  <circle cx="96" cy="247" r="20" class="accT" style="stroke-width:2.5"/>
+  <path class="accS" d="M88 239L104 255M104 239L88 255" style="stroke-width:3"/>
+  <text x="96" y="290" class="f14 b nm mid">Hard failures</text>
+
+  <!-- 2 siblings: one dot off the row -->
+  <rect x="206" y="245" width="84" height="14" rx="7" fill="#BACFE3" fill-opacity="0.45"/>
+  <circle cx="255" cy="252" r="4.5" fill="none" stroke="#9AA9B6" stroke-width="1.5" stroke-dasharray="2 2"/>
+  <g fill="#FFFFFF" stroke="#12222F" stroke-width="1.5">
+    <circle cx="213" cy="252" r="4.5"/>
+    <circle cx="227" cy="252" r="4.5"/>
+    <circle cx="241" cy="252" r="4.5"/>
+    <circle cx="269" cy="252" r="4.5"/>
+    <circle cx="283" cy="252" r="4.5"/>
+  </g>
+  <circle cx="255" cy="232" r="5.5" class="acc" stroke="#12222F" stroke-width="1.5"/>
+  <text x="248" y="290" class="f14 b nm mid">Siblings</text>
+
+  <!-- 3 versions: two shifted curves -->
+  <path d="M340 266H434" fill="none" stroke="#9AA9B6" stroke-width="1.5"/>
+  <path d="M342 266C358 266 362 230 372 230C382 230 386 266 402 266" fill="#BACFE3" fill-opacity="0.6" stroke="#5B6B78" stroke-width="2"/>
+  <path d="M372 266C388 266 392 230 402 230C412 230 416 266 432 266" fill="#FDE7D8" fill-opacity="0.7" stroke="#E8590C" stroke-width="2.5"/>
+  <text x="372" y="225" class="f11 sec mid">v1</text>
+  <text x="402" y="225" class="f11 b nm mid">v2</text>
+  <text x="386" y="290" class="f14 b nm mid">Versions</text>
+
+  <!-- 4 baseline: band with a spike -->
+  <polygon fill="#BACFE3" fill-opacity="0.6" points="480,246 495,242 510,246 525,250 540,246 555,242 570,246 570,260 555,256 540,260 525,264 510,260 495,256 480,260"/>
+  <polyline class="ink" points="480,253 495,249 510,253 525,257 534,254"/>
+  <polyline class="ink" points="546,253 555,249 570,253"/>
+  <polyline class="accS" points="534,254 540,226 546,253"/>
+  <circle cx="540" cy="226" r="3.5" class="acc"/>
+  <text x="524" y="290" class="f14 b nm mid">Baseline</text>
+
+  <!-- 5 memory trend: slope to a limit -->
+  <path class="ink" d="M632 232H712" style="stroke-width:2.5"/>
+  <polyline class="ink" points="618,268 632,263 636,264 650,256 654,257 672,244"/>
+  <path class="accS" d="M672 244L699 232" style="stroke-width:2" stroke-dasharray="4 3"/>
+  <circle cx="699" cy="232" r="4" class="acc"/>
+  <text x="662" y="290" class="f14 b nm mid">Memory trend</text>
+
+  <!-- 6 grouping: dots gather into one -->
+  <path d="M396 350L440 366M394 366L440 366M398 382L440 366M410 357L440 366M408 376L440 366" fill="none" stroke="#9AA9B6" stroke-width="1.5"/>
+  <g class="acc">
+    <circle cx="396" cy="350" r="3.5"/>
+    <circle cx="394" cy="366" r="3.5"/>
+    <circle cx="398" cy="382" r="3.5"/>
+    <circle cx="410" cy="357" r="3.5"/>
+    <circle cx="408" cy="376" r="3.5"/>
+  </g>
+  <circle cx="440" cy="366" r="8" class="acc" stroke="#12222F" stroke-width="1.5"/>
+  <text x="464" y="371" class="f14 b nm">Grouping</text>
+
+  <!-- store -->
+  <rect class="sub" x="365" y="430" width="180" height="54" rx="12"/>
+  <path d="M380 443V467A12 4.5 0 0 0 404 467V443" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <path d="M380 455A12 4.5 0 0 0 404 455" fill="none" stroke="#12222F" stroke-width="1.5"/>
+  <ellipse cx="392" cy="443" rx="12" ry="4.5" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <text x="418" y="453" class="f15 b nm">Store</text>
+  <text x="418" y="471" class="f12 nm">every finding</text>
+
+  <!-- gate: switch -->
+  <rect class="sub" x="395" y="512" width="120" height="64" rx="12"/>
+  <path d="M455 527L439.5 542.5" fill="none" stroke="#12222F" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M455 527L470.5 542.5" fill="none" stroke="#12222F" stroke-width="1.5" stroke-dasharray="3 2.5"/>
+  <circle cx="455" cy="527" r="3.5" class="num"/>
+  <circle cx="437" cy="545" r="3.5" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <circle cx="473" cy="545" r="3.5" fill="#FFFFFF" stroke="#12222F" stroke-width="1.5"/>
+  <text x="455" y="569" class="f14 b nm mid">Gate</text>
+  <text x="455" y="596" class="f12 sec mid">mode, layer, first grace</text>
+
+  <!-- alert -->
+  <rect class="blk" x="36" y="512" width="140" height="64" rx="12"/>
+  <path d="M64 531C57 531 54 536 54 543V550L50 555H78L74 550V543C74 536 71 531 64 531Z" class="accT" stroke-linejoin="round"/>
+  <circle cx="64" cy="529" r="2.2" class="acc"/>
+  <circle cx="64" cy="559" r="3" class="acc"/>
+  <text x="90" y="550" class="f15 b nm">Alert</text>
+
+  <!-- shadow -->
+  <rect class="blk" x="584" y="512" width="140" height="64" rx="12"/>
+  <rect x="601" y="539" width="28" height="19" rx="2" fill="#FFFFFF" stroke="#5B6B78" stroke-width="2"/>
+  <rect x="598" y="531" width="34" height="8" rx="2" fill="#F2F5F8" stroke="#5B6B78" stroke-width="2"/>
+  <path d="M610 546H620" fill="none" stroke="#5B6B78" stroke-width="2" stroke-linecap="round"/>
+  <text x="644" y="541" class="f15 b nm">Shadow</text>
+  <text x="644" y="559" class="f12 sec">stored</text>
+
+  <!-- labels -->
+  <text x="106" y="468" class="f12 sec">every mode</text>
+  <text x="286" y="537" class="f12 sec mid">pass</text>
+  <text x="549" y="537" class="f12 sec mid">held</text>
+
+  <!-- flows -->
+  <path class="flow" d="M380 144V163" marker-end="url(#a)"/>
+  <path class="flow" d="M248 304V318H662V304M386 304V318M524 304V318" stroke-linejoin="round"/>
+  <path class="flow" d="M455 318V333" marker-end="url(#a)"/>
+  <path class="flow" d="M96 304V507" marker-end="url(#a)"/>
+  <path class="flow" d="M455 398V425" marker-end="url(#a)"/>
+  <path class="flow" d="M455 488V507" marker-end="url(#a)"/>
+  <path class="flow" d="M391 545H181" marker-end="url(#a)"/>
+  <path class="flow" d="M519 545H579" marker-end="url(#a)"/>
+</svg>
