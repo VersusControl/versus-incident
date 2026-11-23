@@ -46,6 +46,9 @@ var awsRoutes = []string{
 	"GET /api/admin/aws/accounts/labels/",
 	"PUT /api/admin/aws/accounts/labels/:id",
 	"DELETE /api/admin/aws/accounts/labels/:id",
+	"GET /api/admin/aws/groups/corrections/",
+	"POST /api/admin/aws/groups/corrections/",
+	"DELETE /api/admin/aws/groups/corrections/",
 	"GET /api/admin/aws/finops/summary",
 	"GET /api/admin/aws/finops/bridge",
 	"GET /api/admin/aws/finops/trend",
@@ -134,6 +137,7 @@ func TestMountKeepsEachRouteMiddlewareChain(t *testing.T) {
 	controllers.NewAWSChangesController(nil).WithPreferences(nil).Register(direct.Group("/api"))
 	controllers.NewAWSCoverageController(nil, nil).Register(direct.Group("/api"))
 	controllers.NewAWSAccountLabelsController(nil, tenancy.DefaultOrgScope()).Register(direct.Group("/api"))
+	controllers.NewAWSGroupCorrectionsController(nil, tenancy.DefaultOrgScope(), nil).Register(direct.Group("/api"))
 	controllers.NewAWSFinOpsController(nil).Register(direct.Group("/api"))
 	mounted := fiber.New()
 	mountForTest(t, mounted, Deps{})

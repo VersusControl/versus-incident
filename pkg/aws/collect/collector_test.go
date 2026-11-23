@@ -697,14 +697,16 @@ func TestStoredNameTagValuesHideWhenTheAllowlistNarrows(t *testing.T) {
 }
 
 // The allowlist reaches the collector and the read path through the
-// settings sanitiser. Tag keys are case-sensitive: "Name" there shows the
-// Name tag as the resource name, "name" does not.
-func TestNameAllowlistedThroughSettingsIsCaseSensitive(t *testing.T) {
+// settings sanitiser. Allowlist keys match tag keys without regard to case:
+// "Name" and "name" both show the Name tag as the resource name; another
+// key does not.
+func TestNameAllowlistedThroughSettingsIgnoresCase(t *testing.T) {
 	for _, c := range []struct {
 		key, want string
 	}{
 		{"Name", "versus-web"},
-		{"name", nameTagResources[0].id},
+		{"name", "versus-web"},
+		{"names", nameTagResources[0].id},
 	} {
 		provider := storage.NewMemory()
 		configured := config.AWSConnectorConfig{Enable: true, Tags: config.AWSTagsConfig{ValueAllowlist: []string{" " + c.key + " ", "app"}}}
@@ -744,8 +746,7 @@ func TestExpiredCredentialsAreNamedAsCredentialsNotNetwork(t *testing.T) {
 }
 
 // An application read from a tag is that tag's value: it shows only while
-// the tag key it came from is on the tag-value allowlist (exact,
-// case-sensitive key). The read applies the live allowlist again, and a
+// the tag key it came from is on the tag-value allowlist (any case). The read applies the live allowlist again, and a
 // value collected while its key was not allowlisted is never stored.
 func TestTagApplicationShowsOnlyWhenItsKeyIsAllowlisted(t *testing.T) {
 	table := arnOf("dynamodb", "table/versus-locks")
@@ -760,11 +761,15 @@ func TestTagApplicationShowsOnlyWhenItsKeyIsAllowlisted(t *testing.T) {
 	if got := resourcesByARN(t, h, productionAccount)[table]; got.App != "platform" || got.AppSource != snapshot.AppSourceTags || got.AppTag != "app" {
 		t.Fatalf("allowlisted tag application = %q from %q (%q)", got.App, got.AppSource, got.AppTag)
 	}
-	for _, narrowed := range [][]string{{"team"}, {"App"}} {
+	for _, narrowed := range [][]string{{"team"}, {"apps"}} {
 		allowlist = narrowed
 		if got := resourcesByARN(t, h, productionAccount)[table]; got.App != "" || got.AppSource != "" {
 			t.Errorf("allowlist %v: tag application still shown: %q from %q", narrowed, got.App, got.AppSource)
 		}
+	}
+	allowlist = []string{"APP"}
+	if got := resourcesByARN(t, h, productionAccount)[table]; got.App != "platform" {
+		t.Errorf("allowlist [APP]: tag application = %q, want it shown whatever the case", got.App)
 	}
 
 	allowlist = []string{"team"}
@@ -775,5 +780,25 @@ func TestTagApplicationShowsOnlyWhenItsKeyIsAllowlisted(t *testing.T) {
 	mustSync(t, h, target(productionAccount))
 	if got := resourcesByARN(t, h, productionAccount)[table]; got.App != "" {
 		t.Fatalf("a tag application whose key is not allowlisted was stored: %q", got.App)
+	}
+}
+
+// The collector records each cluster tag's owned or shared marker before it
+// redacts the tag values, so a hidden "shared" never reads as ownership.
+func TestApplyTagsRecordsClusterMarkersBeforeRedaction(t *testing.T) {
+	c := &call{allowlist: map[string]bool{"app": true}}
+	resource := model.Resource{ARN: "arn:aws:ec2:us-east-1:111122223333:security-group/sg-1", Type: "security-group",
+		Attributes: map[string]string{model.AttrID: "sg-1"}}
+	c.applyTags(&resource, map[string]string{"kubernetes.io/cluster/prod": "shared", "kubernetes.io/cluster/data": "owned", "App": "web"})
+	if resource.Tags["kubernetes.io/cluster/prod"] != model.RedactedValue || resource.Tags["App"] != "web" {
+		t.Fatalf("tags = %v", resource.Tags)
+	}
+	if got := resource.Attributes[model.AttrClusterTags]; got != "data=owned,prod=shared" || resource.Attributes[model.AttrID] != "sg-1" {
+		t.Fatalf("attributes = %v", resource.Attributes)
+	}
+	plain := model.Resource{ARN: "arn:aws:sqs:us-east-1:111122223333:q"}
+	c.applyTags(&plain, map[string]string{"app": "x"})
+	if plain.Attributes != nil {
+		t.Fatalf("a resource with no cluster tag gained attributes: %v", plain.Attributes)
 	}
 }

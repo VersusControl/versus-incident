@@ -45,8 +45,32 @@ func TestRedactTagsKeepsKeys(t *testing.T) {
 	if RedactTags(nil, nil) != nil {
 		t.Fatal("empty tags not nil")
 	}
-	if RedactTags(map[string]string{"App": "x"}, map[string]bool{"app": true})["App"] != RedactedValue {
-		t.Fatal("tag key match must be exact")
+	// Allowlist keys match tag keys without regard to case.
+	if out := RedactTags(map[string]string{"App": "x", "APP": "y", "apps": "z"}, map[string]bool{"app": true}); out["App"] != "x" ||
+		out["APP"] != "y" || out["apps"] != RedactedValue {
+		t.Fatalf("case-insensitive match = %v", out)
+	}
+	if !TagAllowed(map[string]bool{"Service": true}, "service") || TagAllowed(map[string]bool{"app": false}, "App") || TagAllowed(nil, "app") {
+		t.Fatal("TagAllowed")
+	}
+}
+
+// The cluster markers are read from the tag values before redaction: owned
+// and shared in any case, sorted by cluster, any other value left out; the
+// attribute survives Sanitize and parses back.
+func TestClusterTagAttribute(t *testing.T) {
+	tags := map[string]string{"kubernetes.io/cluster/prod-eks": "Owned", "kubernetes.io/cluster/data-eks": "SHARED",
+		"kubernetes.io/cluster/odd": "maybe", "kubernetes.io/cluster/": "owned", "kubernetes.io/cluster/a,b": "owned", "app": "x"}
+	value := ClusterTagAttribute(tags)
+	if value != "data-eks=shared,prod-eks=owned" {
+		t.Fatalf("attribute = %q", value)
+	}
+	if ClusterTagAttribute(map[string]string{"kubernetes.io/cluster/prod": RedactedValue}) != "" {
+		t.Fatal("a hidden value was recorded")
+	}
+	kept := Sanitize(Resource{Attributes: map[string]string{AttrClusterTags: value}})
+	if parsed := ParseClusterTags(kept.Attributes[AttrClusterTags]); len(parsed) != 2 || parsed["data-eks"] != ClusterShared || parsed["prod-eks"] != ClusterOwned {
+		t.Fatalf("parsed = %v", parsed)
 	}
 }
 
@@ -139,9 +163,9 @@ func TestRedactNameAppliesTheTagValueAllowlist(t *testing.T) {
 		{"allowlisted",
 			Resource{ARN: instanceARN, Type: "instance", Name: "web", Tags: map[string]string{"Name": "web"}},
 			map[string]bool{"Name": true}, "web", "web"},
-		{"lower-case key is not the Name tag",
+		{"a lower-case allowlist key allows the Name tag",
 			Resource{ARN: instanceARN, Type: "instance", Name: "web", Tags: map[string]string{"Name": "web"}},
-			map[string]bool{"name": true}, "i-1", RedactedValue},
+			map[string]bool{"name": true}, "web", "web"},
 		{"own name that equals the Name tag value",
 			Resource{ARN: "arn:aws:lambda:us-east-1:111122223333:function:checkout", Type: "function", Name: "checkout",
 				Tags: map[string]string{"Name": "checkout"}},
@@ -193,7 +217,7 @@ func TestResourceIDFailsClosedOnMalformedARNs(t *testing.T) {
 }
 
 // An application read from a tag is a tag value: RedactName keeps it only
-// while its tag key is allowlisted, with an exact, case-sensitive match.
+// while its tag key is allowlisted, matched without regard to case.
 // An application from AppRegistry or CloudFormation is not a tag value.
 func TestRedactNameShowsATagApplicationOnlyWhenItsKeyIsAllowlisted(t *testing.T) {
 	cases := []struct {
@@ -210,7 +234,7 @@ func TestRedactNameShowsATagApplicationOnlyWhenItsKeyIsAllowlisted(t *testing.T)
 			map[string]bool{"service": true}, "checkout"},
 		{"allowlist key differs in case",
 			Resource{App: "checkout", AppSource: AppSourceTags, AppTag: "service", Tags: map[string]string{"service": "checkout"}},
-			map[string]bool{"Service": true}, ""},
+			map[string]bool{"Service": true}, "checkout"},
 		{"tag application without its key",
 			Resource{App: "checkout", AppSource: AppSourceTags},
 			map[string]bool{"service": true}, ""},

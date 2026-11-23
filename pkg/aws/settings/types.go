@@ -160,6 +160,10 @@ type leakSample struct {
 // SelfTestRecord.Leaks24h. The self-test record itself keeps the exact public
 // shape.
 type privacyRecord struct {
-	TagValueAllowlist []string     `json:"tag_value_allowlist"`
-	Samples           []leakSample `json:"samples,omitempty"`
+	TagValueAllowlist []string `json:"tag_value_allowlist"`
+	// Saved marks a list the user saved. Only a saved list wins over the
+	// default, and a saved empty list means no tag values at all. A list
+	// stored without it was not chosen by the user and is ignored.
+	Saved   bool         `json:"saved,omitempty"`
+	Samples []leakSample `json:"samples,omitempty"`
 }

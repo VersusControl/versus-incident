@@ -110,6 +110,9 @@ type Store struct {
 	// so each change gets its own revision and a removal holds the revision
 	// it read until its record is gone.
 	accountsMu sync.Mutex
+	// privacyMu orders this process's updates of the privacy record; a
+	// backend with compare-and-swap also orders them across replicas.
+	privacyMu sync.Mutex
 }
 
 // NewStore builds a store over provider. A nil provider is allowed so the API
@@ -540,6 +543,95 @@ func (store *Store) SavePrivacy(org string, record privacyRecord) error {
 	return store.write(org, PrivacyKey(org), record)
 }
 
+// UpdatePrivacy applies change to the stored privacy record and writes it
+// back, so a writer changes only its own fields: the allowlist and the
+// self-test samples never overwrite each other. On a backend with
+// compare-and-swap a record another replica changed in between is read
+// again and change is applied to it.
+func (store *Store) UpdatePrivacy(org string, change func(*privacyRecord)) error {
+	if store == nil || store.provider == nil {
+		return ErrNoStorage
+	}
+	if !store.canWrite(org) {
+		return ErrOutOfScope
+	}
+	store.privacyMu.Lock()
+	defer store.privacyMu.Unlock()
+	cas, ok := store.provider.(storage.BlobCAS)
+	if !ok {
+		record, err := store.LoadPrivacy(org)
+		if err != nil {
+			return err
+		}
+		change(&record)
+		return store.SavePrivacy(org, record)
+	}
+	key := PrivacyKey(org)
+	for range revisionRaiseAttempts {
+		stored, err := store.provider.ReadBlob(key)
+		if err != nil {
+			return err
+		}
+		var record privacyRecord
+		if len(stored) > 0 && json.Unmarshal(stored, &record) != nil {
+			return ErrInvalidRecord
+		}
+		change(&record)
+		data, err := json.Marshal(record)
+		if err != nil {
+			return ErrInvalidRecord
+		}
+		swapped, err := cas.CompareAndSwapBlob(key, stored, data)
+		if err != nil {
+			return err
+		}
+		if swapped {
+			return nil
+		}
+	}
+	return ErrRevisionContended
+}
+
+// legacyDefaultAllowlist is the default an older self-test stored as if
+// the user had saved it.
+var legacyDefaultAllowlist = []string{"app", "team", "env", "owner", "cost-center"}
+
+// userAllowlist is the list the user saved, if any. A list with the saved
+// marker wins, even empty. A list stored without it was saved before the
+// marker existed and still wins, unless it is empty or exactly the old
+// default an older self-test wrote (in any order or case), which was never
+// the user's choice.
+func userAllowlist(privacy privacyRecord) ([]string, bool) {
+	if privacy.Saved {
+		return append([]string{}, privacy.TagValueAllowlist...), true
+	}
+	clean := SanitizeAllowlist(privacy.TagValueAllowlist)
+	if len(clean) == 0 || sameKeysAnyCase(clean, legacyDefaultAllowlist) {
+		return nil, false
+	}
+	return clean, true
+}
+
+func sameKeysAnyCase(left, right []string) bool {
+	set := func(keys []string) map[string]bool {
+		out := map[string]bool{}
+		for _, key := range keys {
+			out[strings.ToLower(strings.TrimSpace(key))] = true
+		}
+		return out
+	}
+	a, b := set(left), set(right)
+	if len(a) != len(b) {
+		return false
+	}
+	for key := range a {
+		if !b[key] {
+			return false
+		}
+	}
+	return true
+}
+
 // LoadOptions returns the stored wizard overrides. A missing record is empty,
 // meaning the config values apply.
 func (store *Store) LoadOptions(org string) (Options, error) {
@@ -563,9 +655,9 @@ func (store *Store) SaveOptions(org string, options Options) error {
 }
 
 // SanitizeAllowlist trims, de-duplicates and bounds the tag keys whose
-// values may reach the model. It returns a stable order. AWS tag keys are
-// case-sensitive, so a key keeps its case and is matched exactly: "Name"
-// and "name" are two keys.
+// values may reach the model. It returns a stable order. Each key keeps the
+// case it was given; matching a tag key against the list ignores case
+// (model.TagAllowed).
 func SanitizeAllowlist(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	clean := make([]string, 0, len(values))
@@ -586,9 +678,16 @@ func SanitizeAllowlist(values []string) []string {
 	return clean
 }
 
-// DefaultTagValueAllowlist is the least-privilege starting set.
+// DefaultTagValueAllowlist is the starting set for a deployment that has
+// not saved its own: the owner and cost keys, and the keys that name an
+// application, a Kubernetes namespace or a CloudFormation stack, which
+// grouping reads. Keys match tag keys without regard to case. A saved or
+// configured allowlist always wins over it.
 func DefaultTagValueAllowlist() []string {
-	return []string{"app", "team", "env", "owner", "cost-center"}
+	return []string{"app", "team", "env", "owner", "cost-center",
+		"application", "service", "app.kubernetes.io/name", "kubernetes.io/service-name",
+		"kubernetes.io/created-for/pvc/namespace", "service.k8s.aws/stack", "ingress.k8s.aws/stack",
+		"aws:cloudformation:stack-name"}
 }
 
 func sortAccounts(accounts []AccountRecord) {

@@ -17,6 +17,7 @@ import (
 	awscollect "github.com/VersusControl/versus-incident/pkg/aws/collect"
 	awscost "github.com/VersusControl/versus-incident/pkg/aws/cost"
 	awslimit "github.com/VersusControl/versus-incident/pkg/aws/limit"
+	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	awssettings "github.com/VersusControl/versus-incident/pkg/aws/settings"
 	awssnapshot "github.com/VersusControl/versus-incident/pkg/aws/snapshot"
 	"github.com/VersusControl/versus-incident/pkg/aws/snapshot/alarmsuspect"
@@ -95,7 +96,7 @@ type Mounted struct {
 // lacks one degrades that feature exactly as the file backend does:
 // storage.AWSInventoryStore, storage.AWSChangeFeedStore,
 // storage.AWSUnitHistoryStore, storage.AWSAccountLabelStore,
-// storage.AWSRetentionSweeper,
+// storage.AWSGroupCorrectionStore, storage.AWSRetentionSweeper,
 // storage.FinOpsStore, storage.FinOpsSavingDecisionStore,
 // storage.FinOpsSavingDecisionSubjects, storage.FinOpsRollupStore,
 // storage.SessionLocker (the change-pair and cost refresh locks),
@@ -120,6 +121,7 @@ func Mount(deps Deps) (*Mounted, error) {
 	mounted.Changes = mountChanges(deps, mounted)
 	mountCoverage(deps, mounted)
 	mountAccountLabels(deps)
+	mountGroupCorrections(deps, mounted)
 	cost, backend, err := mountFinOps(deps, mounted)
 	if err != nil {
 		return nil, err
@@ -340,6 +342,39 @@ func mountAccountLabels(deps Deps) {
 		store = labels
 	}
 	controllers.NewAWSAccountLabelsController(store, deps.Scope).Register(deps.Router)
+}
+
+// mountGroupCorrections mounts the group correction routes over the
+// provider's correction store. Each correction's status is read by
+// grouping the stored inventory of the connected accounts; nothing calls
+// AWS. A provider without the store answers reads with enabled=false.
+func mountGroupCorrections(deps Deps, mounted *Mounted) {
+	var store storage.AWSGroupCorrectionStore
+	if corrections, ok := storage.AWSGroupCorrectionsOf(deps.Store); ok {
+		store = corrections
+	}
+	current := liveAWS(deps.Config)
+	settingsStore := awssettings.NewStore(deps.Store, deps.Scope)
+	inventory := func(ctx context.Context) ([]model.Resource, []string, bool, error) {
+		conn := current()
+		if !conn.Enable || mounted.Snapshots == nil {
+			return nil, nil, false, nil
+		}
+		expected, _, err := coverageScope(settingsStore, deps.Scope.Write, conn, time.Now)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		accounts := make([]string, 0, len(expected))
+		for _, account := range expected {
+			accounts = append(accounts, account.Account)
+		}
+		result, err := mounted.Snapshots.Resources(ctx, awssnapshot.Query{})
+		if err != nil {
+			return nil, nil, false, err
+		}
+		return result.Resources, accounts, true, nil
+	}
+	controllers.NewAWSGroupCorrectionsController(store, deps.Scope, inventory).Register(deps.Router)
 }
 
 // CostOptions maps the connector configuration onto one cost refresh's

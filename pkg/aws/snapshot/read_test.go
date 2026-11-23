@@ -132,3 +132,38 @@ func TestHealthFiltersByServiceAndApplication(t *testing.T) {
 		}
 	})
 }
+
+// A cluster marker the tagging API read travels with its tags onto the
+// resource whose own list call carries none, and never overrides one the
+// resource recorded itself.
+func TestAssembleCarriesClusterMarkersFromTheTaggingAPI(t *testing.T) {
+	eachBackend(t, func(t *testing.T) {
+		store, _, _ := newStore(t)
+		volume := resource("ec2", "volume", "arn:aws:ec2:us-east-1:111122223333:volume/vol-1", "vol-1")
+		own := resource("ec2", "security-group", "arn:aws:ec2:us-east-1:111122223333:security-group/sg-1", "sg-1")
+		own.Attributes[model.AttrClusterTags] = "prod=shared"
+		tagged := func(arn, marker string) model.Resource {
+			return model.Resource{ARN: arn, Service: TagService, Type: "tags", Account: account, Region: region,
+				Tags: map[string]string{"kubernetes.io/cluster/prod": model.RedactedValue}, Attributes: map[string]string{model.AttrClusterTags: marker}}
+		}
+		for name, resources := range map[string][]model.Resource{
+			"ec2":      {volume, own},
+			TagService: {tagged(volume.ARN, "prod=owned"), tagged(own.ARN, "prod=owned")},
+		} {
+			if _, err := store.Commit(unit(name), Candidate{Resources: resources}); err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		}
+		result, err := store.Resources(context.Background(), Query{Account: account})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{}
+		for _, item := range result.Resources {
+			got[item.ARN] = item.Attributes[model.AttrClusterTags]
+		}
+		if got[volume.ARN] != "prod=owned" || got[own.ARN] != "prod=shared" {
+			t.Fatalf("markers = %v", got)
+		}
+	})
+}

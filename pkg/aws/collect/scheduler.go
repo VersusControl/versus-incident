@@ -178,7 +178,7 @@ func (scheduler *Scheduler) RunDue(ctx context.Context) {
 
 		for _, kind := range kindOrder {
 			if kind == KindPolicy {
-				if !scheduler.runPolicy(ctx, target, intervals.of(kind)) {
+				if !scheduler.runPolicy(ctx, target, intervals.of(kind), forced) {
 					return
 				}
 				continue
@@ -213,11 +213,13 @@ type policyState struct {
 // its own stored attempt, as any replica recorded it, is older than the
 // interval, or it was never attempted. A restart or a second replica never
 // reads a unit again inside the interval, and a new Region or a pass cut
-// short reads only the units that need it. A trigger does not force it.
-// The replicas share one lock per account, and a replica that does not get
-// it leaves the read to the one that did. It reports false only when ctx
-// ended.
-func (scheduler *Scheduler) runPolicy(ctx context.Context, target Target, interval time.Duration) bool {
+// short reads only the units that need it. A trigger does not force a unit
+// read inside its interval, but it always looks at the store again, so a
+// unit never attempted (a first sync, an account connected again after a
+// purge) runs at once. The replicas share one lock per account, and a
+// replica that does not get it leaves the read to the one that did. It
+// reports false only when ctx ended.
+func (scheduler *Scheduler) runPolicy(ctx context.Context, target Target, interval time.Duration, forced bool) bool {
 	now := scheduler.now()
 	units := Plan(target.AccountID, target.Regions, KindPolicy)
 	keys := make([]string, 0, len(units))
@@ -228,7 +230,7 @@ func (scheduler *Scheduler) runPolicy(ctx context.Context, target Target, interv
 	scheduler.mu.Lock()
 	state, known := scheduler.policy[target.AccountID]
 	scheduler.mu.Unlock()
-	if known && state.units == fingerprint && now.Before(state.next) {
+	if !forced && known && state.units == fingerprint && now.Before(state.next) {
 		return true
 	}
 	store := scheduler.collector.Store()
@@ -290,6 +292,9 @@ func (scheduler *Scheduler) purgeRemovedAccounts(ctx context.Context) {
 	}
 	for _, account := range stored {
 		if !connected[account] {
+			scheduler.mu.Lock()
+			delete(scheduler.policy, account)
+			scheduler.mu.Unlock()
 			if err := store.PurgeAccount(account); err == nil {
 				scheduler.collector.logf("aws collect: account=%s purged after it was removed", account)
 			}

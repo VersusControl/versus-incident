@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
+	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/finops"
 )
@@ -53,18 +54,17 @@ func FromConfig(cfg config.AWSConnectorConfig, targets []Target, allowlist []str
 		RefreshSet:      true,
 	}
 	o.RefreshHour, o.RefreshMinute = f.RefreshClock()
-	for _, key := range allowlist {
-		if len(allowlist) > maxConfigTagAllowlistLength {
-			break
+	if len(allowlist) <= maxConfigTagAllowlistLength {
+		// Allowlist keys match tag keys without regard to case, as in
+		// every other tag-value redaction (model.TagAllowed).
+		allowed := make(map[string]bool, len(allowlist))
+		for _, key := range allowlist {
+			if key = strings.TrimSpace(key); key != "" {
+				allowed[key] = true
+			}
 		}
-		// AWS tag keys are case-sensitive: an allowlist entry matches a key
-		// exactly, as in every other tag-value redaction.
-		if strings.TrimSpace(key) == f.TeamTagKey {
-			o.TagAllowlisted = true
-		}
-		if strings.TrimSpace(key) == nameTagKey {
-			o.NameAllowlisted = true
-		}
+		o.TagAllowlisted = f.TeamTagKey != "" && model.TagAllowed(allowed, f.TeamTagKey)
+		o.NameAllowlisted = model.TagAllowed(allowed, nameTagKey)
 	}
 	for _, a := range cfg.Accounts {
 		if a.Owner != "" {

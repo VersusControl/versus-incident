@@ -420,7 +420,9 @@ func diffResource(old, current model.Resource, allowlist map[string]bool) []Comp
 		if !model.AllowedAttribute(key) {
 			continue
 		}
-		add(key, old.Attributes[key], current.Attributes[key], hiddenField(key))
+		// The cluster markers are read from tag values, so they are hidden
+		// like the tags themselves.
+		add(key, old.Attributes[key], current.Attributes[key], hiddenField(key) || key == model.AttrClusterTags)
 	}
 	tags := map[string]bool{}
 	for key := range old.Tags {
@@ -437,7 +439,7 @@ func diffResource(old, current model.Resource, allowlist map[string]bool) []Comp
 	for _, key := range names {
 		// Snapshot tags keep allowlisted values, so compare hides by the
 		// live allowlist.
-		add(changes.TagFieldPrefix+key, old.Tags[key], current.Tags[key], !allowlist[key])
+		add(changes.TagFieldPrefix+key, old.Tags[key], current.Tags[key], !model.TagAllowed(allowlist, key))
 	}
 	return out
 }

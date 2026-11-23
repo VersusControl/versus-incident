@@ -259,3 +259,45 @@ func TestNewRegionReadsOnlyItsOwnPolicyUnits(t *testing.T) {
 		}
 	}
 }
+
+// A policy unit that was never attempted runs on the next trigger, even
+// when this process read the account's policies a moment ago: the account
+// was purged and connected again, so its units start over. A unit inside
+// its interval is still not read again by a trigger.
+func TestTriggerRunsPolicyUnitsNeverAttempted(t *testing.T) {
+	h := newHarness(t, fakeaws.ScenarioBadDeploy)
+	clock := &fakeClock{now: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)}
+	h.store = snapshot.New(h.provider, h.store.Scope(), snapshot.WithClock(clock.Now))
+	h.collector.store = h.store
+	scheduler := NewScheduler(h.collector,
+		func(context.Context) []Target { return []Target{target(productionAccount)} },
+		func() Intervals {
+			return Intervals{Inventory: 15 * time.Minute, Health: 2 * time.Minute, Changes: 5 * time.Minute}
+		},
+		func() bool { return true },
+		WithSchedulerClock(clock.Now))
+	scheduler.RunDue(context.Background())
+	first := unitAttempts(t, h.store, "kms")
+	if first.IsZero() {
+		t.Fatal("the first pass made no policy read")
+	}
+
+	clock.Advance(time.Minute)
+	scheduler.Trigger(productionAccount)
+	scheduler.RunDue(context.Background())
+	if !unitAttempts(t, h.store, "kms").Equal(first) {
+		t.Fatal("a trigger read a policy unit again inside its interval")
+	}
+
+	if err := h.store.PurgeAccount(productionAccount); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	scheduler.Trigger(productionAccount)
+	scheduler.RunDue(context.Background())
+	for _, service := range []string{"kms", "ecr", "s3-policy"} {
+		if at := unitAttempts(t, h.store, service); !at.Equal(clock.Now()) {
+			t.Errorf("%s attempted at %v after the purge, want now", service, at)
+		}
+	}
+}

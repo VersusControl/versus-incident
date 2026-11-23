@@ -195,7 +195,7 @@ func (c *call) applyTags(resource *model.Resource, tags map[string]string) {
 		return
 	}
 	for _, key := range c.appTagKeys {
-		if !c.allowlist[key] {
+		if !model.TagAllowed(c.allowlist, key) {
 			continue
 		}
 		if value := strings.TrimSpace(tags[key]); value != "" && resource.App == "" {
@@ -203,6 +203,12 @@ func (c *call) applyTags(resource *model.Resource, tags map[string]string) {
 			resource.AppSource = snapshot.AppSourceTags
 			resource.AppTag = key
 		}
+	}
+	if clusters := model.ClusterTagAttribute(tags); clusters != "" {
+		if resource.Attributes == nil {
+			resource.Attributes = map[string]string{}
+		}
+		resource.Attributes[model.AttrClusterTags] = clusters
 	}
 	resource.Tags = tags
 	model.RedactName(resource, c.allowlist)

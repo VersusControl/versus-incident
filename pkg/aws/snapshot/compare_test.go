@@ -449,3 +449,16 @@ func TestPolicyEntriesAreNotResources(t *testing.T) {
 		}
 	}
 }
+
+// The cluster markers come from tag values: a change in them is listed,
+// but hidden like a tag, whatever the allowlist.
+func TestCompareHidesClusterMarkers(t *testing.T) {
+	old := model.Resource{ARN: "arn:aws:ec2:us-east-1:111122223333:security-group/sg-1",
+		Attributes: map[string]string{model.AttrClusterTags: "prod=owned", model.AttrID: "sg-1"}}
+	current := old
+	current.Attributes = map[string]string{model.AttrClusterTags: "prod=shared", model.AttrID: "sg-1"}
+	fields := diffResource(old, current, map[string]bool{"kubernetes.io/cluster/prod": true})
+	if len(fields) != 1 || fields[0].Field != model.AttrClusterTags || !fields[0].Hidden || fields[0].Before != nil || fields[0].After != nil {
+		t.Fatalf("fields = %+v", fields)
+	}
+}

@@ -379,7 +379,10 @@ func waitFirstSync(t *testing.T, client *awsClient, accountID string, deadline t
 }
 
 // waitAttemptedAfter waits until every unit of the account was attempted
-// after mark, read through the store's Sync surface.
+// after mark, read through the store's Sync surface, and returns the units
+// read after mark. A policy unit read inside its interval before mark is
+// not read again by a trigger: it counts as done, but is not returned. A
+// policy unit never attempted must be read like any other.
 func waitAttemptedAfter(t *testing.T, store *awssnapshot.Store, accountID string, mark time.Time, deadline time.Duration) []awssnapshot.UnitStatus {
 	t.Helper()
 	stop := time.Now().Add(deadline)
@@ -388,17 +391,24 @@ func waitAttemptedAfter(t *testing.T, store *awssnapshot.Store, accountID string
 		if err != nil {
 			t.Fatalf("store sync: %v", err)
 		}
-		fresh := 0
+		done := 0
+		var fresh []awssnapshot.UnitStatus
 		for _, status := range statuses {
-			if !status.Sync.AttemptedAt.Before(mark) {
-				fresh++
+			attempted := status.Sync.AttemptedAt
+			switch {
+			case !attempted.Before(mark):
+				done++
+				fresh = append(fresh, status)
+			case awscollect.KindOf(status.Unit.Service) == awscollect.KindPolicy && !attempted.IsZero() &&
+				mark.Sub(attempted) < awscollect.PolicyInterval:
+				done++
 			}
 		}
-		if len(statuses) == awsCollectUnitsOneRegion && fresh == len(statuses) {
-			return statuses
+		if len(statuses) == awsCollectUnitsOneRegion && done == len(statuses) {
+			return fresh
 		}
 		if time.Now().After(stop) {
-			t.Fatalf("only %d/%d units attempted after %s", fresh, len(statuses), mark.Format(time.RFC3339Nano))
+			t.Fatalf("only %d/%d units attempted after %s", done, len(statuses), mark.Format(time.RFC3339Nano))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
