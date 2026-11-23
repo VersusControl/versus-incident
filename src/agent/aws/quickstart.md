@@ -1,14 +1,8 @@
 # AWS Quickstart
 
-Run Versus on your machine or in a Kubernetes cluster, and let it read your AWS
-account: its resources and its cost. Versus signs in with the access key of a
-new IAM user that can only read. Pick one way to run it:
-
-- **Option A:** Docker Compose, with one command.
-- **Option B:** Kubernetes, with `helm install`.
-
-Both give the same result: the Versus UI, the AWS connector turned on for your
-account, and the FinOps page reading your cost.
+The quickstart guide to run Versus using Docker Compose or Helm, and let it read your AWS
+account: its resources, its changes and its cost. Versus signs in with the access key of a
+new IAM user that can only read.
 
 > **This setup is for trying Versus.** The access key is long-lived. Delete it
 > when you are done (see [Clean up](#clean-up)), and use roles in production
@@ -25,38 +19,41 @@ You need:
   aws sts get-caller-identity
   ```
 
-- For Option A: Docker with Docker Compose v2. Check:
-
-  ```bash
-  docker compose version
-  ```
-
-- For Option B: `kubectl` pointed at your cluster, and Helm 3.8 or newer.
-
 - Cost Explorer turned on in the account. Open the
   [Billing and Cost Management console](https://console.aws.amazon.com/costmanagement/home),
   then **Cost Explorer**, and turn it on once. AWS can take up to 24 hours to
   fill in cost data after that.
 
-- A copy of the Versus repository. Run every command on this page from its
-  root folder:
+## Clone the Versus repository
 
-  ```bash
-  git clone https://github.com/VersusControl/versus-incident.git
-  cd versus-incident
-  ```
+Run every command on this page from its root folder:
 
-What Versus can read:
+```bash
+git clone https://github.com/VersusControl/versus-incident.git
+cd versus-incident
+```
 
-| | |
-| --- | --- |
-| Access | Read-only: metadata of 24 services (names, settings, statuses, counts), plus cost, budgets and savings recommendations. |
-| Data | Not read. The policy denies S3 objects, secret and parameter values, KMS decrypt, DynamoDB items, Lambda code, console output and log events. |
-| Billing account | Not read. Invoices, payment methods and account settings are denied. |
-| Changes | None. Versus never creates, edits or deletes anything in your account. |
+The repository ships the quickstart config in
+`examples/quickstart/aws/config/`, ready to use. You don't edit it: each
+`${VAR}` is filled from the variables you export in
+[Step 2](#step-2-export-the-settings). These are the keys it needs, from
+`connectors.yaml`:
 
-The full policy is in
-[`scripts/aws/versus-quickstart-policy.json`](https://github.com/VersusControl/versus-incident/blob/dev/scripts/aws/versus-quickstart-policy.json).
+```yaml
+connectors:
+  aws:
+    enable: true                         # turn on the AWS connector (default false)
+    accounts:
+      - account_id: "${AWS_ACCOUNT_ID}"  # the 12-digit account the key belongs to
+        display_name: Quickstart         # name shown in the UI (default: the account ID)
+        regions: ["${AWS_REGION}"]       # regions to read
+        auth:
+          mode: default_chain            # sign in with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+    optional_data:
+      cost_explorer: true                # read cost for FinOps (default false)
+```
+
+For every other option, see [AWS configuration](/agent/aws/configuration).
 
 ## Step 1: Create the IAM user
 
@@ -75,6 +72,11 @@ aws iam put-user-policy --user-name versus-quickstart --policy-name versus-quick
 ```
 
 This prints nothing when it works.
+
+The policy only reads. It already grants `cloudtrail:LookupEvents`, which the
+Changes page uses to read CloudTrail event history, so there is nothing to add.
+CloudTrail event history is on in every account, with no trail needed. See
+[Changes setup](/agent/aws/configuration#changes-setup).
 
 **3. Create an access key.**
 
@@ -120,6 +122,12 @@ variables.
 
 ## Step 3, Option A: Docker Compose
 
+Need Docker with Docker Compose v2. Check:
+
+```bash
+docker compose version
+```
+
 **1. Start Versus.**
 
 ```bash
@@ -155,7 +163,7 @@ Go to [What you'll see](#step-4-what-youll-see).
 
 ## Step 3, Option B: Kubernetes
 
-For a detailed EKS setup with IRSA or Pod Identity, several accounts and
+Need Helm 3.8 or newer. For a detailed EKS setup with IRSA or Pod Identity, several accounts and
 FinOps, see [AWS on EKS](/examples/aws-eks-irsa-pod-identity).
 
 **1. Store the key in a Secret.** The key reaches the pod as environment
@@ -227,6 +235,19 @@ When the first sync is done, the account shows its services and regions.
 ![AWS Settings after the first sync: the Quickstart account connected, with its readable services counted](../../docs/images/aws-quickstart-settings-account-dark.png)
 
 *The account after the first sync: readable services are counted. Services this account can't read, such as ones that need a support plan, aren't counted.*
+
+### Changes
+
+Open **AWS > Changes**. The page shows who changed what in your account, and
+which change most likely started an alarm. The summary card counts the
+changes, splits them into people and automation, and names the likely cause.
+The services filter starts on RDS and IAM; open it to add others.
+
+![The Changes page: the summary card with a likely cause, the activity grid, and the list of changes](../../docs/images/aws-changes-overview-dark.png)
+
+*The Changes page: who changed what, and the likely cause of an alarm.*
+
+The first read covers the last 24 hours.
 
 ### FinOps
 
