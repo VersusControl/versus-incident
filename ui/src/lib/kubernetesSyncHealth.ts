@@ -1,5 +1,6 @@
 import type { KubernetesFailingKind, KubernetesKindStatus, KubernetesSync, KubernetesSyncHealthReport, KubernetesSyncProgress, KubernetesUnreadableKind } from "./api";
 import { pendingKindNames } from "./kubernetesPending";
+import { datedClockTime } from "./kubernetesClock";
 
 /**
  * The four states a cluster sync can be in. Every Kubernetes data view reads
@@ -97,8 +98,8 @@ const failureReasons: Record<string, string> = {
   proof_host_not_allowed: "the cloud identity service host is not on the allowed list for this cloud",
   token_endpoint_unreachable: "can't reach the cloud token endpoint to get this cluster's credential; check outbound access (DNS, egress, proxy) to the provider's token host, Versus keeps retrying",
   publication_failed: "the latest snapshot could not be published",
-  storage_unavailable: "the cluster was read, but the snapshot could not be saved",
-  storage_rejected: "the cluster was read, but the history store rejected the snapshot",
+  storage_unavailable: "the history database is unavailable, so the latest read could not be saved",
+  storage_rejected: "the history database refused to save the latest read",
   timeout: "the cluster is slow or rate-limiting reads",
   throttled: "the cluster is slow or rate-limiting reads",
   unavailable: "the cluster read failed",
@@ -116,6 +117,16 @@ const failureReasons: Record<string, string> = {
  * change. Neither ever counts as a failure.
  */
 const preparingClasses = new Set(["syncing", "authority_pending"]);
+
+const historyStoreClasses = new Set(["storage_unavailable", "storage_rejected"]);
+
+/**
+ * Every failing kind failed to be saved, not read: the cluster answers, and
+ * the database Versus keeps history in is what needs attention.
+ */
+export function historyStoreFailure(health: Pick<KubernetesSyncHealth, "problems">): boolean {
+  return health.problems.length > 0 && health.problems.every((problem) => historyStoreClasses.has(problem.error));
+}
 
 /** The phrase for a known failure class, or undefined for an unknown one. */
 export function knownFailureReason(failureClass?: string): string | undefined {
@@ -416,6 +427,23 @@ export function syncReportPollIntervalMs(sync?: KubernetesSync): number {
   return typeof interval === "number" ? interval : syncReportIdlePollMs;
 }
 
+/**
+ * How long status reads may fail, with no report ever received, before the
+ * status stops saying "Preparing" and says it could not load. It is the
+ * server's shortest freshness limit for a kind.
+ */
+export const syncStatusUnloadedAfterMs = 180_000;
+
+/**
+ * When a report received at `receivedAt` stops vouching for fresh data: the
+ * moment its first collected kind goes stale. A report that names no such
+ * moment never expires by this rule.
+ */
+export function syncReportStaleAt(report: { stale_in_s?: number } | undefined, receivedAt: number): number | undefined {
+  const staleIn = report?.stale_in_s;
+  return typeof staleIn === "number" && Number.isFinite(staleIn) && staleIn >= 0 ? receivedAt + staleIn * 1000 : undefined;
+}
+
 /** The four words every surface uses for the one classification. */
 export function syncHealthStateLabel(state: KubernetesSyncHealthState): string {
   switch (state) {
@@ -452,11 +480,11 @@ export function syncSince(value?: string): { iso: string; age: string } | undefi
  * The wall-clock time of the data on screen, as 24-hour HH:MM: the snapshot's own
  * time when it was reported, else now minus the reported age.
  */
-export function syncDataTime(observedAt?: string | null, ageSeconds?: number): string | undefined {
+export function syncDataTime(observedAt?: string | null, ageSeconds?: number, now: number = Date.now()): string | undefined {
   // A 24-hour clock, like the snapshot time and log timestamps beside it.
-  const format = (at: Date) => at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const format = (at: Date) => datedClockTime(at, now, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   if (!isZeroTime(observedAt)) return format(new Date(observedAt!));
-  if (ageSeconds !== undefined && Number.isFinite(ageSeconds) && ageSeconds >= 0) return format(new Date(Date.now() - ageSeconds * 1000));
+  if (ageSeconds !== undefined && Number.isFinite(ageSeconds) && ageSeconds >= 0) return format(new Date(now - ageSeconds * 1000));
   return undefined;
 }
 
@@ -521,16 +549,11 @@ export function historySaveDelay(...pages: unknown[]): KubernetesHistorySaveDela
  * today's data.
  */
 function savedTime(savedThrough: string, now: number): string {
-  const saved = new Date(savedThrough);
-  const today = new Date(now);
-  const time = saved.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (saved.toDateString() === today.toDateString()) return time;
-  const date = saved.toLocaleDateString([], { month: "short", day: "numeric", ...(saved.getFullYear() !== today.getFullYear() ? { year: "numeric" } : {}) });
-  return `${date}, ${time}`;
+  return datedClockTime(new Date(savedThrough), now, { hour: "2-digit", minute: "2-digit" });
 }
 
 /** The one-line notice for a delayed or rejected history save. */
 export function historySaveLabel(delay: KubernetesHistorySaveDelay, now: number = Date.now()): string {
-  const lead = delay.rejected ? "History could not save the latest data" : "History is temporarily not saving";
+  const lead = delay.rejected ? "History could not save the latest data to the database" : "History is temporarily not saving to the database";
   return delay.savedThrough ? `${lead} — showing data from ${savedTime(delay.savedThrough, now)}` : `${lead} — showing the last saved data`;
 }

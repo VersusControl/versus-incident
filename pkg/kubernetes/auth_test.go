@@ -855,7 +855,9 @@ func TestProjectedServiceAccountReplicasRotationAndReplacement(t *testing.T) {
 		t.Fatal("two replicas acquired one principal")
 	}
 	change := Change{ID: "history", Kind: "Pod", UID: "pod", Name: "api", Cluster: "cluster", Type: kubechanges.Created, At: now}
-	if err := first.commitCredential(t.Context(), func() error { return first.changeStore().Commit([]Change{change}, nil, nil, "first", now) }); err != nil {
+	if err := first.commitCredential(t.Context(), func(context.Context) error {
+		return first.changeStore().Commit([]Change{change}, nil, nil, "first", now)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(paths[0], []byte(sign("rotation", nil)), 0o600); err != nil {
@@ -884,7 +886,7 @@ func TestProjectedServiceAccountReplicasRotationAndReplacement(t *testing.T) {
 	if err != nil || len(page.Items) != 0 {
 		t.Fatal("replacement exposed previous principal history")
 	}
-	if err := first.commitCredential(t.Context(), func() error { t.Fatal("retired principal committed"); return nil }); !errors.Is(err, ErrCredentialUnavailable) {
+	if err := first.commitCredential(t.Context(), func(context.Context) error { t.Fatal("retired principal committed"); return nil }); !errors.Is(err, ErrCredentialUnavailable) {
 		t.Fatal("old write not fenced")
 	}
 	if page, err := first.Changes(t.Context(), ChangeQuery{}); err == nil || len(page.Items) != 0 {
@@ -946,7 +948,7 @@ func TestProjectedRotationCanceledDiscoveryPreservesCapture(t *testing.T) {
 		t.Fatal("transient discovery retired or changed verified identity")
 	}
 	blocked.Store(false)
-	if err := service.commitCredential(t.Context(), func() error { return store.RenewLease("capture-owner", time.Now().UTC(), time.Minute) }); err != nil {
+	if err := service.commitCredential(t.Context(), func(context.Context) error { return store.RenewLease("capture-owner", time.Now().UTC(), time.Minute) }); err != nil {
 		t.Fatalf("same-token retry did not preserve owner: %v", err)
 	}
 	page, err := service.Changes(t.Context(), ChangeQuery{})
@@ -1174,7 +1176,7 @@ func TestProjectedRotationInvalidSignatureFencesEpoch(t *testing.T) {
 	if err := service.validateCredential(t.Context()); !errors.Is(err, ErrCredentialUnavailable) || service.identity.ctx.Err() == nil {
 		t.Fatalf("invalid signature did not fence old epoch: %v", err)
 	}
-	if err := service.commitCredential(t.Context(), func() error { t.Fatal("invalid token committed"); return nil }); !errors.Is(err, ErrCredentialUnavailable) {
+	if err := service.commitCredential(t.Context(), func(context.Context) error { t.Fatal("invalid token committed"); return nil }); !errors.Is(err, ErrCredentialUnavailable) {
 		t.Fatalf("invalid signature permitted write: %v", err)
 	}
 }
@@ -1411,7 +1413,7 @@ func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
 				t.Fatal(err)
 			}
 			change := Change{ID: "history", Kind: "Pod", UID: "pod", Name: "api", Cluster: "cluster", Type: kubechanges.Created, At: now}
-			if err := service.commitCredential(t.Context(), func() error {
+			if err := service.commitCredential(t.Context(), func(context.Context) error {
 				return store.Commit([]Change{change}, nil, nil, "owner", now)
 			}); err != nil {
 				t.Fatal(err)
@@ -1432,7 +1434,7 @@ func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
 			case "history_refresh":
 				_, err = service.Changes(t.Context(), ChangeQuery{})
 			case "lease_refresh":
-				err = service.commitCredential(t.Context(), func() error { t.Fatal("rejected refresh renewed lease"); return nil })
+				err = service.commitCredential(t.Context(), func(context.Context) error { t.Fatal("rejected refresh renewed lease"); return nil })
 			}
 			if !errors.Is(err, ErrUnauthorized) {
 				t.Fatalf("definitive rejection hidden: %v", err)
@@ -1445,7 +1447,7 @@ func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
 				if page, err := old.Changes(t.Context(), ChangeQuery{}); err == nil || len(page.Items) != 0 {
 					t.Fatal("retired epoch exposed history")
 				}
-				if err := old.commitCredential(t.Context(), func() error { t.Fatal("retired epoch committed"); return nil }); err == nil {
+				if err := old.commitCredential(t.Context(), func(context.Context) error { t.Fatal("retired epoch committed"); return nil }); err == nil {
 					t.Fatal("retired epoch accepted renewal")
 				}
 			}
@@ -1514,7 +1516,7 @@ func TestProjectedExpiredFreshnessTransientAndForbidden(t *testing.T) {
 			verifier.mu.Unlock()
 			failed.Store(true)
 			for range 2 {
-				if err := service.commitCredential(t.Context(), func() error { t.Fatal("expired freshness accepted commit"); return nil }); err == nil {
+				if err := service.commitCredential(t.Context(), func(context.Context) error { t.Fatal("expired freshness accepted commit"); return nil }); err == nil {
 					t.Fatal("expired principal accepted request")
 				}
 				if code == http.StatusTooManyRequests {
@@ -1684,7 +1686,7 @@ func TestProjectedExpiredFreshnessCancellationDoesNotExtendLease(t *testing.T) {
 	blocked.Store(true)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Millisecond)
 	defer cancel()
-	if err := service.commitCredential(ctx, func() error {
+	if err := service.commitCredential(ctx, func(context.Context) error {
 		t.Fatal("expired freshness renewed lease during timeout")
 		return store.RenewLease("owner", now.Add(time.Second), ttl)
 	}); !errors.Is(err, context.DeadlineExceeded) || service.identity.ctx.Err() != nil || !service.identity.known {

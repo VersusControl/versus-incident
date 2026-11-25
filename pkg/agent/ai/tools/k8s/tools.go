@@ -619,9 +619,16 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 			next = result.ResumeAfter(len(items))
 		}
 		data := map[string]any{
-			"items": modelItems, "totals": result.Totals, "broken": result.Broken, "truncated": truncated,
+			"items": modelItems, "truncated": truncated,
 			"partial_failures": result.Partial, "sync": result.Sync,
 			"hint": "Use diagnose_k8s_workload to inspect one root workload.",
+		}
+		if issuePageUncounted(result, cursor) {
+			data["count_unknown"] = true
+			data["count_note"] = "This page does not count issues; use the totals from the first page."
+		} else {
+			data["totals"] = result.Totals
+			data["broken"] = result.Broken
 		}
 		if next != "" {
 			data["next"] = next
@@ -647,6 +654,15 @@ func compactIssues(result kubernetes.IssuePage, scope kubernetes.Scope, cursor s
 			truncated = true
 		}
 	}
+}
+
+// issuePageUncounted reports whether an issues page carries no counts of its
+// own. Saved-history cursor pages are not recounted; the service marks them,
+// and a cursor page whose totals map came back empty is treated the same way,
+// because file mode and older saved history leave the map empty instead of
+// setting the mark. An empty count there must not read as "no issues".
+func issuePageUncounted(result kubernetes.IssuePage, cursor string) bool {
+	return result.CountUnknown || cursor != "" && len(result.Totals) == 0
 }
 
 func trimModelBreak(issue *kubernetes.Issue) bool {
@@ -887,7 +903,7 @@ func trimOneModelString(value any) bool {
 func removeOneModelField(view map[string]any) bool {
 	for _, key := range sortedMapKeys(view) {
 		switch key {
-		case "sync", "ref", "links", "hint", "truncated", "next", "totals", "total", "count":
+		case "sync", "ref", "links", "hint", "truncated", "next", "totals", "total", "count", "count_unknown", "count_note":
 			continue
 		default:
 			delete(view, key)

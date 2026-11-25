@@ -2,15 +2,25 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { notifyManager, QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { BrowserRouter, useLocation } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, type KubernetesIssue, type KubernetesIssuePage } from "@/lib/api";
 import * as apiModule from "@/lib/api";
 import { KubernetesPage } from "./KubernetesPage";
+import { commitRefreshIntervalMs } from "@/lib/useKubernetesCluster";
+import { syncDuration } from "@/lib/kubernetesSyncHealth";
 import { ToastProvider } from "@/components/Toast";
 
 vi.mock("@/components/TopBar", () => ({ TopBar: ({ title, actions }: { title: string; actions?: React.ReactNode }) => <header><span>{title}</span>{actions}</header> }));
 vi.mock("@/lib/api", async (importActual) => { const actual = await importActual<typeof import("@/lib/api")>(); return { ...actual, api: { ...actual.api, listAgentToolsets: vi.fn(), kubernetesOverview: vi.fn(), kubernetesSyncHealth: vi.fn(), kubernetesClusterSyncHealth: vi.fn(), kubernetesOverviewGraph: vi.fn(), kubernetesIssues: vi.fn(), kubernetesChanges: vi.fn(), kubernetesGraph: vi.fn(), kubernetesNamespaces: vi.fn(), kubernetesNeighborhood: vi.fn(), kubernetesCommitStream: vi.fn(), kubernetesTop: vi.fn(), kubernetesReleases: vi.fn(), kubernetesGitOpsApps: vi.fn(), kubernetesRollout: vi.fn(), kubernetesRollouts: vi.fn(), kubernetesTraffic: vi.fn(), kubernetesDiagnose: vi.fn(), kubernetesWorkloadLogs: vi.fn(), kubernetesPodLogs: vi.fn(), kubernetesUsage: vi.fn(), kubernetesWorkloads: vi.fn(), kubernetesWorkload: vi.fn(), kubernetesNodes: vi.fn(), kubernetesNodePods: vi.fn(), kubernetesSearch: vi.fn(), kubernetesEvents: vi.fn(), kubernetesDescribe: vi.fn() } }; });
 
+// The status as shown on a wide screen: without its screen-reader-only words
+// and without the short phone label.
+const shownText = (element: Element | null | undefined) => {
+	if (!element) return undefined;
+	const copy = element.cloneNode(true) as Element;
+	copy.querySelectorAll(".sr-only, [data-sync-label-short]").forEach((node) => node.remove());
+	return copy.textContent;
+};
 function LocationProbe() { const location = useLocation(); return <output aria-label="Current location">{location.pathname}{location.search}</output>; }
 function renderPage(client = new QueryClient({ defaultOptions: { queries: { retry: false } } }), seedCatalog = true) {
 	if (seedCatalog && !client.getQueryData(["kubernetes-clusters"])) client.setQueryData(["kubernetes-clusters"], { multiple: false, clusters: [] });
@@ -1038,6 +1048,8 @@ describe("KubernetesPage", () => {
 		const onEvent = vi.mocked(api.kubernetesCommitStream).mock.calls[0][0];
 		vi.useFakeTimers();
 		for (const index of [0, 1]) {
+			// Commit refreshes are at least the refresh interval apart.
+			if (index) await act(async () => { await vi.advanceTimersByTimeAsync(commitRefreshIntervalMs); });
 			invalidate.mockClear();
 			act(() => onEvent({ event: "committed", id: String(index), data: JSON.stringify({ revision: index, kinds: ["Pod"], cluster_id: "east" }) }));
 			await act(async () => { await vi.advanceTimersByTimeAsync(99); });
@@ -2532,7 +2544,8 @@ describe("KubernetesPage sync gate", () => {
 		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 		const { container } = renderPage(client);
 		await screen.findByRole("region", { name: "Cluster health" });
-		const snapshot = `Snapshot ${new Date(healthyOverview.observed_at).toLocaleTimeString([], { hour12: false })}`;
+		// The snapshot is from an earlier day, so it carries its date.
+		const snapshot = `Snapshot ${new Date(healthyOverview.observed_at).toLocaleDateString([], { month: "short", day: "numeric" })}, ${new Date(healthyOverview.observed_at).toLocaleTimeString([], { hour12: false })}`;
 		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...healthyOverview, observed_at: "2026-10-28T00:13:00Z", nodes: 0, pods: 0, sync: { state: "syncing", age_s: 780, partial: false } });
 		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...report("syncing", { Pod: { ...readyKind, state: "pending" } }), first_ready_at: published });
 		fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" }));
@@ -2679,7 +2692,7 @@ describe("KubernetesPage sync gate", () => {
 		});
 		const { container } = renderPage();
 		const head = state === "error" ? "Sync failed" : "Sync degraded";
-		const time = new Date(healthyOverview.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+		const time = `${new Date(healthyOverview.observed_at).toLocaleDateString([], { month: "short", day: "numeric" })}, ${new Date(healthyOverview.observed_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
 		// The top bar names the state and dates the data on screen.
 		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toBe(`${head} — showing data from ${time}`));
 		// No in-page failure section, no blocking surface, and the views are open.
@@ -2710,7 +2723,7 @@ describe("KubernetesPage sync gate", () => {
 		expect(vi.mocked(api.kubernetesOverview)).toHaveBeenCalledTimes(1);
 		expect(container.querySelector("[data-sync-health]")).toBeNull();
 		expect(screen.queryByLabelText("Loading Kubernetes overview")).toBeNull();
-		expect(container.querySelector("[data-sync-state]")?.textContent).toMatch(/^Sync (failed|degraded) — showing data from \d{2}:\d{2}$/);
+		expect(container.querySelector("[data-sync-state]")?.textContent).toMatch(/^Sync (failed|degraded) — showing data from ([A-Z][a-z]{2} \d{1,2}, )?\d{2}:\d{2}$/);
 	});
 
 	// Every read failing at once is one failure: the panel, not a second overview card.
@@ -3500,8 +3513,9 @@ describe("KubernetesPage sync gate", () => {
 		act(() => emit(progress));
 		await waitFor(() => expect(container.querySelector("[data-sync-state]")?.textContent).toBe("Syncing"));
 		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(new ApiError(504, "Kubernetes read timed out", { error: { code: "request_timeout" } }));
-		act(() => emit(progress));
-		const expected = `Sync failed — showing data from ${new Date(observed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
+		// A repeat of the same state is not read again; a change of its cause is.
+		act(() => emit({ ...progress, data: JSON.stringify({ state: "refreshing", age: 1, reason: "collection_stale", cluster_id: "production" }) }));
+		const expected = `Sync failed — showing data from ${new Date(observed).toLocaleDateString([], { month: "short", day: "numeric" })}, ${new Date(observed).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })}`;
 		await waitFor(() => expect(container.querySelector('[data-sync-state="failed"]')?.textContent).toBe(expected));
 		expect(screen.getByRole("region", { name: "Cluster health" })).toBe(loaded);
 	});
@@ -3781,4 +3795,561 @@ describe("Preparation and snapshot age regressions", () => {
   expect(await screen.findByText("Snapshot 261s ago")).toBeTruthy();
   expect(screen.queryByText(/Synced 261s/)).toBeNull();
  });
+});
+
+// A cluster whose sync keeps failing: the report answers (state error, published
+// before) while the data reads answer 503. Every answer arrives after a short
+// network delay, and the commit feed sends its first notice right after it
+// connects, the way a server does on every new connection.
+describe("Kubernetes reads that keep failing", () => {
+	const unavailable = (retryable: boolean) => new ApiError(503, "The Kubernetes connector is configured, but its credential cannot be resolved.", {
+		code: "connector_credential_unresolved", error: "The Kubernetes connector is configured, but its credential cannot be resolved.",
+		action: "Restore or rotate the connector credential, then retry.", retryable,
+	});
+	const failedReport = {
+		state: "error", partial: true, age_s: 30, first_ready_at: "2026-10-26T08:00:00Z",
+		kinds: { Pod: { state: "error" as const, observed_at: "2026-10-26T09:12:00Z", records: 12, partial: true, error: "unavailable", failing_since: "2026-10-26T09:00:00Z" } },
+		total_kinds: 1, ready_kinds: 0, failing_kinds: 1, pending_kinds: 0, truncated: false,
+		failing: [{ kind: "Pod", state: "error", class: "unavailable", records: 12, since: "2026-10-26T09:00:00Z" }],
+	};
+	const issue: KubernetesIssue = {
+		root: { kind: "StatefulSet", namespace: "shop", name: "ledger", uid: "ledger-uid" },
+		occurrence_id: "ledger-crash", rule: "pod.crash_loop", severity: "critical", count: 3, broken: true, broke_at: "2026-10-26T09:30:00Z",
+	};
+	const dataReads = () => [api.kubernetesOverview, api.kubernetesIssues, api.kubernetesWorkloads, api.kubernetesNamespaces, api.kubernetesUsage, api.kubernetesIssueAlerts, api.kubernetesNodes, api.kubernetesTimeline, api.kubernetesGraph];
+	const callCount = () => dataReads().reduce((sum, read) => sum + vi.mocked(read).mock.calls.length, 0);
+	const answerLater = <T,>(answer: () => T) => () => new Promise<T>((resolve, reject) => {
+		setTimeout(() => { try { resolve(answer()); } catch (error) { reject(error); } }, 80);
+	});
+
+	function failEveryRead(retryable: boolean) {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=issues");
+		vi.mocked(api.kubernetesSyncHealth).mockImplementation(answerLater(() => failedReport as never));
+		for (const read of dataReads()) vi.mocked(read).mockImplementation(answerLater(() => { throw unavailable(retryable); }) as never);
+		let revision = 0;
+		vi.mocked(api.kubernetesCommitStream).mockImplementation((onEvent, signal) => new Promise<void>((resolve) => {
+			setTimeout(() => {
+				if (!signal?.aborted) onEvent({ event: "committed", id: "", data: JSON.stringify({ cluster_id: "production", revision: ++revision, kinds: ["Pod"] }) });
+			}, 30);
+			signal?.addEventListener("abort", () => resolve(), { once: true });
+		}));
+	}
+
+	// What the reader sees, sampled every 100 simulated milliseconds: each
+	// distinct consecutive state is recorded once.
+	async function watch(container: HTMLElement, milliseconds: number) {
+		const seen: string[] = [];
+		for (let elapsed = 0; elapsed < milliseconds; elapsed += 100) {
+			await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+			const state = [
+				container.querySelector('[aria-label="Loading Kubernetes overview"], [aria-label="Loading cluster sync status"]') ? "loading" : "",
+				container.querySelector("[data-sync-health]") ? "failed-panel" : "",
+				screen.queryByRole("region", { name: "Kubernetes issues" }) ? "issues" : "",
+			].filter(Boolean).join("+") || "blank";
+			if (seen[seen.length - 1] !== state) seen.push(state);
+		}
+		return seen;
+	}
+
+	it("backs off a read that keeps answering 503 and keeps the failure on screen without flashing", async () => {
+		failEveryRead(true);
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await watch(container, 1_000);
+		expect(container.querySelector('[data-sync-health="failed"]')).toBeTruthy();
+		const settledCalls = callCount();
+		const seen = await watch(container, 60_000);
+		// Backoff from 2 s doubling, never faster than the normal 5 s cadence:
+		// a handful of overview reads a minute, not one per round trip.
+		expect(vi.mocked(api.kubernetesOverview).mock.calls.length).toBeLessThanOrEqual(8);
+		expect(callCount() - settledCalls).toBeLessThanOrEqual(16);
+		// The failure panel stays put: no loader between the retries.
+		expect(seen).toEqual(["failed-panel+issues"]);
+	});
+
+	it("does not retry a read the server says is not retryable", async () => {
+		failEveryRead(false);
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await watch(container, 1_000);
+		expect(container.querySelector('[data-sync-health="failed"]')).toBeTruthy();
+		const overviewCalls = vi.mocked(api.kubernetesOverview).mock.calls.length;
+		expect(overviewCalls).toBe(1);
+		await watch(container, 60_000);
+		expect(vi.mocked(api.kubernetesOverview).mock.calls.length).toBe(overviewCalls);
+	});
+
+	it("asks again once, at once, when the reader presses Retry", async () => {
+		failEveryRead(true);
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await watch(container, 1_000);
+		const before = vi.mocked(api.kubernetesOverview).mock.calls.length;
+		expect(before).toBe(1);
+		const retry = container.querySelector<HTMLButtonElement>("[data-sync-retry]")!;
+		await act(async () => { fireEvent.click(retry); });
+		expect(vi.mocked(api.kubernetesOverview).mock.calls.length).toBe(before + 1);
+		// The answer lands and the failure stays steady; nothing else is asked.
+		const seen = await watch(container, 1_000);
+		expect(vi.mocked(api.kubernetesOverview).mock.calls.length).toBe(before + 1);
+		expect(seen).toEqual(["failed-panel+issues"]);
+	});
+
+	it("keeps the Issues view's loaded list when only the overview and alert settings answer 503", async () => {
+		failEveryRead(true);
+		const loaded = { items: [issue], totals: { critical: 1 }, broken: { total: 1 }, truncated: false, sync: { state: "error", age_s: 30, partial: true } };
+		vi.mocked(api.kubernetesIssues).mockImplementation(answerLater(() => loaded) as never);
+		vi.mocked(api.kubernetesNamespaces).mockImplementation(answerLater(() => ({ items: ["shop"], sync: { state: "ready", age_s: 0, partial: false } })) as never);
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await watch(container, 2_000);
+		const issues = screen.getByRole("region", { name: "Kubernetes issues" });
+		expect(issues.textContent).toContain("shop/ledger");
+		const seen = await watch(container, 60_000);
+		expect(seen).toEqual(["issues"]);
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(screen.getByRole("region", { name: "Kubernetes issues" })).toBe(issues);
+	});
+});
+
+// Answers that mean "wait" or "the history store is away" are not cluster
+// failures, and a history store that refuses writes is not a cluster that
+// cannot be read. Each is named for what it is.
+describe("Kubernetes passing failures and history-store faults", () => {
+	const published = "2026-10-26T08:00:00Z";
+	const loadedOverview = { connector: "kubernetes", cluster_id: "production", observed_at: "2026-10-26T09:00:00Z", nodes: 3, ready_nodes: 3, pods: 4, running_pods: 4, namespaces: 2, active_namespaces: 2, workloads: 2, warnings: 0, sync: { state: "ready", age_s: 0, partial: false } };
+	const readyReport = { state: "ready", partial: false, age_s: 0, first_ready_at: published, kinds: { Pod: { state: "ready" as const, observed_at: "2026-10-26T09:00:00Z", records: 4, partial: false } }, total_kinds: 1, ready_kinds: 1, failing_kinds: 0, pending_kinds: 0, truncated: false };
+	const answer = (code: string, message: string, action: string) => {
+		const error = new ApiError(503, message, { code, error: message, action, retryable: true });
+		error.retryAfterMs = 5_000;
+		return error;
+	};
+	const reconnectingAnswer = () => answer("connector_reconnecting", "Versus is reconnecting to the Kubernetes cluster.", "Retry shortly; Versus reconnects on its own.");
+	const historyStoreAnswer = () => answer("history_store_unavailable", "The history database is temporarily unavailable.", "Restore the history store and retry.");
+	async function step(milliseconds: number) {
+		for (let elapsed = 0; elapsed < milliseconds; elapsed += 100) await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+	}
+	const noCredentialWording = () => {
+		expect(document.body.textContent).not.toMatch(/rotate|credential/i);
+		expect(screen.queryByRole("heading", { name: "Cannot read this cluster right now" })).toBeNull();
+	};
+
+	it("says it is reconnecting and keeps the loaded overview when the overview answers connector_reconnecting", async () => {
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(readyReport as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await step(1_000);
+		const health = screen.getByRole("region", { name: "Cluster health" });
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(reconnectingAnswer());
+		await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Refresh Kubernetes data" })); });
+		await step(1_000);
+		expect(container.querySelector("[data-kubernetes-reconnecting]")?.textContent).toBe("Reconnecting to the cluster…");
+		expect(screen.getByRole("region", { name: "Cluster health" })).toBe(health);
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(screen.queryByRole("alert")).toBeNull();
+		noCredentialWording();
+	});
+
+	it("shows the reconnecting state, not the failed panel, when a published cluster has no overview yet", async () => {
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...readyReport, state: "error", partial: true, failing_kinds: 1, kinds: { Pod: { state: "error" as const, observed_at: "2026-10-26T09:00:00Z", records: 4, partial: true, error: "unavailable" } } } as never);
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(reconnectingAnswer());
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await step(1_000);
+		expect(container.querySelector("[data-kubernetes-reconnecting]")?.textContent).toBe("Reconnecting to the cluster…");
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(screen.queryByRole("alert")).toBeNull();
+		noCredentialWording();
+	});
+
+	it.each([
+		["server_timeout", "Versus did not finish this read in time.", "Couldn't refresh status — try again in 5s"],
+		["history_store_timeout", "The history database read timed out.", "The history database is not responding"],
+	])("keeps the last sync state with a neutral line when the status read answers %s", async (code, message, note) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-26T09:00:00Z"));
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...readyReport, age_s: 3 } as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await step(1_000);
+		const status = () => container.querySelector<HTMLElement>("[data-sync-state]")!;
+		expect(status().getAttribute("data-sync-state")).toBe("ready");
+		// The status read now times out; the cluster sync itself said nothing new.
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(answer(code, message, "Retry shortly."));
+		await act(async () => { await client.refetchQueries({ predicate: (query) => query.queryKey.includes("kubernetes-sync-health") }); });
+		expect(vi.mocked(api.kubernetesSyncHealth).mock.calls.length).toBeGreaterThan(1);
+		await step(1_000);
+		expect(status().getAttribute("data-sync-state")).toBe("ready");
+		expect(shownText(status().querySelector("[data-sync-label]"))).toMatch(/^(Last synced \d+s ago|Updates disconnected — refreshing every 30s)$/);
+		expect(status().querySelector("[data-sync-refresh-note]")?.textContent).toBe(`· ${note}`);
+		expect(document.body.textContent).not.toMatch(/Sync failed/);
+		expect(document.body.textContent).not.toMatch(/Cluster: |the last sync attempt at this resource type failed/);
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		expect(status().className).not.toMatch(/sev-critical/);
+	});
+
+	// Larger steps for waits measured in minutes; each still lets queries settle.
+	async function stepSeconds(seconds: number) {
+		for (let elapsed = 0; elapsed < seconds; elapsed++) await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+	}
+	const refetchStatus = (client: QueryClient) => act(async () => { await client.refetchQueries({ predicate: (query) => query.queryKey.includes("kubernetes-sync-health") }); });
+
+	const timeoutAnswer = () => answer("server_timeout", "Versus did not finish this read in time.", "Retry shortly.");
+	const status = (container: HTMLElement) => container.querySelector<HTMLElement>("[data-sync-state]")!;
+
+	it("stays calm on a healthy report with an old snapshot until its stale_in_s has passed since it was received", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-26T09:00:00Z"));
+		// A healthy report routinely stands behind an observation older than the
+		// shortest stale limit; stale_in_s is what says when it goes stale.
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...readyReport, age_s: 297, stale_in_s: 120 } as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await step(1_000);
+		expect(status(container).getAttribute("data-sync-state")).toBe("ready");
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(timeoutAnswer());
+		await refetchStatus(client);
+		await stepSeconds(6);
+		expect(status(container).getAttribute("data-sync-state")).toBe("ready");
+		expect(status(container).className).not.toContain("text-sev-warning-text");
+		await stepSeconds(100);
+		expect(status(container).getAttribute("data-sync-state")).toBe("ready");
+		// 120 s after the last good report was received.
+		await stepSeconds(15);
+		expect(status(container).getAttribute("data-sync-state")).toBe("degraded");
+		expect(shownText(status(container).querySelector("[data-sync-label]"))).toMatch(/^Status may be out of date · last snapshot \d+ minutes? ago$/);
+		expect(status(container).className).toContain("text-sev-warning-text");
+		expect(status(container).querySelector("[data-sync-refresh-note]")?.textContent).toMatch(/^· Couldn't refresh status — (try again in \d+s|retrying…)$/);
+		expect(document.body.textContent).not.toMatch(/Sync failed|Cluster: /);
+	});
+
+	it("turns amber at the stale moment by its own timer when no read or render happens in between", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-26T09:00:00Z"));
+		vi.spyOn(Math, "random").mockReturnValue(1);
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...readyReport, stale_in_s: 7 } as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await step(1_000);
+		const receivedAt = client.getQueryCache().find({ predicate: (query) => query.queryKey.includes("kubernetes-sync-health") })!.state.dataUpdatedAt;
+		// A long Retry-After parks the status read past the stale moment.
+		const failure = timeoutAnswer();
+		failure.retryAfterMs = 600_000;
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(failure);
+		await refetchStatus(client);
+		await step(100);
+		const reads = vi.mocked(api.kubernetesSyncHealth).mock.calls.length;
+		expect(status(container).getAttribute("data-sync-state")).toBe("ready");
+		await act(async () => { await vi.advanceTimersByTimeAsync(receivedAt + 7_000 - Date.now() - 50); });
+		expect(status(container).getAttribute("data-sync-state")).toBe("ready");
+		await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+		expect(vi.mocked(api.kubernetesSyncHealth).mock.calls.length, "no status read in between").toBe(reads);
+		expect(status(container).getAttribute("data-sync-state")).toBe("degraded");
+	});
+
+	it("names the same snapshot age when amber as the green line did, grown by the time since, and as Cluster health", async () => {
+		vi.useFakeTimers();
+		// The snapshot on screen is 20 s old; the report's oldest observation is
+		// far older and is not the age the page shows.
+		vi.setSystemTime(Date.parse("2026-10-26T09:00:20Z"));
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...readyReport, age_s: 400, stale_in_s: 40 } as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await step(1_000);
+		const green = shownText(status(container).querySelector("[data-sync-label]")) ?? "";
+		const greenAge = Number(/^Last synced (\d+)s ago$/.exec(green)?.[1]);
+		expect(greenAge).toBeGreaterThanOrEqual(20);
+		expect(greenAge).toBeLessThan(25);
+		const startedAt = Date.now();
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(timeoutAnswer());
+		await refetchStatus(client);
+		await stepSeconds(45);
+		expect(status(container).getAttribute("data-sync-state")).toBe("degraded");
+		const elapsed = (Date.now() - startedAt) / 1000;
+		const health = screen.getByRole("region", { name: "Cluster health" });
+		const cardAge = Number(/Snapshot (\d+)s ago/.exec(health.textContent ?? "")?.[1]);
+		// The card and the green line before it name the same snapshot.
+		expect(Math.abs(cardAge - (greenAge + elapsed))).toBeLessThanOrEqual(2);
+		expect(shownText(status(container).querySelector("[data-sync-label]"))).toBe(`Status may be out of date · last snapshot ${syncDuration(greenAge + elapsed)} ago`);
+		expect(syncDuration(cardAge)).toBe(syncDuration(greenAge + elapsed));
+	});
+
+	it("never turns amber from failed status reads when the report names no stale_in_s", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-26T09:00:00Z"));
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...readyReport, age_s: 400 } as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await step(1_000);
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(timeoutAnswer());
+		await refetchStatus(client);
+		await stepSeconds(600);
+		expect(status(container).getAttribute("data-sync-state")).toBe("ready");
+		expect(status(container).className).not.toContain("text-sev-warning-text");
+		expect(status(container).querySelector("[data-sync-refresh-note]")).toBeTruthy();
+	});
+
+	it("falls back to preparing, never a failed sync, when the status read times out before any report, then says it couldn't load", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-26T09:00:00Z"));
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(answer("server_timeout", "Versus did not finish this read in time.", "Retry shortly."));
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const { container } = renderPage();
+		await step(1_000);
+		const status = () => container.querySelector<HTMLElement>("[data-sync-state]")!;
+		// No report has ever answered: the neutral code takes the syncing path.
+		expect(status().getAttribute("data-sync-state")).toBe("preparing");
+		expect(status().querySelector("[data-sync-label]")?.textContent).toBe("Preparing");
+		expect(document.body.textContent).not.toMatch(/Sync failed|Cluster: |the last sync attempt at this resource type failed/);
+		expect(container.querySelector('[data-sync-health="failed"]')).toBeNull();
+		await stepSeconds(181);
+		expect(status().querySelector("[data-sync-label]")?.textContent).toBe("Couldn't load sync status — try again");
+		expect(status().className).toContain("text-ink-300");
+		expect(document.body.textContent).not.toMatch(/Sync failed/);
+	});
+
+	// The note counts down to the read the backoff actually schedules, failure
+	// after failure. Jitter is pinned so each wait is the full step: 2, 4, 8,
+	// 16 s, never under the 5 s Retry-After.
+	it.each([
+		["a ready cluster", readyReport, [5, 5, 8, 16]],
+		["a first sync, which polls every second while answering", { ...readyReport, state: "syncing", first_ready_at: undefined }, [5, 5, 8, 16]],
+	])("re-reads the status on the backoff and counts the note down to each read, for %s", async (_name, report, waits) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.parse("2026-10-26T09:00:00Z"));
+		vi.spyOn(Math, "random").mockReturnValue(1);
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(report as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		const { container } = renderPage(client);
+		await step(1_000);
+		const reads = () => vi.mocked(api.kubernetesSyncHealth).mock.calls.length;
+		const note = () => container.querySelector("[data-sync-refresh-note]")?.textContent;
+		vi.mocked(api.kubernetesSyncHealth).mockRejectedValue(timeoutAnswer());
+		await refetchStatus(client);
+		// Each check runs 0.1 s after the failure it describes.
+		await step(100);
+		for (const wait of waits) {
+			const before = reads();
+			expect(note()).toBe(`· Couldn't refresh status — try again in ${wait}s`);
+			await step(1_000);
+			expect(note()).toBe(`· Couldn't refresh status — try again in ${wait - 1}s`);
+			await step(wait * 1_000 - 1_200);
+			expect(reads(), `no read before the ${wait}s wait ends`).toBe(before);
+			await step(200);
+			expect(reads(), `one read when the ${wait}s wait ends`).toBe(before + 1);
+		}
+	});
+
+	it.each([
+		["server_timeout", "Couldn't refresh — try again"],
+		["history_store_timeout", "The history database is not responding"],
+	])("names a %s Workloads refresh failure calmly in the header, not above the list", async (code, note) => {
+		vi.useFakeTimers();
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(readyReport as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		vi.mocked(api.kubernetesWorkloads).mockResolvedValue({ items: [{ resource_id: "apps~v1~deployments", kind: "Deployment", namespace: "shop", name: "checkout", uid: "uid-checkout" }], counts: { Deployment: 1 }, truncated: false, sync: { state: "ready", age_s: 0, partial: false } } as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderWorkloads(client);
+		await step(1_000);
+		const inventory = screen.getByRole("region", { name: "Workloads" });
+		expect(within(inventory).getByText("checkout")).toBeTruthy();
+		vi.mocked(api.kubernetesWorkloads).mockRejectedValue(answer(code, "failed", "Retry shortly."));
+		await act(async () => { await client.refetchQueries({ predicate: (query) => query.queryKey.includes("kubernetes-workloads") }); });
+		await step(500);
+		const line = inventory.querySelector<HTMLElement>("[data-workloads-refresh-note]");
+		expect(line?.textContent).toBe(note);
+		// It sits in the card header, on that header's one line.
+		expect(line?.closest("header")).toBeTruthy();
+		expect(line?.className.split(/\s+/)).toEqual(expect.arrayContaining(["truncate", "text-ink-300"]));
+		expect(inventory.textContent).not.toMatch(/Resource inventory refresh is unavailable|authorized observation/);
+		expect(within(inventory).getByText("checkout")).toBeTruthy();
+	});
+
+	it.each([
+		["server_timeout", "Couldn't refresh — try again; showing the last usage figures"],
+		["history_store_timeout", "The history database is not responding; showing the last usage figures"],
+	])("names a %s usage refresh failure by its cause on the Overview usage card", async (code, line) => {
+		vi.useFakeTimers();
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(readyReport as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		vi.mocked(api.kubernetesUsage).mockResolvedValue({ observed_at: "2026-10-26T09:00:00Z", availability: "available", fresh: true, truncated: false, cpu_milli: 700, memory_bytes: 1073741824 } as never);
+		const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		renderPage(client);
+		await step(1_000);
+		vi.mocked(api.kubernetesUsage).mockRejectedValue(answer(code, "failed", "Retry shortly."));
+		await act(async () => { await client.refetchQueries({ predicate: (query) => query.queryKey.includes("kubernetes-usage") }); });
+		await step(500);
+		expect(screen.getByText(line)).toBeTruthy();
+		expect(screen.queryByText(/^Usage snapshot unavailable/)).toBeNull();
+	});
+
+	it("keeps the Cluster health state on one line that truncates instead of wrapping", async () => {
+		vi.useFakeTimers();
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(readyReport as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const { container } = renderPage();
+		await step(1_000);
+		const pill = container.querySelector<HTMLElement>("[data-cluster-health-state]")!;
+		expect(pill.className.split(/\s+/)).toEqual(expect.arrayContaining(["min-w-0", "max-w-full"]));
+		expect(pill.firstElementChild?.className).toBe("truncate");
+		expect(pill.getAttribute("title")).toBe(pill.textContent);
+		expect(pill.parentElement!.className.split(/\s+/)).not.toContain("flex-wrap");
+	});
+
+	it("names an unavailable history store on the Timeline without an error or credential wording", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(readyReport as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		vi.mocked(api.kubernetesTimeline).mockRejectedValue(historyStoreAnswer());
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await step(1_000);
+		const timeline = screen.getByRole("region", { name: "Kubernetes change timeline" });
+		expect(within(timeline).getByText(/Saved history is temporarily unavailable\./)).toBeTruthy();
+		expect(within(timeline).queryByText(/Timeline unavailable/)).toBeNull();
+		expect(container.querySelector("[data-sync-health]")).toBeNull();
+		noCredentialWording();
+	});
+
+	it("says the count is unknown instead of zero when the history store could not count the range", async () => {
+		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(readyReport as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue(loadedOverview as never);
+		const change = { id: "change-1", cluster: "production", kind: "Deployment", namespace: "shop", name: "checkout", uid: "uid-1", type: "image_changed" as const, fields: [], at: "2026-10-26T09:10:00Z" };
+		vi.mocked(api.kubernetesTimeline).mockResolvedValue({ items: [{ type: "change", id: change.id, at: change.at, change }], total: 0, crash_count: 0, counts: { change: 0, crash: 0, break: 0 }, count_unknown: true, since: "2026-10-26T08:10:00Z", until: "2026-10-26T09:10:00Z", gaps: [], sync: { state: "ready", age_s: 0, partial: false } } as never);
+		vi.useFakeTimers();
+		renderPage();
+		await step(1_000);
+		const timeline = screen.getByRole("region", { name: "Kubernetes change timeline" });
+		expect(within(timeline).getByText("Count unknown")).toBeTruthy();
+		expect(timeline.textContent).not.toMatch(/\b0 events?\b|\b0 crash/);
+		expect(within(timeline).getByRole("button", { name: "Open change details" })).toBeTruthy();
+	});
+
+	it("titles a history-store failure as a database problem, not as a cluster that cannot be read", async () => {
+		const storageKind = (error: string) => ({ state: "error" as const, observed_at: "2026-10-26T09:00:00Z", records: 4, partial: true, error, failing_since: "2026-10-26T09:00:00Z" });
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue({ ...readyReport, state: "error", partial: true, failing_kinds: 2, ready_kinds: 0, total_kinds: 2,
+			kinds: { Pod: storageKind("storage_unavailable"), Deployment: storageKind("storage_rejected") },
+			failing: [{ kind: "Pod", state: "error", class: "storage_unavailable", records: 4, since: "2026-10-26T09:00:00Z" }, { kind: "Deployment", state: "error", class: "storage_rejected", records: 2, since: "2026-10-26T09:00:00Z" }] } as never);
+		vi.mocked(api.kubernetesOverview).mockRejectedValue(new ApiError(503, "The history database is temporarily unavailable.", { code: "storage_unavailable", retryable: true }));
+		vi.useFakeTimers();
+		const { container } = renderPage();
+		await step(1_000);
+		const panel = container.querySelector<HTMLElement>('[data-sync-health="failed"]')!;
+		expect(within(panel).getByRole("heading").textContent).toBe("Versus cannot save this cluster's history right now — check the database");
+		expect(panel.querySelector('[data-sync-problem="Pod"]')?.textContent).toContain("the history database is unavailable");
+		expect(panel.querySelector('[data-sync-problem="Deployment"]')?.textContent).toContain("the history database refused");
+		expect(panel.textContent).not.toContain("the cluster read failed");
+		expect(screen.queryByRole("heading", { name: "Cannot read this cluster right now" })).toBeNull();
+	});
+
+	it("dates the snapshot when it is not from today", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 10, 23, 10, 0, 0));
+		const observed = new Date(2026, 10, 21, 23, 37, 5).toISOString();
+		vi.mocked(api.kubernetesSyncHealth).mockResolvedValue(readyReport as never);
+		vi.mocked(api.kubernetesOverview).mockResolvedValue({ ...loadedOverview, observed_at: observed } as never);
+		renderPage();
+		await step(1_000);
+		const health = screen.getByRole("region", { name: "Cluster health" });
+		expect(within(health).getByText(`Snapshot ${new Date(observed).toLocaleDateString([], { month: "short", day: "numeric" })}, ${new Date(observed).toLocaleTimeString([], { hour12: false })}`)).toBeTruthy();
+	});
+});
+
+// The Timeline header states the window's count from its first page for the
+// whole walk; later pages count nothing. Times are read in the reader's zone.
+describe("Kubernetes Timeline header and row times while paging", () => {
+	const zone = process.env.TZ;
+	beforeAll(() => { process.env.TZ = "Asia/Ho_Chi_Minh"; });
+	afterAll(() => { process.env.TZ = zone; });
+	const now = Date.parse("2026-11-24T19:45:00Z"); // 02:45 on Nov 25 for the reader
+	const change = (id: string, at: string) => ({ type: "change" as const, id, at, change: { id, cluster: "production", kind: "Deployment", namespace: "shop", name: `checkout-${id}`, uid: `uid-${id}`, type: "image_changed" as const, fields: [], at } });
+	const page = (items: ReturnType<typeof change>[], overrides: Record<string, unknown>) => ({ items, total: 0, crash_count: 0, counts: { change: 0, crash: 0, break: 0 }, limit: 2, since: "2026-11-24T18:45:00Z", until: "2026-11-24T19:45:00Z", gaps: [], sync: { state: "ready", age_s: 0, partial: false }, ...overrides });
+	async function step(milliseconds: number) {
+		for (let elapsed = 0; elapsed < milliseconds; elapsed += 100) await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+	}
+	// A later page as the server answers it: rows, a cursor, and
+	// `count_unknown` with no count fields at all.
+	const laterPage = (items: ReturnType<typeof change>[], next?: string) => ({ items, count_unknown: true, limit: 2, ...(next ? { next } : {}), since: "2026-11-24T18:45:00Z", until: "2026-11-24T19:45:00Z", gaps: [], sync: { state: "ready", age_s: 0, partial: false } });
+	async function walkThreePages(first: object) {
+		vi.useFakeTimers();
+		vi.setSystemTime(now);
+		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+		const pages: Record<string, object> = {
+			"page-2": laterPage([change("c", "2026-11-24T19:20:00Z"), change("d", "2026-11-24T19:10:00Z")], "page-3"),
+			"page-3": laterPage([change("e", "2026-11-24T19:05:00Z")]),
+		};
+		vi.mocked(api.kubernetesTimeline).mockImplementation(async (options) => (options.cursor ? pages[options.cursor] : first) as never);
+		renderPage();
+		await step(1_000);
+		const timeline = screen.getByRole("region", { name: "Kubernetes change timeline" });
+		const header = () => timeline.querySelector("[data-timeline-count]")?.textContent;
+		const headers = [header()];
+		for (const row of ["checkout-c", "checkout-e"]) {
+			fireEvent.click(within(timeline).getByRole("button", { name: "Next page" }));
+			await step(1_000);
+			expect(within(timeline).getByText(row)).toBeTruthy();
+			headers.push(header());
+			// Nothing on the card says zero while rows are listed.
+			expect(timeline.textContent).not.toMatch(/\b0 events?\b|\b0 crash/);
+		}
+		return headers;
+	}
+
+	it("keeps a counted window's first-page count on every later page", async () => {
+		const headers = await walkThreePages(page([change("a", "2026-11-24T19:40:00Z"), change("b", "2026-11-24T19:30:00Z")], { total: 18, crash_count: 3, counts: { change: 15, crash: 3, break: 0 }, next: "page-2" }));
+		expect(headers).toEqual(["18 events and 3 crashes", "18 events and 3 crashes", "18 events and 3 crashes"]);
+	});
+
+	it("keeps saying the count is unknown on every later page of an uncounted window", async () => {
+		const headers = await walkThreePages(page([change("a", "2026-11-24T19:40:00Z"), change("b", "2026-11-24T19:30:00Z")], { count_unknown: true, next: "page-2" }));
+		expect(headers).toEqual(["Count unknown", "Count unknown", "Count unknown"]);
+	});
+
+	it("never says zero events over rows on screen, even on the first page", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(now);
+		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+		vi.mocked(api.kubernetesTimeline).mockResolvedValue(page([change("a", "2026-11-24T19:40:00Z")], {}) as never);
+		renderPage();
+		await step(1_000);
+		const timeline = screen.getByRole("region", { name: "Kubernetes change timeline" });
+		expect(timeline.querySelector("[data-timeline-count]")?.textContent).toBe("Count unknown");
+	});
+
+	it("dates a row from an earlier day and leaves today's rows as a time", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(now);
+		window.history.replaceState(null, "", "/agent/kubernetes?view=timeline");
+		// 16:59 UTC on Nov 24 is 23:59 on Nov 24 for the reader, the day before.
+		const yesterday = "2026-11-24T16:59:00Z";
+		const today = "2026-11-24T19:40:00Z";
+		vi.mocked(api.kubernetesTimeline).mockResolvedValue(page([change("a", today), change("b", yesterday)], { total: 2, counts: { change: 2, crash: 0, break: 0 } }) as never);
+		renderPage();
+		await step(1_000);
+		const timeline = screen.getByRole("region", { name: "Kubernetes change timeline" });
+		const hm = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+		expect(timeline.querySelector(`time[datetime="${yesterday}"]`)?.textContent).toBe(`${new Date(yesterday).toLocaleDateString([], { month: "short", day: "numeric" })}, ${hm(yesterday)}`);
+		expect(timeline.querySelector(`time[datetime="${today}"]`)?.textContent).toBe(hm(today));
+	});
+
+	it("lets a long sync status shrink in the mobile top bar instead of wrapping it", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(now);
+		renderPage();
+		await step(1_000);
+		// The status group takes only the room the stacked action row has left,
+		// so its text width never decides whether the row wraps.
+		const group = document.querySelector<HTMLElement>("[data-kubernetes-topbar-status]")!;
+		const classes = group.className.split(/\s+/);
+		for (const token of ["min-w-0", "flex-1", "basis-0", "sm:flex-none", "sm:basis-auto"]) expect(classes).toContain(token);
+		expect(within(group).getByRole("button", { name: "Refresh Kubernetes data" }).className.split(/\s+/)).toContain("shrink-0");
+	});
 });

@@ -30,9 +30,12 @@ type ChangePage struct {
 	Sync        SyncStatus        `json:"sync"`
 	Capture     *CaptureStatus    `json:"capture,omitempty"`
 	// Total is the first page's bounded count; CountCapped marks it as a lower
-	// bound. A non-zero Limit marks Total as present.
-	Total int `json:"total,omitempty"`
-	Limit int `json:"limit,omitempty"`
+	// bound. A non-zero Limit marks Total as present, except on a page with
+	// CountUnknown: a cursor page is not recounted, so it carries no Total and
+	// the client keeps the first page's.
+	Total        int  `json:"total,omitempty"`
+	Limit        int  `json:"limit,omitempty"`
+	CountUnknown bool `json:"count_unknown,omitempty"`
 	// resume holds, per item, the cursor that continues the list after it.
 	resume []string
 }
@@ -113,16 +116,18 @@ func newChangeStoreState() *changeStoreState {
 }
 
 // SetChangeStorage installs the shared persistence provider for scoped timelines.
+// The provider is installed behind the store boundary, so every store call this
+// package makes has its failures named for the store.
 func (service *Service) SetChangeStorage(provider storage.Provider) {
 	if service == nil || service.changes == nil {
 		return
 	}
 	service.changes.mu.Lock()
-	if service.changes.provider == provider {
+	if service.changes.provider == provider || unwrapStore(service.changes.provider) == provider && provider != nil {
 		service.changes.mu.Unlock()
 		return
 	}
-	service.changes.provider = provider
+	service.changes.provider = wrapStore(provider)
 	service.inventoryRestore.reset()
 	service.changes.stores = make(map[kubeindex.Scope]*kubechanges.Store)
 	service.changes.captureLocks = make(map[kubeindex.Scope]*sync.Mutex)
@@ -231,7 +236,7 @@ func (service *Service) Changes(ctx context.Context, query ChangeQuery) (ChangeP
 	} else {
 		_, refreshed, refreshErr = service.CachedIndexSnapshot(ctx, "Pod", "Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob")
 	}
-	page, err := store.Query(query, time.Now().UTC())
+	page, err := store.QueryContext(ctx, query, time.Now().UTC())
 	if err != nil {
 		return ChangePage{}, err
 	}

@@ -5,6 +5,7 @@ import { type KubernetesClusterSummary, type KubernetesSyncHealthReport, type Ku
 import { firstSyncProgress, firstSyncProgressText } from "@/lib/kubernetesFirstSync";
 import { isZeroTime, reportSyncHealth, type KubernetesSyncHealthState } from "@/lib/kubernetesSyncHealth";
 import { TopBar } from "@/components/TopBar";
+import { clockLabel } from "@/lib/kubernetesClock";
 
 // One classification drives the row pill, the row order and the header counts.
 // It is the cluster's complete sync report, the same source the explorer gates
@@ -116,7 +117,7 @@ export function KubernetesFleet({ clusters, reports = {}, notice, retry, retryin
                   {cluster.health === "unreachable" && !report ? <span>Unavailable</span> : preparing ? <span>Waiting for first data</span> : ready ? <><p className={cluster.warnings > 0 ? "text-sev-warning" : undefined}>{cluster.warnings} warnings</p>{typeof cluster.broken === "number" && cluster.broken > 0 && <p className="text-sev-critical">{cluster.broken} broken</p>}{cluster.last_change_at && Number.isFinite(Date.parse(cluster.last_change_at)) && <p>Last change {Math.max(0, Math.floor((Date.now() - Date.parse(cluster.last_change_at)) / 60_000))} min ago</p>}</> : <span>{notReadyLabel}</span>}
                 </div>
                 <div className="pointer-events-none relative min-w-0 space-y-1 text-2xs text-ink-300">
-                  {preparing ? <p>Preparing first data</p> : <p>{isZeroTime(cluster.observed_at) ? "Snapshot unavailable" : new Date(cluster.observed_at).toLocaleTimeString()}</p>}
+                  {preparing ? <p>Preparing first data</p> : <p>{isZeroTime(cluster.observed_at) ? "Snapshot unavailable" : clockLabel(cluster.observed_at, {})}</p>}
                 </div>
                 <div data-actions-cell className="pointer-events-none relative flex items-center justify-end gap-2">
                   {cluster.health === "unreachable" ? <button type="button" className="btn pointer-events-auto" disabled={retrying} onClick={retry}><RefreshCw size={12} aria-hidden="true" />Retry</button> : <Link className="btn pointer-events-auto whitespace-nowrap" to={`?cluster=${encodeURIComponent(cluster.id)}&view=issues`}><AlertTriangle size={12} aria-hidden="true" />Review issues</Link>}

@@ -51,22 +51,45 @@ type TimelinePage struct {
 	// History is "off_namespace_access" when the connector identity reads only
 	// inside namespaces: no history is kept for it, so the page is empty by
 	// design and retrying cannot fill it.
-	History     string            `json:"history,omitempty"`
-	CountCapped bool              `json:"count_capped,omitempty"`
-	Items       []TimelineItem    `json:"items"`
-	Next        string            `json:"next,omitempty"`
-	Sync        SyncStatus        `json:"sync"`
-	Capture     *CaptureStatus    `json:"capture,omitempty"`
-	Partial     []PartialFailure  `json:"partial_failures,omitempty"`
-	Gaps        []kubechanges.Gap `json:"gaps"`
-	CrashCount  int               `json:"crash_count"`
-	Total       int               `json:"total"`
-	Counts      map[string]int    `json:"counts"`
-	Since       time.Time         `json:"since"`
-	Until       time.Time         `json:"until"`
-	BreaksOnly  bool              `json:"breaks_only,omitempty"`
+	History     string `json:"history,omitempty"`
+	CountCapped bool   `json:"count_capped,omitempty"`
+	// CountUnknown says Total and Counts are not a count of the window. On a
+	// first page the store counted rows the read could not verify, and the
+	// counts are sent as zero; a cursor page is never recounted, so it sends
+	// no counts at all and the client keeps the first page's.
+	CountUnknown bool              `json:"count_unknown,omitempty"`
+	Items        []TimelineItem    `json:"items"`
+	Next         string            `json:"next,omitempty"`
+	Sync         SyncStatus        `json:"sync"`
+	Capture      *CaptureStatus    `json:"capture,omitempty"`
+	Partial      []PartialFailure  `json:"partial_failures,omitempty"`
+	Gaps         []kubechanges.Gap `json:"gaps"`
+	CrashCount   int               `json:"crash_count"`
+	Total        int               `json:"total"`
+	Counts       map[string]int    `json:"counts"`
+	Since        time.Time         `json:"since"`
+	Until        time.Time         `json:"until"`
+	BreaksOnly   bool              `json:"breaks_only,omitempty"`
 	// Limit is the page size; with Total it sizes the pager.
 	Limit int `json:"limit,omitempty"`
+	// uncounted marks a cursor page: it was not recounted, so its JSON
+	// carries no total, crash count or counts.
+	uncounted bool
+}
+
+// MarshalJSON leaves the counts out of a page that was not counted, so a
+// client never reads a zero total over a list of rows.
+func (page TimelinePage) MarshalJSON() ([]byte, error) {
+	type plain TimelinePage
+	if !page.uncounted {
+		return json.Marshal(plain(page))
+	}
+	return json.Marshal(struct {
+		plain
+		CrashCount *int           `json:"crash_count,omitempty"`
+		Total      *int           `json:"total,omitempty"`
+		Counts     map[string]int `json:"counts,omitempty"`
+	}{plain: plain(page)})
 }
 
 type timelineSnapshot struct {
@@ -300,7 +323,11 @@ func (service *Service) editTimelineManifest(ctx context.Context, change func(*t
 			return err
 		}
 		won := false
-		err = service.commitCredential(ctx, func() error { var err error; won, err = cas.CompareAndSwapBlob(key, raw, replacement); return err })
+		err = service.commitCredential(ctx, func(ctx context.Context) error {
+			var err error
+			won, err = storage.CompareAndSwapBlobContext(ctx, cas, key, raw, replacement)
+			return err
+		})
 		if err != nil {
 			return err
 		}
@@ -487,7 +514,9 @@ func (service *Service) storeTimeline(ctx context.Context, snapshot *timelineSna
 		if err != nil {
 			return 0, err
 		}
-		if err := service.commitCredential(ctx, func() error { return provider.WriteBlob(service.timelineKey(slot)+"/"+snapshot.ID, data) }); err != nil {
+		if err := service.commitCredential(ctx, func(ctx context.Context) error {
+			return storage.WriteBlobContext(ctx, provider, service.timelineKey(slot)+"/"+snapshot.ID, data)
+		}); err != nil {
 			return 0, err
 		}
 		current := false

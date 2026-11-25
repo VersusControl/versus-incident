@@ -346,3 +346,108 @@ func TestUsageExplicitLimitAndSampleBoundPagingDoNotCutCachedTotals(t *testing.T
 		t.Fatalf("changed metric generation accepted cursor: %v", err)
 	}
 }
+
+// A cursor page is never recounted, so it must not claim a count: every page
+// after the first says the count is unknown and sends no total and no zeroed
+// counts, while the first page keeps the window's count. A zero total over a
+// page of rows reads to the user as "0 events" above a full list.
+func TestCursorPagesSayCountUnknownInsteadOfAZeroTotal(t *testing.T) {
+	service, _, store, scope, _ := timelineHistoryFixture(t)
+	now := time.Now().UTC()
+	records := []storage.EvidenceRecord{}
+	observations := []storage.EvidenceIssue{}
+	for index := 0; index < 6; index++ {
+		name := "pod-" + strconv.Itoa(index)
+		at := now.Add(-time.Duration(index+1) * time.Minute)
+		records = append(records, timelineChangeRecord(Change{ID: "change-" + name, Cluster: "cluster", UID: name, RootUID: name, Kind: "Pod", Name: name, Namespace: "shop", Type: kubechanges.Created, At: at}))
+		crash := kubechanges.CrashEvent{Cluster: "cluster", Namespace: "shop", Pod: name, PodUID: name, RootUID: name, RootKind: "Pod", RootName: name, Container: "app", Type: "termination", Reason: "Error", ExitCode: 1, RestartCount: 1, At: at, ObservedAt: now, TimeSource: "finished_at"}
+		crash.ID = kubechanges.CrashID(crash)
+		records = append(records, timelineCrashRecord(crash))
+		observations = append(observations, timelineIssueObservation(name, at))
+	}
+	commitTimelineHistory(t, store, scope, storage.EvidenceBatch{ID: "cursor-counts", At: now, Epoch: "fixture", Records: records, Issues: observations})
+	since, until := now.Add(-time.Hour), now.Add(time.Second)
+
+	encode := func(t *testing.T, page any) map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		return fields
+	}
+	// walk reads three pages and checks the two after the first.
+	walk := func(t *testing.T, countFields []string, read func(cursor string) (any, string, int, error)) map[string]any {
+		t.Helper()
+		page, next, rows, err := read("")
+		if err != nil || next == "" || rows == 0 {
+			t.Fatalf("first page: next=%q rows=%d err=%v", next, rows, err)
+		}
+		first := encode(t, page)
+		for number := 2; number <= 3; number++ {
+			page, next, rows, err = read(next)
+			if err != nil || rows == 0 {
+				t.Fatalf("page %d: rows=%d err=%v", number, rows, err)
+			}
+			fields := encode(t, page)
+			if fields["count_unknown"] != true {
+				t.Fatalf("page %d with %d rows does not say its count is unknown: %v", number, rows, fields)
+			}
+			for _, field := range countFields {
+				if value, ok := fields[field]; ok && value != nil {
+					t.Fatalf("page %d with %d rows claims %s=%v", number, rows, field, value)
+				}
+			}
+			if _, ok := fields["count_capped"]; ok {
+				t.Fatalf("page %d marks a count it does not carry as capped: %v", number, fields)
+			}
+		}
+		if next != "" {
+			t.Fatalf("the walk did not end on page 3: next=%q", next)
+		}
+		return first
+	}
+
+	t.Run("timeline", func(t *testing.T) {
+		first := walk(t, []string{"total", "crash_count", "counts"}, func(cursor string) (any, string, int, error) {
+			page, err := service.Timeline(t.Context(), TimelineQuery{Since: since, Until: until, Namespace: "shop", Limit: 6, Cursor: cursor})
+			return page, page.Next, len(page.Items), err
+		})
+		counts, _ := first["counts"].(map[string]any)
+		if first["total"] != float64(18) || first["crash_count"] != float64(6) || counts["change"] != float64(6) || counts["crash"] != float64(6) || counts["break"] != float64(6) || first["count_unknown"] != nil {
+			t.Fatalf("first page lost the window's count: %v", first)
+		}
+	})
+	t.Run("changes", func(t *testing.T) {
+		first := walk(t, []string{"total"}, func(cursor string) (any, string, int, error) {
+			page, err := service.Changes(t.Context(), ChangeQuery{Since: since, Until: until, Namespace: "shop", Limit: 2, Cursor: cursor})
+			return page, page.Next, len(page.Items), err
+		})
+		if first["total"] != float64(6) || first["count_unknown"] != nil {
+			t.Fatalf("first page lost the window's count: %v", first)
+		}
+	})
+	t.Run("crashes", func(t *testing.T) {
+		first := walk(t, []string{"total", "crash_count"}, func(cursor string) (any, string, int, error) {
+			page, err := service.Crashes(t.Context(), kubechanges.CrashQuery{Since: since, Until: until, Namespace: "shop", Limit: 2, Cursor: cursor})
+			return page, page.Next, len(page.Items), err
+		})
+		if first["total"] != float64(6) || first["crash_count"] != float64(6) || first["count_unknown"] != nil {
+			t.Fatalf("first page lost the window's count: %v", first)
+		}
+	})
+	t.Run("occurrences", func(t *testing.T) {
+		first := walk(t, []string{"total", "totals", "broken"}, func(cursor string) (any, string, int, error) {
+			page, err := service.Issues(t.Context(), IssueOptions{Since: since, Until: until, Namespace: "shop", Limit: 2, Cursor: cursor})
+			return page, page.Next, len(page.Items), err
+		})
+		broken, _ := first["broken"].(map[string]any)
+		if first["total"] != float64(6) || broken["total"] != float64(6) || first["count_unknown"] != nil {
+			t.Fatalf("first page lost the window's count: %v", first)
+		}
+	})
+}

@@ -804,6 +804,7 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 			}
 			previous.recovery.reserveReplacement(renewal)
 		}
+		previous.recovery.noteRebuild(renewal)
 		previous.recovery.beginAttempt(orgID, err)
 		defer previous.recovery.endAttempt()
 		if held != nil {
@@ -890,6 +891,14 @@ func (registry *ServiceRegistry) resolveCluster(ctx context.Context, orgID, clus
 		case <-drained:
 		case <-ctx.Done():
 			fresh.identity.cancel()
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				// The collection being replaced did not stop in time, which
+				// says nothing about the credential. It is named for what it
+				// waited on, so the answer never sends anyone to rotate it.
+				// Only the supervisor records it: a caller whose own wait ran
+				// out leaves no trace in the recovery state.
+				return nil, previous.rebuildStalled(oldServices)
+			}
 			return nil, ctx.Err()
 		}
 		if upgraded && fresh.inheritsInventoryFrom(previous) {
@@ -1019,9 +1028,36 @@ func (service *Service) Discover(ctx context.Context) (result Discovery, resultE
 	ctx, cancelIdentity := service.credentialContext(ctx)
 	defer cancelIdentity()
 	credentialCtx := ctx
-	defer func() {
+	// roundTripTimeout keeps a group-list failure whose deadline fired inside
+	// the Kubernetes round trip. The discovery records it as partial and goes
+	// on; when the closing check then meets the same spent deadline, the
+	// answer still names the API server, not Versus.
+	var roundTripTimeout error
+	// closeDiscovery is the last word on a discovery: a failed one returns no
+	// resources, and the credential is checked once more. A discovery that
+	// already failed because its request's deadline passed keeps that
+	// failure; the check would only repeat the deadline. A retired credential
+	// cancels credentialCtx instead, and the check still names it.
+	closed := false
+	closeDiscovery := func(result Discovery, resultErr error) (Discovery, error) {
+		closed = true
+		if resultErr != nil {
+			result = Discovery{}
+		}
+		if resultErr != nil && errors.Is(credentialCtx.Err(), context.DeadlineExceeded) {
+			return result, resultErr
+		}
 		if err := service.validateCredential(credentialCtx); err != nil {
-			result, resultErr = Discovery{}, err
+			if roundTripTimeout != nil && errors.Is(err, context.DeadlineExceeded) && errors.Is(credentialCtx.Err(), context.DeadlineExceeded) {
+				return Discovery{}, roundTripTimeout
+			}
+			return Discovery{}, err
+		}
+		return result, resultErr
+	}
+	defer func() {
+		if !closed {
+			result, resultErr = closeDiscovery(result, resultErr)
 		}
 	}()
 	ctx, cancel := withOperationBudget(discoveryRead(ctx), defaultOperationTimeout, discoveryRequests, defaultOperationBytes, defaultOperationItems)
@@ -1048,6 +1084,9 @@ func (service *Service) Discover(ctx context.Context) (result Discovery, resultE
 	service.discoveryCalls[key] = call
 	service.mu.Unlock()
 	defer func() {
+		// Requests sharing this discovery get exactly what it returns, after
+		// its closing check.
+		result, resultErr = closeDiscovery(result, resultErr)
 		service.mu.Lock()
 		call.result, call.err = cloneDiscovery(result), resultErr
 		delete(service.discoveryCalls, key)
@@ -1078,6 +1117,9 @@ func (service *Service) Discover(ctx context.Context) (result Discovery, resultE
 		Groups []apiGroup `json:"groups"`
 	}
 	if err := service.client.GetJSON(ctx, "/apis", &groups); err != nil {
+		if isKubernetesTimeout(err) {
+			roundTripTimeout = err
+		}
 		discovery.Partial = append(discovery.Partial, PartialFailure{Class: errorClass(err)})
 	} else {
 		for _, group := range groups.Groups {

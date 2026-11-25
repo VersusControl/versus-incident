@@ -237,9 +237,24 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       (body && typeof body === "object" && "error" in body
         ? String((body as { error: unknown }).error)
         : null) || `HTTP ${res.status}`;
-    throw new ApiError(res.status, msg, body);
+    const failure = new ApiError(res.status, msg, body);
+    const retryAfter = retryAfterMilliseconds(res.headers?.get("Retry-After") ?? null);
+    if (retryAfter !== undefined) failure.retryAfterMs = retryAfter;
+    throw failure;
   }
   return body as T;
+}
+
+/**
+ * A Retry-After header in milliseconds from now: either delta seconds or an
+ * HTTP date. Anything else, or a time already past, is no hint.
+ */
+export function retryAfterMilliseconds(value: string | null, now = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const text = value.trim();
+  if (/^\d+$/.test(text)) return Number(text) * 1000;
+  const at = Date.parse(text);
+  return Number.isFinite(at) && at > now ? at - now : undefined;
 }
 
 // ---------- Types matching pkg/agent shapes ----------
@@ -2384,6 +2399,11 @@ export interface KubernetesIssue {
 export interface KubernetesHistoryCounts {
   count_capped?: boolean;
   total?: number;
+  /**
+   * The server did not count this window. Every page after the first says so
+   * and leaves its count fields out; the first page owns the window's count.
+   */
+  count_unknown?: boolean;
   /** Page size; a positive limit means `total` sizes the pager. */
   limit?: number;
 }
@@ -2404,8 +2424,14 @@ export function retainKubernetesHistoryCounts<T>(first: unknown, page: T): T {
   const incoming = page as { authority?: string; partial_failures?: Array<{ class?: string }> } | undefined;
   if (incoming?.authority === "denied" || incoming?.authority === "unknown"
     || incoming?.partial_failures?.some(failure => ["forbidden", "unauthorized", "namespace_scope", "credential_unavailable"].includes(failure.class ?? ""))) return page;
+  // Later pages answer `count_unknown` because they count nothing; whether the
+  // window's count is known is the first page's to say, so its state is
+  // carried either way.
   const fields = ["total", "counts", "totals", "crash_count", "broken", "count_capped"];
-  return { ...page, ...Object.fromEntries(fields.filter(field => field in prior).map(field => [field, prior[field]])) };
+  const carried: Record<string, unknown> = { ...page, ...Object.fromEntries(fields.filter(field => field in prior).map(field => [field, prior[field]])) };
+  if (prior.count_unknown === true) carried.count_unknown = true;
+  else delete carried.count_unknown;
+  return carried as T;
 }
 
 export interface KubernetesIssuePage extends KubernetesHistoryCounts {
@@ -2415,7 +2441,8 @@ export interface KubernetesIssuePage extends KubernetesHistoryCounts {
   /** Persisted UID identity, independent of the selected history window and its totals. */
   root_context?: { root: KubernetesObjectRef; occurrence: KubernetesIssue; retained: true };
   items: KubernetesIssue[];
-  totals: Record<string, number>;
+  /** Absent on pages after the first, which carry no counts. */
+  totals?: Record<string, number>;
   broken?: { total: number; by_severity: Record<string, number> };
   truncated: boolean;
   next?: string;
@@ -2551,9 +2578,16 @@ export interface KubernetesTimelinePage extends KubernetesHistoryCounts {
   sync: KubernetesSync;
   partial_failures?: Array<{ resource_id?: string; class: string }>;
   gaps: Array<{ from: string; to: string }>;
-  crash_count: number;
-  total: number;
-  counts: { change: number; crash: number; break: number };
+  /** Counts are absent on pages after the first, which carry no counts. */
+  crash_count?: number;
+  total?: number;
+  counts?: { change: number; crash: number; break: number };
+  /**
+   * The history store could not count this range, or this is a page after the
+   * first: `total`, `crash_count` and `counts` are absent or zero placeholders,
+   * not counts. The rows are still real.
+   */
+  count_unknown?: boolean;
   /** Echoed when the server filtered to breaks only. */
   breaks_only?: boolean;
   since: string;
@@ -2731,6 +2765,11 @@ export interface KubernetesSyncHealthReport {
    */
   namespace_scoped?: KubernetesUnreadableKind[] | null;
   namespace_scoped_kinds?: number;
+  /**
+   * Seconds, from when this report was produced, until the first collected
+   * kind goes stale. Absent when no kind has been collected yet.
+   */
+  stale_in_s?: number;
 }
 
 /**

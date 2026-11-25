@@ -1,5 +1,6 @@
 import { RefreshCw } from "lucide-react";
 import { ApiError } from "@/lib/api";
+import { historyStoreDownMessage, kubernetesHistoryStoreDown, kubernetesReconnecting, reconnectingMessage } from "@/lib/kubernetesLiveFailure";
 
 // RetryableError replaces every bare ErrorBox on query failures — the audit
 // found zero retry affordances in the entire app. Message + cause + a Retry
@@ -16,6 +17,20 @@ export function RetryableError({
   /** Optional "what failed" lead-in, e.g. "Couldn't load incidents". */
   context?: string;
 }) {
+  // Two Kubernetes answers are passing states, not faults: a reconnect in
+  // progress and a history store that is briefly away. They read calmly and
+  // never carry the "Couldn't load" lead-in or the server's remedy, which
+  // are written for a real failure.
+  const calm = kubernetesReconnecting(error) ? reconnectingMessage : kubernetesHistoryStoreDown(error) ? `${historyStoreDownMessage}.` : undefined;
+  if (calm) return (
+    <div role="status" data-calm-failure className="flex items-center justify-between gap-3 rounded-card border border-ink-600 bg-ink-800/60 p-3 text-xs text-ink-300">
+      <div className="min-w-0 break-words">{calm}</div>
+      <button className="btn shrink-0" onClick={onRetry} disabled={retrying}>
+        <RefreshCw size={12} className={retrying ? "animate-spin" : undefined} />
+        {retrying ? "Retrying…" : "Retry"}
+      </button>
+    </div>
+  );
   const msg = error instanceof Error ? error.message : String(error);
   const action = error instanceof ApiError && error.body && typeof error.body === "object" && "action" in error.body && typeof error.body.action === "string"
     ? error.body.action

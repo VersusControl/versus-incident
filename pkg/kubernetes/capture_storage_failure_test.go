@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -395,13 +396,13 @@ func TestHistorySaveOutageIsReportedAlikeByEveryReplica(t *testing.T) {
 			observed.readsDown.Store(false)
 
 			observed.restore()
+			// A newer capture inside its grace reports nothing before it is
+			// saved, so a clear page alone does not prove a save: wait for the
+			// checkpoint to advance, then for every replica to clear.
 			eventually(t, "the next successful history save on every replica", func() bool {
-				return historySaveCleared(t, replicas[0]) && historySaveCleared(t, replicas[1])
+				latest, err := observed.EvidenceCheckpoint(t.Context(), scope)
+				return err == nil && latest.At.After(checkpoint.At) && historySaveCleared(t, replicas[0]) && historySaveCleared(t, replicas[1])
 			})
-			latest, err := observed.EvidenceCheckpoint(t.Context(), scope)
-			if err != nil || !latest.At.After(checkpoint.At) {
-				t.Fatalf("recovered checkpoint did not advance: %s -> %s %v", checkpoint.At, latest.At, err)
-			}
 		})
 	}
 }
@@ -687,8 +688,8 @@ func TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica(t *testing.T) {
 	endpoint := saveDelayCluster(t)
 	base := storage.NewMemory()
 	observed := &checkpointOutageStore{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore)}
-	// Production pacing: the expected saved-through time is read before the
-	// checkpoint outage starts, and a faster capture could save again in between.
+	// Production pacing keeps captures apart, so the outage below starts
+	// between them.
 	replicas := []*Service{saveDelayReplica(t, endpoint, observed, "save-unprepared", productionPace), saveDelayReplica(t, endpoint, observed, "save-unprepared", productionPace)}
 	scope := storage.EvidenceScope{OrgID: "default", ClusterID: "save-unprepared", ClusterUID: "save-delay-physical"}
 	eventually(t, "a complete first capture saved to history", func() bool {
@@ -696,10 +697,6 @@ func TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica(t *testing.T) {
 		checkpoint, checkpointErr := observed.EvidenceStore.EvidenceCheckpoint(t.Context(), scope)
 		return err == nil && health.State == "ready" && health.PendingKinds == 0 && checkpointErr == nil && checkpoint.ID != "" && historySaveCleared(t, replicas[0])
 	})
-	checkpoint, err := observed.EvidenceStore.EvidenceCheckpoint(t.Context(), scope)
-	if err != nil {
-		t.Fatal(err)
-	}
 	unprepared := func(service *Service) bool {
 		service.changes.mu.Lock()
 		cache := service.changes.inventories[service.indexScope()]
@@ -715,6 +712,13 @@ func TestUnpreparedHistorySaveIsReportedAlikeByEveryReplica(t *testing.T) {
 	eventuallyWithin(t, 75*time.Second, "a capture published on every replica without a save", func() bool {
 		return unprepared(replicas[0]) && unprepared(replicas[1])
 	})
+	// The holder publishes a capture without a save only when no save of
+	// its own is running, so the checkpoint is settled now: read it here
+	// rather than before the outage, when a second capture may still land.
+	checkpoint, err := observed.EvidenceStore.EvidenceCheckpoint(t.Context(), scope)
+	if err != nil {
+		t.Fatal(err)
+	}
 	observed.down.Store(false)
 	for i, service := range replicas {
 		page, err := service.Crashes(t.Context(), kubechanges.CrashQuery{})
@@ -767,7 +771,7 @@ func TestEveryCredentialFailureClosesTheGate(t *testing.T) {
 				// A proved principal cannot be replaced by an unreviewed one.
 				service.identity.reviewPrincipal = "self-subject-review:previous"
 			}
-			err := service.commitStorage(t.Context(), "journal", func() error { return nil })
+			err := service.commitStorage(t.Context(), "journal", func(ctx context.Context) error { return nil })
 			if err == nil || !countsAgainstCredential(err) {
 				t.Fatalf("%s failure did not close the credential gate: %v", test.name, err)
 			}
@@ -808,11 +812,495 @@ func TestContendedCredentialLockPastTheSaveDeadlineKeepsTheGateOpen(t *testing.T
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 	saved := false
-	err := service.commitStorage(ctx, "journal", func() error { saved = true; return nil })
+	err := service.commitStorage(ctx, "journal", func(ctx context.Context) error { saved = true; return nil })
 	if saved || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a save past its deadline ran or failed differently: saved=%t %v", saved, err)
 	}
 	if countsAgainstCredential(err) || errors.Is(err, ErrCredentialUnavailable) || DiagnoseError(err).Code == "connector_credential_unresolved" {
 		t.Fatalf("a contended credential lock was reported as a credential fault: %v", err)
+	}
+}
+
+// While every history save times out, live inventory still publishes each
+// new cluster read: live views stay current and the cluster stays ready, and
+// only saved history lags, reported as not saving.
+func TestLiveInventoryPublishesWhileEveryHistorySaveTimesOut(t *testing.T) {
+	t.Parallel()
+	endpoint, fixture := saveDelayFixture(t)
+	observed := newFailingSaveStore(fmt.Errorf("journal statement on 10.0.0.7: %w", context.DeadlineExceeded), "save-timeout")
+	service := saveDelayReplica(t, endpoint, observed, "save-timeout", fixturePace)
+	eventually(t, "history reported as not saving", func() bool {
+		save := historySaveOf(t, service)
+		return observed.failures.Load() > 0 && save != nil && save.Code == "history_save_delayed"
+	})
+	for round := range 3 {
+		name := fmt.Sprintf("while-not-saving-%d", round)
+		failuresBefore := observed.failures.Load()
+		pod := `{"operation":"upsert","resource":"pods","namespace":"batch","name":"` + name + `","object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"` + name + `","namespace":"batch","uid":"` + name + `"},"status":{"phase":"Running"}}}`
+		mutation := httptest.NewRecorder()
+		fixture.ServeHTTP(mutation, httptest.NewRequest(http.MethodPost, "/_fake/mutate", strings.NewReader(pod)))
+		if mutation.Code != http.StatusOK {
+			t.Fatal("pod mutation failed")
+		}
+		eventuallyWithin(t, 75*time.Second, "the new pod live and its capture's save attempted", func() bool {
+			page, err := service.List(t.Context(), ListOptions{ResourceID: indexedResourceIDs["Pod"], Namespace: "batch"})
+			if err != nil {
+				return false
+			}
+			listed := false
+			for _, item := range page.Items {
+				listed = listed || item.Name == name
+			}
+			return listed && observed.failures.Load() > failuresBefore
+		})
+		health, err := service.SyncHealth(t.Context())
+		if err != nil || health.State != "ready" || len(health.Failing) != 0 {
+			t.Fatalf("round %d: live inventory is not ready while history is not saving: state=%q failing=%+v err=%v", round, health.State, health.Failing, err)
+		}
+		if save := historySaveOf(t, service); save == nil || save.Code != "history_save_delayed" || !save.Retryable {
+			t.Fatalf("round %d: history save status = %+v, want delayed and retryable", round, save)
+		}
+	}
+	service.recovery.mu.Lock()
+	credentialFailures := service.recovery.failures
+	service.recovery.mu.Unlock()
+	if credentialFailures != 0 {
+		t.Fatalf("history save timeouts counted %d credential failures", credentialFailures)
+	}
+}
+
+// timingOutJournal times out every history save.
+type timingOutJournal struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	mu       sync.Mutex
+	attempts map[string]int
+}
+
+func (store *timingOutJournal) CommitEvidence(_ context.Context, _ storage.EvidenceScope, batch storage.EvidenceBatch) error {
+	store.mu.Lock()
+	store.attempts[batch.ID]++
+	store.mu.Unlock()
+	return fmt.Errorf("journal statement on 10.0.0.7: %w", context.DeadlineExceeded)
+}
+
+func (store *timingOutJournal) attemptsOf(id string) (int, int) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return store.attempts[id], len(store.attempts)
+}
+
+// Over a hundred cycles after the store failed a save, no capture is
+// prepared or saved until the backoff has passed: the history save state stays
+// one dropped capture, never a growing queue. The capture prepared once the
+// backoff passes records the dropped stretch as a gap. A capture published over
+// one still waiting to start replaces it and is counted, and a capture whose
+// authority proof failed is never saved.
+func TestHistorySaveQueueStaysBoundedOverManyFailingCycles(t *testing.T) {
+	isolateProblems(t, 0, nil)
+	base := storage.NewMemory()
+	store := &timingOutJournal{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore), attempts: map[string]int{}}
+	service := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "default", ClusterID: "save-queue", CredentialID: "unchanged"})
+	service.SetChangeStorage(store)
+	service.changes.evidenceEnabled = true
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	cache := &inventoryCache{}
+	cache.historySave.clock = func() time.Time { return time.Unix(0, clock.Load()) }
+	service.changes.mu.Lock()
+	service.changes.inventories[service.indexScope()] = cache
+	service.changes.mu.Unlock()
+	t.Cleanup(service.startHistorySaver(t.Context(), cache))
+	lease := &inventoryLease{scope: service.scope, record: inventoryLeaseRecord{Owner: "owner", Expires: time.Now().Add(time.Hour)}}
+	settled := func() pendingHistorySave {
+		var pending pendingHistorySave
+		eventually(t, "the running save to end", func() bool {
+			cache.mu.RLock()
+			defer cache.mu.RUnlock()
+			pending = cache.historySave
+			return pending.inFlight == ""
+		})
+		return pending
+	}
+	// publish is one cycle: it prepares a capture only when one is due.
+	prepared := 0
+	publish := func(name string) (inventoryGeneration, bool) {
+		if !service.historyCaptureDue(cache) {
+			cache.mu.Lock()
+			cache.generation = inventoryGeneration{Revision: name}
+			cache.mu.Unlock()
+			return inventoryGeneration{}, false
+		}
+		previous := previousCapture(cache)
+		prepared++
+		generation := inventoryGeneration{Revision: name, EvidenceBatch: &storage.EvidenceBatch{ID: "capture:" + name}, EvidenceFailure: previous.EvidenceFailure}
+		cache.mu.Lock()
+		cache.generation = generation
+		cache.mu.Unlock()
+		service.queueHistorySave(lease, cache, generation)
+		settled()
+		return generation, true
+	}
+	const cycles = 100
+	for cycle := 1; cycle <= cycles; cycle++ {
+		publish(fmt.Sprintf("%d", cycle))
+	}
+	pending := settled()
+	if _, total := store.attemptsOf("capture:1"); prepared != 1 || total != 1 || pending.dropped != 1 || pending.queued != nil {
+		t.Fatalf("over %d failing cycles %d captures were prepared and %d saved, %d dropped, queue %+v; want one of each and nothing waiting", cycles, prepared, total, pending.dropped, pending.queued)
+	}
+
+	clock.Add(int64(historySaveRetryCeiling))
+	generation, ok := publish("after-backoff")
+	if !ok || generation.EvidenceFailure != "storage_unavailable" {
+		t.Fatalf("the capture after the backoff was not prepared to record the dropped stretch (prepared=%t failure=%q)", ok, generation.EvidenceFailure)
+	}
+	if attempts, total := store.attemptsOf("capture:after-backoff"); attempts != 1 || total != 2 {
+		t.Fatalf("after the backoff %d captures were saved, the newest %d times", total, attempts)
+	}
+
+	// While the cycle's authority proof is pending a capture waits to start;
+	// one published over it replaces it and is counted.
+	cache.mu.Lock()
+	cache.authorityQuestioned = inventoryQuestionedKinds{kinds: map[string]bool{"Pod": true}}
+	cache.mu.Unlock()
+	dropped := settled().dropped
+	for _, name := range []string{"held-a", "held-b"} {
+		service.queueHistorySave(lease, cache, inventoryGeneration{Revision: name, EvidenceBatch: &storage.EvidenceBatch{ID: "capture:" + name}})
+	}
+	pending = settled()
+	if pending.queued == nil || pending.queued.EvidenceBatch.ID != "capture:held-b" || pending.dropped != dropped+1 {
+		t.Fatalf("a replaced capture was not counted: queue %+v with %d dropped, want held-b and %d", pending.queued, pending.dropped, dropped+1)
+	}
+	// Once the proof fails the waiting capture is never saved.
+	cache.mu.Lock()
+	cache.authorityQuestioned = inventoryQuestionedKinds{}
+	cache.authorityFailure = unverifiedInventoryAuthority(ErrForbidden)
+	cache.mu.Unlock()
+	service.startHistorySave(lease, cache)
+	pending = settled()
+	if attempts, _ := store.attemptsOf("capture:held-b"); attempts != 0 || pending.queued != nil || pending.dropped != dropped+2 {
+		t.Fatalf("a capture was saved or kept after its proof failed: attempts=%d queue=%+v dropped=%d", attempts, pending.queued, pending.dropped)
+	}
+}
+
+// partedJournal saves a capture in three parts, asking the save's lease check
+// before each one, as a Postgres save of a large capture does. betweenParts
+// runs after the first part.
+type partedJournal struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	betweenParts func()
+	written      atomic.Int32
+}
+
+func (store *partedJournal) CommitEvidence(ctx context.Context, _ storage.EvidenceScope, batch storage.EvidenceBatch) error {
+	for part := range 3 {
+		if batch.KeepLease != nil {
+			if _, err := batch.KeepLease(ctx); err != nil {
+				return err
+			}
+		}
+		store.written.Add(1)
+		if part == 0 && store.betweenParts != nil {
+			store.betweenParts()
+		}
+	}
+	return nil
+}
+
+// An authority proof that fails between the transactions of one capture's
+// save stops the transactions that remain.
+func TestAuthorityFailureBetweenSavePartsStopsTheSave(t *testing.T) {
+	base := storage.NewMemory()
+	store := &partedJournal{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore)}
+	service := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "default", ClusterID: "save-parts", CredentialID: "unchanged"})
+	service.SetChangeStorage(store)
+	service.changes.evidenceEnabled = true
+	cache := &inventoryCache{}
+	service.changes.mu.Lock()
+	service.changes.inventories[service.indexScope()] = cache
+	service.changes.mu.Unlock()
+	store.betweenParts = func() {
+		cache.mu.Lock()
+		cache.authorityFailure = unverifiedInventoryAuthority(ErrForbidden)
+		cache.mu.Unlock()
+	}
+	lease := &inventoryLease{scope: service.scope, record: inventoryLeaseRecord{Owner: "owner", Expires: time.Now().Add(time.Hour)}}
+	generation := inventoryGeneration{Revision: "parts", EvidenceBatch: &storage.EvidenceBatch{ID: "capture:parts"}}
+	err := lease.commitJournal(t.Context(), service, generation)
+	if !errors.Is(err, errHistorySaveRefused) || store.written.Load() != 1 {
+		t.Fatalf("a save went on after its authority proof failed: %d of 3 parts written, err=%v", store.written.Load(), err)
+	}
+}
+
+// countingJournal records conflicts and coverage gaps among the captures a
+// healthy store saves.
+type countingJournal struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	mu        sync.Mutex
+	saves     int
+	conflicts int
+	gaps      int
+}
+
+func (store *countingJournal) CommitEvidence(ctx context.Context, scope storage.EvidenceScope, batch storage.EvidenceBatch) error {
+	err := store.EvidenceStore.CommitEvidence(ctx, scope, batch)
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.saves++
+	if errors.Is(err, storage.ErrEvidenceConflict) {
+		store.conflicts++
+	}
+	for _, record := range batch.Records {
+		if record.Type == "coverage_gap" {
+			store.gaps++
+			break
+		}
+	}
+	return err
+}
+
+// On a healthy store, saving history beside collection never conflicts with
+// this process's own lease moves and never records a gap.
+func TestHealthyStoreSavesEveryCaptureWithoutConflictsOrGaps(t *testing.T) {
+	t.Parallel()
+	for _, backend := range []string{"memory", "file", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			t.Parallel()
+			var provider storage.Provider
+			switch backend {
+			case "memory":
+				provider = storage.NewMemory()
+			case "file":
+				file, err := storage.NewFile(storage.FileOptions{DataDir: t.TempDir()})
+				if err != nil {
+					t.Fatal(err)
+				}
+				provider = file
+			default:
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("isolated Postgres required")
+				}
+				postgres, err := storage.NewPostgres(storage.PostgresOptions{DSN: dsn})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = postgres.Close() })
+				provider = postgres
+			}
+			store := &countingJournal{Provider: provider, BlobCAS: provider.(storage.BlobCAS), EvidenceStore: provider.(storage.EvidenceStore)}
+			endpoint, fixture := saveDelayFixture(t)
+			cluster := fmt.Sprintf("healthy-%s-%d", backend, time.Now().UnixNano())
+			service := saveDelayReplica(t, endpoint, store, cluster, fixturePace)
+			published := func() string {
+				cache := service.inventoryCache()
+				if cache == nil {
+					return ""
+				}
+				cache.mu.RLock()
+				defer cache.mu.RUnlock()
+				if cache.generation.EvidenceBatch == nil {
+					return ""
+				}
+				return cache.generation.EvidenceBatch.ID
+			}
+			for round := range 15 {
+				before := published()
+				name := fmt.Sprintf("healthy-%d", round)
+				pod := `{"operation":"upsert","resource":"pods","namespace":"batch","name":"` + name + `","object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"` + name + `","namespace":"batch","uid":"` + name + `"},"status":{"phase":"Running"}}}`
+				mutation := httptest.NewRecorder()
+				fixture.ServeHTTP(mutation, httptest.NewRequest(http.MethodPost, "/_fake/mutate", strings.NewReader(pod)))
+				if mutation.Code != http.StatusOK {
+					t.Fatal("pod mutation failed")
+				}
+				eventuallyWithin(t, 75*time.Second, "a new capture published", func() bool {
+					id := published()
+					return id != "" && id != before
+				})
+			}
+			historySavesSettled(t, service.inventoryCache())
+			store.mu.Lock()
+			defer store.mu.Unlock()
+			if store.saves < 15 || store.conflicts != 0 || store.gaps != 0 {
+				t.Fatalf("a healthy %s store saved %d captures with %d conflicts and %d gap records, want at least 15 with none", backend, store.saves, store.conflicts, store.gaps)
+			}
+		})
+	}
+}
+
+// hangingJournal lets the first history save land, then holds every later
+// save until its context ends, as a database that stopped answering does. It
+// counts how many saves run at once.
+type hangingJournal struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	mu       sync.Mutex
+	saved    bool
+	running  int
+	most     int
+	attempts int
+}
+
+func (store *hangingJournal) CommitEvidence(ctx context.Context, scope storage.EvidenceScope, batch storage.EvidenceBatch) error {
+	store.mu.Lock()
+	if !store.saved {
+		store.mu.Unlock()
+		err := store.EvidenceStore.CommitEvidence(ctx, scope, batch)
+		store.mu.Lock()
+		store.saved = err == nil
+		store.mu.Unlock()
+		return err
+	}
+	store.running++
+	store.attempts++
+	store.most = max(store.most, store.running)
+	store.mu.Unlock()
+	<-ctx.Done()
+	store.mu.Lock()
+	store.running--
+	store.mu.Unlock()
+	return ctx.Err()
+}
+
+// While a history save hangs on a database that does not answer, collection
+// keeps publishing each new cluster read, and no more than one save runs.
+func TestCollectionKeepsPublishingWhileAHistorySaveHangs(t *testing.T) {
+	t.Parallel()
+	endpoint, fixture := saveDelayFixture(t)
+	base := storage.NewMemory()
+	store := &hangingJournal{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore)}
+	service := saveDelayReplica(t, endpoint, store, "save-hangs", fixturePace)
+	eventually(t, "a history save hanging", func() bool {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		return store.running > 0
+	})
+	for round := range 3 {
+		name := fmt.Sprintf("while-saving-hangs-%d", round)
+		pod := `{"operation":"upsert","resource":"pods","namespace":"batch","name":"` + name + `","object":{"apiVersion":"v1","kind":"Pod","metadata":{"name":"` + name + `","namespace":"batch","uid":"` + name + `"},"status":{"phase":"Running"}}}`
+		mutation := httptest.NewRecorder()
+		fixture.ServeHTTP(mutation, httptest.NewRequest(http.MethodPost, "/_fake/mutate", strings.NewReader(pod)))
+		if mutation.Code != http.StatusOK {
+			t.Fatal("pod mutation failed")
+		}
+		eventuallyWithin(t, 75*time.Second, "the new pod published by collection while a save hangs", func() bool {
+			service.changes.mu.Lock()
+			cache := service.changes.inventories[service.indexScope()]
+			service.changes.mu.Unlock()
+			if cache == nil {
+				return false
+			}
+			cache.mu.RLock()
+			defer cache.mu.RUnlock()
+			for _, record := range cache.generation.View.Records {
+				if record.UID == name {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	store.mu.Lock()
+	most, attempts := store.most, store.attempts
+	store.mu.Unlock()
+	if most != 1 || attempts < 1 {
+		t.Fatalf("%d saves ran at once (%d started), want exactly one at a time", most, attempts)
+	}
+	if health, err := service.SyncHealth(t.Context()); err != nil || health.State != "ready" {
+		t.Fatalf("live inventory while a save hangs: state=%q err=%v", health.State, err)
+	}
+}
+
+// hangingBlobStore answers blob reads only when their context ends once it is
+// armed, as a database that stopped answering does.
+type hangingBlobStore struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	armed   atomic.Bool
+	entered chan struct{}
+	once    sync.Once
+	release chan struct{}
+}
+
+func (store *hangingBlobStore) hang(ctx context.Context) error {
+	store.once.Do(func() { close(store.entered) })
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-store.release:
+		return errors.New("released")
+	}
+}
+
+func (store *hangingBlobStore) ReadBlob(name string) ([]byte, error) {
+	if store.armed.Load() && strings.HasPrefix(name, "kubernetes/inventory/") {
+		return nil, store.hang(context.Background())
+	}
+	return store.Provider.ReadBlob(name)
+}
+
+func (store *hangingBlobStore) ReadBlobContext(ctx context.Context, name string) ([]byte, error) {
+	if store.armed.Load() && strings.HasPrefix(name, "kubernetes/inventory/") {
+		return nil, store.hang(ctx)
+	}
+	return store.Provider.ReadBlob(name)
+}
+
+func (store *hangingBlobStore) WriteBlobContext(ctx context.Context, name string, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return store.Provider.WriteBlob(name, data)
+}
+
+// A blob read on a database that stopped answering ends with its context, so
+// a credential rebuild that stops the collection waiting on it completes
+// instead of being held behind the hung read.
+func TestRebuildStopsACollectionWaitingOnAHungBlobRead(t *testing.T) {
+	isolateProblems(t, 0, nil)
+	fixture := newFakeCluster(t, "synthetic-a", "api")
+	client, err := NewClient(fixture.trustedConfig(&credentialSource{authorization: func(context.Context) (string, error) {
+		return "Bearer synthetic-a", nil
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := storage.NewMemory()
+	store := &hangingBlobStore{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore), entered: make(chan struct{}), release: make(chan struct{})}
+	service := NewService(client, Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "configured"}, 0)
+	service.recovery = &clusterRecovery{cluster: "cluster"}
+	service.SetChangeStorage(store)
+	registry := NewServiceRegistry(service)
+	t.Cleanup(registry.Close)
+	// Runs before the registry closes, so a read the code under test failed
+	// to cancel cannot hold the test's own cleanup.
+	t.Cleanup(func() { close(store.release) })
+	store.armed.Store(true)
+	registry.StartCapture(t.Context())
+	waitFor(t, store.entered, "the collection to wait on the hung read")
+
+	service.identity.mu.Lock()
+	service.identity.retired, service.identity.renewal = true, true
+	service.identity.mu.Unlock()
+	type outcome struct {
+		service *Service
+		err     error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		rebuilt, err := registry.resolveCluster(t.Context(), "org", "cluster", nil)
+		result <- outcome{rebuilt, err}
+	}()
+	done := waitFor(t, result, "the rebuild to stop the waiting collection and finish")
+	if done.err != nil || done.service == nil || done.service.identity == service.identity {
+		t.Fatalf("rebuild behind a hung blob read ended with %v", done.err)
 	}
 }

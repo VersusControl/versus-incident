@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,12 +32,6 @@ var errSelfSubjectReviewUnsupported = errors.New("kubernetes: self subject revie
 // invalid_client, a missing token file, an invalid answer) is a definite one.
 var ErrTokenEndpointUnavailable = errors.New("kubernetes: cloud token endpoint unavailable")
 
-// tokenEndpointUnavailable classifies a cloud token request. It returns an
-// error wrapping ErrTokenEndpointUnavailable when the request got no definite
-// answer, and nil when response is a definite answer for the caller to read.
-// A failed request drops the client's idle connections, so the next attempt
-// dials again and resolves the host again rather than reusing a connection
-// opened while the network was still coming up.
 // abandonedAttempt reports whether err only says that the caller stopped
 // waiting. A caller that cancelled is never evidence about the credential. A
 // deadline that passed while the token host had not answered is: the token
@@ -49,6 +44,12 @@ func abandonedAttempt(ctx context.Context, err error) bool {
 	return errors.Is(ctx.Err(), context.Canceled) || !errors.Is(err, ErrTokenEndpointUnavailable)
 }
 
+// tokenEndpointUnavailable classifies a cloud token request. It returns an
+// error wrapping ErrTokenEndpointUnavailable when the request got no definite
+// answer, and nil when response is a definite answer for the caller to read.
+// A failed request drops the client's idle connections, so the next attempt
+// dials again and resolves the host again rather than reusing a connection
+// opened while the network was still coming up.
 func tokenEndpointUnavailable(client *http.Client, response *http.Response, err error, failure string) error {
 	if err == nil && response != nil && response.StatusCode != http.StatusTooManyRequests && response.StatusCode < 500 {
 		return nil
@@ -57,6 +58,41 @@ func tokenEndpointUnavailable(client *http.Client, response *http.Response, err 
 		client.CloseIdleConnections()
 	}
 	return fmt.Errorf("%s: %w", failure, ErrTokenEndpointUnavailable)
+}
+
+// lockContext takes mu, or gives up when ctx ends first. The epoch lock is
+// held across credential commits, and a commit can wait on the history store;
+// a reader whose deadline passes behind it stops waiting and answers, instead
+// of holding its request until the store returns. A wait that is given up
+// leaves no lock behind: the waiter releases it as soon as it gets it.
+func lockContext(ctx context.Context, mu *sync.Mutex) error {
+	if mu.TryLock() {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	const waiting, taken, abandoned = 0, 1, 2
+	var state atomic.Int32
+	acquired := make(chan struct{})
+	go func() {
+		mu.Lock()
+		if state.CompareAndSwap(waiting, taken) {
+			close(acquired)
+			return
+		}
+		mu.Unlock()
+	}()
+	select {
+	case <-acquired:
+		return nil
+	case <-ctx.Done():
+		if state.CompareAndSwap(waiting, abandoned) {
+			return ctx.Err()
+		}
+		<-acquired
+		return nil
+	}
 }
 
 // CredentialSource supplies request and TLS credentials without exposing them
@@ -265,7 +301,9 @@ func (service *Service) validateCredential(ctx context.Context) error {
 		return ctx.Err()
 	}
 	epoch := service.identity
-	epoch.mu.Lock()
+	if err := lockContext(ctx, &epoch.mu); err != nil {
+		return err
+	}
 	if epoch.retired || epoch.ctx.Err() != nil {
 		defer epoch.mu.Unlock()
 		return retiredEpochErrorLocked(epoch)
@@ -275,7 +313,9 @@ func (service *Service) validateCredential(ctx context.Context) error {
 	// token host never holds up the others; its wait ends on its own
 	// deadline.
 	header, err := service.client.credentials.Authorization(ctx)
-	epoch.mu.Lock()
+	if lockErr := lockContext(ctx, &epoch.mu); lockErr != nil {
+		return lockErr
+	}
 	if epoch.retired || epoch.ctx.Err() != nil {
 		defer epoch.mu.Unlock()
 		return retiredEpochErrorLocked(epoch)
@@ -343,7 +383,9 @@ func (service *Service) acceptCredentialForRequest(ctx context.Context, header s
 		return admission.header, admission.generation, admission.certificate, nil
 	}
 	epoch := service.identity
-	epoch.mu.Lock()
+	if err := lockContext(ctx, &epoch.mu); err != nil {
+		return "", 0, nil, err
+	}
 	defer epoch.mu.Unlock()
 	if err := service.acceptCredentialLocked(ctx, header); err != nil {
 		return "", 0, nil, err
@@ -362,9 +404,35 @@ func (err commitConflictError) Error() string {
 func (err commitConflictError) Unwrap() error { return err.cause }
 func (err commitConflictError) Class() string { return "commit_conflict" }
 
-func (service *Service) commitCredential(ctx context.Context, commit func() error) error {
-	if err := ctx.Err(); err != nil {
+// commitCredential runs one write admitted under the current credential
+// epoch. Admission is short and runs under the epoch lock: the epoch must be
+// live and the credential accepted. The write itself runs with no lock held,
+// so readers never wait on the store. It runs under a context that ends when
+// the caller's does, when the epoch is retired, or when the client credential
+// is rejected, so retirement cancels a write in flight rather than waiting for
+// it. An epoch that ended while the write ran is reported as a commit
+// conflict, whatever the write answered, and the caller reads again.
+func (service *Service) commitCredential(ctx context.Context, commit func(context.Context) error) (err error) {
+	commitContext, finish, err := service.admitCommit(ctx)
+	if err != nil {
 		return err
+	}
+	// Deferred, so a commit that panics still releases its context.
+	defer func() {
+		if conflict := finish(); conflict != nil {
+			err = conflict
+		}
+	}()
+	return commit(commitContext)
+}
+
+// admitCommit admits one write under the epoch lock and returns the context
+// the write runs under, and the check to run once it returns: that check
+// releases the context and reports a commit conflict when the epoch or the
+// client credential ended in between.
+func (service *Service) admitCommit(ctx context.Context) (context.Context, func() error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
 	epoch := service.identity
 	// The token is fetched before the epoch lock is taken, so a commit that
@@ -381,40 +449,68 @@ func (service *Service) commitCredential(ctx context.Context, commit func() erro
 	// is contention, not a credential answer, so it is returned before the
 	// credential is consulted and stays untyped.
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if epoch.retired || epoch.ctx.Err() != nil {
-		return commitConflictError{cause: retiredEpochCauseLocked(epoch)}
+		return nil, nil, commitConflictError{cause: retiredEpochCauseLocked(epoch)}
 	}
 	if credentials {
 		if authErr != nil {
-			return authErr
+			return nil, nil, authErr
 		}
 		if source, ok := service.client.credentials.(provenCredentialSource); ok {
 			// A commit never waits on a proof: with no token allowed to
 			// serve yet, it fails fast and is retried.
 			_, wait, err := service.admitProvenLocked(ctx, source, header, true)
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			if wait != nil {
-				return credentialFault(&proofError{class: "pending"})
+				return nil, nil, credentialFault(&proofError{class: "pending"})
 			}
 		} else if err := service.acceptCredentialLocked(ctx, header); err != nil {
-			return err
+			return nil, nil, err
 		}
 	}
-	if service.client != nil {
-		service.client.authMu.Lock()
-		defer service.client.authMu.Unlock()
-		if epoch.ctx.Err() != nil {
-			return commitConflictError{cause: retiredEpochCauseLocked(epoch)}
+	commitContext, cancel := context.WithCancel(ctx)
+	stops := []func() bool{context.AfterFunc(epoch.ctx, cancel)}
+	generation, client := uint64(0), service.client
+	if client != nil {
+		client.authMu.Lock()
+		if client.authContext == nil {
+			client.authContext, client.authCancel = context.WithCancel(context.Background())
 		}
+		generation = client.authGeneration.Load()
+		stops = append(stops, context.AfterFunc(client.authContext, cancel))
+		client.authMu.Unlock()
+	}
+	if epoch.ctx.Err() != nil {
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
+		return nil, nil, commitConflictError{cause: retiredEpochCauseLocked(epoch)}
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
+		return nil, nil, err
 	}
-	return commit()
+	finish := func() error {
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
+		epoch.mu.Lock()
+		defer epoch.mu.Unlock()
+		if epoch.retired || epoch.ctx.Err() != nil || client != nil && client.authGeneration.Load() != generation {
+			return commitConflictError{cause: retiredEpochCauseLocked(epoch)}
+		}
+		return nil
+	}
+	return commitContext, finish, nil
 }
 
 func (service *Service) acceptCredentialLocked(ctx context.Context, header string) error {
@@ -466,6 +562,7 @@ func (service *Service) acceptCredentialLocked(ctx context.Context, header strin
 				epoch.reviewUnsupported, epoch.unsupportedFingerprint = true, fingerprint
 			}
 			if errors.Is(reviewErr, ErrUnauthorized) {
+				forgetRejectedBearer(service.client.credentials, header)
 				epoch.retired = true
 				epoch.cancel()
 				return credentialFault(reviewErr)
@@ -863,6 +960,14 @@ func staticTokenCredential(token string) (CredentialSource, error) {
 	return &credentialSource{authorization: func(context.Context) (string, error) { return header, nil }}, nil
 }
 
+// forgetRejectedBearer tells a source that remembers tokens that the cluster
+// refused header, so it is never served again from memory.
+func forgetRejectedBearer(credentials CredentialSource, header string) {
+	if source, ok := credentials.(interface{ forgetBearer(string) }); ok {
+		source.forgetBearer(header)
+	}
+}
+
 func tokenFileCredential(path string) CredentialSource {
 	return &tokenFileSource{path: path}
 }
@@ -870,21 +975,164 @@ func tokenFileCredential(path string) CredentialSource {
 type tokenFileSource struct {
 	path     string
 	verifier *projectedTokenVerifier
+	// wait paces the re-reads of a token file that read as missing or empty,
+	// and now is the clock the last good token's age is read on; nil uses a
+	// real timer and the real clock.
+	wait func(context.Context, time.Duration) error
+	now  func() time.Time
+	// lastGood is the last header the file answered, read at lastGoodAt. It
+	// bridges a token file that is being replaced and reads as missing or
+	// empty for a moment; a rejection clears it.
+	mu         sync.Mutex
+	lastGood   string
+	lastGoodAt time.Time
+	// refused holds the most recent headers the cluster refused, oldest
+	// first. Memory never keeps or serves one of them, whatever order reads
+	// and refusals arrive in; a read never removes one.
+	refused [][]byte
+	// afterRead, when set, runs between a read of the file and its answer.
+	// Tests use it to order reads against each other.
+	afterRead func()
 }
+
+// tokenFileRetryPauses are the pauses before each re-read of a token file
+// that read as missing or empty. They add up to 250 ms, so a reader that
+// holds a lock while it reads waits no longer.
+var tokenFileRetryPauses = [...]time.Duration{50 * time.Millisecond, 75 * time.Millisecond, 125 * time.Millisecond}
+
+// tokenFileGrace is how long the last good token may stand in for a token
+// file that cannot be read.
+const tokenFileGrace = 10 * time.Second
 
 func (source *tokenFileSource) Authorization(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	header, transient, err := source.read()
+	// A file being replaced in place reads as missing or empty for a moment:
+	// read it again a few times before calling the credential unavailable.
+	for attempt := 0; err != nil && transient && attempt < len(tokenFileRetryPauses); attempt++ {
+		if source.pause(ctx, tokenFileRetryPauses[attempt]) != nil {
+			break
+		}
+		header, transient, err = source.read()
+	}
+	if source.afterRead != nil {
+		source.afterRead()
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	now := source.clock()
+	if err == nil {
+		if source.refusedLocked(header) {
+			// The file holds a refused token: it is the file's answer, and
+			// the cluster decides, but memory never keeps it. Memory is left
+			// as it is: this read may be older than the one memory holds.
+			return header, nil
+		}
+		source.lastGood, source.lastGoodAt = header, now
+		return header, nil
+	}
+	// The last good token stands in only while it is recent, unrejected and
+	// unexpired; past that the file's own failure is the answer.
+	if transient && source.lastGood != "" && now.Sub(source.lastGoodAt) <= tokenFileGrace && !bearerExpired(source.lastGood, now) {
+		return source.lastGood, nil
+	}
+	return "", credentialFault(err)
+}
+
+// read reads the token file once. transient marks a file that is missing,
+// unreadable or empty, as one being replaced is for a moment.
+func (source *tokenFileSource) read() (string, bool, error) {
 	data, err := readBoundedFile(source.path, maxTokenBytes)
 	if err != nil {
-		return "", credentialFault(ErrCredentialUnavailable)
+		return "", true, ErrCredentialUnavailable
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return "", true, ErrCredentialUnavailable
 	}
 	header, err := bearerHeader(string(data))
-	return header, credentialFault(err)
+	return header, false, err
+}
+
+func (source *tokenFileSource) pause(ctx context.Context, delay time.Duration) error {
+	if source.wait != nil {
+		return source.wait(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (source *tokenFileSource) clock() time.Time {
+	if source.now != nil {
+		return source.now()
+	}
+	return time.Now()
+}
+
+// bearerExpired reports a bearer JWT whose exp claim is not in the future. A
+// token that is not a JWT, or carries no exp, has no expiry to read here.
+func bearerExpired(header string, now time.Time) bool {
+	parts := strings.Split(strings.TrimPrefix(header, "Bearer "), ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Exp *json.Number `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.Exp == nil {
+		return false
+	}
+	exp, err := claims.Exp.Int64()
+	return err != nil || !time.Unix(exp, 0).After(now)
+}
+
+// tokenFileRefusals bounds how many refused headers a source remembers.
+const tokenFileRefusals = 8
+
+// forgetBearer records that the cluster refused header: it joins the refused
+// set, dropping the oldest past the bound, and memory drops it if it holds
+// it. It reads no file, so a caller holding the epoch lock may call it.
+func (source *tokenFileSource) forgetBearer(header string) {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if !source.refusedLocked(header) {
+		if len(source.refused) == tokenFileRefusals {
+			source.refused = source.refused[1:]
+		}
+		source.refused = append(source.refused, []byte(header))
+	}
+	if subtle.ConstantTimeCompare([]byte(source.lastGood), []byte(header)) == 1 {
+		source.lastGood, source.lastGoodAt = "", time.Time{}
+	}
+}
+
+// refusedLocked reports whether header is in the refused set; the caller
+// holds source.mu.
+func (source *tokenFileSource) refusedLocked(header string) bool {
+	refused := false
+	for _, candidate := range source.refused {
+		if subtle.ConstantTimeCompare(candidate, []byte(header)) == 1 {
+			refused = true
+		}
+	}
+	return refused
 }
 
 func (source *tokenFileSource) rejectBearer(rejected string) bool {
+	// A rejected token is never served again from memory, including by the
+	// re-read below.
+	source.forgetBearer(rejected)
 	current, err := source.Authorization(context.Background())
 	// An unavailable file still retires the rejected epoch. A newer file does not.
 	return err != nil || subtle.ConstantTimeCompare([]byte(current), []byte(rejected)) == 1

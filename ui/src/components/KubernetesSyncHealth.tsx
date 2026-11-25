@@ -1,6 +1,6 @@
 import { useId } from "react";
 import { AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
-import { syncDuration, syncHealthStateLabel, syncSince, type KubernetesSyncHealth as Health } from "@/lib/kubernetesSyncHealth";
+import { historyStoreFailure, syncDuration, syncHealthStateLabel, syncSince, type KubernetesSyncHealth as Health } from "@/lib/kubernetesSyncHealth";
 import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
 import type { KubernetesConnectorDetail } from "@/lib/kubernetesNamespaceAccess";
 
@@ -51,6 +51,9 @@ export function KubernetesSyncHealthSurface({ health, onRetry, retrying, cluster
 
   const failed = health.state === "failed";
   const stale = health.staleSeconds !== undefined;
+  // The cluster answers; the database Versus saves its history in does not.
+  // That is named as what it is, never as a cluster that cannot be read.
+  const storage = historyStoreFailure(health);
   return <section aria-labelledby={titleID} data-sync-health={health.state} className="card rise-in overflow-hidden">
     <div className="flex flex-wrap items-start gap-3 border-b border-ink-700 p-4 sm:p-6">
       <span aria-hidden="true" className={`inline-flex size-9 shrink-0 items-center justify-center rounded-full ${failed ? "bg-sev-critical/15 text-sev-critical" : "bg-sev-warn/15 text-sev-warning"}`}>
@@ -58,13 +61,17 @@ export function KubernetesSyncHealthSurface({ health, onRetry, retrying, cluster
       </span>
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 id={titleID} className="text-sm font-semibold text-ink-50">{published
+          <h2 id={titleID} className="text-sm font-semibold text-ink-50">{storage
+            ? "Versus cannot save this cluster's history right now — check the database"
+            : published
             ? failed ? "Cannot read this cluster right now" : "Cannot show this cluster right now"
             : failed ? "Cannot connect to this cluster" : "Cannot finish syncing this cluster"}</h2>
           <span className={stateTone[health.state]}>{syncHealthStateLabel(health.state)}</span>
         </div>
         <p className="text-xs text-ink-300">
-          {published
+          {storage
+            ? "Versus reaches the cluster, but the database it keeps history in is unavailable or refusing writes. Check that it is reachable and has free connections and space; cluster data appears again after the next successful save."
+            : published
             ? failed
               ? "This cluster synced before, but Versus cannot read it now. Cluster data appears again after the next successful sync."
               : "This cluster synced before, but its data cannot be shown now. Cluster data appears again after the next successful sync."
