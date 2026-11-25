@@ -63,6 +63,8 @@ type systemReadsKube struct {
 	// replaces the built event items.
 	rawMetrics []byte
 	rawEvents  []map[string]any
+	// logs answers every Pod log request.
+	logs http.HandlerFunc
 }
 
 func (kube *systemReadsKube) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -97,7 +99,12 @@ func (kube *systemReadsKube) ServeHTTP(writer http.ResponseWriter, request *http
 		_, _ = fmt.Fprintf(writer, `{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"Forbidden","code":%d,"message":"events is forbidden: User \"reader\" cannot list resource \"events\" %s"}`, status, systemReadCanary)
 		return
 	}
+	kube.mu.Lock()
+	logs := kube.logs
+	kube.mu.Unlock()
 	switch {
+	case logs != nil && strings.HasSuffix(path, "/log"):
+		logs(writer, request)
 	case path == "/apis/metrics.k8s.io/v1beta1/pods":
 		kube.writeMetrics(writer, request, "")
 	case strings.HasPrefix(path, "/apis/metrics.k8s.io/v1beta1/namespaces/") && strings.HasSuffix(path, "/pods"):
@@ -792,7 +799,8 @@ func TestSystemReadsRotateNamespacesAcrossCalls(t *testing.T) {
 }
 
 // The handle must never be reachable from a request path: no code in the
-// module outside this package may name it. The program that wires the worker
+// module outside this package's own files may name it, its subpackages
+// included. The program that wires the worker
 // passes it by hand.
 func TestSystemReadsAreNotNamedOutsideTheKubernetesPackage(t *testing.T) {
 	root := filepath.Join("..", "..")
@@ -800,21 +808,23 @@ func TestSystemReadsAreNotNamedOutsideTheKubernetesPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forbidden := map[string]bool{"EnableSystemReads": true, "SystemReads": true, "SystemReadsOptions": true}
-	parsed := 0
+	forbidden := map[string]bool{"EnableSystemReads": true, "SystemReads": true, "SystemReadsOptions": true, "FollowPodLog": true, "PreviousPodLog": true, "SystemLogStream": true}
+	parsed, subpackages := 0, 0
 	err = filepath.WalkDir(root, func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if entry.IsDir() {
-			absolute, _ := filepath.Abs(name)
 			base := entry.Name()
-			if absolute == own || base == "testdata" || base == "node_modules" || base == "vendor" || name != root && strings.HasPrefix(base, ".") {
+			if base == "testdata" || base == "node_modules" || base == "vendor" || name != root && strings.HasPrefix(base, ".") {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(name, ".go") {
+		// Only this package's own files may name the handle; its
+		// subpackages are walked like the rest of the module.
+		directory, _ := filepath.Abs(filepath.Dir(name))
+		if !strings.HasSuffix(name, ".go") || directory == own {
 			return nil
 		}
 		file, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.SkipObjectResolution)
@@ -822,6 +832,9 @@ func TestSystemReadsAreNotNamedOutsideTheKubernetesPackage(t *testing.T) {
 			return err
 		}
 		parsed++
+		if strings.HasPrefix(directory, own+string(filepath.Separator)) {
+			subpackages++
+		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			if ident, ok := node.(*ast.Ident); ok && forbidden[ident.Name] {
 				t.Errorf("%s names %s", name, ident.Name)
@@ -833,10 +846,13 @@ func TestSystemReadsAreNotNamedOutsideTheKubernetesPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"cmd", "pkg/agent", "pkg/controllers", "pkg/routes"} {
+	for _, required := range []string{"cmd", "pkg/agent", "pkg/controllers", "pkg/routes", "pkg/kubernetes/breaklogs"} {
 		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(required))); err != nil {
 			t.Fatalf("the walk does not cover %s: %v", required, err)
 		}
+	}
+	if subpackages == 0 {
+		t.Fatal("the walk skipped the subpackages of this package")
 	}
 	if parsed < 100 {
 		t.Fatalf("only %d source files were checked", parsed)

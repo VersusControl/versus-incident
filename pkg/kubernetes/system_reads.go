@@ -22,6 +22,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	"github.com/VersusControl/versus-incident/pkg/logging"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // System reads are fixed, read-only cluster reads made by a background worker
@@ -55,6 +56,9 @@ const (
 	// systemReadSettingsMaxAge is how long a loaded learning setting is
 	// trusted before it is read from storage again.
 	systemReadSettingsMaxAge = 30 * time.Second
+	// systemReadSettingsWait is how long a read waits for the saved setting
+	// before it refuses as settings_unavailable.
+	systemReadSettingsWait = 5 * time.Second
 	// systemReadTimeout bounds one request of a system read.
 	systemReadTimeout = 20 * time.Second
 	// systemReadCallTimeout bounds one whole call, every namespace included.
@@ -139,8 +143,8 @@ const (
 // SystemReadError is the only error a system read returns. Class is one of
 // the cause classes; Reason says why a refused read was refused. A refusal
 // and a forbidden answer match ErrForbidden, too_large matches
-// ErrResponseTooLarge, a timeout matches context.DeadlineExceeded and the
-// rest match ErrClusterUnavailable.
+// ErrResponseTooLarge, a timeout matches context.DeadlineExceeded, not_found
+// matches ErrNotFound and the rest match ErrClusterUnavailable.
 type SystemReadError struct {
 	Class  string
 	Reason string
@@ -161,6 +165,8 @@ func (err *SystemReadError) Unwrap() error {
 		return ErrResponseTooLarge
 	case SystemReadTimeout:
 		return context.DeadlineExceeded
+	case SystemReadNotFound:
+		return ErrNotFound
 	default:
 		return ErrClusterUnavailable
 	}
@@ -198,6 +204,13 @@ type SystemReadCounters struct {
 	// LastCause is the cause class of the last read that failed in full or
 	// in part; it clears when a read succeeds in full.
 	LastCause string `json:"last_cause,omitempty"`
+	// StreamsOpen counts log streams open now. Lines counts log lines
+	// returned, Truncated the lines cut to the line limit, and Closes the
+	// streams that ended, by close reason.
+	StreamsOpen int               `json:"streams_open,omitempty"`
+	Lines       uint64            `json:"lines,omitempty"`
+	Truncated   uint64            `json:"truncated,omitempty"`
+	Closes      map[string]uint64 `json:"closes,omitempty"`
 }
 
 // ContainerUsage is one container's usage in a Pod metrics sample.
@@ -293,10 +306,20 @@ type SystemReads struct {
 	warn  func(key, cause, format string, args ...any)
 	clear func(key string)
 
-	mu       sync.Mutex
-	settings map[string]systemReadSettings
-	rotation map[systemReadKey]int
-	counters map[systemReadKey]*SystemReadCounters
+	// logLimits bounds log reads; tests lower them.
+	logLimits systemLogLimits
+	// newLogPace makes one stream's byte rate limiter; tests replace it.
+	newLogPace func() systemLogPace
+
+	// settingsWait bounds how long a read waits for the saved setting.
+	settingsWait time.Duration
+
+	mu         sync.Mutex
+	logStreams systemLogStreams
+	settings   map[string]systemReadSettings
+	loading    map[string]*systemSettingsLoad
+	rotation   map[systemReadKey]int
+	counters   map[systemReadKey]*SystemReadCounters
 }
 
 type systemReadSettings struct {
@@ -355,9 +378,14 @@ func EnableSystemReads(options SystemReadsOptions) (*SystemReads, error) {
 		clear: func(key string) {
 			throttle.Clear(key, "kubernetes: system read %s recovered", key)
 		},
-		settings: map[string]systemReadSettings{},
-		rotation: map[systemReadKey]int{},
-		counters: map[systemReadKey]*SystemReadCounters{},
+		logLimits:    defaultSystemLogLimits(),
+		newLogPace:   newSystemLogPace,
+		logStreams:   systemLogStreams{perCluster: map[string]int{}},
+		settings:     map[string]systemReadSettings{},
+		loading:      map[string]*systemSettingsLoad{},
+		settingsWait: systemReadSettingsWait,
+		rotation:     map[systemReadKey]int{},
+		counters:     map[systemReadKey]*SystemReadCounters{},
 	}, nil
 }
 
@@ -391,6 +419,10 @@ func (reads *SystemReads) Counters() []SystemReadCounters {
 		if counter.Causes != nil {
 			copied.Causes = make(map[string]uint64, len(counter.Causes))
 			maps.Copy(copied.Causes, counter.Causes)
+		}
+		if counter.Closes != nil {
+			copied.Closes = make(map[string]uint64, len(counter.Closes))
+			maps.Copy(copied.Closes, counter.Closes)
 		}
 		result = append(result, copied)
 	}
@@ -464,7 +496,13 @@ func (reads *SystemReads) admit(ctx context.Context, clusterID string, lane Syst
 	if service.recovery.requestGateError(reads.orgID) != nil {
 		return nil, reads.unavailable(key, SystemReadRefusedCredential)
 	}
-	learning, err := reads.learning(service, clusterID)
+	// A log read keeps its stream open, so it opens only on a setting as
+	// fresh as the stream's own recheck would read.
+	maxAge := systemReadSettingsMaxAge
+	if lane == SystemReadLaneLogs {
+		maxAge = reads.logLimits.recheck
+	}
+	learning, err := reads.learningWithin(service, clusterID, maxAge)
 	if err != nil {
 		return nil, reads.refuse(key, SystemReadRefusedSettings)
 	}
@@ -484,6 +522,8 @@ func laneEnabled(learning breaklogs.Learning, lane SystemReadLane) bool {
 	switch lane {
 	case SystemReadLaneMetrics:
 		return learning.Metrics
+	case SystemReadLaneLogs:
+		return learning.Logs
 	default:
 		return false
 	}
@@ -503,23 +543,79 @@ func (reads *SystemReads) countedCluster(clusterID string) string {
 // learning returns the cluster's saved learning setting, read from storage at
 // most every systemReadSettingsMaxAge. A failed load is never cached.
 func (reads *SystemReads) learning(service *Service, clusterID string) (breaklogs.Learning, error) {
+	return reads.learningWithin(service, clusterID, systemReadSettingsMaxAge)
+}
+
+// learningWithin is learning with a shorter trust period, for an open stream
+// that must see a change sooner.
+func (reads *SystemReads) learningWithin(service *Service, clusterID string, maxAge time.Duration) (breaklogs.Learning, error) {
+	maxAge = min(maxAge, systemReadSettingsMaxAge)
 	now := reads.now()
 	reads.mu.Lock()
 	cached, ok := reads.settings[clusterID]
 	reads.mu.Unlock()
-	if age := now.Sub(cached.loadedAt); ok && age >= 0 && age < systemReadSettingsMaxAge {
+	if age := now.Sub(cached.loadedAt); ok && age >= 0 && age < maxAge {
 		return cached.learning, nil
 	}
-	provider, key := service.logSettingsStore()
+	// The store read takes no context, so it runs on its own and is waited
+	// for a bounded time: a store that does not answer refuses the read
+	// instead of holding it. At most one read per cluster is in flight; a
+	// caller that finds one waits for it rather than starting another.
+	reads.mu.Lock()
+	load := reads.loading[clusterID]
+	if load == nil {
+		load = &systemSettingsLoad{done: make(chan struct{}), startedAt: now}
+		reads.loading[clusterID] = load
+		provider, key := service.logSettingsStore()
+		go reads.loadSettings(clusterID, provider, key, now, load)
+	} else {
+		load.joined++
+	}
+	reads.mu.Unlock()
+	timer := time.NewTimer(reads.settingsWait)
+	defer timer.Stop()
+	select {
+	case <-load.done:
+		// A read joined late may get an answer that started before its own
+		// trust period; it refuses that answer, as it would a cached one.
+		if load.err == nil && now.Sub(load.startedAt) >= maxAge {
+			return breaklogs.Learning{}, errSystemSettingsSlow
+		}
+		return load.learning, load.err
+	case <-timer.C:
+		return breaklogs.Learning{}, errSystemSettingsSlow
+	}
+}
+
+// errSystemSettingsSlow is a settings load that did not answer in time.
+var errSystemSettingsSlow = errors.New("kubernetes: learning settings did not load in time")
+
+// systemSettingsLoad is one settings read in flight for a cluster.
+type systemSettingsLoad struct {
+	done      chan struct{}
+	startedAt time.Time
+	// joined counts the reads that waited on this load instead of starting
+	// one; guarded by SystemReads.mu.
+	joined   int
+	learning breaklogs.Learning
+	err      error
+}
+
+// loadSettings reads one cluster's setting, caches a success and ends the
+// in-flight read. A failed load is never cached.
+func (reads *SystemReads) loadSettings(clusterID string, provider storage.Provider, key string, now time.Time, load *systemSettingsLoad) {
 	state, err := breaklogs.LoadSettings(provider, key)
 	reads.mu.Lock()
 	defer reads.mu.Unlock()
+	delete(reads.loading, clusterID)
 	if err != nil {
 		delete(reads.settings, clusterID)
-		return breaklogs.Learning{}, err
+		load.err = err
+	} else {
+		reads.settings[clusterID] = systemReadSettings{learning: state.Settings.Learning, loadedAt: now}
+		load.learning = state.Settings.Learning
 	}
-	reads.settings[clusterID] = systemReadSettings{learning: state.Settings.Learning, loadedAt: now}
-	return state.Settings.Learning, nil
+	close(load.done)
 }
 
 func (reads *SystemReads) askPolicy(ctx context.Context, clusterID string, lane SystemReadLane, namespace string) bool {
@@ -623,7 +719,10 @@ func (reads *SystemReads) finish(admission *systemAdmission, tally systemTally, 
 	readKey := admission.key.cluster + "/" + admission.key.read
 	switch tally.cause {
 	case SystemReadForbidden:
-		reads.warn(readKey, SystemReadForbidden, "kubernetes: cluster %s cannot list %s for learning (forbidden); grant list on %s to the reader role, or turn off metrics learning for the cluster", admission.key.cluster, systemReadResource(admission.key.read), systemReadResource(admission.key.read))
+		verb, resource := systemReadAccess(admission.key.read)
+		reads.warn(readKey, SystemReadForbidden, "kubernetes: cluster %s cannot %s %s for learning (forbidden); grant %s on %s to the reader role, or turn off %s learning for the cluster", admission.key.cluster, verb, resource, verb, resource, admission.key.lane)
+	case SystemReadUnauthorized:
+		reads.warn(readKey, SystemReadUnauthorized, "kubernetes: cluster %s refused a Pod log read for learning (unauthorized); the kubelet of the Pod's node may be refusing the API server, check the kubelet's client certificate settings on that node", admission.key.cluster)
 	case "":
 		reads.clear(readKey)
 	}
@@ -636,13 +735,17 @@ func (reads *SystemReads) finish(admission *systemAdmission, tally systemTally, 
 	return nil
 }
 
-// systemReadResource names the Kubernetes resource a read lists, for the
-// operator.
-func systemReadResource(read string) string {
-	if read == systemReadPodMetrics {
-		return "pods.metrics.k8s.io"
+// systemReadAccess names the verb and Kubernetes resource a read needs, for
+// the operator.
+func systemReadAccess(read string) (verb, resource string) {
+	switch read {
+	case systemReadPodMetrics:
+		return "list", "pods.metrics.k8s.io"
+	case systemReadPodLog, systemReadPreviousPodLog:
+		return "get", "pods/log"
+	default:
+		return "list", "events"
 	}
-	return "events"
 }
 
 // systemReadCause reduces an error to its cause class.
