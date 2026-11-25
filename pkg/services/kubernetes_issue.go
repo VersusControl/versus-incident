@@ -12,6 +12,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
@@ -54,6 +55,35 @@ func kubernetesIssueParams(ctx context.Context, severity string) map[string]stri
 	return map[string]string{"oncall_enable": "false"}
 }
 
+// scrubIssueContent bounds and scrubs the text in an issue's template
+// content in place: strings are cut to 512 bytes, lists to their first lines
+// of 256 bytes, whitespace is collapsed, and each value is scrubbed with its
+// field name known, so a value under a name like password is replaced whole.
+func scrubIssueContent(content map[string]interface{}, scrubber core.Scrubber) {
+	for key, value := range content {
+		switch v := value.(type) {
+		case string:
+			if len(v) > 512 {
+				v = v[:512]
+			}
+			content[key] = redaction.ScrubLabel(key, strings.Join(strings.Fields(v), " "), scrubber.Scrub)
+		case []string:
+			limit := 5
+			if key == "Changes" {
+				limit = 3
+			}
+			lines := []string{}
+			for _, line := range v[:min(len(v), limit)] {
+				if len(line) > 256 {
+					line = line[:256]
+				}
+				lines = append(lines, redaction.ScrubLabel(key, strings.Join(strings.Fields(line), " "), scrubber.Scrub))
+			}
+			content[key] = lines
+		}
+	}
+}
+
 func kubernetesIssueContent(a kubernetes.IssueAlert, publicHost string) map[string]interface{} {
 	severity := "medium"
 	if a.Severity == "critical" {
@@ -79,29 +109,7 @@ func kubernetesIssueContent(a kubernetes.IssueAlert, publicHost string) map[stri
 		delete(c, "Changes")
 		delete(c, "HistoryIncomplete")
 	}
-	scrubber := reportScrubber()
-	for key, value := range c {
-		switch v := value.(type) {
-		case string:
-			if len(v) > 512 {
-				v = v[:512]
-			}
-			c[key] = scrubber.Scrub(strings.Join(strings.Fields(v), " "))
-		case []string:
-			limit := 5
-			if key == "Changes" {
-				limit = 3
-			}
-			lines := []string{}
-			for _, line := range v[:min(len(v), limit)] {
-				if len(line) > 256 {
-					line = line[:256]
-				}
-				lines = append(lines, scrubber.Scrub(strings.Join(strings.Fields(line), " ")))
-			}
-			c[key] = lines
-		}
-	}
+	scrubIssueContent(c, reportScrubber())
 	u, err := url.Parse(publicHost)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
 		return c

@@ -982,3 +982,35 @@ func TestRedirectDoesNotForwardCredentials(t *testing.T) {
 		t.Fatalf("followed redirect: err=%v requests=%d", err, redirects)
 	}
 }
+
+// TestReadReplacesValuesUnderSecretFieldNames covers result fields named
+// like secrets: the value is replaced, the field name and the other fields
+// are kept.
+func TestReadReplacesValuesUnderSecretFieldNames(t *testing.T) {
+	rows := []map[string]any{{"index": "main", "_time": "2026-09-28T00:00:00Z", "_raw": "login ok", "host": "node-1", "db_password": "hunter2", "token_count": "5"}}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPost:
+			fmt.Fprint(writer, `{"sid":"123.456"}`)
+		case request.Method == http.MethodDelete:
+			writer.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(request.URL.Path, "/results"):
+			_ = json.NewEncoder(writer).Encode(map[string]any{"results": rows})
+		default:
+			fmt.Fprint(writer, `{"entry":[{"content":{"isDone":true}}]}`)
+		}
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentSplunkSourceConfig{Address: server.URL, Search: "index=MAIN", ExtraFields: []string{"db_password", "token_count"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Read(context.Background(), ReadRequest{Limit: 1})
+	if err != nil || result.Count != 1 {
+		t.Fatalf("read = %+v, %v", result, err)
+	}
+	record := result.Records[0]
+	if record.Fields["db_password"] != "<REDACTED:secret>" || record.Fields["token_count"] != "5" || record.Fields["host"] != "node-1" || record.Message != "login ok" {
+		t.Fatalf("record = %+v", record)
+	}
+}

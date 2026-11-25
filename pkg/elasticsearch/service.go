@@ -13,6 +13,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 )
 
 const (
@@ -332,7 +333,7 @@ func (service *Service) Search(ctx context.Context, options SearchOptions) (Sear
 		projected := make(map[string]any, len(fields))
 		for _, field := range fields {
 			if value, ok := lookup(item.Source, field); ok {
-				projected[field] = service.scrubValue(value)
+				projected[field] = redaction.ScrubField(field, value, func(text string) string { return service.scrub(text, 4096) })
 			}
 		}
 		result.Hits = append(result.Hits, SearchHit{ID: service.scrub(item.ID, 256), Fields: projected})
@@ -779,25 +780,4 @@ func (service *Service) scrub(value string, limit int) string {
 		value = service.scrubber.Scrub(value)
 	}
 	return boundedString(value, limit)
-}
-
-func (service *Service) scrubValue(value any) any {
-	switch typed := value.(type) {
-	case string:
-		return service.scrub(typed, 4096)
-	case []any:
-		result := make([]any, len(typed))
-		for index := range typed {
-			result[index] = service.scrubValue(typed[index])
-		}
-		return result
-	case map[string]any:
-		result := make(map[string]any, len(typed))
-		for key, child := range typed {
-			result[key] = service.scrubValue(child)
-		}
-		return result
-	default:
-		return value
-	}
 }
