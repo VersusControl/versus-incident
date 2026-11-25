@@ -5,6 +5,7 @@ import { useCursorPagination } from "./pagination";
 import { hasKubernetesPublication, kubernetesAccessLost, kubernetesCursorExpired, kubernetesFailureCode, retainKubernetesPublication } from "./kubernetesContinuity";
 import { focusedCrashes } from "./kubernetesFocusedHistory";
 import { historyOff } from "./kubernetesNamespaceAccess";
+import { kubernetesFailureBackingOff, kubernetesFailureRefetchInterval } from "./kubernetesFailureBackoff";
 
 export function kubernetesKey(cluster: string | undefined, ...parts: readonly unknown[]) {
   return ["kubernetes", cluster ?? "_", ...parts] as const;
@@ -66,20 +67,39 @@ export function useKubernetesQuery<T>(options: UseQueryOptions<T, Error, T, read
       return data;
     } : queryFn,
     queryKey: key(...options.queryKey),
+    // A read that keeps failing backs off instead of asking at its normal
+    // cadence; one the server says not to retry waits for the reader.
+    refetchInterval: (current) => kubernetesFailureRefetchInterval(current,
+      typeof options.refetchInterval === "function" ? options.refetchInterval(current) : options.refetchInterval),
     structuralSharing: (previous, incoming) => retainKubernetesPublication(
       kubernetesAccessLost(cache.getQueryState(key(...options.queryKey))?.error) ? undefined : previous as T | undefined,
       incoming as T,
     ),
   });
-  const accessLost = kubernetesAccessLost(query.error);
   const scopedKey = JSON.stringify(key(...options.queryKey));
+  // A read with no data that is asked again goes back to "pending" until it
+  // answers. Its failure is still the truth on screen meanwhile: dropping it
+  // would swap the error for a loader, unmount whatever the failure gates and
+  // mount it again — and every remount asks its own failing reads once more.
+  // A reset read (the reader's fresh start after lost access) forgets its
+  // failure, so only the failure the cache still records is held.
+  const lastFailure = useRef<{ key: string; at: number; error: Error }>();
+  if (query.error) lastFailure.current = { key: scopedKey, at: query.errorUpdatedAt, error: query.error };
+  else if (!query.isPending || !query.isFetching) lastFailure.current = undefined;
+  const heldFailure = query.isPending && query.isFetching && query.errorUpdatedAt > 0
+    && lastFailure.current?.key === scopedKey && lastFailure.current.at === query.errorUpdatedAt ? lastFailure.current.error : undefined;
+  const settled = heldFailure ? {
+    ...query, status: "error" as const, error: heldFailure, isError: true as const, isPending: false as const, isLoading: false as const,
+    isLoadingError: true as const, isRefetchError: false as const, isSuccess: false as const, isRefetching: true,
+  } : query;
+  const accessLost = kubernetesAccessLost(settled.error);
   const authorityFence = cache.getQueryData<symbol>(key("kubernetes-authority-fence"));
   const lastGood = useRef<{ key: string; data: T; at: number; fence: symbol | undefined }>();
   if (lastGood.current && lastGood.current.fence !== authorityFence) lastGood.current = undefined;
-  const invalidRequest = query.error instanceof ApiError && [400, 409, 410, 422].includes(query.error.status);
+  const invalidRequest = settled.error instanceof ApiError && [400, 409, 410, 422].includes(settled.error.status);
   if (accessLost || invalidRequest) lastGood.current = undefined;
   else if (query.data !== undefined) lastGood.current = { key: scopedKey, data: query.data, at: query.dataUpdatedAt || lastGood.current?.at || Date.now(), fence: authorityFence };
-  const retained = query.data ?? (query.isError && lastGood.current?.key === scopedKey ? lastGood.current.data : undefined);
+  const retained = query.data ?? (settled.isError && lastGood.current?.key === scopedKey ? lastGood.current.data : undefined);
   useEffect(() => {
     if (!accessLost) return;
     // Keep the authoritative error, but discard its now-unauthorized cache.
@@ -88,7 +108,7 @@ export function useKubernetesQuery<T>(options: UseQueryOptions<T, Error, T, read
   const missingPublication = query.data !== undefined && !hasKubernetesPublication(query.data, firstReadyAt);
   const unpublished = missingPublication && (query.data as { sync?: { state?: string } }).sync?.state === "syncing";
   const hidden = accessLost || missingPublication;
-  return { ...query, unpublished, data: hidden ? undefined : retained, dataUpdatedAt: query.dataUpdatedAt || lastGood.current?.at || 0 };
+  return { ...settled, unpublished, data: hidden ? undefined : retained, dataUpdatedAt: query.dataUpdatedAt || lastGood.current?.at || 0 };
 }
 
 /**
@@ -183,6 +203,8 @@ export function useKubernetesCommitEvents(enabled: boolean, namespaceOnly = fals
       "kubernetes-issues", "kubernetes-top", "kubernetes-diagnosis", "kubernetes-drawer-changes",
       "kubernetes-changes", "kubernetes-crashes", "kubernetes-timeline", "kubernetes-break-logs",
     ]);
+    // Reads that were already in flight when a commit was noticed, asked once
+    // more when that read settles, since its answer may predate the commit.
     const pending = new Set<string>();
     const recoveryFamilies = new Set(["kubernetes-overview", "kubernetes-sync-health"]);
     const recover = () => {
@@ -190,28 +212,60 @@ export function useKubernetesCommitEvents(enabled: boolean, namespaceOnly = fals
         void cache.invalidateQueries({ queryKey: key(family) }, { cancelRefetch: false });
       }
     };
+    // Change notices and read starts are numbered in the order they happen,
+    // so a refresh can tell whether a read started after the latest change,
+    // even within the same millisecond.
+    let order = 0;
+    const fetchStarts = new WeakMap<object, number>();
+    // The latest change not yet refreshed for, and when the last refresh ran.
+    let latestChange: number | undefined;
+    let lastFlushAt = Number.NEGATIVE_INFINITY;
+    // The last committed generation and sync report the feed announced. They
+    // outlive a single connection: each reconnect opens with the current
+    // generation, and one that has not moved changes nothing on screen.
+    let generation: string | undefined;
+    let syncSignature: string | undefined;
     const unsubscribe = cache.getQueryCache().subscribe(event => {
-      if (disposed || event.type !== "updated" || event.query.state.fetchStatus !== "idle"
-        || !pending.delete(event.query.queryHash)) return;
+      if (disposed || event.type !== "updated") return;
+      if (event.action.type === "fetch") fetchStarts.set(event.query, ++order);
+      if (event.query.state.fetchStatus !== "idle" || !pending.delete(event.query.queryHash)) return;
       if (denied || kubernetesAccessLost(event.query.state.error)) return;
       void cache.invalidateQueries({ queryKey: event.query.queryKey, exact: true }, { cancelRefetch: false });
     });
+    const refresh = () => {
+      flush = undefined;
+      if (disposed || denied || latestChange === undefined) return;
+      const change = latestChange;
+      latestChange = undefined;
+      lastFlushAt = Date.now();
+      // A read that started after the latest change already answers for every
+      // change gathered here, whether it is still running or has settled;
+      // asking again would only repeat it. A read that started between two of
+      // them may hold the earlier state, so it is asked again.
+      const covered = (query: object) => (fetchStarts.get(query) ?? 0) > change;
+      for (const query of cache.getQueryCache().findAll({ queryKey: key() })) {
+        if (families.has(String(query.queryKey[2])) && query.isActive() && query.state.fetchStatus === "fetching" && !covered(query)) pending.add(query.queryHash);
+      }
+      // Do not cancel a slow persisted read on every commit. Mark it stale
+      // and schedule one trailing refresh when its current request settles.
+      // A history page that says history is off for this identity cannot
+      // change with a commit; the page asks again when the access changes.
+      // A read waiting out its failure backoff is asked again when the
+      // backoff ends, not on every notice.
+      void cache.invalidateQueries({ queryKey: key(), predicate: query =>
+        families.has(String(query.queryKey[2])) && !covered(query) && !historyOff(query.state.data) && !kubernetesFailureBackingOff(query),
+      }, { cancelRefetch: false });
+    };
+    // Every change notice lands here. Notices are gathered into one refresh:
+    // the first after a quiet spell runs shortly after it arrives, and any that
+    // follow wait until the refresh interval has passed, so a burst of commits
+    // (a backlog after a recovery, a busy cluster) asks each read once per
+    // interval rather than once per commit.
     const invalidate = () => {
-      if (disposed || denied || flush) return;
-      flush = setTimeout(() => {
-        flush = undefined;
-        if (disposed || denied) return;
-        for (const query of cache.getQueryCache().findAll({ queryKey: key() })) {
-          if (families.has(String(query.queryKey[2])) && query.isActive() && query.state.fetchStatus === "fetching") pending.add(query.queryHash);
-        }
-        // Do not cancel a slow persisted read on every commit. Mark it stale
-        // and schedule one trailing refresh when its current request settles.
-        // A history page that says history is off for this identity cannot
-        // change with a commit; the page asks again when the access changes.
-        void cache.invalidateQueries({ queryKey: key(), predicate: query =>
-          families.has(String(query.queryKey[2])) && !historyOff(query.state.data),
-        }, { cancelRefetch: false });
-      }, 100);
+      if (disposed || denied) return;
+      latestChange = ++order;
+      if (flush) return;
+      flush = setTimeout(refresh, Math.max(commitRefreshDelayMs, lastFlushAt + commitRefreshIntervalMs - Date.now()));
     };
     const run = async () => {
       const currentController = new AbortController();
@@ -238,7 +292,8 @@ export function useKubernetesCommitEvents(enabled: boolean, namespaceOnly = fals
           if (event.event === "committed" && (!Number.isSafeInteger(payload.revision) || !Array.isArray(payload.kinds)
             || !payload.kinds.every(kind => typeof kind === "string"))) throw new Error("Invalid commit revision");
           if (event.event === "sync" && (typeof payload.state !== "string" || typeof payload.age !== "number")) throw new Error("Invalid sync event");
-          if (event.event === "sync") setSync({ state: String(payload.state), reason: typeof payload.reason === "string" ? payload.reason : undefined, age: Number(payload.age) });
+          const reason = typeof payload.reason === "string" ? payload.reason : undefined;
+          if (event.event === "sync") setSync({ state: String(payload.state), reason, age: Number(payload.age) });
           denied = false;
           recoveryOnly = false;
           connected = true;
@@ -252,11 +307,27 @@ export function useKubernetesCommitEvents(enabled: boolean, namespaceOnly = fals
             if (identity && seen.has(identity)) return;
             if (identity) { seen.add(identity); lastID = identity; }
             if (seen.size > 1024) seen.delete(seen.values().next().value!);
+            // Each connection opens with the current generation. One that has
+            // not moved since the last connection has nothing new to show; any
+            // other value, lower ones included (revisions restart with the
+            // server), is a change.
+            const next = `${String(payload.revision)}:${String(payload.evidence_sequence ?? "")}`;
+            if (next === generation) return;
+            generation = next;
+            invalidate();
+            return;
           }
-          // A new connection's initial snapshot is deliberately not deduped
-          // against the old process: revisions can reset after a restart.
-          if (event.event === "committed") invalidate();
-          else void cache.invalidateQueries({ queryKey: key("kubernetes-sync-health") }, { cancelRefetch: false });
+          // The sync event repeats the same state every second while the
+          // cluster is healthy; the report is asked again only when the state
+          // or its cause changes; a new generation reaches it through the
+          // commit refresh. The report keeps its own poll for everything else.
+          // The first event is measured against the report already on screen.
+          const signature = JSON.stringify([payload.state, reason ?? ""]);
+          const changed = syncSignature === undefined
+            ? cache.getQueryData<{ state?: unknown }>(key("kubernetes-sync-health"))?.state !== payload.state
+            : signature !== syncSignature;
+          syncSignature = signature;
+          if (changed) void cache.invalidateQueries({ queryKey: key("kubernetes-sync-health") }, { cancelRefetch: false });
         }, currentController.signal, lastID);
       } catch (error) {
         cleanEnd = false;
@@ -275,6 +346,12 @@ export function useKubernetesCommitEvents(enabled: boolean, namespaceOnly = fals
           pending.clear();
           clearTimeout(flush);
           flush = undefined;
+          latestChange = undefined;
+          // Access came back means every read is asked afresh: the first
+          // generation after the fence is a change even if it has not moved.
+          generation = undefined;
+          syncSignature = undefined;
+          lastFlushAt = Number.NEGATIVE_INFINITY;
           const filters = {
             queryKey: key(),
             predicate: (query: { queryKey: readonly unknown[] }) => query.queryKey[2] !== "kubernetes-authority-fence"
@@ -337,6 +414,16 @@ export function useKubernetesCommitEvents(enabled: boolean, namespaceOnly = fals
  * still silent after five seconds is treated as down.
  */
 export const commitStreamGraceMs = 5_000;
+
+/** How soon after a first change notice the views are asked again. */
+export const commitRefreshDelayMs = 100;
+
+/**
+ * The shortest time between two refreshes driven by the commit feed. Notices
+ * that arrive sooner are gathered into the next refresh, so each read is asked
+ * at most once per interval however many commits land.
+ */
+export const commitRefreshIntervalMs = 5_000;
 
 /** Longest wait between commit-stream reconnects while the server keeps failing. */
 export const commitStreamRetryCapMs = 60_000;

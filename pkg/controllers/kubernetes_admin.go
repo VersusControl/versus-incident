@@ -128,7 +128,9 @@ func (controller *KubernetesAdminController) requireClusterView(ctx *fiber.Ctx, 
 		service, err = controller.resolve(middleware.OrgFromContext(ctx), clusterID)
 	}
 	if err != nil {
-		credentialFault := errors.Is(err, kubernetes.ErrCredentialUnavailable) || errors.Is(err, kubernetes.ErrUnauthorized)
+		// A connector that is reconnecting, or whose rebuild waits on the
+		// history store, still has local state to report from.
+		credentialFault := errors.Is(err, kubernetes.ErrCredentialUnavailable) || errors.Is(err, kubernetes.ErrUnauthorized) || kubernetes.ConnectorRecovering(err)
 		if !reportable || !credentialFault {
 			return writeKubernetes(ctx, nil, connectorResolutionError(err))
 		}
@@ -804,8 +806,14 @@ func writeKubernetes(ctx *fiber.Ctx, value any, err error) error {
 		status = fiber.StatusGatewayTimeout
 	}
 	switch detail.Code {
-	case "history_store_timeout", "history_store_unavailable", "history_not_established", "history_upgrading":
+	case "history_store_timeout", "history_store_unavailable", "server_timeout":
 		status = fiber.StatusServiceUnavailable
+		ctx.Set(fiber.HeaderRetryAfter, "5")
+	case "history_not_established", "history_upgrading":
+		status = fiber.StatusServiceUnavailable
+	case "connector_reconnecting":
+		status = fiber.StatusServiceUnavailable
+		ctx.Set(fiber.HeaderRetryAfter, "5")
 	case "history_authority_denied", "authority_mismatch":
 		status = fiber.StatusForbidden
 	}

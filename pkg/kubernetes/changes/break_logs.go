@@ -1,6 +1,7 @@
 package changes
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
@@ -90,12 +91,16 @@ func (store *Store) ReleaseBreakSettleSlot(token string) error {
 }
 
 func (store *Store) BreakLogs(now time.Time) (breaklogs.State, error) {
+	return store.breakLogsContext(context.Background(), now)
+}
+
+func (store *Store) breakLogsContext(ctx context.Context, now time.Time) (breaklogs.State, error) {
 	if store == nil {
 		return breaklogs.State{}, ErrStoreLimit
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	current, err := store.read()
+	current, err := store.readContext(ctx)
 	if err != nil {
 		return breaklogs.State{}, err
 	}
@@ -150,13 +155,18 @@ func (store *Store) BreakLogs(now time.Time) (breaklogs.State, error) {
 }
 
 func (store *Store) CommitBreakLogs(items []breaklogs.Snapshot, gaps []breaklogs.Gap, job, owner string, now time.Time, manifests ...breaklogs.Manifest) error {
+	return store.CommitBreakLogsContext(context.Background(), items, gaps, job, owner, now, manifests...)
+}
+
+// CommitBreakLogsContext is CommitBreakLogs with its store reads and writes stopping when ctx ends.
+func (store *Store) CommitBreakLogsContext(ctx context.Context, items []breaklogs.Snapshot, gaps []breaklogs.Gap, job, owner string, now time.Time, manifests ...breaklogs.Manifest) error {
 	if store == nil {
 		return ErrStoreLimit
 	}
 	if _, ok := store.provider.(storage.BlobCAS); !ok {
 		return ErrStoreLimit
 	}
-	return store.commitSnapshot(func(current *snapshot) error {
+	return store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if owner == "" && current.Lease != nil {
 			if current.Lease.Expires.After(time.Now().UTC()) {
 				return ErrLeaseLost
@@ -181,14 +191,20 @@ func validBreakLease(current *snapshot, owner string) bool {
 }
 
 func (store *Store) ObserveBreakPods(pods []breaklogs.ManifestPod, owner string, now time.Time) error {
+	return store.ObserveBreakPodsContext(context.Background(), pods, owner, now)
+}
+
+// ObserveBreakPodsContext is ObserveBreakPods with its store reads and writes
+// stopping when ctx ends.
+func (store *Store) ObserveBreakPodsContext(ctx context.Context, pods []breaklogs.ManifestPod, owner string, now time.Time) error {
 	if store == nil {
 		return ErrStoreLimit
 	}
-	view, err := store.BreakLogs(time.Now().UTC())
+	view, err := store.breakLogsContext(ctx, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	return store.commitSnapshot(func(current *snapshot) error {
+	return store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if !validBreakLease(current, owner) {
 			return ErrLeaseLost
 		}
@@ -209,15 +225,21 @@ func (store *Store) ObserveBreakPods(pods []breaklogs.ManifestPod, owner string,
 // ClaimBreakSettle persists an attempt before any network request. Lost queries
 // consume that attempt; failover cannot issue an unbounded replay.
 func (store *Store) ClaimBreakSettle(id, owner string, now time.Time) (breaklogs.Manifest, error) {
+	return store.ClaimBreakSettleContext(context.Background(), id, owner, now)
+}
+
+// ClaimBreakSettleContext is ClaimBreakSettle with its store reads and writes
+// stopping when ctx ends.
+func (store *Store) ClaimBreakSettleContext(ctx context.Context, id, owner string, now time.Time) (breaklogs.Manifest, error) {
 	if store == nil || owner == "" {
 		return breaklogs.Manifest{}, ErrLeaseLost
 	}
-	view, err := store.BreakLogs(now)
+	view, err := store.breakLogsContext(ctx, now)
 	if err != nil {
 		return breaklogs.Manifest{}, err
 	}
 	var claimed breaklogs.Manifest
-	err = store.commitSnapshot(func(current *snapshot) error {
+	err = store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if !validBreakLease(current, owner) {
 			return ErrLeaseLost
 		}
@@ -257,10 +279,15 @@ func (store *Store) ClaimBreakSettle(id, owner string, now time.Time) (breaklogs
 }
 
 func (store *Store) CommitBreakSettle(claim breaklogs.Manifest, items []breaklogs.Snapshot, retry bool, owner string, now time.Time) error {
+	return store.CommitBreakSettleContext(context.Background(), claim, items, retry, owner, now)
+}
+
+// CommitBreakSettleContext is CommitBreakSettle with its store reads and writes stopping when ctx ends.
+func (store *Store) CommitBreakSettleContext(ctx context.Context, claim breaklogs.Manifest, items []breaklogs.Snapshot, retry bool, owner string, now time.Time) error {
 	if store == nil || owner == "" {
 		return ErrLeaseLost
 	}
-	return store.commitSnapshot(func(current *snapshot) error {
+	return store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if !validBreakLease(current, owner) {
 			return ErrLeaseLost
 		}
@@ -281,12 +308,17 @@ func (store *Store) CommitBreakSettle(claim breaklogs.Manifest, items []breaklog
 }
 
 func (store *Store) CheckCaptureLease(owner string) error {
+	return store.CheckCaptureLeaseContext(context.Background(), owner)
+}
+
+// CheckCaptureLeaseContext is CheckCaptureLease with its store reads and writes stopping when ctx ends.
+func (store *Store) CheckCaptureLeaseContext(ctx context.Context, owner string) error {
 	if store == nil {
 		return ErrStoreLimit
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	current, err := store.read()
+	current, err := store.readContext(ctx)
 	if err != nil {
 		return err
 	}

@@ -167,8 +167,8 @@ func (service *Service) observeBreakInventory(ctx context.Context, snapshot kube
 		if err != nil {
 			return
 		}
-		_ = service.commitCredential(ctx, func() error {
-			return store.ObserveBreakPods(service.scrubManifestPods(verifiedBreakPods(snapshot, state.PodHistory)), owner, breakPodObservationAt(snapshot))
+		_ = service.commitCredential(ctx, func(ctx context.Context) error {
+			return store.ObserveBreakPodsContext(ctx, service.scrubManifestPods(verifiedBreakPods(snapshot, state.PodHistory)), owner, breakPodObservationAt(snapshot))
 		})
 	}
 }
@@ -613,7 +613,7 @@ func (service *Service) runDemandBreakSettles(loop *captureLoop) {
 		if store != nil && loop.ctx.Err() == nil {
 			due, err := service.dueBreakSettles(now)
 			if err == nil && len(due) > 0 {
-				err = service.commitCredential(loop.ctx, func() error { return store.ClaimLease(loop.owner, now, 45*time.Second) })
+				err = service.commitCredential(loop.ctx, func(ctx context.Context) error { return store.ClaimLeaseContext(ctx, loop.owner, now, 45*time.Second) })
 				if err == nil {
 					owned, cancel := context.WithTimeout(loop.ctx, 45*time.Second)
 					owned = captureReadContext(owned, loop.owner)
@@ -679,9 +679,9 @@ func (service *Service) scheduleBreakSettles(ctx context.Context, owner string, 
 			continue
 		}
 		var claimed breaklogs.Manifest
-		err := service.commitCredential(ctx, func() error {
+		err := service.commitCredential(ctx, func(ctx context.Context) error {
 			var claimErr error
-			claimed, claimErr = store.ClaimBreakSettle(item.ID, owner, now)
+			claimed, claimErr = store.ClaimBreakSettleContext(ctx, item.ID, owner, now)
 			return claimErr
 		})
 		if err != nil {
@@ -774,7 +774,9 @@ func (service *Service) settleBreakLogs(parent context.Context, store *kubechang
 		}
 		break
 	}
-	if err := service.commitCredential(ctx, func() error { return store.CommitBreakSettle(manifest, items, retry, owner, time.Now().UTC()) }); err == nil {
+	if err := service.commitCredential(ctx, func(ctx context.Context) error {
+		return store.CommitBreakSettleContext(ctx, manifest, items, retry, owner, time.Now().UTC())
+	}); err == nil {
 		clearLinkedCache()
 	}
 }

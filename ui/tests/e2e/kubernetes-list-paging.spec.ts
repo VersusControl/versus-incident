@@ -106,7 +106,19 @@ function truncatedIssues(): KubernetesIssue[] {
   ];
 }
 
+// Every page after the first answers `count_unknown: true` and leaves the
+// count fields out; the first page owns the window's count.
+const countFields = ["total", "totals", "crash_count", "counts", "count_capped", "broken"];
+function laterPage<T extends object>(page: T): T {
+  return { ...Object.fromEntries(Object.entries(page).filter(([field]) => !countFields.includes(field))), count_unknown: true } as T;
+}
+
 function issuePage(state: Fixture, url: URL) {
+  const page = issueFirstPageShape(state, url);
+  return url.searchParams.get("cursor") && !url.searchParams.get("root_uid") ? laterPage(page) : page;
+}
+
+function issueFirstPageShape(state: Fixture, url: URL) {
   const cursor = url.searchParams.get("cursor");
   const severity = url.searchParams.get("severity") ?? "";
   const rootUID = url.searchParams.get("root_uid");
@@ -241,7 +253,12 @@ function nodePage(state: Fixture) {
   };
 }
 
-function timelinePage(state: Fixture): KubernetesTimelinePage {
+function timelinePage(state: Fixture, url: URL): KubernetesTimelinePage {
+  const page = timelineFirstPageShape(state);
+  return url.searchParams.get("cursor") ? laterPage(page) : page;
+}
+
+function timelineFirstPageShape(state: Fixture): KubernetesTimelinePage {
   const items = Array.from({ length: 50 }, (_, index) => ({
     type: "change" as const,
     id: `change-${index + 1}`,
@@ -335,7 +352,7 @@ async function installFixture(page: Page, state: Fixture) {
       if (resourceID === "core~v1~nodes") return answer(route, nodePage(state));
       return answer(route, { items: [], continue: "", truncated: false, sync });
     }
-    if (path === "/api/admin/kubernetes/timeline") return answer(route, timelinePage(state));
+    if (path === "/api/admin/kubernetes/timeline") return answer(route, timelinePage(state, url));
     // An opened Pod drawer reads its own describe; answer with the Pod it names
     // so the drawer renders a whole resource, not a malformed body.
     const describe = path.match(/^\/api\/admin\/kubernetes\/resources\/core~v1~pods\/([^/]+)\/describe$/);
@@ -513,7 +530,13 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       // (newer first_seen) stays after the broken ones.
       // "Broke" and its <time> are separate flex items, so innerText puts a
       // line break between them; compare the words, not the layout.
-      expect((await firstRow.innerText()).replace(/\s+/g, " ")).toContain("Broke " + await page.evaluate(iso => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }), "2026-11-05T15:38:00Z"));
+      // A break from a day other than the reader's today carries its date.
+      expect((await firstRow.innerText()).replace(/\s+/g, " ")).toContain("Broke " + await page.evaluate(iso => {
+        const at = new Date(iso);
+        const clock = at.toLocaleTimeString([], { hour12: false });
+        if (at.toDateString() === new Date().toDateString()) return clock;
+        return `${at.toLocaleDateString([], { month: "short", day: "numeric", ...(at.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) })}, ${clock}`;
+      }, "2026-11-05T15:38:00Z"));
       expect((await rowNames(page)).indexOf("Deployment search")).toBeGreaterThan((await rowNames(page)).indexOf("Deployment ledger"));
       await expect(section.locator('article[aria-label="Deployment search"]')).toContainText("First seen");
       // A nil broke_at sorts last in its severity group and reads as unknown.
@@ -1041,6 +1064,13 @@ test.describe("Kubernetes list paging, order and history warnings", () => {
       await expect(timeline.getByRole("navigation", { name: "Timeline pages" })).toBeVisible({ timeout: 30_000 });
       expect(await pagerText(page, timeline)).toContain("1–50 of 120");
       expect(await pagerText(page, timeline)).toContain("Page 1 / 3");
+      await expect(timeline.locator("[data-timeline-count]")).toHaveText("120 events and 0 crashes");
+      // A later page carries no count; the first page's count and pager total stay.
+      await timeline.getByRole("navigation", { name: "Timeline pages" }).getByRole("button", { name: "Next page" }).click();
+      await expect.poll(() => pagerText(page, timeline)).toContain("of 120");
+      await expect(timeline.locator("[data-timeline-count]")).toHaveText("120 events and 0 crashes");
+      await timeline.getByRole("navigation", { name: "Timeline pages" }).getByRole("button", { name: "Previous page" }).click();
+      await expect.poll(() => pagerText(page, timeline)).toContain("1–50 of 120");
       await assertPagerFits(page, timeline);
       await noHorizontalOverflow(page, `timeline totals ${viewport.name}`);
       await page.screenshot({ path: capturePath("kubernetes-list-paging-timeline-pager", viewport.width, "dark", "totals"), fullPage: true, animations: "disabled" });

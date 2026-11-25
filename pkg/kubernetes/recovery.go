@@ -59,6 +59,52 @@ type heldRequest struct{ cause error }
 func (held *heldRequest) Error() string { return held.cause.Error() }
 func (held *heldRequest) Unwrap() error { return held.cause }
 
+// errConnectorReconnecting is the held answer while the connector rebuilds its
+// connection for a reason that says nothing against the credential: a routine
+// token renewal, or a rebuild attempt that ran out of time. Versus retries on
+// its own, so it is never answered as a credential to restore or rotate.
+var errConnectorReconnecting = errors.New("kubernetes: connector is reconnecting")
+
+// rebuildStalled reports a connector rebuild that could not finish because the
+// collection it replaces did not stop in time. Its cause names why: the history
+// database when that collection was waiting on it, otherwise a reconnect that
+// Versus retries.
+type rebuildStalled struct{ cause error }
+
+func (err *rebuildStalled) Error() string {
+	return "kubernetes: connector rebuild waited for the previous collection to stop"
+}
+func (err *rebuildStalled) Unwrap() error { return err.cause }
+
+// ConnectorRecovering reports an answer the connector recovery gave instead of
+// a cluster read: a request held back while the connector reconnects, or a
+// rebuild that could not finish. Such an answer is about Versus's own
+// connection, so a report about the cluster can still be served from local
+// state.
+func ConnectorRecovering(err error) bool {
+	var held *heldRequest
+	var stalled *rebuildStalled
+	return errors.As(err, &held) || errors.As(err, &stalled)
+}
+
+// stallCause is the held answer for a recovery failure that is not a
+// credential fault. A storage fault keeps its storage class; anything else is
+// a reconnect Versus retries. It is a fixed value, so no failure text is kept.
+func stallCause(err error) error {
+	var stalled *rebuildStalled
+	if errors.As(err, &stalled) && stalled.cause != nil {
+		return stalled.cause
+	}
+	var saveFailure *captureStorageError
+	switch {
+	case errors.Is(err, errHistoryTimeout):
+		return errHistoryTimeout
+	case errors.Is(err, errHistoryUnavailable), errors.As(err, &saveFailure):
+		return errHistoryUnavailable
+	}
+	return errConnectorReconnecting
+}
+
 // clusterRecovery survives credential epochs. Neither request traffic nor a
 // successor's construction is evidence of recovery; only publication resets it.
 type clusterRecovery struct {
@@ -89,6 +135,12 @@ type clusterRecovery struct {
 	inFlight int
 	// closed is set when the registry closes.
 	closed bool
+	// stall is the held answer after a failure that says nothing against the
+	// credential, and renewing marks a rebuild for a routine token renewal.
+	// Neither closes the request gate; both only name why a request waits on a
+	// rebuild. A publication clears both.
+	stall    error
+	renewing bool
 }
 
 // beginAttempt marks a credential rebuild in flight for orgID. The failure
@@ -213,15 +265,49 @@ func (r *clusterRecovery) requestGateError(orgID string) error {
 }
 
 // gatedError is the answer for a request held back while recovery waits for
-// its next attempt: the stored cause when one is recorded, otherwise the bare
-// credential fault.
+// its next attempt: the stored cause when one is recorded, the bare credential
+// fault while a credential failure holds the gate, and otherwise why the
+// connector is reconnecting. A rebuild that no credential failure explains is
+// never answered as a credential to restore or rotate.
 func (r *clusterRecovery) gatedError(orgID string) error {
 	if r == nil {
 		return ErrCredentialUnavailable
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return gatedCause(r.scopes[""], r.scopes[orgID])
+	credential, scope := r.scopes[""], r.scopes[orgID]
+	if r.credentialRecordedLocked(orgID, time.Now()) {
+		return gatedCause(credential, scope)
+	}
+	if r.stall != nil {
+		return &heldRequest{cause: r.stall}
+	}
+	if r.renewing {
+		return &heldRequest{cause: errConnectorReconnecting}
+	}
+	return gatedCause(credential, scope)
+}
+
+// credentialRecordedLocked reports whether a credential failure still holds
+// this scope: a stored cause, or a gate that has not reopened yet.
+func (r *clusterRecovery) credentialRecordedLocked(orgID string, now time.Time) bool {
+	for _, gated := range []*recoveryScope{r.scopes[""], r.scopes[orgID]} {
+		if gated != nil && (gated.cause != nil || gated.denied || now.Before(gated.next)) {
+			return true
+		}
+	}
+	return false
+}
+
+// noteRebuild records why the credential epoch is being rebuilt: a routine
+// token renewal, or a retired credential.
+func (r *clusterRecovery) noteRebuild(renewal bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.renewing = renewal
 }
 
 // gatedCause picks the stored cause, the credential's own before the org
@@ -263,6 +349,7 @@ func (r *clusterRecovery) recovered() {
 	for _, scope := range r.scopes {
 		scope.next, scope.denied, scope.cause = time.Time{}, false, nil
 	}
+	r.stall, r.renewing = nil, false
 	for reason := range r.warned {
 		problems().Clear(credentialProblemKey(r.cluster, reason), "kubernetes: cluster %q credential check recovered", r.cluster)
 	}
@@ -313,13 +400,41 @@ func (r *clusterRecovery) failed(err error, client *Client, orgID string) {
 	// schedule, so the supervisor keeps backing off, but it never replaces the
 	// cause the gate answers with: a request must keep hearing about the proof
 	// outage, not be told to rotate a credential.
-	keepCause := cause == nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	credentialAnswer := denied || cause != nil || countsAgainstCredential(err)
+	// Nor does any other failure that says nothing against the credential:
+	// only a credential answer may replace the stored cause.
+	keepCause := cause == nil && (!credentialAnswer || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	// A rebuild that could not stop the previous collection is never a
+	// credential attempt, whatever the gate holds already.
+	var stalled *rebuildStalled
+	stall := errors.As(err, &stalled) && !denied
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return
 	}
 	now := time.Now()
+	if stall || !credentialAnswer && !r.credentialRecordedLocked(orgID, now) {
+		// Nothing here says the credential failed: the attempt ran out of
+		// time, the cluster or the history store did not answer, or the
+		// previous collection would not stop. The retry is still backed off,
+		// but requests are not gated, and one that waits on the rebuild is
+		// told why instead of being sent to rotate a credential. A cause the
+		// gate already holds is left as it is, and still answers first.
+		r.stall = stallCause(err)
+		if now.Before(r.next) && r.failures > 0 {
+			return
+		}
+		r.failures++
+		delay := time.Second * time.Duration(1<<min(r.failures-1, 6))
+		delay += time.Duration(rand.Int63n(int64(delay/4 + 1)))
+		r.next = maxTime(r.next, now.Add(delay))
+		logging.Debugf("kubernetes: recovery stage=credential_recovery reason=%s attempt=%d retry_ms=%d", recoveryReason(err, "credential_recovery"), r.failures, time.Until(r.next).Milliseconds())
+		return
+	}
+	if credentialAnswer {
+		r.stall = nil
+	}
 	// Concurrent failures from a single attempt do not multiply the streak, but the
 	// scope gate still follows every recorded failure.
 	if now.Before(r.next) && r.failures > 0 {
@@ -780,4 +895,58 @@ func (client *Client) noteIdentityKept(cluster string) {
 	client.identityChanges, client.identityFields = 0, nil
 	client.identityMu.Unlock()
 	problems().Clear(problemKey("", cluster, "identity_unstable"), "kubernetes: cluster %q identity stable again", cluster)
+}
+
+// rebuildStalled is the failure of a rebuild whose previous collection did not
+// stop in time. When that collection was failing on the history store, which
+// is what keeps a worker from stopping, the store is named; otherwise it is a
+// reconnect Versus retries.
+func (service *Service) rebuildStalled(previous []*Service) error {
+	for _, old := range append([]*Service{service}, previous...) {
+		if old.historyStoreFailing() {
+			return &rebuildStalled{cause: errHistoryUnavailable}
+		}
+	}
+	return &rebuildStalled{cause: errConnectorReconnecting}
+}
+
+// historyStoreFailing reports whether this scope's collection is failing on
+// the history store: its last inventory cycle failed with a storage class, or
+// its last save stage did.
+func (service *Service) historyStoreFailing() bool {
+	if service == nil || service.changes == nil {
+		return false
+	}
+	service.changes.mu.Lock()
+	cache := service.changes.inventories[service.indexScope()]
+	service.changes.mu.Unlock()
+	if cache != nil {
+		cache.mu.RLock()
+		failed, class := cache.failed, cache.failedClass
+		cache.mu.RUnlock()
+		if failed && storageClass(class) {
+			return true
+		}
+	}
+	return service.recovery.storageStageFailing()
+}
+
+// storageStageFailing reports whether a save stage last ended on a storage
+// failure.
+func (r *clusterRecovery) storageStageFailing() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, stage := range r.stages {
+		if storageClass(stage.reason) {
+			return true
+		}
+	}
+	return false
+}
+
+func storageClass(class string) bool {
+	return class == "storage_unavailable" || class == "storage_rejected"
 }

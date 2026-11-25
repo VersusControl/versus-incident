@@ -281,7 +281,7 @@ func TestRenewalsWithAFlakyProofNeverSendAnUnprovenToken(t *testing.T) {
 					}
 				}()
 			}
-			if err := fixture.service.commitCredential(t.Context(), func() error { return nil }); err != nil {
+			if err := fixture.service.commitCredential(t.Context(), func(context.Context) error { return nil }); err != nil {
 				t.Errorf("renewal %d: commit failed inside the grace window: %v", renewal, err)
 			}
 			readers.Wait()
@@ -337,7 +337,7 @@ func TestProofUnavailableServesThePreviousTokenUntilTheBound(t *testing.T) {
 			t.Fatalf("read past the bound = %v, want proof_unreachable", err)
 		}
 	}
-	if err := fixture.service.commitCredential(t.Context(), func() error { t.Fatal("committed past the bound"); return nil }); proofCode(err) != "proof_unreachable" {
+	if err := fixture.service.commitCredential(t.Context(), func(context.Context) error { t.Fatal("committed past the bound"); return nil }); proofCode(err) != "proof_unreachable" {
 		t.Fatalf("commit past the bound = %v", err)
 	}
 	if fixture.cluster.count("data") != before {
@@ -507,7 +507,7 @@ func TestProofOfADifferentPrincipalRetiresAtOnce(t *testing.T) {
 			if err := fixture.read(); err != nil {
 				t.Fatal(err)
 			}
-			if err := fixture.service.commitCredential(t.Context(), func() error { return nil }); err != nil {
+			if err := fixture.service.commitCredential(t.Context(), func(context.Context) error { return nil }); err != nil {
 				t.Fatalf("commit before the identity change failed: %v", err)
 			}
 			fixture.settle()
@@ -532,7 +532,7 @@ func TestProofOfADifferentPrincipalRetiresAtOnce(t *testing.T) {
 				fixture.settle()
 				return errors.Is(err, ErrCredentialUnavailable) && !fixture.alive()
 			})
-			if err := fixture.service.commitCredential(t.Context(), func() error { t.Fatal("committed after retire"); return nil }); err == nil {
+			if err := fixture.service.commitCredential(t.Context(), func(context.Context) error { t.Fatal("committed after retire"); return nil }); err == nil {
 				t.Fatal("a commit after the identity change was accepted")
 			}
 			fixture.assertOnlyProvenTokensReadData("principal-value-reader")
@@ -955,7 +955,7 @@ func bootDuringProofOutage(t *testing.T) *lateProofCase {
 		if err := first.validateCredential(t.Context()); err != nil {
 			t.Fatalf("the proof host being down failed a request: %v", err)
 		}
-		if err := first.commitCredential(t.Context(), func() error { return nil }); err != nil {
+		if err := first.commitCredential(t.Context(), func(context.Context) error { return nil }); err != nil {
 			t.Fatalf("the proof host being down failed a commit: %v", err)
 		}
 		settleProofs(t, first.client)
@@ -1247,7 +1247,7 @@ func TestLateProofSuccessorInheritsOnlyUnderTheSameIdentity(t *testing.T) {
 				defer c.first.identity.mu.Unlock()
 				return c.first.identity.upgradeReady
 			})
-			if err := c.first.commitCredential(t.Context(), func() error { return nil }); err == nil || !c.first.identity.upgraded {
+			if err := c.first.commitCredential(t.Context(), func(context.Context) error { return nil }); err == nil || !c.first.identity.upgraded {
 				t.Fatalf("the commit did not end the ready epoch: %v", err)
 			}
 			if test.renew {
@@ -1517,7 +1517,7 @@ func TestUnknownEpochProvenBeforeAnyCommitRestartsUnderTheFreshKey(t *testing.T)
 	})
 	// Reads go on with the same, now proven, token; the next commit ends the
 	// epoch quietly before anything is written under its keys.
-	ended := first.commitCredential(t.Context(), func() error { t.Fatal("committed under the unknown keys"); return nil })
+	ended := first.commitCredential(t.Context(), func(context.Context) error { t.Fatal("committed under the unknown keys"); return nil })
 	if ended == nil || countsAgainstCredential(ended) || first.identity.ctx.Err() == nil || !first.identity.upgraded {
 		t.Fatalf("the upgrade did not end the epoch quietly: %v", ended)
 	}
@@ -1570,7 +1570,7 @@ func TestReplicasConvergeWhenReviewWasDownAtOneBoot(t *testing.T) {
 			t.Fatalf("a read failed while review recovered: %v", err)
 		}
 		settleProofs(t, degraded.client)
-		if degraded.commitCredential(t.Context(), func() error { return nil }) != nil {
+		if degraded.commitCredential(t.Context(), func(context.Context) error { return nil }) != nil {
 			degraded = newService(t.Context(), degraded.client, degraded.Scope(), time.Minute)
 		}
 		return degraded.identity.known
@@ -1836,7 +1836,7 @@ func TestAHangingProofDoesNotDelayReadsOrCommits(t *testing.T) {
 		if err := fixture.read(); err != nil {
 			t.Fatalf("read during a hanging proof failed: %v", err)
 		}
-		if err := fixture.service.commitCredential(t.Context(), func() error { return nil }); err != nil {
+		if err := fixture.service.commitCredential(t.Context(), func(context.Context) error { return nil }); err != nil {
 			t.Fatalf("commit during a hanging proof failed: %v", err)
 		}
 	}
@@ -1939,7 +1939,7 @@ func TestUpgradeRestartRaceStillHandsOverTheSuccessor(t *testing.T) {
 		return first.identity.upgradeReady
 	})
 	// The commit wins the race and ends the epoch first.
-	if err := first.commitCredential(t.Context(), func() error { return nil }); err == nil || !first.identity.upgraded {
+	if err := first.commitCredential(t.Context(), func(context.Context) error { return nil }); err == nil || !first.identity.upgraded {
 		t.Fatalf("the commit did not end the ready epoch: %v", err)
 	}
 	if !first.endIfUpgradeReady() {

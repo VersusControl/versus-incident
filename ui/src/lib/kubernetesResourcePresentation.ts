@@ -1,4 +1,5 @@
 import { isKnownKubernetesTime } from "./kubernetesTime";
+import { clockLabel } from "./kubernetesClock";
 
 export function elapsed(at: unknown) {
   if (!isKnownKubernetesTime(at)) return "Unavailable";
@@ -14,7 +15,7 @@ export function elapsed(at: unknown) {
 }
 export function clock(time: string) {
   return isKnownKubernetesTime(time)
-    ? new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
+    ? clockLabel(time, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })
     : "unavailable";
 }
 export const resourceIDs: Record<string, string> = {

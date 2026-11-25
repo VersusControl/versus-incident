@@ -314,8 +314,8 @@ func (service *Service) issuesSnapshot(ctx context.Context, options IssueOptions
 		}
 		store := service.changeStore()
 		if store != nil && service.evidenceStore() == nil {
-			if err := service.commitCredential(ctx, func() error {
-				return store.Append(kubechanges.Reconstruct(service.scope.ClusterID, records, now), now)
+			if err := service.commitCredential(ctx, func(ctx context.Context) error {
+				return store.AppendContext(ctx, kubechanges.Reconstruct(service.scope.ClusterID, records, now), now)
 			}); err != nil && !errors.Is(err, kubechanges.ErrLeaseLost) {
 				page.Partial = append(page.Partial, PartialFailure{ResourceID: "kubernetes.history", Class: errorClass(err)})
 				page.Sync.Partial = true

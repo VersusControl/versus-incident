@@ -1530,7 +1530,7 @@ func TestWriteKubernetesReturnsSafeActionableDiagnostics(t *testing.T) {
 		{name: "authentication", err: kubernetes.ErrUnauthorized, status: fiber.StatusBadGateway, code: "cluster_authentication_failed"},
 		{name: "permission", err: kubernetes.ErrForbidden, status: fiber.StatusForbidden, code: "cluster_permission_denied"},
 		{name: "configuration", err: kubernetes.ErrInvalidEndpoint, status: fiber.StatusBadRequest, code: "connector_configuration_invalid"},
-		{name: "timeout", err: context.DeadlineExceeded, status: fiber.StatusGatewayTimeout, code: "request_timeout"},
+		{name: "deadline spent inside versus", err: context.DeadlineExceeded, status: fiber.StatusServiceUnavailable, code: "server_timeout"},
 		{name: "fallback", err: errors.New("provider secret response"), status: fiber.StatusBadGateway, code: "read_failed"},
 	}
 	for _, test := range tests {
@@ -1894,5 +1894,88 @@ func TestKubernetesSyncHealthIsCompleteAndAuthorized(t *testing.T) {
 	// Reading it again must not touch the cluster, which is already closed.
 	if response, body := get("/api/admin/kubernetes/sync?cluster=cluster", ""); response.StatusCode != fiber.StatusOK || !strings.Contains(string(body), `"forbidden"`) {
 		t.Fatalf("repeat read status=%d body=%s", response.StatusCode, body)
+	}
+}
+
+// stalledInventoryStore fails every read of the stored Kubernetes inventory
+// with fault, as a database that stops answering does, and serves every
+// other blob normally.
+type stalledInventoryStore struct {
+	storage.Provider
+	storage.BlobCAS
+	fault error
+}
+
+func (store stalledInventoryStore) ReadBlob(name string) ([]byte, error) {
+	if strings.HasPrefix(name, "kubernetes/inventory/") {
+		return nil, store.fault
+	}
+	return store.Provider.ReadBlob(name)
+}
+
+// A live view that waits on the stored inventory and runs out of time, or
+// finds the database unreachable, names the history database and asks for a
+// retry. It never blames the Kubernetes API server or tells the operator to
+// raise the Kubernetes timeout.
+func TestLiveViewsNameAStalledStoreNotTheCluster(t *testing.T) {
+	for _, test := range []struct {
+		name, code string
+		fault      error
+	}{
+		{"store deadline", "history_store_timeout", fmt.Errorf("read blob on 10.0.0.7: %w", context.DeadlineExceeded)},
+		{"store unreachable", "history_store_unavailable", errors.New("dial tcp 10.0.0.7:5432: connection refused")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, err := kubernetes.NewClient(kubernetes.Config{Endpoint: "http://127.0.0.1:1", AllowLoopbackHTTP: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			memory := storage.NewMemory()
+			t.Cleanup(func() { _ = memory.Close() })
+			service := kubernetes.NewService(client, kubernetes.Scope{OrgID: "default", ClusterID: "stalled"}, 0)
+			service.SetChangeStorage(stalledInventoryStore{Provider: memory, BlobCAS: memory.(storage.BlobCAS), fault: test.fault})
+			app := fiber.New(fiber.Config{Immutable: true})
+			app.Use(func(ctx *fiber.Ctx) error {
+				middleware.MarkAuthorized(ctx)
+				middleware.SetRequestPermission(ctx, string(core.PermissionInfrastructureView), true)
+				return ctx.Next()
+			})
+			NewKubernetesAdminController(service).Register(app.Group("/api"))
+			for _, path := range []string{"/api/admin/kubernetes/workloads", "/api/admin/kubernetes/usage"} {
+				response, err := app.Test(httptest.NewRequest(http.MethodGet, path, nil), -1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body struct {
+					Code   string `json:"code"`
+					Action string `json:"action"`
+				}
+				decodeErr := json.NewDecoder(response.Body).Decode(&body)
+				response.Body.Close()
+				if decodeErr != nil {
+					t.Fatalf("%s: %v", path, decodeErr)
+				}
+				if response.StatusCode != fiber.StatusServiceUnavailable || body.Code != test.code || response.Header.Get("Retry-After") == "" {
+					t.Fatalf("%s: status=%d code=%q retry-after=%q, want 503 %s with Retry-After", path, response.StatusCode, body.Code, response.Header.Get("Retry-After"), test.code)
+				}
+				if strings.Contains(body.Action, "connectors.kubernetes") {
+					t.Fatalf("%s: a store fault sent the operator to the Kubernetes settings: %q", path, body.Action)
+				}
+			}
+			// The sync report still answers, and names the store as the fault.
+			response, err := app.Test(httptest.NewRequest(http.MethodGet, "/api/admin/kubernetes/sync", nil), -1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report struct {
+				State string `json:"state"`
+				Class string `json:"class"`
+			}
+			decodeErr := json.NewDecoder(response.Body).Decode(&report)
+			response.Body.Close()
+			if decodeErr != nil || response.StatusCode != fiber.StatusOK || report.Class != "storage_unavailable" {
+				t.Fatalf("sync: status=%d report=%+v err=%v, want the store named as the fault", response.StatusCode, report, decodeErr)
+			}
+		})
 	}
 }

@@ -21,6 +21,7 @@ import {
 } from "@/lib/kubernetesResourceDetail";
 import { counted } from "@/lib/kubernetesEvidence";
 import { historyOffMessage } from "@/lib/kubernetesNamespaceAccess";
+import { clockLabel } from "@/lib/kubernetesClock";
 function metricValue(value: number | null, field: "cpu" | "memory") {
   if (value === null) return "Unavailable";
   if (field === "cpu") return `${Math.round(value * 1000)} mCPU`;
@@ -179,7 +180,7 @@ export function ResourceMetrics({
             className={`mt-2 text-lg font-semibold ${restarts === null ? "text-ink-400" : "text-ink-50"}`}
           >
             {restarts ?? "Unavailable"}
-            <span className="metric-restart-description">{crashesQuery.historyOff ? historyOffMessage : crashesQuery.isError ? "Crash evidence unavailable" : lastCrash ? `shown ${lastCrash.reason || lastCrash.waiting_reason || "Termination"} ${new Date(lastCrash.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}` : crashesQuery.isFetching && !crashesQuery.data ? "Loading captured crashes" : "No captured crash on this page"}</span>
+            <span className="metric-restart-description">{crashesQuery.historyOff ? historyOffMessage : crashesQuery.isError ? "Crash evidence unavailable" : lastCrash ? `shown ${lastCrash.reason || lastCrash.waiting_reason || "Termination"} ${clockLabel(lastCrash.at, { hour: "2-digit", minute: "2-digit", hour12: false })}` : crashesQuery.isFetching && !crashesQuery.data ? "Loading captured crashes" : "No captured crash on this page"}</span>
           </p>
           <div
             className="relative mt-3 h-6 border-b border-ink-700"
@@ -213,14 +214,14 @@ export function ResourceMetrics({
           <p className="mt-1 text-2xs text-ink-400">
             since restart at{" "}
             {typeof start === "string"
-              ? <time dateTime={start} title={new Date(start).toLocaleString()}>{new Date(start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</time>
+              ? <time dateTime={start} title={new Date(start).toLocaleString()}>{clockLabel(start, { hour: "2-digit", minute: "2-digit", hour12: false })}</time>
               : "Unavailable"}
           </p>
         </div>
       </div>
-      {!crashesQuery.isError && crashesQuery.data && (crashesQuery.data.crash_count ?? 0) > 0 && <nav aria-label="Captured crash pages" className="text-2xs text-ink-400">
-        <p>{`${counted(crashesQuery.data.crash_count ?? 0, "captured crash")} in the last 24h`}</p>
-        {(crashesQuery.data.next || crashesQuery.paging.canPrevious) && <CursorPagination state={crashesQuery.paging} busy={crashesQuery.isFetching} next={crashesQuery.data.next} total={crashesQuery.data.total} limit={crashesQuery.data.limit} capped={crashesQuery.data.count_capped} count={crashesQuery.data.items?.length} />}
+      {!crashesQuery.isError && crashesQuery.data && ((crashesQuery.data.crash_count ?? 0) > 0 || crashesQuery.paging.canPrevious) && <nav aria-label="Captured crash pages" className="text-2xs text-ink-300">
+        {!crashesQuery.data.count_unknown && (crashesQuery.data.crash_count ?? 0) > 0 && <p>{`${counted(crashesQuery.data.crash_count ?? 0, "captured crash")} in the last 24h`}</p>}
+        {(crashesQuery.data.next || crashesQuery.paging.canPrevious) && <CursorPagination state={crashesQuery.paging} busy={crashesQuery.isFetching} next={crashesQuery.data.next} total={crashesQuery.data.count_unknown ? undefined : crashesQuery.data.total} limit={crashesQuery.data.limit} capped={crashesQuery.data.count_capped} count={crashesQuery.data.items?.length} />}
       </nav>}
       {/* A later crash page whose link expired cannot load again; restart
           from the first page, like the Timeline's "Restart history". The
@@ -393,7 +394,7 @@ function UsageChart({
   }
   const title = field === "cpu" ? "CPU" : "Memory";
   const activeDescription = active
-    ? `${new Date(active.observedAt).toLocaleTimeString()}: ${metricValue(active[field], field)}${active.coverage ? ` with ${active.coverage[field]} of ${active.coverage.total} tracked Pods sampled` : ""}`
+    ? `${clockLabel(active.observedAt, {})}: ${metricValue(active[field], field)}${active.coverage ? ` with ${active.coverage[field]} of ${active.coverage.total} tracked Pods sampled` : ""}`
     : "Use arrow keys or hover to inspect usage samples.";
   return (
     <figure aria-label="CPU and memory usage chart">
@@ -450,7 +451,7 @@ function UsageChart({
           preserveAspectRatio="none"
           viewBox="0 0 792 142"
           role="img"
-          aria-label={`Workload CPU and memory collected since ${new Date(start).toLocaleTimeString()}, independently scaled with request, limit and crash markers`}
+          aria-label={`Workload CPU and memory collected since ${clockLabel(start, {})}, independently scaled with request, limit and crash markers`}
           onPointerMove={(event) => {
             if (!validSamples.length) return;
             const bounds = event.currentTarget.getBoundingClientRect();
@@ -532,7 +533,7 @@ function UsageChart({
               fill="currentColor"
             >
               <title>
-                {new Date(sample.observedAt).toLocaleTimeString()}{" "}
+                {clockLabel(sample.observedAt, {})}{" "}
                 {metricValue(sample[metric], metric)}
               </title>
             </circle>
@@ -598,7 +599,7 @@ function UsageChart({
                 fontSize="10"
                 fill="currentColor"
               >
-                {new Date(active.observedAt).toLocaleTimeString()}:{" "}
+                {clockLabel(active.observedAt, {})}:{" "}
                 {metricValue(active[field], field)}
                 <title>{activeDescription}</title>
               </text>

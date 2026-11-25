@@ -76,7 +76,11 @@ func (service *Service) editNamespaceCandidates(ctx context.Context, cache *inve
 			return status, nil
 		}
 		won := false
-		err = service.commitCredential(ctx, func() error { var err error; won, err = cas.CompareAndSwapBlob(key, raw, replacement); return err })
+		err = service.commitCredential(ctx, func(ctx context.Context) error {
+			var err error
+			won, err = storage.CompareAndSwapBlobContext(ctx, cas, key, raw, replacement)
+			return err
+		})
 		if err != nil {
 			return "namespace_hint_unavailable", err
 		}

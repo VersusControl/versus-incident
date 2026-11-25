@@ -172,6 +172,7 @@ func (verifier *projectedTokenVerifier) get(ctx context.Context, apiPath, token 
 	defer response.Body.Close()
 	verifier.status.HTTPStatus = response.StatusCode
 	if response.StatusCode == http.StatusUnauthorized {
+		forgetRejectedBearer(verifier.client.credentials, "Bearer "+token)
 		verifier.client.rejectCredential()
 		return false, ErrUnauthorized
 	}

@@ -242,7 +242,7 @@ func (service *Service) loadAlertCheckpoint(window *issueAlertWindow, adopt stri
 
 // alertCheckpoint saves the window to its record, provided the record did not
 // change since it was read here.
-func (service *Service) alertCheckpoint(window *issueAlertWindow, owner string) error {
+func (service *Service) alertCheckpoint(ctx context.Context, window *issueAlertWindow, owner string) error {
 	provider, _ := service.logSettingsStore()
 	key := window.key
 	if key == "" {
@@ -252,7 +252,10 @@ func (service *Service) alertCheckpoint(window *issueAlertWindow, owner string) 
 	if !ok {
 		return storage.ErrUnsupported
 	}
-	encoded, err := readAlertCheckpoint(provider, key)
+	encoded, err := storage.ReadBlobContext(ctx, provider, key)
+	if errors.Is(err, storage.ErrNotFound) {
+		encoded, err = nil, nil
+	}
 	if err != nil {
 		return err
 	}
@@ -263,10 +266,10 @@ func (service *Service) alertCheckpoint(window *issueAlertWindow, owner string) 
 	if len(replacement) > 8<<20 {
 		return ErrInvalidArguments
 	}
-	if err := service.changeStore().CheckCaptureLease(owner); err != nil {
+	if err := service.changeStore().CheckCaptureLeaseContext(ctx, owner); err != nil {
 		return err
 	}
-	swapped, err := cas.CompareAndSwapBlob(key, encoded, replacement)
+	swapped, err := storage.CompareAndSwapBlobContext(ctx, cas, key, encoded, replacement)
 	if err != nil {
 		return err
 	}
@@ -322,8 +325,8 @@ func (service *Service) SaveIssueAlertSettings(ctx context.Context, enabled bool
 		return ErrInvalidArguments
 	}
 	provider, key := service.logSettingsStore()
-	return service.commitCredential(ctx, func() error {
-		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+	return service.commitCredential(ctx, func(ctx context.Context) error {
+		return breaklogs.UpdateSettingsContext(ctx, provider, key, func(state *breaklogs.SettingsState) error {
 			a := &state.Settings.Alerts
 			if enabled && !a.Enabled {
 				a.EnabledAt = time.Now().UTC()
@@ -395,8 +398,8 @@ func alertBaselineSteadyGap(state kubeindex.KindStatus) bool {
 // settings changed since.
 func (service *Service) recordAlertsEvaluated(ctx context.Context, enabledAt, at time.Time) error {
 	provider, key := service.logSettingsStore()
-	return service.commitCredential(ctx, func() error {
-		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+	return service.commitCredential(ctx, func(ctx context.Context) error {
+		return breaklogs.UpdateSettingsContext(ctx, provider, key, func(state *breaklogs.SettingsState) error {
 			a := &state.Settings.Alerts
 			if a.Enabled && a.EnabledAt.Equal(enabledAt) && a.EvaluatedFrom.IsZero() {
 				a.EvaluatedFrom = at.UTC()
@@ -614,7 +617,7 @@ func (service *Service) emitIssueAlertCycle(ctx context.Context, items []kubebre
 			service.changes.mu.Unlock()
 		}
 		window.start, window.baselining = now, !complete
-		if err := service.commitCredential(ctx, func() error { return service.alertCheckpoint(window, owner) }); err != nil {
+		if err := service.commitCredential(ctx, func(ctx context.Context) error { return service.alertCheckpoint(ctx, window, owner) }); err != nil {
 			return err
 		}
 		if !complete {
@@ -696,7 +699,7 @@ func (service *Service) emitIssueAlertCycle(ctx context.Context, items []kubebre
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := service.commitCredential(ctx, func() error { return store.CheckCaptureLease(owner) }); err != nil {
+		if err := service.commitCredential(ctx, func(ctx context.Context) error { return store.CheckCaptureLeaseContext(ctx, owner) }); err != nil {
 			return err
 		}
 		latest, err := service.IssueAlertSettings(ctx)
@@ -738,7 +741,7 @@ func (service *Service) emitIssueAlertCycle(ctx context.Context, items []kubebre
 		if a.RollupCount == 0 && !window.seen[keys[i]] {
 			window.sent++
 			window.seen[keys[i]] = true
-			if err := service.commitCredential(ctx, func() error { return service.alertCheckpoint(window, owner) }); err != nil {
+			if err := service.commitCredential(ctx, func(ctx context.Context) error { return service.alertCheckpoint(ctx, window, owner) }); err != nil {
 				return err
 			}
 		}
@@ -752,7 +755,7 @@ func (service *Service) emitIssueAlertCycle(ctx context.Context, items []kubebre
 					window.suppressed[key] = true
 				}
 			}
-			if err := service.alertCheckpoint(window, owner); err != nil {
+			if err := service.alertCheckpoint(ctx, window, owner); err != nil {
 				return err
 			}
 			continue
@@ -761,11 +764,11 @@ func (service *Service) emitIssueAlertCycle(ctx context.Context, items []kubebre
 		if enrichKeys[keys[i]] {
 			window.enriched[keys[i]] = true
 		}
-		if err := service.alertCheckpoint(window, owner); err != nil {
+		if err := service.alertCheckpoint(ctx, window, owner); err != nil {
 			return err
 		}
 	}
-	return service.alertCheckpoint(window, owner)
+	return service.alertCheckpoint(ctx, window, owner)
 }
 
 func (service *Service) issueAlert(b kubebreaks.Break) IssueAlert {

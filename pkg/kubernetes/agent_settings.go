@@ -205,8 +205,8 @@ func (service *Service) SaveAgentSettingsChanges(ctx context.Context, settings b
 	provider, key := service.logSettingsStore()
 	clearLinkedCache()
 	var changes []string
-	err := service.commitCredential(ctx, func() error {
-		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+	err := service.commitCredential(ctx, func(ctx context.Context) error {
+		return breaklogs.UpdateSettingsContext(ctx, provider, key, func(state *breaklogs.SettingsState) error {
 			settings.Alerts = state.Settings.Alerts
 			changes = breaklogs.SettingsChanges(state.Settings, settings)
 			state.Settings = settings
@@ -311,8 +311,8 @@ func (service *Service) recordLogHealth(ctx context.Context, name string, starte
 		health = "failing"
 	}
 	provider, key := service.logSettingsStore()
-	return service.commitCredential(ctx, func() error {
-		return breaklogs.UpdateSettings(provider, key, func(state *breaklogs.SettingsState) error {
+	return service.commitCredential(ctx, func(ctx context.Context) error {
+		return breaklogs.UpdateSettingsContext(ctx, provider, key, func(state *breaklogs.SettingsState) error {
 			now := time.Now().UTC()
 			if previous, ok := state.Health[name]; ok && previous.State == health && now.Sub(previous.At) < time.Minute {
 				return nil
