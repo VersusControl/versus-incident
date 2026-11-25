@@ -151,9 +151,14 @@ func discoveryResourcesChanged(previous *Discovery, current Discovery) bool {
 func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCache) {
 	stopWorker := service.recovery.workerStarted()
 	defer stopWorker()
+	// History saves run beside collection, under this worker's context. At
+	// stop no new save starts, the one in flight ends, and only then is the
+	// lease given up: a save may never outlive the lease that fences it.
+	stopSaves := service.startHistorySaver(ctx, cache)
 	owner := uuid.NewString()
 	var ownedLease *inventoryLease
 	defer func() {
+		stopSaves()
 		if ownedLease != nil {
 			if err := ownedLease.release(); err != nil {
 				logging.Debugf("kubernetes: inventory lease release deferred")
@@ -191,7 +196,7 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				}
 				scope := service.scope
 				scope.OrgID = org
-				candidate, record, readErr := readInventoryGeneration(provider, scope, generation.Revision)
+				candidate, record, readErr := readInventoryGenerationContext(ctx, provider, scope, generation.Revision)
 				if readErr != nil {
 					err = inventoryReadFailure(readErr)
 					break
@@ -283,20 +288,23 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 			var owned bool
 			lease, owned, err = service.claimInventory(ctx, provider, owner)
 			if err == nil && owned {
+				// A history save may still be running on the lease this
+				// worker already holds and renewing it; every user shares
+				// that one lease, so their renewals never race.
+				lease = ownedLease.adopt(lease)
 				ownedLease = lease
 				if generation.EvidenceBatch != nil && evidenceCommitted != generation.Revision && !service.historySaveAbandoned(cache, generation.EvidenceBatch.ID) {
-					// A retried save is fenced like the first attempt: it
-					// renews the lease between its transactions and stops when
-					// the lease runs out. Its failure is a storage stage, so it
-					// does not reach the credential recovery gate.
-					err = lease.commitJournal(ctx, service, generation)
-					if err == nil {
-						evidenceCommitted = generation.Revision
-					}
+					// A capture this process has not queued yet, such as the
+					// one restored at start, is queued once. Saves run off
+					// this path, fenced like the first attempt; collection
+					// never waits for them.
+					service.queueHistorySave(lease, cache, generation)
+					evidenceCommitted = generation.Revision
 				}
-				if err == nil {
-					err = service.inventoryOwnedCycle(ctx, cache, lease, index, &generation)
-				}
+				// A capture held while its cycle's authority proof was pending
+				// starts once the proof stands.
+				service.startHistorySave(lease, cache)
+				err = service.inventoryOwnedCycle(ctx, cache, lease, index, &generation)
 				if err == nil {
 					loadedRevision = generation.Revision
 				}
@@ -306,6 +314,10 @@ func (service *Service) inventoryWorker(ctx context.Context, cache *inventoryCac
 				// Another replica collects this scope; no proof of this
 				// replica is pending against its generation.
 				cache.authorityQuestioned = inventoryQuestionedKinds{}
+				// Its saves are what history now waits on, so a store
+				// failure of this replica's own last save no longer holds
+				// back the first capture it saves once it holds the lease.
+				cache.historySave.failing, cache.historySave.failures, cache.historySave.next = false, 0, time.Time{}
 				cache.mu.Unlock()
 			}
 		}
@@ -489,7 +501,8 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 		*destination = committed
 		service.recovery.published(*current, service.scope.OrgID)
 		cache.mu.Unlock()
-		return lease.commitJournal(ctx, service, committed)
+		service.queueHistorySave(lease, cache, committed)
+		return nil
 	}
 	dirty, err := service.collectInventoryCycle(ctx, cache, index, generation, publishCore)
 	if err != nil {
@@ -513,7 +526,8 @@ func (service *Service) inventoryOwnedCycle(parent context.Context, cache *inven
 	*destination = *generation
 	service.recovery.published(*generation, service.scope.OrgID)
 	cache.mu.Unlock()
-	return lease.commitJournal(ctx, service, *generation)
+	service.queueHistorySave(lease, cache, *generation)
+	return nil
 }
 
 // Discovery already tries the preferred version first. Defensively select one
@@ -729,7 +743,9 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 					err = ErrIncompleteInventory
 				}
 				return records, complete, err
-			}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+			}, func(commit func() error) error {
+				return service.commitCredential(ctx, func(context.Context) error { return commit() })
+			})
 			if refreshErr != nil && ctx.Err() != nil {
 				return
 			}
@@ -780,7 +796,9 @@ func (service *Service) collectInventoryCycle(ctx context.Context, cache *invent
 				err = ErrIncompleteInventory
 			}
 			return records, complete, err
-		}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+		}, func(commit func() error) error {
+			return service.commitCredential(ctx, func(context.Context) error { return commit() })
+		})
 		withInventoryKind(&generation.View, index.Snapshot(), "Namespace")
 	}
 	questioned := newlyDeniedInventory(baseline, *generation, now)
@@ -1070,7 +1088,9 @@ func (service *Service) collectScopedInventory(ctx context.Context, cache *inven
 					return nil, false, indexReadError{error: inventorySyncError(), class: state.Error}
 				}
 				return snapshot.Records, state.State == "ready" && !state.Partial, ctx.Err()
-			}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+			}, func(commit func() error) error {
+				return service.commitCredential(ctx, func(context.Context) error { return commit() })
+			})
 			if refreshErr != nil && ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -1219,6 +1239,18 @@ func (service *Service) coreDiscovery(ctx context.Context) (result Discovery, re
 	defer cancelIdentity()
 	credentialCtx := ctx
 	defer func() {
+		// A failed discovery returns no resources, whatever it read before
+		// the failure.
+		if resultErr != nil {
+			result = Discovery{}
+		}
+		// A discovery that already failed because its request's deadline
+		// passed keeps that failure; the closing check would only repeat the
+		// deadline. A retired credential cancels credentialCtx instead, and
+		// the check still names it.
+		if resultErr != nil && errors.Is(credentialCtx.Err(), context.DeadlineExceeded) {
+			return
+		}
 		if err := service.validateCredential(credentialCtx); err != nil {
 			result, resultErr = Discovery{}, err
 		}

@@ -405,7 +405,7 @@ describe("History save delay on saved-history views", () => {
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
     const saved = new Date("2026-10-14T12:01:00Z");
     // The fixture's save time is from an earlier day than the test clock, so the date is named.
-    const notice = await screen.findByText(`History is temporarily not saving — showing data from ${saved.toLocaleDateString([], { month: "short", day: "numeric", ...(saved.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) })}, ${saved.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+    const notice = await screen.findByText(`History is temporarily not saving to the database — showing data from ${saved.toLocaleDateString([], { month: "short", day: "numeric", ...(saved.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) })}, ${saved.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
     expect(notice.closest("[role=status]")).toBeTruthy();
     expect(screen.getAllByText(/History is temporarily not saving/)).toHaveLength(1);
     expect(screen.getByRole("region", { name: "Timeline lane checkout" })).toBeTruthy();
@@ -422,7 +422,7 @@ describe("History save delay on saved-history views", () => {
       : { items: [], totals: { warning: 0 }, truncated: false, sync });
     vi.spyOn(api, "kubernetesIssueAlerts").mockResolvedValue({ enabled: false, level: "critical", available: false, can_write: false, reason: "read_only", links_ready: false, channels_enabled: false });
     mount(<ToastProvider><KubernetesExplorerTabContent tab="issues" onSelectResource={vi.fn()} /></ToastProvider>);
-    await screen.findByText("History is temporarily not saving — showing the last saved data");
+    await screen.findByText("History is temporarily not saving to the database — showing the last saved data");
     expect(screen.getAllByText(/checkout/).length).toBeGreaterThan(0);
     expect(screen.queryByText("Grouped issues are unavailable.")).toBeNull();
   });
@@ -486,7 +486,7 @@ describe("History save delay on saved-history views", () => {
     vi.spyOn(api, "kubernetesChanges").mockResolvedValueOnce({ items: [change], next: "older", sync })
       .mockResolvedValueOnce({ items: [], sync, capture: { mode: "continuous", behind: true, history_save: { ...history_save, code: "history_save_rejected", retryable: false, action: "Check the history store." } } });
     mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
-    const label = await screen.findByText("History could not save the latest data — showing the last saved data");
+    const label = await screen.findByText("History could not save the latest data to the database — showing the last saved data");
     const notice = label.closest("[role=status]") as HTMLElement;
     expect(notice.className).toContain("text-sev-warning");
     expect(within(notice).getByText("Check the history store.")).toBeTruthy();
@@ -501,7 +501,7 @@ describe("History save delay on saved-history views", () => {
     const entry: KubernetesTimelineEntry = { type: "change", id: change.id, at: change.at, change };
     const reads = vi.spyOn(api, "kubernetesTimeline").mockResolvedValue(timelinePage([entry], { capture: { mode: "continuous", behind: true, history_save } }));
     const { client } = mount(<KubernetesExplorerTabContent tab="timeline" onSelectResource={vi.fn()} />);
-    await screen.findByText("History is temporarily not saving — showing the last saved data");
+    await screen.findByText("History is temporarily not saving to the database — showing the last saved data");
     expect(screen.getByRole("button", { name: "Open change details" })).toBeTruthy();
     expect(screen.queryByText("Timeline unavailable.")).toBeNull();
     reads.mockResolvedValue(timelinePage([entry], { capture: { mode: "continuous", behind: false } }));

@@ -499,7 +499,9 @@ func reviewHistoryGeneration(t *testing.T, service *Service) inventoryGeneration
 	for _, kind := range kinds {
 		_ = index.RefreshGuarded(ctx, kind, 0, time.Now().UTC(), func(ctx context.Context) ([]kubeindex.Record, bool, error) {
 			return service.loadIndexKind(ctx, kind)
-		}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+		}, func(commit func() error) error {
+			return service.commitCredential(ctx, func(context.Context) error { return commit() })
+		})
 	}
 	generation := inventoryGeneration{View: index.Snapshot()}
 	if err := service.prepareEvidence(ctx, &generation, inventoryGeneration{}); err != nil {
@@ -1126,7 +1128,9 @@ func TestEvidenceSourceProofDenialsOutrankTransientFailuresAcrossStorageBackends
 						for _, kind := range []string{first, second} {
 							_ = index.RefreshGuarded(ctx, kind, 0, time.Now().UTC(), func(ctx context.Context) ([]kubeindex.Record, bool, error) {
 								return service.loadIndexKind(ctx, kind)
-							}, func(commit func() error) error { return service.commitCredential(ctx, commit) })
+							}, func(commit func() error) error {
+								return service.commitCredential(ctx, func(context.Context) error { return commit() })
+							})
 						}
 						proofs := historyProofs(inventoryGeneration{View: index.Snapshot()})
 						if proofs["Secret"].State != "denied" {
@@ -1737,5 +1741,110 @@ func TestLiveIssuesPinOccurrencesFromItemsOnlyReads(t *testing.T) {
 	}
 	if counting.reads.Load() == 0 || counting.itemsOnly.Load() != counting.reads.Load() {
 		t.Fatalf("pins read occurrence totals: reads=%d items-only=%d", counting.reads.Load(), counting.itemsOnly.Load())
+	}
+}
+
+// postgresShapedTimeline answers timeline reads the way the Postgres store
+// does for a row it keeps but the read cannot verify: the row is in the keyset
+// and in the counts, and only the service turns it into unavailable evidence.
+// The local stores already leave such a row out of both. The row sits newest
+// or oldest in the window, and pages continue by offset.
+type postgresShapedTimeline struct {
+	storage.Provider
+	storage.EvidenceStore
+	unverified       storage.EvidenceRecord
+	oldest           bool
+	continuationDown bool
+}
+
+func (store postgresShapedTimeline) QueryEvidence(ctx context.Context, scope storage.EvidenceScope, query storage.EvidenceQuery) (storage.EvidencePage, error) {
+	if query.Type != "timeline" {
+		return store.EvidenceStore.QueryEvidence(ctx, scope, query)
+	}
+	offset := 0
+	if query.Cursor != "" {
+		if store.continuationDown {
+			return storage.EvidencePage{}, errors.New("continuation read refused by 10.0.0.7")
+		}
+		if _, err := fmt.Sscanf(query.Cursor, "offset-%d", &offset); err != nil {
+			return storage.EvidencePage{}, err
+		}
+	}
+	whole := query
+	whole.Cursor, whole.Limit = "", 500
+	page, err := store.EvidenceStore.QueryEvidence(ctx, scope, whole)
+	if err != nil {
+		return page, err
+	}
+	gaps := page.Gaps[:0]
+	for _, gap := range page.Gaps {
+		if gap.ID != store.unverified.ID {
+			gaps = append(gaps, gap)
+		}
+	}
+	page.Gaps = gaps
+	rows := append([]storage.EvidenceRecord{store.unverified}, page.Items...)
+	if store.oldest {
+		rows = append(append([]storage.EvidenceRecord{}, page.Items...), store.unverified)
+	}
+	page.Counts[store.unverified.Type]++
+	page.Total++
+	if query.Cursor != "" {
+		page.Counts, page.Total = map[string]int{}, 0
+	}
+	end := min(len(rows), offset+query.Limit)
+	page.Items, page.Next = rows[offset:end], ""
+	if end < len(rows) {
+		page.Next = fmt.Sprintf("offset-%d", end)
+	}
+	return page, nil
+}
+
+// The timeline count describes the rows the list can show. A saved row the
+// read cannot verify is shown only as unavailable evidence and never counted
+// as an event, on whichever page it falls; when the rest of the window cannot
+// be read to check, the count is reported unknown, never as a number the list
+// cannot reach.
+func TestTimelineCountNeverIncludesRowsTheListCannotShow(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		oldest           bool
+		continuationDown bool
+		limit            int
+		total            int
+		unknown          bool
+	}{
+		{name: "whole window on one page", limit: 100, total: 2},
+		{name: "hidden row first, rest verified", limit: 1, total: 2},
+		{name: "hidden row on a later page", oldest: true, limit: 1, total: 2},
+		{name: "later pages cannot be read", oldest: true, continuationDown: true, limit: 1, unknown: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, store, scope := reviewHistoryService(t)
+			at := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Microsecond)
+			shown := []storage.EvidenceRecord{syntheticChangeEvidence(scope.ClusterID, "Deployment", "shop", "shown-a", at), syntheticChangeEvidence(scope.ClusterID, "Deployment", "shop", "shown-b", at.Add(time.Second))}
+			if err := store.CommitEvidence(t.Context(), scope, storage.EvidenceBatch{ID: "capture:shown", At: at.Add(time.Minute), Epoch: "synthetic", Records: shown}); err != nil {
+				t.Fatal(err)
+			}
+			// Saved under another cluster's name: the read cannot verify it
+			// belongs to this cluster.
+			unverified := syntheticChangeEvidence("another-cluster", "Deployment", "shop", "unverified", at.Add(2*time.Second))
+			provider := service.usageProvider()
+			service.SetChangeStorage(postgresShapedTimeline{Provider: provider, EvidenceStore: provider.(storage.EvidenceStore), unverified: unverified, oldest: test.oldest, continuationDown: test.continuationDown})
+			service.changes.evidenceEnabled = true
+			page, err := service.Timeline(t.Context(), TimelineQuery{Namespace: "shop", Since: at.Add(-time.Minute), Until: at.Add(2 * time.Minute), Limit: test.limit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.unknown {
+				if !page.CountUnknown || page.Total != 0 || page.CrashCount != 0 || page.Counts["change"] != 0 {
+					t.Fatalf("a count over rows the read could not check was sent as a number: total=%d unknown=%t counts=%v", page.Total, page.CountUnknown, page.Counts)
+				}
+				return
+			}
+			if page.CountUnknown || page.Total != test.total || page.Counts["change"] != test.total {
+				t.Fatalf("count %d (changes %d, unknown %t), want the %d rows the list can show", page.Total, page.Counts["change"], page.CountUnknown, test.total)
+			}
+		})
 	}
 }

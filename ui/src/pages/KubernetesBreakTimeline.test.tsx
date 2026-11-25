@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { useState } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, type KubernetesBreakLogPage, type KubernetesChangesPage, type KubernetesCrashEvent, type KubernetesCrashPage, type KubernetesIssue, type KubernetesIssuePage, type KubernetesTimelineEntry, type KubernetesTimelinePage } from "@/lib/api";
 import { KubernetesClusterContext, kubernetesKey, useKubernetesCrashes } from "@/lib/useKubernetesCluster";
 import { BreakRow, BreakTimelineLane, CrashJournal, ResourceTimelineChart, TimelineCard } from "./KubernetesBreakTimeline";
@@ -1885,5 +1885,67 @@ describe("Break timeline", () => {
     expect(screen.getByText("Change activity is stale.")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Changes in 60 min/ }).textContent).toContain("0+");
     expect(screen.queryByText("Break evidence is partial.")).toBeNull();
+  });
+});
+// Times on the Overview Timeline card are read in the reader's zone, and a
+// refresh failure says what failed.
+describe("Overview Timeline card times and refresh failures", () => {
+  const zone = process.env.TZ;
+  beforeAll(() => { process.env.TZ = "Asia/Ho_Chi_Minh"; });
+  afterAll(() => { process.env.TZ = zone; });
+  const now = Date.parse("2026-11-24T19:45:00Z"); // 02:45 on Nov 25 for the reader
+  const sync = { state: "ready" as const, age_s: 0, partial: false };
+  async function step(milliseconds: number) {
+    for (let elapsed = 0; elapsed < milliseconds; elapsed += 100) await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  }
+
+  it("dates a break from an earlier day on its card", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const brokeAt = "2026-11-21T08:36:45Z";
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, truncated: false, sync });
+    mount(<BreakRow issue={{ ...issue, broke_at: brokeAt }} resource={resource} onSelectResource={vi.fn()} />);
+    await step(500);
+    const time = document.querySelector(`time[datetime="${brokeAt}"]`);
+    expect(time?.textContent).toBe(`${new Date(brokeAt).toLocaleDateString([], { month: "short", day: "numeric" })}, ${new Date(brokeAt).toLocaleTimeString([], { hour12: false })}`);
+  });
+
+  it.each([
+    ["history_store_timeout", 503, "The history database is not responding — showing data as of "],
+    ["server_timeout", 504, "The server timed out — try again in 30s; showing data as of "],
+  ])("names a %s refresh failure and dates the data still shown", async (code, status, lead) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, broken: { total: 0, by_severity: {} }, truncated: false, sync });
+    const retry = vi.fn();
+    // The changes were last read at 23:59 on Nov 24, before the reader's midnight.
+    const asOf = Date.parse("2026-11-24T16:59:00Z");
+    mount(<TimelineCard changes={{ items: [], sync }} changesAsOf={asOf} changesError={new ApiError(status, "failed", { code })} onRetryChanges={retry} windowEnd={now} clusterId="east" onSelectView={vi.fn()} onSelectResource={vi.fn()} resourceFor={() => null} />);
+    await step(500);
+    const notice = document.querySelector<HTMLElement>("[data-refresh-failure]")!;
+    expect(notice.textContent).toBe(`${lead}${new Date(asOf).toLocaleDateString([], { month: "short", day: "numeric" })}, ${new Date(asOf).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} Try again`);
+    expect(notice.textContent).not.toMatch(/Couldn't refresh/);
+    fireEvent.click(within(notice).getByRole("button", { name: "Try again" }));
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Overview break card header at phone width", () => {
+  it("gives the severity, kind and name their own wrapping line so nothing runs under the reason", async () => {
+    vi.spyOn(api, "kubernetesIssues").mockResolvedValue({ items: [], totals: {}, truncated: false, sync: { state: "ready", age_s: 0, partial: false } });
+    const node: KubernetesIssue = { ...issue, rule: "node.not_ready", root: { kind: "Node", name: "harness-evidence-node", uid: "node-uid" } };
+    mount(<BreakRow issue={node} resource={resource} onSelectResource={vi.fn()} />);
+    const card = await screen.findByRole("article", { name: "Node harness-evidence-node" });
+    const head = card.querySelector<HTMLElement>("[data-issue-head]")!;
+    const classes = head.className.split(/\s+/);
+    // A full line below lg, so the group is never narrower than its pills.
+    expect(classes).toEqual(expect.arrayContaining(["basis-full", "flex-wrap", "min-w-0", "lg:flex-1", "lg:basis-0"]));
+    expect(classes).not.toContain("flex-1");
+    for (const pill of head.querySelectorAll(".pill")) expect(pill.className.split(/\s+/)).toContain("shrink-0");
+    const name = card.querySelector<HTMLElement>("[data-issue-subject]")!;
+    expect(name.className.split(/\s+/)).toEqual(expect.arrayContaining(["truncate", "min-w-0", "max-w-full"]));
+    expect(name.getAttribute("title")).toBe("harness-evidence-node");
+    // The reason follows the head group, not beside it on the same flex line.
+    expect(head.nextElementSibling?.textContent).toContain("NotReady");
   });
 });

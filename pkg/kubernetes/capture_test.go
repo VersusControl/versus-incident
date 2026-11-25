@@ -719,7 +719,7 @@ func TestUnavailableCaptureCredentialCannotAcquireOrPublish(t *testing.T) {
 	if service.captureState() != nil {
 		t.Fatal("uninitialized credential started capture")
 	}
-	if err := service.commitCredential(t.Context(), func() error { t.Fatal("unavailable credential published"); return nil }); !errors.Is(err, ErrCredentialUnavailable) || strings.Contains(err.Error(), "canary") {
+	if err := service.commitCredential(t.Context(), func(context.Context) error { t.Fatal("unavailable credential published"); return nil }); !errors.Is(err, ErrCredentialUnavailable) || strings.Contains(err.Error(), "canary") {
 		t.Fatal("unavailable credential did not fail closed")
 	}
 	blobs, err := provider.ListBlobs("kubernetes/changes/")
@@ -771,7 +771,7 @@ func TestUnknownPrincipalRenewalRetiresCaptureScope(t *testing.T) {
 	if err != nil || len(page.Items) != 0 {
 		t.Fatal("unknown-principal renewal exposed old history")
 	}
-	if err := old.commitCredential(t.Context(), func() error { t.Fatal("retired renewal published"); return nil }); !errors.Is(err, ErrCredentialUnavailable) {
+	if err := old.commitCredential(t.Context(), func(context.Context) error { t.Fatal("retired renewal published"); return nil }); !errors.Is(err, ErrCredentialUnavailable) {
 		t.Fatal("unknown-principal renewal admitted a stale commit")
 	}
 }
@@ -997,7 +997,7 @@ func TestCredentialReplacementRetiresAliasesAndHistory(t *testing.T) {
 			t.Fatal("stale alias served old history")
 		}
 		committed := false
-		if err := stale.commitCredential(t.Context(), func() error { committed = true; return nil }); err == nil || committed {
+		if err := stale.commitCredential(t.Context(), func(context.Context) error { committed = true; return nil }); err == nil || committed {
 			t.Fatal("old credential committed after replacement")
 		}
 		if page, err := stale.Issues(t.Context(), IssueOptions{IncludeChanges: true}); err == nil || len(page.Items) != 0 {

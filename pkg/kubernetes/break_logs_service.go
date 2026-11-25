@@ -111,7 +111,7 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 	if err != nil {
 		return
 	}
-	if err := service.commitCredential(ctx, func() error { return store.CheckCaptureLease(owner) }); err != nil {
+	if err := service.commitCredential(ctx, func(ctx context.Context) error { return store.CheckCaptureLeaseContext(ctx, owner) }); err != nil {
 		return
 	}
 
@@ -193,7 +193,9 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		admissionContext, stopAdmission = context.WithTimeout(service.identity.ctx, time.Second)
 	}
 	defer stopAdmission()
-	if err := service.commitCredential(admissionContext, func() error { return store.CommitBreakLogs(nil, nil, "", owner, time.Now().UTC(), manifests...) }); err != nil {
+	if err := service.commitCredential(admissionContext, func(ctx context.Context) error {
+		return store.CommitBreakLogsContext(ctx, nil, nil, "", owner, time.Now().UTC(), manifests...)
+	}); err != nil {
 
 		return
 	}
@@ -254,7 +256,9 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		if ctx.Err() != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				commitContext, stop := context.WithTimeout(service.identity.ctx, time.Second)
-				commitErr := service.commitCredential(commitContext, func() error { return store.CommitBreakLogs(items, gaps, "", owner, time.Now().UTC(), manifest) })
+				commitErr := service.commitCredential(commitContext, func(ctx context.Context) error {
+					return store.CommitBreakLogsContext(ctx, items, gaps, "", owner, time.Now().UTC(), manifest)
+				})
 				stop()
 				if commitErr != nil {
 					return
@@ -266,8 +270,8 @@ func (service *Service) captureBreakLogs(ctx context.Context, snapshot kubeindex
 		if retry {
 			completedJob = ""
 		}
-		err = service.commitCredential(ctx, func() error {
-			return store.CommitBreakLogs(items, gaps, completedJob, owner, time.Now().UTC(), manifest)
+		err = service.commitCredential(ctx, func(ctx context.Context) error {
+			return store.CommitBreakLogsContext(ctx, items, gaps, completedJob, owner, time.Now().UTC(), manifest)
 		})
 		if err != nil {
 			return

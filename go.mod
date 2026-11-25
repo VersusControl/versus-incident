@@ -161,7 +161,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sns v1.47.9
 	github.com/aws/aws-sdk-go-v2/service/ssmincidents v1.48.3
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
+	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4 // indirect
 	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect

@@ -384,7 +384,8 @@ func (client *Client) waitBackoff(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return ctx.Err()
+			// The API server asked for this wait.
+			return markKubernetesTimeout(ctx.Err())
 		case <-timer.C:
 		}
 	}
@@ -471,6 +472,10 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 		return nil, false, err
 	}
 	defer closeTransport()
+	// A deadline that already passed before the request was sent was spent
+	// inside Versus (a lock, the credential, the history store), so only one
+	// that fires during the round trip is a Kubernetes timeout.
+	sentInTime := requestCtx.Err() == nil
 	response, err := requestClient.Do(request)
 	if err != nil {
 		if errors.Is(err, ErrRedirect) {
@@ -479,7 +484,11 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 		if budget.expired() {
 			return nil, false, ErrOperationBudget
 		}
-		return nil, false, fmt.Errorf("kubernetes: request failed: %w", err)
+		err = fmt.Errorf("kubernetes: request failed: %w", err)
+		if sentInTime {
+			err = markKubernetesTimeout(err)
+		}
+		return nil, false, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -534,7 +543,7 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 	limited := io.LimitReader(response.Body, maxBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {
-		return nil, false, fmt.Errorf("kubernetes: read response: %w", err)
+		return nil, false, markKubernetesTimeout(fmt.Errorf("kubernetes: read response: %w", err))
 	}
 	if !budget.takeBytes(int64(len(data))) {
 		return nil, false, ErrOperationBudget

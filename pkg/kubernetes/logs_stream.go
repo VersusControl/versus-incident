@@ -328,9 +328,13 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 		return nil, err
 	}
 	defer closeTransport()
+	sentInTime := ctx.Err() == nil
 	response, err := streamClient.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
+			if sentInTime {
+				return nil, markKubernetesTimeout(ctx.Err())
+			}
 			return nil, ctx.Err()
 		}
 		if errors.Is(err, ErrRedirect) {

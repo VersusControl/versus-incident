@@ -83,19 +83,23 @@ func historySaveRejectionKey(scope Scope) string {
 
 type historySaveRejection struct {
 	Batch string `json:"batch"`
+	// Expected is the saved checkpoint the refused capture was to follow.
+	// Older notes carry none.
+	Expected string `json:"expected,omitempty"`
 }
 
 // recordHistorySaveRejection stores which published capture the history store
-// refused. A store outage usually fails this write as well; readers then fall
-// back to reporting a delay, which is the honest answer for an outage.
-func (service *Service) recordHistorySaveRejection(batchID string) {
+// refused, and the saved checkpoint it was to follow. A store outage usually
+// fails this write as well; readers then fall back to reporting a delay,
+// which is the honest answer for an outage.
+func (service *Service) recordHistorySaveRejection(batchID, expected string) {
 	service.changes.mu.Lock()
 	provider := service.changes.provider
 	service.changes.mu.Unlock()
 	if provider == nil {
 		return
 	}
-	payload, err := json.Marshal(historySaveRejection{Batch: batchID})
+	payload, err := json.Marshal(historySaveRejection{Batch: batchID, Expected: expected})
 	if err == nil {
 		err = provider.WriteBlob(historySaveRejectionKey(service.scope), payload)
 	}
@@ -104,7 +108,15 @@ func (service *Service) recordHistorySaveRejection(batchID string) {
 	}
 }
 
-func (service *Service) historySaveWasRejected(batchID string) bool {
+// historySaveWasRejected reports whether the store refused the published
+// capture pending, or refused a capture that was to follow the checkpoint
+// still saved. The note names only the latest refusal, and a replica's
+// published capture can lag the owner's: while the saved checkpoint is the one
+// the refused capture expected, history is stuck behind it, and every replica
+// with an unsaved capture reports it alike. No clock of another replica is
+// compared; once the checkpoint moves on, the note no longer applies to other
+// captures.
+func (service *Service) historySaveWasRejected(pending storage.EvidenceBatch, checkpointID string) bool {
 	service.changes.mu.Lock()
 	provider := service.changes.provider
 	service.changes.mu.Unlock()
@@ -116,7 +128,10 @@ func (service *Service) historySaveWasRejected(batchID string) bool {
 		return false
 	}
 	var note historySaveRejection
-	return json.Unmarshal(raw, &note) == nil && note.Batch == batchID
+	if json.Unmarshal(raw, &note) != nil {
+		return false
+	}
+	return note.Batch == pending.ID || note.Expected != "" && note.Expected == checkpointID
 }
 
 type captureLoop struct {
@@ -539,7 +554,11 @@ func (service *Service) capture(loop *captureLoop) {
 	defer close(loop.done)
 	store := service.changeStore()
 	defer func() {
-		if err := store.ReleaseLease(loop.owner); err != nil {
+		// The loop has ended, so the release runs past its context. It is
+		// not fenced: a stopped service admits no commit, and the release
+		// only clears a lease this owner holds, so it never touches another
+		// holder's.
+		if err := store.ReleaseLeaseContext(context.WithoutCancel(loop.ctx), loop.owner); err != nil {
 			logging.Debugf("kubernetes: capture lease release unavailable")
 		}
 	}()
@@ -554,13 +573,13 @@ func (service *Service) capture(loop *captureLoop) {
 	}
 	for loop.ctx.Err() == nil {
 		var leaseExpires time.Time
-		if err := service.commitCredential(loop.ctx, func() error {
+		if err := service.commitCredential(loop.ctx, func(ctx context.Context) error {
 			now := time.Now().UTC()
 			leaseExpires = now.Add(leaseTTL)
-			return store.ClaimLease(loop.owner, now, leaseTTL)
+			return store.ClaimLeaseContext(ctx, loop.owner, now, leaseTTL)
 		}); err == nil {
 			service.captureOwned(loop, store, leaseTTL, renewInterval, leaseExpires, ticker.C)
-			if err := store.ReleaseLease(loop.owner); err != nil {
+			if err := service.releaseCaptureLease(loop.ctx, store, loop.owner); err != nil {
 				logging.Debugf("kubernetes: capture lease release unavailable")
 			}
 			loop.mu.Lock()
@@ -577,6 +596,19 @@ func (service *Service) capture(loop *captureLoop) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// releaseCaptureLease releases this loop's capture lease under the credential
+// epoch fence while the loop runs. A release refused or cancelled because the
+// epoch was retired leaves the lease to expire, the safe side. The release
+// only ever clears a lease this owner holds, never another holder's.
+func (service *Service) releaseCaptureLease(ctx context.Context, store *kubechanges.Store, owner string) error {
+	if ctx.Err() != nil {
+		// The loop is shutting down, not retired: release now so a successor
+		// need not wait out the lease. It still clears only this owner's.
+		return store.ReleaseLeaseContext(context.WithoutCancel(ctx), owner)
+	}
+	return service.commitCredential(ctx, func(ctx context.Context) error { return store.ReleaseLeaseContext(ctx, owner) })
 }
 
 func (service *Service) captureOwned(loop *captureLoop, store *kubechanges.Store, leaseTTL, renewInterval time.Duration, leaseExpires time.Time, ticks <-chan time.Time) {
@@ -609,11 +641,11 @@ func (service *Service) captureOwned(loop *captureLoop, store *kubechanges.Store
 				return
 			case <-renew.C:
 				attemptedRenewal := false
-				if err := service.commitCredential(ownedContext, func() error {
+				if err := service.commitCredential(ownedContext, func(ctx context.Context) error {
 					attemptedRenewal = true
 					now := time.Now().UTC()
 					leaseExpires = now.Add(leaseTTL)
-					return store.RenewLease(loop.owner, now, leaseTTL)
+					return store.RenewLeaseContext(ctx, loop.owner, now, leaseTTL)
 				}); err != nil {
 					loop.mu.Lock()
 					loop.status.Behind = true
@@ -722,6 +754,12 @@ func (service *Service) captureCycle(store *kubechanges.Store, deltas <-chan kub
 }
 
 func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas <-chan kubeindex.Delta, snapshot kubeindex.Snapshot, kinds []string, started time.Time, crashes *crashCaptureBatch, expectedOwner ...string) error {
+	return service.captureCycleWithCrashesContext(context.Background(), store, deltas, snapshot, kinds, started, crashes, expectedOwner...)
+}
+
+// captureCycleWithCrashesContext is captureCycleWithCrashes with its store
+// writes stopping when ctx ends, as a commit's do when its epoch is retired.
+func (service *Service) captureCycleWithCrashesContext(ctx context.Context, store *kubechanges.Store, deltas <-chan kubeindex.Delta, snapshot kubeindex.Snapshot, kinds []string, started time.Time, crashes *crashCaptureBatch, expectedOwner ...string) error {
 	loop := service.captureState()
 	now := loop.clock()
 	continuous := loop != nil && loop.status.Mode == "continuous"
@@ -766,7 +804,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 			}
 			loop.mu.Unlock()
 		}
-		if err := service.commitLegacyCapture(store, collected, gaps, nil, owner, now, events, crashGaps, podRead); err != nil {
+		if err := service.commitLegacyCapture(ctx, store, collected, gaps, nil, owner, now, events, crashGaps, podRead); err != nil {
 			return err
 		}
 		service.rememberBreaks(broken, "", now, partial, deferredRoots...)
@@ -849,7 +887,7 @@ func (service *Service) captureCycleWithCrashes(store *kubechanges.Store, deltas
 		}
 		success[kind] = observed
 	}
-	if err := service.commitLegacyCapture(store, collected, gaps, coverage, loop.owner, now, events, crashGaps, podRead); err != nil {
+	if err := service.commitLegacyCapture(ctx, store, collected, gaps, coverage, loop.owner, now, events, crashGaps, podRead); err != nil {
 		loop.status.Behind = true
 		return err
 	}
@@ -901,11 +939,11 @@ func drainIndexChanges(cluster string, deltas <-chan kubeindex.Delta, started, n
 	return result, gaps
 }
 
-func (service *Service) commitLegacyCapture(store *kubechanges.Store, collected []Change, gaps []kubechanges.Gap, coverage map[string]kubechanges.Gap, owner string, now time.Time, events []kubechanges.CrashEvent, crashGaps []kubechanges.Gap, podRead bool) error {
+func (service *Service) commitLegacyCapture(ctx context.Context, store *kubechanges.Store, collected []Change, gaps []kubechanges.Gap, coverage map[string]kubechanges.Gap, owner string, now time.Time, events []kubechanges.CrashEvent, crashGaps []kubechanges.Gap, podRead bool) error {
 	if service.evidenceStore() != nil {
 		return nil
 	}
-	return store.CommitCapture(collected, gaps, coverage, owner, now, events, crashGaps, podRead)
+	return store.CommitCaptureContext(ctx, collected, gaps, coverage, owner, now, events, crashGaps, podRead)
 }
 
 func (service *Service) withEvidenceStatus(status CaptureStatus) CaptureStatus {
@@ -930,10 +968,12 @@ func (service *Service) withEvidenceStatus(status CaptureStatus) CaptureStatus {
 }
 
 // historyCapture is the capture status for a page served from saved history.
-// Whether history is behind is decided from stored state only: the published
-// generation names the capture waiting to be saved, and the checkpoint the page
-// was read against names the last one saved. Every replica reads the same two,
-// so the owner and the others give the same answer.
+// Whether history is behind is decided from shared state only: the published
+// generation names the cluster's latest listing and the capture waiting to be
+// saved, and the checkpoint the page was read against names the last one
+// saved. Every replica reads the same two, so the lease holder and the others
+// give the same answer, and a save by any holder clears it on all of them. A
+// replica that cannot read the checkpoint fails the page itself.
 func (service *Service) historyCapture(checkpoint storage.EvidenceCheckpoint) *CaptureStatus {
 	status := service.CaptureStatus()
 	service.changes.mu.Lock()
@@ -948,6 +988,7 @@ func (service *Service) historyCapture(checkpoint storage.EvidenceCheckpoint) *C
 		pending = storage.EvidenceBatch{ID: batch.ID, At: batch.At, Generation: batch.Generation}
 	}
 	failure := cache.generation.EvidenceFailure
+	listedAt := captureMoment(cache.generation.View)
 	cache.mu.RUnlock()
 	// The capture could not be prepared for saving at all, whatever the reason,
 	// so the published capture carries no save and history stops at the
@@ -962,13 +1003,47 @@ func (service *Service) historyCapture(checkpoint storage.EvidenceCheckpoint) *C
 	if grace <= 0 {
 		grace = defaultHistorySaveGrace
 	}
-	// A capture fenced by an explicit journal deletion is never saved, and one
-	// no newer than the checkpoint has nothing left to add.
-	if pending.ID == "" || pending.ID == checkpoint.ID || pending.Generation != checkpoint.Generation ||
-		!pending.At.After(checkpoint.At) || time.Since(pending.At) < grace {
+	// A capture fenced by an explicit journal deletion is never saved, and is
+	// not measured against the checkpoint it no longer follows; a capture the
+	// checkpoint names is already saved.
+	if pending.ID != "" && pending.Generation != checkpoint.Generation || pending.ID != "" && pending.ID == checkpoint.ID {
+		return &status
+	}
+	if checkpoint.At.IsZero() {
+		// Nothing is saved yet: the first capture is late once it has waited
+		// past the grace.
+		if pending.ID == "" || time.Since(pending.At) < grace {
+			return &status
+		}
+		status.Behind = true
+		status.HistorySave = historySaveStatus(service.historySaveWasRejected(pending, checkpoint.ID), checkpoint.At)
+		return &status
+	}
+	// History is behind once the cluster has been read well past the last
+	// saved capture, by one measure on every replica: saves are failing or
+	// held back, whichever replica holds the lease and whether or not the
+	// published generation carries a capture right now. A cluster that is not
+	// being read leaves nothing new to save, so it never reads as behind.
+	if pending.At.After(listedAt) {
+		listedAt = pending.At
+	}
+	// The store refused the published capture for good, as the stored
+	// rejection note says: it is never saved, so history is behind now. The
+	// same holds with no capture published right now, on a replica that read
+	// the cluster past the checkpoint a refused capture was to follow.
+	rejected := (pending.ID == "" || pending.At.After(checkpoint.At)) && listedAt.After(checkpoint.At) && service.historySaveWasRejected(pending, checkpoint.ID)
+	if !rejected && listedAt.Sub(checkpoint.At) <= grace+service.historySaveCadence() {
 		return &status
 	}
 	status.Behind = true
-	status.HistorySave = historySaveStatus(service.historySaveWasRejected(pending.ID), checkpoint.At)
+	status.HistorySave = historySaveStatus(rejected, checkpoint.At)
 	return &status
+}
+
+// historySaveCadence is the longest a healthy scope goes between saved
+// captures: a capture is prepared each time the most frequently listed kinds
+// are published, and one publication is skipped while the previous save
+// still runs.
+func (service *Service) historySaveCadence() time.Duration {
+	return 2 * service.collectionCadence(captureCadences["Pod"])
 }

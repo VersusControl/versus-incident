@@ -93,7 +93,13 @@ func publicationKey(scope Scope) string {
 }
 
 func readFirstPublication(provider storage.Provider, scope Scope) (time.Time, error) {
-	raw, err := provider.ReadBlob(publicationKey(scope))
+	return readFirstPublicationContext(context.Background(), provider, scope)
+}
+
+// readFirstPublicationContext is readFirstPublication that stops when ctx
+// ends.
+func readFirstPublicationContext(ctx context.Context, provider storage.Provider, scope Scope) (time.Time, error) {
+	raw, err := storage.ReadBlobContext(ctx, provider, publicationKey(scope))
 	if err != nil || len(raw) == 0 {
 		return time.Time{}, err
 	}
@@ -108,10 +114,16 @@ func readFirstPublication(provider storage.Provider, scope Scope) (time.Time, er
 // A single CAS wins across credential renewals and workers; it never overwrites
 // the original timestamp with a later publication.
 func rememberFirstPublication(provider storage.Provider, scope Scope, at time.Time) (time.Time, error) {
+	return rememberFirstPublicationContext(context.Background(), provider, scope, at)
+}
+
+// rememberFirstPublicationContext is rememberFirstPublication that stops when
+// ctx ends.
+func rememberFirstPublicationContext(ctx context.Context, provider storage.Provider, scope Scope, at time.Time) (time.Time, error) {
 	if at.IsZero() || provider == nil {
 		return at, nil
 	}
-	if recorded, err := readFirstPublication(provider, scope); err != nil || !recorded.IsZero() {
+	if recorded, err := readFirstPublicationContext(ctx, provider, scope); err != nil || !recorded.IsZero() {
 		return recorded, err
 	}
 	cas, ok := provider.(storage.BlobCAS)
@@ -122,20 +134,20 @@ func rememberFirstPublication(provider storage.Provider, scope Scope, at time.Ti
 	if err != nil {
 		return time.Time{}, err
 	}
-	won, err := cas.CompareAndSwapBlob(publicationKey(scope), nil, raw)
+	won, err := storage.CompareAndSwapBlobContext(ctx, cas, publicationKey(scope), nil, raw)
 	if err != nil {
 		return time.Time{}, err
 	}
 	if won {
 		return at.UTC(), nil
 	}
-	return readFirstPublication(provider, scope)
+	return readFirstPublicationContext(ctx, provider, scope)
 }
 
 // preserveFirstPublication migrates an existing, already recorded timestamp even
 // when the credential is unavailable. Persistence failure never erases that fact.
-func preserveFirstPublication(provider storage.Provider, scope Scope, at time.Time) time.Time {
-	recorded, err := rememberFirstPublication(provider, scope, at)
+func preserveFirstPublication(ctx context.Context, provider storage.Provider, scope Scope, at time.Time) time.Time {
+	recorded, err := rememberFirstPublicationContext(ctx, provider, scope, at)
 	if err != nil {
 		logging.Debugf("kubernetes: first publication metadata persistence deferred")
 	}
@@ -156,23 +168,37 @@ func preserveFirstPublication(provider storage.Provider, scope Scope, at time.Ti
 // record that cannot be read right now, yields the zero time — the marker is
 // never invented to fill the gap.
 func (service *Service) recordedFirstReadyAt() time.Time {
+	at, _ := service.recordedFirstReadyAtContext(context.Background())
+	return at
+}
+
+// recordedFirstReadyAtContext is recordedFirstReadyAt for a request: its store
+// reads stop when ctx ends, and when no moment could be found because the store
+// failed, that failure is returned with the zero time, so a request is not told
+// a cluster never became ready only because the store did not answer.
+func (service *Service) recordedFirstReadyAtContext(ctx context.Context) (time.Time, error) {
 	if service != nil {
 		if at := service.recovery.firstPublication(service.scope.OrgID); !at.IsZero() {
-			return at
+			return at, nil
 		}
 	}
 	if service == nil || service.changes == nil {
-		return time.Time{}
+		return time.Time{}, nil
 	}
 	service.changes.mu.Lock()
 	provider := service.changes.provider
 	service.changes.mu.Unlock()
+	var storeErr error
 	for _, org := range service.inventoryReadOrgs() {
 		scope := service.scope
 		scope.OrgID = org
 		if provider != nil {
-			if at, err := readFirstPublication(provider, scope); err == nil && !at.IsZero() {
-				return at
+			at, err := readFirstPublicationContext(ctx, provider, scope)
+			if err == nil && !at.IsZero() {
+				return at, nil
+			}
+			if err != nil && storeErr == nil {
+				storeErr = err
 			}
 		}
 		// Finish this org's layouts before consulting an upgrade fallback org.
@@ -186,13 +212,16 @@ func (service *Service) recordedFirstReadyAt() time.Time {
 			recorded := cache.generation.FirstReadyAt
 			cache.mu.RUnlock()
 			if !recorded.IsZero() {
-				return preserveFirstPublication(provider, scope, recorded)
+				return preserveFirstPublication(ctx, provider, scope, recorded), nil
 			}
 		}
 		if provider == nil {
 			continue
 		}
-		raw, err := provider.ReadBlob(inventoryKey(scope))
+		raw, err := storage.ReadBlobContext(ctx, provider, inventoryKey(scope))
+		if err != nil && storeErr == nil {
+			storeErr = err
+		}
 		if err != nil || len(raw) == 0 {
 			continue
 		}
@@ -202,10 +231,10 @@ func (service *Service) recordedFirstReadyAt() time.Time {
 			continue
 		}
 		if recorded := record.FirstReadyAt; !recorded.IsZero() {
-			return preserveFirstPublication(provider, scope, recorded)
+			return preserveFirstPublication(ctx, provider, scope, recorded), nil
 		}
 	}
-	return time.Time{}
+	return time.Time{}, storeErr
 }
 
 // recordedSnapshotObservedAt is when the cluster's stored snapshot was last
@@ -217,7 +246,7 @@ func (service *Service) recordedFirstReadyAt() time.Time {
 // credential fault that makes a read fail. A cluster that never published a
 // snapshot yields the zero time, and the caller omits the age instead of claiming
 // the data is current.
-func (service *Service) recordedSnapshotObservedAt() time.Time {
+func (service *Service) recordedSnapshotObservedAt(ctx context.Context) time.Time {
 	if service == nil || service.changes == nil {
 		return time.Time{}
 	}
@@ -239,7 +268,7 @@ func (service *Service) recordedSnapshotObservedAt() time.Time {
 	for _, org := range service.inventoryReadOrgs() {
 		scope := service.scope
 		scope.OrgID = org
-		generation, _, err := readInventoryGeneration(provider, scope, "")
+		generation, _, err := readInventoryGenerationContext(ctx, provider, scope, "")
 		if err != nil {
 			continue
 		}
@@ -306,15 +335,22 @@ func inventoryDataKey(scope Scope, record inventoryLeaseRecord) (string, error) 
 }
 
 func readInventoryGeneration(provider storage.Provider, scope Scope, revision string) (inventoryGeneration, inventoryLeaseRecord, error) {
+	return readInventoryGenerationContext(context.Background(), provider, scope, revision)
+}
+
+// readInventoryGenerationContext reads the published generation and stops
+// when ctx ends, so a worker waiting on a database that does not answer can
+// still be stopped.
+func readInventoryGenerationContext(ctx context.Context, provider storage.Provider, scope Scope, revision string) (inventoryGeneration, inventoryLeaseRecord, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		generation, record, err := readInventoryGenerationOnce(provider, scope, revision)
+		generation, record, err := readInventoryGenerationOnce(ctx, provider, scope, revision)
 		var payloadErr inventoryPayloadError
 		if !errors.As(err, &payloadErr) {
 			return generation, record, err
 		}
-		raw, readErr := provider.ReadBlob(inventoryKey(scope))
+		raw, readErr := storage.ReadBlobContext(ctx, provider, inventoryKey(scope))
 		if readErr != nil {
-			return generation, record, readErr
+			return generation, record, inventoryStoreReadError{readErr}
 		}
 		var latest inventoryLeaseRecord
 		if json.Unmarshal(raw, &latest) != nil || latest.Revision == record.Revision {
@@ -328,10 +364,32 @@ type inventoryPayloadError struct{ error }
 
 func (err inventoryPayloadError) Unwrap() error { return err.error }
 
-func readInventoryGenerationOnce(provider storage.Provider, scope Scope, revision string) (inventoryGeneration, inventoryLeaseRecord, error) {
-	raw, err := provider.ReadBlob(inventoryKey(scope))
-	if err != nil || len(raw) == 0 {
-		return inventoryGeneration{}, inventoryLeaseRecord{}, err
+// inventoryStoreReadError is a published generation the store did not hand
+// over: it timed out, was unreachable or failed the read. The stored data
+// itself was never seen, so nothing is known about the cluster.
+type inventoryStoreReadError struct{ error }
+
+func (err inventoryStoreReadError) Unwrap() error { return err.error }
+
+// inventoryReadAnswer names a reader's failed read of the published generation
+// for the store when the store failed it, with the same classes a saved
+// history read uses, so a database that stalls is never reported as a
+// Kubernetes timeout. Any other failure is returned unchanged.
+func inventoryReadAnswer(err error) error {
+	var store inventoryStoreReadError
+	if errors.As(err, &store) {
+		return historyReadError(store.error)
+	}
+	return err
+}
+
+func readInventoryGenerationOnce(ctx context.Context, provider storage.Provider, scope Scope, revision string) (inventoryGeneration, inventoryLeaseRecord, error) {
+	raw, err := storage.ReadBlobContext(ctx, provider, inventoryKey(scope))
+	if err != nil {
+		return inventoryGeneration{}, inventoryLeaseRecord{}, inventoryStoreReadError{err}
+	}
+	if len(raw) == 0 {
+		return inventoryGeneration{}, inventoryLeaseRecord{}, nil
 	}
 	var lease inventoryLeaseRecord
 	if err := json.Unmarshal(raw, &lease); err != nil {
@@ -351,9 +409,9 @@ func readInventoryGenerationOnce(provider storage.Provider, scope Scope, revisio
 	if err != nil {
 		return inventoryGeneration{}, lease, err
 	}
-	payload, err := provider.ReadBlob(key)
+	payload, err := storage.ReadBlobContext(ctx, provider, key)
 	if err != nil {
-		return inventoryGeneration{}, lease, err
+		return inventoryGeneration{}, lease, inventoryStoreReadError{err}
 	}
 	var generation inventoryGeneration
 	if err := json.Unmarshal(payload, &generation); err != nil {
@@ -373,7 +431,7 @@ func (service *Service) claimInventory(ctx context.Context, provider storage.Pro
 	if !ok {
 		return nil, false, errors.New("kubernetes: atomic inventory storage unavailable")
 	}
-	raw, err := provider.ReadBlob(inventoryKey(service.scope))
+	raw, err := storage.ReadBlobContext(ctx, provider, inventoryKey(service.scope))
 	if err != nil {
 		return nil, false, storageStageFailure("lease", err)
 	}
@@ -396,9 +454,9 @@ func (service *Service) claimInventory(ctx context.Context, provider storage.Pro
 		return nil, false, err
 	}
 	var won bool
-	err = service.commitStorage(ctx, "lease", func() error {
+	err = service.commitStorage(ctx, "lease", func(ctx context.Context) error {
 		var err error
-		won, err = cas.CompareAndSwapBlob(inventoryKey(service.scope), raw, replacement)
+		won, err = storage.CompareAndSwapBlobContext(ctx, cas, inventoryKey(service.scope), raw, replacement)
 		return err
 	})
 	return &inventoryLease{provider: provider, cas: cas, scope: service.scope, record: record, expected: replacement, ttl: ttl}, won, err
@@ -420,12 +478,12 @@ func (lease *inventoryLease) renewHeld(ctx context.Context, service *Service) er
 	if !lease.record.Expires.After(time.Now()) {
 		return errInventoryLeaseLost
 	}
-	return service.commitStorage(ctx, "lease", lease.renewFenced)
+	return service.commitStorage(ctx, "lease", func(ctx context.Context) error { return lease.renewFenced(ctx) })
 }
 
 // renewFenced renews the lease; the caller holds lease.mu and is already inside
 // the credential epoch fence, as a history save is.
-func (lease *inventoryLease) renewFenced() error {
+func (lease *inventoryLease) renewFenced(ctx context.Context) error {
 	if !lease.record.Expires.After(time.Now()) {
 		return errInventoryLeaseLost
 	}
@@ -435,7 +493,7 @@ func (lease *inventoryLease) renewFenced() error {
 	if err != nil {
 		return err
 	}
-	won, err := lease.cas.CompareAndSwapBlob(inventoryKey(lease.scope), lease.expected, replacement)
+	won, err := storage.CompareAndSwapBlobContext(ctx, lease.cas, inventoryKey(lease.scope), lease.expected, replacement)
 	if err == nil && !won {
 		return errInventoryLeaseLost
 	}
@@ -449,8 +507,28 @@ func (lease *inventoryLease) renewFenced() error {
 // the store's own answer is a storage failure: a credential that cannot be
 // resolved or accepted before the write keeps its meaning, so it still reaches
 // the credential recovery gate.
-func (service *Service) commitStorage(ctx context.Context, stage string, commit func() error) error {
-	return service.commitCredential(ctx, func() error { return storageStageFailure(stage, commit()) })
+func (service *Service) commitStorage(ctx context.Context, stage string, commit func(context.Context) error) error {
+	return service.commitCredential(ctx, func(ctx context.Context) error { return storageStageFailure(stage, commit(ctx)) })
+}
+
+// commitAdmitted runs one storage write that the credential epoch fence
+// admits, without holding the fence while the store works. It is for a write
+// whose context already ends with the epoch, such as a history save: the
+// fence answers the same credential and lease questions as commitStorage, and
+// an epoch that ends during the write cancels it and is reported as the
+// commit conflict a held fence would have reported.
+func (service *Service) commitAdmitted(ctx context.Context, stage string, commit func() error) error {
+	if err := service.commitCredential(ctx, func(ctx context.Context) error { return nil }); err != nil {
+		return err
+	}
+	err := storageStageFailure(stage, commit())
+	if epoch := service.identity; epoch != nil && epoch.ctx.Err() != nil {
+		epoch.mu.Lock()
+		cause := retiredEpochCauseLocked(epoch)
+		epoch.mu.Unlock()
+		return commitConflictError{cause: cause}
+	}
+	return err
 }
 
 func (lease *inventoryLease) release() error {
@@ -485,7 +563,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	// holds for an in-memory cluster too; with a store the record below makes it
 	// the cluster's durable copy.
 	if lease.provider != nil {
-		at, err := readFirstPublication(lease.provider, lease.scope)
+		at, err := readFirstPublicationContext(ctx, lease.provider, lease.scope)
 		if err != nil {
 			return err
 		}
@@ -532,24 +610,20 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	service.changes.mu.Lock()
 	cache := service.changes.inventories[service.indexScope()]
 	service.changes.mu.Unlock()
-	previous := inventoryGeneration{}
-	if cache != nil {
-		cache.mu.RLock()
-		previous = cache.generation
-		// A capture whose save was abandoned left saved history short of it.
-		if previous.EvidenceBatch != nil && previous.EvidenceBatch.ID == cache.abandonedSave {
-			previous.EvidenceFailure = "storage_rejected"
-		}
-		cache.mu.RUnlock()
-	}
 	generation.EvidenceBatch = nil
 	generation.EvidenceFailure = ""
-	refusal := ""
-	if evidenceErr := service.prepareEvidence(ctx, generation, previous); evidenceErr != nil {
-		generation.EvidenceFailure = errorClass(evidenceErr)
-		refusal = "reason=" + captureRefusalReason(evidenceErr) + " class=" + generation.EvidenceFailure
+	// No capture is prepared while a save runs or the store's backoff waits:
+	// the checkpoint is not read, and the first capture after it covers every
+	// change since the last saved one.
+	if service.historyCaptureDue(cache) {
+		previous := previousCapture(cache)
+		refusal := ""
+		if evidenceErr := service.prepareEvidence(ctx, generation, previous); evidenceErr != nil {
+			generation.EvidenceFailure = errorClass(evidenceErr)
+			refusal = "reason=" + captureRefusalReason(evidenceErr) + " class=" + generation.EvidenceFailure
+		}
+		noteCaptureRefusal(service.scope, cache, refusal)
 	}
-	noteCaptureRefusal(service.scope, cache, refusal)
 	payload, err := json.Marshal(generation)
 	if err != nil {
 		return err
@@ -557,7 +631,7 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 	// Each owner alternates its own two slots. A stale owner cannot modify a
 	// successor's data, and the small CAS is the only publication point.
 	payloadStarted := time.Now()
-	writeErr := service.commitStorage(ctx, "payload", func() error { return lease.provider.WriteBlob(key, payload) })
+	writeErr := service.commitStorage(ctx, "payload", func(ctx context.Context) error { return storage.WriteBlobContext(ctx, lease.provider, key, payload) })
 	service.recovery.stage("payload", payloadStarted, writeErr)
 	if err := writeErr; err != nil {
 		return err
@@ -573,8 +647,8 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 		return err
 	}
 	casStarted := time.Now()
-	err = service.commitStorage(ctx, "cas", func() error {
-		won, err := lease.cas.CompareAndSwapBlob(inventoryKey(lease.scope), lease.expected, replacement)
+	err = service.commitStorage(ctx, "cas", func(ctx context.Context) error {
+		won, err := storage.CompareAndSwapBlobContext(ctx, lease.cas, inventoryKey(lease.scope), lease.expected, replacement)
 		if err == nil && !won {
 			return errInventoryLeaseLost
 		}
@@ -639,36 +713,56 @@ func (lease *inventoryLease) commitJournal(parent context.Context, service *Serv
 	if generation.EvidenceBatch == nil {
 		return nil
 	}
+	// The lease lock is held only to read and renew the lease, never while
+	// the store works: a cycle publishing live data takes the same lock.
+	short := func() bool { return lease.cas != nil && time.Until(lease.record.Expires) < lease.leaseTTL()/2 }
 	lease.mu.Lock()
-	defer lease.mu.Unlock()
 	if !lease.record.Expires.After(time.Now()) {
+		lease.mu.Unlock()
 		return kubechanges.ErrLeaseLost
 	}
 	// A large capture is saved in several transactions. Start it with at least
 	// half a lease ahead, and confirm the lease before each transaction, so
 	// every part is fenced by a lease that is still held.
-	short := func() bool { return lease.cas != nil && time.Until(lease.record.Expires) < lease.leaseTTL()/2 }
 	if short() {
 		if err := lease.renewHeld(parent, service); err != nil {
+			lease.mu.Unlock()
 			return err
 		}
 	}
+	expires, expected, owner := lease.record.Expires, append([]byte(nil), lease.expected...), lease.record.Owner
+	lease.mu.Unlock()
 	// The save stops when the lease runs out; each renewal between its
 	// transactions moves that point, so a long save that keeps its lease is
 	// not cut at the expiry it started with.
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
-	expiry := time.AfterFunc(time.Until(lease.record.Expires), cancel)
+	expiry := time.AfterFunc(time.Until(expires), cancel)
 	defer expiry.Stop()
 	batch := *generation.EvidenceBatch
-	batch.GuardKey, batch.GuardExpected = inventoryKey(lease.scope), append([]byte(nil), lease.expected...)
-	// Called by the store inside the save, which already holds the fence.
-	batch.KeepLease = func(context.Context) ([]byte, error) {
+	// The save is fenced by who holds the lease, not by its bytes: this
+	// process's own publications and renewals rewrite the lease while the
+	// save runs and must never conflict with it.
+	batch.GuardKey, batch.GuardExpected, batch.GuardOwner = inventoryKey(lease.scope), expected, owner
+	// Called by the store inside the save, between its transactions.
+	batch.KeepLease = func(keepCtx context.Context) ([]byte, error) {
+		// Each transaction is admitted only while the proof that fenced the
+		// capture still stands: a save never lands after it failed.
+		if cache := service.inventoryCache(); cache != nil {
+			cache.mu.RLock()
+			_, refused := service.historySaveAuthorityLocked(cache)
+			cache.mu.RUnlock()
+			if refused {
+				return nil, errHistorySaveRefused
+			}
+		}
+		lease.mu.Lock()
+		defer lease.mu.Unlock()
 		if !lease.record.Expires.After(time.Now()) {
 			return nil, kubechanges.ErrLeaseLost
 		}
 		if short() {
-			if err := lease.renewFenced(); err != nil {
+			if err := lease.renewFenced(keepCtx); err != nil {
 				return nil, storageStageFailure("lease", err)
 			}
 			expiry.Reset(time.Until(lease.record.Expires))
@@ -763,4 +857,256 @@ func (service *Service) historySaveAbandoned(cache *inventoryCache, batchID stri
 	cache.mu.RLock()
 	defer cache.mu.RUnlock()
 	return batchID != "" && cache.abandonedSave == batchID
+}
+
+// historySaveRetryCeiling bounds the wait between saves after the store
+// failed one.
+const historySaveRetryCeiling = 5 * time.Minute
+
+// pendingHistorySave is the history save state of one inventory scope.
+//
+// At most one save runs at a time, off the collection path, under the
+// worker's context. While it runs, cycles publish live inventory but prepare
+// no capture, and after the store failed a save they prepare none until the
+// backoff has passed. A capture is a diff from base, the generation whose
+// capture was last saved, against the checkpoint it reads when it is
+// prepared, so a capture prepared after a pause covers every change since:
+// nothing is lost while a save runs, and no gap is recorded for it. Only a
+// capture the store failed to save is dropped; the next capture records the
+// stretch it covered as a gap. The inventory cache's lock guards every field
+// but the wait group.
+type pendingHistorySave struct {
+	// queued is a capture waiting to start: the generation restored at start,
+	// or a capture held while its cycle's authority proof is pending.
+	queued   *inventoryGeneration
+	inFlight string
+	base     *inventoryGeneration
+	failures int
+	next     time.Time
+	dropped  int
+	// lost is set when a capture was dropped because the store failed it, so
+	// the next capture records the stretch as a gap.
+	lost bool
+	// failing is set from a store failure until the next save succeeds.
+	failing bool
+	ctx     context.Context
+	running *sync.WaitGroup
+	// clock tells the backoff time; nil is the wall clock.
+	clock func() time.Time
+}
+
+func (pending *pendingHistorySave) now() time.Time {
+	if pending.clock != nil {
+		return pending.clock()
+	}
+	return time.Now()
+}
+
+// captureDue reports whether a cycle publishing now prepares a capture: no
+// save runs or waits to start, and no store-failure backoff is pending.
+func (pending *pendingHistorySave) captureDue() bool {
+	return pending.inFlight == "" && pending.queued == nil && (!pending.failing || !pending.now().Before(pending.next))
+}
+
+// known reports whether batch is already saved, being saved or waiting.
+func (pending *pendingHistorySave) known(batch string) bool {
+	for _, generation := range []*inventoryGeneration{pending.queued, pending.base} {
+		if generation != nil && generation.EvidenceBatch != nil && generation.EvidenceBatch.ID == batch {
+			return true
+		}
+	}
+	return pending.inFlight == batch
+}
+
+// historySaveStoreFailure reports a save that failed in the store: slow,
+// unavailable or refusing. Only that sets the backoff, is reported as history
+// not saving and records a gap; a lost lease, a moved checkpoint or a
+// credential answer drops the capture, and the next one, prepared from the
+// fresh checkpoint, covers it.
+func historySaveStoreFailure(err error) bool {
+	return !errors.Is(err, errInventoryLeaseLost) && !errors.Is(err, kubechanges.ErrLeaseLost) && !errors.Is(err, storage.ErrEvidenceConflict) &&
+		!countsAgainstCredential(err) && !errors.Is(err, errHistorySaveRefused)
+}
+
+// historySaveAuthorityLocked tells whether a capture may be saved now: held
+// while the cycle's authority proof is pending, refused once the proof failed
+// or the credential epoch ended, and allowed otherwise. The caller holds the
+// inventory cache's lock.
+func (service *Service) historySaveAuthorityLocked(cache *inventoryCache) (allowed, refused bool) {
+	if service.identity != nil && service.identity.ctx.Err() != nil {
+		return false, true
+	}
+	if cache.authorityFailure != nil || cache.failed && (cache.failedClass == "forbidden" || cache.failedClass == "unauthorized") {
+		return false, true
+	}
+	if !cache.authorityQuestioned.empty() {
+		return false, false
+	}
+	return true, false
+}
+
+// errHistorySaveRefused stops a save whose cycle's authority proof failed or
+// whose credential epoch ended after the capture was published.
+var errHistorySaveRefused = errors.New("kubernetes: history save refused after the authority proof failed")
+
+// startHistorySaver binds a scope's history saves to its worker's context.
+// The returned stop refuses every later save, then waits until the one
+// running, if any, has ended.
+func (service *Service) startHistorySaver(ctx context.Context, cache *inventoryCache) func() {
+	running := &sync.WaitGroup{}
+	cache.mu.Lock()
+	cache.historySave.ctx, cache.historySave.running = ctx, running
+	cache.mu.Unlock()
+	return func() {
+		cache.mu.Lock()
+		if cache.historySave.running == running {
+			cache.historySave.running = nil
+		}
+		cache.mu.Unlock()
+		running.Wait()
+	}
+}
+
+// historyCaptureDue reports whether a cycle publishing now prepares a capture.
+func (service *Service) historyCaptureDue(cache *inventoryCache) bool {
+	if cache == nil {
+		return true
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	return cache.historySave.captureDue()
+}
+
+// queueHistorySave starts the save of a published capture. It never waits for
+// the store: the capture is already live, and only saved history lags while
+// the store is slow.
+func (service *Service) queueHistorySave(lease *inventoryLease, cache *inventoryCache, generation inventoryGeneration) {
+	if cache == nil || generation.EvidenceBatch == nil {
+		return
+	}
+	cache.mu.Lock()
+	if cache.historySave.known(generation.EvidenceBatch.ID) {
+		cache.mu.Unlock()
+		return
+	}
+	if cache.historySave.queued != nil {
+		cache.historySave.dropped++
+	}
+	cache.historySave.queued = &generation
+	cache.mu.Unlock()
+	service.startHistorySave(lease, cache)
+}
+
+// startHistorySave starts the waiting capture's save when its cycle's
+// authority stands and no other save runs.
+func (service *Service) startHistorySave(lease *inventoryLease, cache *inventoryCache) {
+	if cache == nil || lease == nil {
+		return
+	}
+	cache.mu.Lock()
+	pending := &cache.historySave
+	allowed, refused := service.historySaveAuthorityLocked(cache)
+	if refused && pending.queued != nil {
+		// A capture is never saved once the proof that fenced it failed.
+		pending.queued = nil
+		pending.dropped++
+	}
+	if !allowed || pending.queued == nil || pending.inFlight != "" || pending.ctx == nil || pending.running == nil || pending.ctx.Err() != nil {
+		cache.mu.Unlock()
+		return
+	}
+	generation := *pending.queued
+	pending.queued, pending.inFlight = nil, generation.EvidenceBatch.ID
+	ctx, running := pending.ctx, pending.running
+	running.Add(1)
+	cache.mu.Unlock()
+	go func() {
+		defer running.Done()
+		err := lease.commitJournal(ctx, service, generation)
+		service.finishHistorySave(cache, generation, err)
+	}()
+}
+
+// finishHistorySave records how a save ended. A saved capture becomes the
+// base of the next. A store failure drops the capture, sets the backoff and is
+// reported as history not saving; the next capture records the gap.
+func (service *Service) finishHistorySave(cache *inventoryCache, generation inventoryGeneration, err error) {
+	cache.mu.Lock()
+	pending := &cache.historySave
+	pending.inFlight = ""
+	switch {
+	case err == nil:
+		pending.base = &generation
+		pending.failing, pending.failures, pending.next, pending.lost = false, 0, time.Time{}, false
+		cache.mu.Unlock()
+		return
+	case pending.ctx.Err() != nil:
+		// The worker is stopping; its successor saves what it publishes.
+		cache.mu.Unlock()
+		return
+	case !historySaveStoreFailure(err):
+		// The next capture, prepared from the fresh checkpoint against the
+		// same base, covers this one.
+		pending.dropped++
+		cache.mu.Unlock()
+		return
+	}
+	pending.dropped++
+	pending.lost, pending.failing = true, true
+	pending.failures++
+	pending.next = pending.now().Add(min(time.Second<<min(pending.failures-1, 9), historySaveRetryCeiling))
+	dropped := pending.dropped
+	cache.mu.Unlock()
+	problems().Fail(slog.LevelWarn, problemKey(service.scope.OrgID, service.scope.ClusterID, "history_save"), "storage_unavailable",
+		"kubernetes: cluster %q history is not saving (storage unavailable); live views stay current and the next capture is saved after a backoff, %d captures dropped; check the history database is reachable and answering quickly", service.scope.ClusterID, dropped)
+}
+
+// previousCapture is the generation a new capture is diffed from: the one
+// whose capture was last saved, or the published one before any save. A
+// capture the store rejected, or dropped because the store failed it, left
+// saved history short, so the new capture records that stretch as a gap.
+func previousCapture(cache *inventoryCache) inventoryGeneration {
+	if cache == nil {
+		return inventoryGeneration{}
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	previous := cache.generation
+	if cache.historySave.base != nil {
+		previous = *cache.historySave.base
+	}
+	if previous.EvidenceBatch != nil && previous.EvidenceBatch.ID == cache.abandonedSave {
+		previous.EvidenceFailure = "storage_rejected"
+	}
+	if cache.historySave.lost {
+		previous.EvidenceFailure = "storage_unavailable"
+	}
+	return previous
+}
+
+// adopt folds a fresh claim of the same lease into the lease already held, so
+// a history save running on it and the next cycle share one lease and its
+// renewals. The claim's state is taken only when it is the newer write.
+func (lease *inventoryLease) adopt(claimed *inventoryLease) *inventoryLease {
+	if lease == nil || claimed == nil || lease == claimed {
+		return claimed
+	}
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	if lease.record.Owner != claimed.record.Owner || lease.scope != claimed.scope {
+		return claimed
+	}
+	if claimed.record.Expires.After(lease.record.Expires) {
+		lease.record, lease.expected = claimed.record, claimed.expected
+	}
+	lease.provider, lease.cas, lease.ttl = claimed.provider, claimed.cas, claimed.ttl
+	return lease
+}
+
+// inventoryCache is this scope's inventory cache, or nil before the worker
+// starts.
+func (service *Service) inventoryCache() *inventoryCache {
+	service.changes.mu.Lock()
+	defer service.changes.mu.Unlock()
+	return service.changes.inventories[service.indexScope()]
 }

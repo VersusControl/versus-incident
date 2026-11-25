@@ -72,6 +72,7 @@
   --sev-info: 96 165 250;
   --sev-info-solid: 37 99 235;
   --sev-ok: 74 222 128;
+  --sev-ok-text: 74 222 128;
   --sev-ok-solid: 22 163 74;
 
   --sk-shimmer: 255 255 255;
@@ -119,6 +120,7 @@
   --sev-info: 37 99 235;
   --sev-info-solid: 37 99 235;
   --sev-ok: 21 128 61;
+  --sev-ok-text: 22 101 52; /* green-800, 6.3:1 on surface-sunken (green-700 is 4.43:1) */
   --sev-ok-solid: 22 163 74;
 
   --sk-shimmer: 0 0 0;

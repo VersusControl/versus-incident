@@ -331,7 +331,7 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 					}
 					return records, complete, err
 				}, func(commit func() error) error {
-					return service.commitCredential(refreshContext, commit)
+					return service.commitCredential(refreshContext, func(context.Context) error { return commit() })
 				})
 				var throttled *ErrThrottled
 				if errors.As(refreshErr, &throttled) {
@@ -355,7 +355,7 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 			service.changes.mu.Lock()
 			crashes.omitted = crashes.omitted || service.changes.journalFailed[key.scope]
 			service.changes.mu.Unlock()
-			commitErr := service.commitCredential(refreshContext, func() error {
+			commitErr := service.commitCredential(refreshContext, func(ctx context.Context) error {
 				snapshot := index.Snapshot()
 				if key.cached {
 					for _, kind := range kinds {
@@ -366,7 +366,7 @@ func (service *Service) runIndexRefresh(requestContext context.Context, key inde
 						snapshot.Kinds[kind] = state
 					}
 				}
-				return service.captureCycleWithCrashes(changeStore, deltas, snapshot, kinds, started, crashes, refreshOwner)
+				return service.captureCycleWithCrashesContext(ctx, changeStore, deltas, snapshot, kinds, started, crashes, refreshOwner)
 			})
 			if !errors.Is(commitErr, kubechanges.ErrLeaseLost) {
 				service.changes.mu.Lock()

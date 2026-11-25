@@ -757,3 +757,50 @@ func TestHelmReleasesViewEndsOnTheLastPageWhenMetadataIsIncomplete(t *testing.T)
 		t.Fatalf("the last page offered next=%v", next)
 	}
 }
+
+func TestListK8sIssuesCursorPageWithoutCountsOmitsTotals(t *testing.T) {
+	issue := kubernetes.Issue{Root: kubernetes.ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "checkout"}, Rule: "workload.unavailable", Severity: "critical", Count: 1}
+	for name, page := range map[string]kubernetes.IssuePage{
+		"marked by the service":     {Items: []kubernetes.Issue{issue}, CountUnknown: true, Next: "page-3"},
+		"empty totals from history": {Items: []kubernetes.Issue{issue}, Totals: map[string]int{}, Next: "page-3"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			data := compactIssues(page, kubernetes.Scope{ClusterID: "cluster-a"}, "page-2")
+			if _, ok := data["totals"]; ok {
+				t.Errorf("cursor page without counts sends totals: %+v", data["totals"])
+			}
+			if _, ok := data["broken"]; ok {
+				t.Errorf("cursor page without counts sends broken: %+v", data["broken"])
+			}
+			if data["count_unknown"] != true {
+				t.Errorf("count_unknown = %v, want true", data["count_unknown"])
+			}
+			if note, _ := data["count_note"].(string); !strings.Contains(note, "does not count issues") {
+				t.Errorf("count_note = %q, want a line saying the page does not count issues", note)
+			}
+			view := compactModelView(data, arguments{}, kubernetes.Scope{ClusterID: "cluster-a"})
+			if view["count_unknown"] != true || view["count_note"] == nil {
+				t.Errorf("model view dropped the uncounted marker: %+v", view)
+			}
+		})
+	}
+}
+
+func TestListK8sIssuesFirstPageKeepsCounts(t *testing.T) {
+	issue := kubernetes.Issue{Root: kubernetes.ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "checkout"}, Rule: "workload.unavailable", Severity: "critical", Count: 1, Broken: true}
+	page := kubernetes.IssuePage{Items: []kubernetes.Issue{issue}, Totals: map[string]int{"critical": 4}, Broken: kubernetes.BrokenTotals{Total: 2}, Next: "page-2"}
+	data := compactIssues(page, kubernetes.Scope{ClusterID: "cluster-a"}, "")
+	totals, ok := data["totals"].(map[string]int)
+	if !ok || totals["critical"] != 4 {
+		t.Errorf("first page totals = %+v, want critical=4", data["totals"])
+	}
+	if broken, ok := data["broken"].(kubernetes.BrokenTotals); !ok || broken.Total != 2 {
+		t.Errorf("first page broken = %+v, want 2 workloads", data["broken"])
+	}
+	if _, ok := data["count_unknown"]; ok {
+		t.Errorf("first page marked uncounted: %+v", data)
+	}
+	if _, ok := data["count_note"]; ok {
+		t.Errorf("first page carries an uncounted note: %+v", data["count_note"])
+	}
+}
