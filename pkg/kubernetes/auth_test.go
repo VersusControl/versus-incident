@@ -1372,7 +1372,7 @@ func TestProjectedPositiveFreshnessBound(t *testing.T) {
 }
 
 func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
-	for _, mode := range []string{"read", "stream", "history_refresh", "lease_refresh"} {
+	for _, mode := range []string{"read", "history_refresh", "lease_refresh"} {
 		t.Run(mode, func(t *testing.T) {
 			var rejected atomic.Bool
 			var discoveryReads atomic.Int32
@@ -1429,8 +1429,6 @@ func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
 			case "read":
 				var output any
 				err = client.GetJSON(t.Context(), "/api/v1/pods", &output)
-			case "stream":
-				_, err = client.openPodLogStream(t.Context(), "/api/v1/namespaces/default/pods/api/log", false)
 			case "history_refresh":
 				_, err = service.Changes(t.Context(), ChangeQuery{})
 			case "lease_refresh":

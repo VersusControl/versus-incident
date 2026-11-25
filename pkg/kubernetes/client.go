@@ -496,6 +496,12 @@ func (client *Client) getBounded(ctx context.Context, apiPath, accept string, ma
 			delay := parseRetryAfter(hint, time.Now().UTC())
 			client.extendBackoff(ctx, time.Now().Add(delay))
 		}
+		if response.StatusCode == http.StatusUnauthorized && podLogPath(apiPath) {
+			// For a Pod log the API server relays the kubelet's answer: a 401
+			// can be one node's kubelet refusing the API server while this
+			// credential is good everywhere else. It fails this read only.
+			return nil, false, ErrUnauthorized
+		}
 		currentRequest := requestService == nil || requestService.identity.requestGeneration.Load() == requestCredentialGeneration
 		if response.StatusCode == http.StatusUnauthorized && requestService != nil {
 			requestService.noteRejectedCredential(request.Header.Get("Authorization"))
@@ -785,6 +791,15 @@ func (client *Client) clearMetadataDenial(key metadataDenyKey) {
 	client.metadataMu.Lock()
 	defer client.metadataMu.Unlock()
 	delete(client.metadataDenied, key)
+}
+
+// podLogPath reports a request for a Pod's log subresource: exactly
+// /api/v1/namespaces/<namespace>/pods/<pod>/log, query aside. A Pod named
+// "log", or an object named "log" in a namespace named "pods", is not one.
+func podLogPath(apiPath string) bool {
+	path, _, _ := strings.Cut(apiPath, "?")
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	return len(parts) == 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" && parts[3] != "" && parts[4] == "pods" && parts[5] != "" && parts[6] == "log"
 }
 
 type ErrThrottled struct{ RetryAfter time.Duration }
