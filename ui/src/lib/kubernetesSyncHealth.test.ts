@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { KubernetesKindStatus, KubernetesSync } from "./api";
-import { clusterSyncEnvelope, firstReadyAt, historySaveDelay, historySaveLabel, isZeroTime, kindFailed, kindFailureReason, reportSyncHealth, syncFailureReport, syncHealth, syncHealthStateLabel, syncPollIntervalMs, syncReportIdlePollMs, syncReportPollIntervalMs } from "./kubernetesSyncHealth";
+import { clusterSyncEnvelope, firstReadyAt, historySaveDelay, historySaveLabel, historyStoreFailure, isZeroTime, kindFailed, kindFailureReason, reportSyncHealth, syncDataTime, syncFailureLabel, syncFailureReport, syncHealth, syncHealthStateLabel, syncPollIntervalMs, syncReportIdlePollMs, syncReportPollIntervalMs } from "./kubernetesSyncHealth";
 
 const ready = { state: "ready", age_s: 4, partial: false };
 const zero = "0001-01-01T00:00:00Z";
@@ -180,8 +180,8 @@ describe("Cluster sync health", () => {
   it("words every failure class for an operator", () => {
     expect(kindFailureReason({ error: "record_rejected" })).toBe("some objects could not be indexed, everything else is current");
     expect(kindFailureReason({ error: "record_limit" })).toBe("too many objects for the safety limit");
-    expect(kindFailureReason({ error: "storage_unavailable" })).toBe("the cluster was read, but the snapshot could not be saved");
-    expect(kindFailureReason({ error: "storage_rejected" })).toBe("the cluster was read, but the history store rejected the snapshot");
+    expect(kindFailureReason({ error: "storage_unavailable" })).toBe("the history database is unavailable, so the latest read could not be saved");
+    expect(kindFailureReason({ error: "storage_rejected" })).toBe("the history database refused to save the latest read");
     expect(kindFailureReason({ error: "incomplete_pages" })).toBe("the listing could not be paged through");
     expect(kindFailureReason({ error: "commit_conflict" })).toBe("credentials rotated mid-sync, retrying");
     expect(kindFailureReason({ error: "forbidden" })).toBe("permission denied");
@@ -475,23 +475,23 @@ describe("History save delay notice", () => {
   it("labels a save time from today in local hours and minutes only", () => {
     const delay = historySaveDelay(save(at));
     expect(delay).toEqual({ code: "history_save_delayed", rejected: false, action: "a", savedThrough: at });
-    expect(historySaveLabel(delay!, localNoon(at))).toBe(`History is temporarily not saving — showing data from ${time}`);
+    expect(historySaveLabel(delay!, localNoon(at))).toBe(`History is temporarily not saving to the database — showing data from ${time}`);
   });
 
   it("adds the short local date when the save time is from an earlier day", () => {
     const delay = historySaveDelay(save(at))!;
     const date = new Date(at).toLocaleDateString([], { month: "short", day: "numeric" });
-    expect(historySaveLabel(delay, localNoon(at, 1))).toBe(`History is temporarily not saving — showing data from ${date}, ${time}`);
+    expect(historySaveLabel(delay, localNoon(at, 1))).toBe(`History is temporarily not saving to the database — showing data from ${date}, ${time}`);
     expect(historySaveLabel(delay, localNoon(at, 1))).not.toBe(historySaveLabel(delay, localNoon(at)));
     const yearAgo = new Date(at).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
-    expect(historySaveLabel(delay, localNoon(at, 366))).toBe(`History is temporarily not saving — showing data from ${yearAgo}, ${time}`);
+    expect(historySaveLabel(delay, localNoon(at, 366))).toBe(`History is temporarily not saving to the database — showing data from ${yearAgo}, ${time}`);
   });
 
   it("omits the time when the backend does not know one", () => {
     for (const page of [save(), save("0001-01-01T00:00:00Z"), save("not a time")]) {
       const delay = historySaveDelay(page);
       expect(delay).toEqual({ code: "history_save_delayed", rejected: false, action: "a" });
-      expect(historySaveLabel(delay!)).toBe("History is temporarily not saving — showing the last saved data");
+      expect(historySaveLabel(delay!)).toBe("History is temporarily not saving to the database — showing the last saved data");
     }
   });
 
@@ -511,11 +511,11 @@ describe("History save delay notice", () => {
   it("labels a rejected save honestly, never as temporary, with the same date rules", () => {
     const delay = historySaveDelay(rejected(at))!;
     expect(delay).toEqual({ code: "history_save_rejected", rejected: true, action: "Check the history store; it refused the batch.", savedThrough: at });
-    expect(historySaveLabel(delay, localNoon(at))).toBe(`History could not save the latest data — showing data from ${time}`);
+    expect(historySaveLabel(delay, localNoon(at))).toBe(`History could not save the latest data to the database — showing data from ${time}`);
     const date = new Date(at).toLocaleDateString([], { month: "short", day: "numeric" });
-    expect(historySaveLabel(delay, localNoon(at, 1))).toBe(`History could not save the latest data — showing data from ${date}, ${time}`);
+    expect(historySaveLabel(delay, localNoon(at, 1))).toBe(`History could not save the latest data to the database — showing data from ${date}, ${time}`);
     const untimed = historySaveLabel(historySaveDelay(rejected())!);
-    expect(untimed).toBe("History could not save the latest data — showing the last saved data");
+    expect(untimed).toBe("History could not save the latest data to the database — showing the last saved data");
     for (const label of [historySaveLabel(delay), untimed]) expect(label).not.toMatch(/temporar|credential|connector/i);
   });
 
@@ -527,5 +527,25 @@ describe("History save delay notice", () => {
     const delay = historySaveDelay(save("2026-11-05T08:00:00Z"), rejected(at), undefined)!;
     expect(delay.rejected).toBe(true);
     expect(delay.savedThrough).toBe(at);
+  });
+});
+
+describe("Dated data times", () => {
+  it("adds the date when the data is not from today, and the year when that differs too", () => {
+    const now = new Date(2026, 10, 23, 10, 0).getTime();
+    expect(syncDataTime(new Date(2026, 10, 23, 9, 5).toISOString(), undefined, now)).toBe("09:05");
+    expect(syncDataTime(new Date(2026, 10, 21, 23, 37).toISOString(), undefined, now)).toBe("Nov 21, 23:37");
+    expect(syncDataTime(undefined, 36 * 3600, now)).toBe("Nov 21, 22:00");
+    expect(syncDataTime(new Date(2025, 11, 31, 23, 59).toISOString(), undefined, now)).toBe("Dec 31, 2025, 23:59");
+    expect(syncFailureLabel("failed", { onScreen: true, time: syncDataTime(new Date(2026, 10, 21, 23, 37).toISOString(), undefined, now) })).toBe("Sync failed — showing data from Nov 21, 23:37");
+  });
+});
+
+describe("History-store sync failures", () => {
+  it("is a history-store failure only when every failing kind failed to save", () => {
+    const problem = (error: string) => ({ kind: error, error, reason: kindFailureReason({ error }), skipped: 0, records: 0 });
+    expect(historyStoreFailure({ problems: [problem("storage_unavailable"), problem("storage_rejected")] })).toBe(true);
+    expect(historyStoreFailure({ problems: [problem("storage_unavailable"), problem("unavailable")] })).toBe(false);
+    expect(historyStoreFailure({ problems: [] })).toBe(false);
   });
 });

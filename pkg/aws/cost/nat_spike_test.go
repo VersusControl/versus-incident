@@ -609,14 +609,15 @@ func TestRightsizeTitleShowsTheNameTagOnlyWhenAllowlisted(t *testing.T) {
 	}
 }
 
-// Through the settings sanitiser, "Name" on the allowlist shows the Name
-// tag in a rightsize title and "name" does not: tag keys are
-// case-sensitive and matched exactly.
-func TestRightsizeTitleNameAllowlistThroughSettingsIsCaseSensitive(t *testing.T) {
+// Through the settings sanitiser, "Name" or "name" on the allowlist shows
+// the Name tag in a rightsize title and another key does not: allowlist
+// keys match tag keys without regard to case.
+func TestRightsizeTitleNameAllowlistThroughSettingsIgnoresCase(t *testing.T) {
 	targets := []Target{{AccountID: "111111111111", Credentials: testCreds}}
 	for _, c := range []struct{ key, want string }{
 		{"Name", "Resize reporting to m6i.medium"},
-		{"name", "Resize i-0a1b2c3d4e5f67890 to m6i.medium"},
+		{"name", "Resize reporting to m6i.medium"},
+		{"names", "Resize i-0a1b2c3d4e5f67890 to m6i.medium"},
 	} {
 		allowed := FromConfig(awsConfig(""), targets, settings.SanitizeAllowlist([]string{" " + c.key + " ", "team"}), "prod")
 		_, _, svc := natSpike(t, func(h *harness, _ *scenario) {

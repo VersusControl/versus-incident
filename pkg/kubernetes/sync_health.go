@@ -46,6 +46,12 @@ type SyncHealth struct {
 	// ever been published, because zero seconds would claim the empty screen is
 	// current data.
 	AgeSeconds *float64 `json:"age_s,omitempty"`
+	// StaleInSeconds is how many seconds from now the first collected kind
+	// turns stale if nothing new is collected: across the kinds being
+	// collected, the least time left before a kind's age passes its own stale
+	// limit, and zero once one has passed it. It is absent when no kind has
+	// been collected, because no kind has an age to run out.
+	StaleInSeconds *int `json:"stale_in_s,omitempty"`
 	// Kinds carries one entry per known kind. A kind the cluster does not serve is
 	// present with Absent set, so it is never confused with a missing kind.
 	Kinds map[string]kubeindex.KindStatus `json:"kinds"`
@@ -116,15 +122,18 @@ func (service *Service) SyncHealth(ctx context.Context) (SyncHealth, error) {
 		if !reportableSyncFailure(ctx, err) {
 			return SyncHealth{}, err
 		}
-		return SyncHealth{}, &syncHealthFailure{Report: service.failedSyncHealth(err), cause: err}
+		return SyncHealth{}, &syncHealthFailure{Report: service.failedSyncHealth(ctx, err), cause: err}
 	}
 	// The publication fact outlives credentials, unlike the inventory itself.
-	if at := service.recordedFirstReadyAt(); !at.IsZero() {
+	// The generation already answered, so a store that does not answer this
+	// read leaves the generation's own moment in place.
+	if at, _ := service.recordedFirstReadyAtContext(ctx); !at.IsZero() {
 		generation.FirstReadyAt = at
 	}
 	kinds := syncHealthKinds(generation)
 	markAuthorityPending(kinds, service.authorityPendingKinds())
-	report := buildSyncHealth(kinds, generation.FirstReadyAt, service.inventoryFreshFloor())
+	freshFloor := service.inventoryFreshFloor()
+	report := buildSyncHealthAt(kinds, generation.FirstReadyAt, freshFloor, service.syncClock())
 	if generation.FirstReadyAt.IsZero() {
 		report.Progress = service.coldSyncProgress()
 	}
@@ -228,9 +237,9 @@ func reportableSyncFailure(ctx context.Context, err error) bool {
 // the last data on screen can say how old it is. A cluster that never published
 // a snapshot has no age to give, and the field is left out — zero seconds would
 // present an empty screen as current.
-func (service *Service) failedSyncHealth(err error) SyncHealth {
+func (service *Service) failedSyncHealth(ctx context.Context, err error) SyncHealth {
 	class := syncFailureClass(err)
-	observedAt := service.recordedSnapshotObservedAt()
+	observedAt := service.recordedSnapshotObservedAt(ctx)
 	kinds := cycleFailureKinds(class)
 	if !observedAt.IsZero() {
 		for kind, state := range kinds {
@@ -238,7 +247,8 @@ func (service *Service) failedSyncHealth(err error) SyncHealth {
 			kinds[kind] = state
 		}
 	}
-	report := buildSyncHealth(kinds, service.recordedFirstReadyAt(), time.Time{})
+	firstReady, _ := service.recordedFirstReadyAtContext(ctx)
+	report := buildSyncHealthAt(kinds, firstReady, time.Time{}, service.syncClock())
 	if observedAt.IsZero() {
 		report.AgeSeconds = nil
 	}
@@ -273,6 +283,10 @@ func syncFailureClass(err error) string {
 		class = "forbidden"
 	case errors.As(err, &throttled):
 		class = "throttled"
+	case errors.Is(err, errHistoryTimeout), errors.Is(err, errHistoryUnavailable), isStoreFailure(err):
+		// The stored inventory could not be read: a store fault, never a
+		// cluster read that timed out.
+		class = "storage_unavailable"
 	case errors.Is(err, context.DeadlineExceeded):
 		class = "timeout"
 	case errors.Is(err, ErrOperationBudget):
@@ -325,6 +339,12 @@ func (generation *inventoryGeneration) markFirstReady(now time.Time) {
 // freshFloor is the earliest observation time the stale rule uses (see
 // inventoryFreshFloor); zero applies the rule to the kinds' own times.
 func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt, freshFloor time.Time) SyncHealth {
+	return buildSyncHealthAt(all, firstReadyAt, freshFloor, time.Now().UTC())
+}
+
+// buildSyncHealthAt is buildSyncHealth with every age in the report measured
+// at now, so the stale state and the time left before it agree on one clock.
+func buildSyncHealthAt(all map[string]kubeindex.KindStatus, firstReadyAt, freshFloor, now time.Time) SyncHealth {
 	names := make([]string, 0, len(all))
 	for kind := range all {
 		names = append(names, kind)
@@ -340,10 +360,37 @@ func buildSyncHealth(all map[string]kubeindex.KindStatus, firstReadyAt, freshFlo
 		result.Truncated = true
 		result.OmittedKinds = omitted
 	}
-	state, partial, ageSeconds, ready, pending := summarizeSyncHealthFrom(all, freshFloor)
+	state, partial, ageSeconds, ready, pending := summarizeSyncHealthAt(all, freshFloor, now)
 	result.State, result.Partial, result.AgeSeconds = state, partial, &ageSeconds
 	result.ReadyKinds, result.PendingKinds = ready, pending
+	result.StaleInSeconds = syncStaleIn(all, freshFloor, now)
 	return result
+}
+
+// syncStaleIn is the time left, at now, before the first collected kind turns
+// stale: per kind, its stale limit less its age, counted from the same moment
+// the stale rule counts from, and never below zero. A kind the cluster does not
+// serve, one the identity may not read, and one never collected have no age to
+// run out and are left out; with none left the answer is nil.
+func syncStaleIn(kinds map[string]kubeindex.KindStatus, freshFloor, now time.Time) *int {
+	var least *time.Duration
+	for kind, state := range kinds {
+		if state.Absent || isUnreadableSyncKind(state) || state.ObservedAt.IsZero() {
+			continue
+		}
+		limit := syncKindStaleLimit(kind)
+		left := max(0, limit-now.Sub(restartAge(state.ObservedAt, freshFloor, limit)))
+		if least == nil || left < *least {
+			least = &left
+		}
+	}
+	if least == nil {
+		return nil
+	}
+	// Rounded up, so the report reads zero only once a kind is at or past its
+	// limit, never a second before its stale state flips.
+	seconds := int((*least + time.Second - 1) / time.Second)
+	return &seconds
 }
 
 // summarizeSyncHealth aggregates every known kind. A kind the cluster does not
@@ -363,6 +410,11 @@ func summarizeSyncHealth(kinds map[string]kubeindex.KindStatus) (string, bool, f
 // ages from no earlier than freshFloor. The reported age stays the age of the
 // oldest observation.
 func summarizeSyncHealthFrom(kinds map[string]kubeindex.KindStatus, freshFloor time.Time) (string, bool, float64, int, int) {
+	return summarizeSyncHealthAt(kinds, freshFloor, time.Now().UTC())
+}
+
+// summarizeSyncHealthAt is summarizeSyncHealthFrom with ages measured at now.
+func summarizeSyncHealthAt(kinds map[string]kubeindex.KindStatus, freshFloor, now time.Time) (string, bool, float64, int, int) {
 	failed, clusterFailed, degraded, stale, loading := false, false, false, false, false
 	ready, pending, unreadable := 0, 0, 0
 	oldest := time.Time{}
@@ -389,7 +441,7 @@ func summarizeSyncHealthFrom(kinds map[string]kubeindex.KindStatus, freshFloor t
 			// capability limit too, and its data is as current as any ready
 			// kind's.
 			ready++
-			if syncKindStale(kind, state, freshFloor) {
+			if syncKindStaleAt(kind, state, freshFloor, now) {
 				stale = true
 			}
 			continue
@@ -410,13 +462,13 @@ func summarizeSyncHealthFrom(kinds map[string]kubeindex.KindStatus, freshFloor t
 			continue
 		}
 		ready++
-		if syncKindStale(kind, state, freshFloor) {
+		if syncKindStaleAt(kind, state, freshFloor, now) {
 			stale = true
 		}
 	}
 	ageSeconds := 0.0
 	if !oldest.IsZero() {
-		if age := time.Since(oldest).Seconds(); age > 0 {
+		if age := now.Sub(oldest).Seconds(); age > 0 {
 			ageSeconds = age
 		}
 	}
@@ -449,8 +501,33 @@ func summarizeSyncHealthFrom(kinds map[string]kubeindex.KindStatus, freshFloor t
 // syncKindStale applies the same freshness rule a view uses for a listed kind,
 // counting its age from no earlier than freshFloor.
 func syncKindStale(kind string, state kubeindex.KindStatus, freshFloor time.Time) bool {
-	limit := max(3*time.Minute, 2*inventoryCadence(kind))
-	return time.Since(restartAge(state.ObservedAt, freshFloor, limit)) > limit
+	return syncKindStaleAt(kind, state, freshFloor, time.Now().UTC())
+}
+
+// syncKindStaleAt is syncKindStale with the age measured at now. A kind is
+// stale once its age passes its limit, the moment syncStaleIn reaches zero.
+func syncKindStaleAt(kind string, state kubeindex.KindStatus, freshFloor, now time.Time) bool {
+	limit := syncKindStaleLimit(kind)
+	return now.Sub(restartAge(state.ObservedAt, freshFloor, limit)) > limit
+}
+
+// syncClock is the time a sync report measures ages at: the cluster client's
+// clock, so a test that moves it moves the report with it.
+func (service *Service) syncClock() time.Time {
+	var client *Client
+	if service != nil {
+		client = service.client
+	}
+	return client.clock().UTC()
+}
+
+// syncStaleFloor is the shortest age any kind may reach before it is stale.
+const syncStaleFloor = 3 * time.Minute
+
+// syncKindStaleLimit is how old a kind's observation may grow before it is
+// stale: twice its collection cadence, and never under the floor.
+func syncKindStaleLimit(kind string) time.Duration {
+	return max(syncStaleFloor, 2*inventoryCadence(kind))
 }
 
 // restartAge is the time a freshness rule with the given limit counts an

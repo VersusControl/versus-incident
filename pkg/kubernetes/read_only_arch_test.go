@@ -111,7 +111,7 @@ func TestKubernetesProductionSurfaceIsReadOnly(t *testing.T) {
 				continue
 			}
 			method := strings.ToLower(function.Name.Name)
-			if filepath.Clean(name) == filepath.Join("breaklogs", "settings.go") && function.Name.Name == "UpdateSettings" && function.Recv == nil {
+			if filepath.Clean(name) == filepath.Join("breaklogs", "settings.go") && (function.Name.Name == "UpdateSettings" || function.Name.Name == "UpdateSettingsContext") && function.Recv == nil {
 				continue
 			}
 			if allowedUsageHistoryStorageFunction(name, function) {

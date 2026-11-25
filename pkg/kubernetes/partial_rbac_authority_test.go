@@ -434,6 +434,19 @@ func (cluster *partialRoleCluster) settle() {
 	before := cluster.attempts()
 	cluster.wake()
 	eventually(cluster.t, "worker iteration to finish", func() bool { return cluster.attempts() > before })
+	historySavesSettled(cluster.t, cluster.cache)
+}
+
+// historySavesSettled waits until no history save runs or waits to run, so a
+// test reads saved history after the captures it published were saved.
+func historySavesSettled(t testing.TB, cache *inventoryCache) {
+	t.Helper()
+	eventually(t, "history saves to settle", func() bool {
+		cache.mu.RLock()
+		defer cache.mu.RUnlock()
+		pending := cache.historySave
+		return pending.inFlight == "" && (pending.queued == nil || pending.failing)
+	})
 }
 
 func (cluster *partialRoleCluster) committed() inventoryGeneration {

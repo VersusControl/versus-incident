@@ -139,7 +139,7 @@ func (service *Service) persistedHistoryScope(ctx context.Context) (storage.Evid
 	scope.ReadOrgs = append([]string(nil), service.readOrgs...)
 	checkpoint, err := store.EvidenceCheckpoint(ctx, scope)
 	if err != nil {
-		return scope, checkpoint, historyStoreError(err)
+		return scope, checkpoint, historyReadError(err)
 	}
 	principal := service.historyPrincipal()
 	if checkpoint.ID == "" || checkpoint.Principal == "" {
@@ -178,14 +178,14 @@ func (service *Service) storedHistoryScope(ctx context.Context, store storage.Ev
 				if errors.Is(err, storage.ErrNotFound) {
 					return scope, errHistoryNotEstablished
 				}
-				return scope, historyStoreError(err)
+				return scope, historyReadError(err)
 			}
 		}
 	}
 	if scope.ClusterUID == "" {
 		raw, err := service.usageProvider().ReadBlob(service.historyScopeKey())
 		if err != nil {
-			return scope, historyStoreError(err)
+			return scope, historyReadError(err)
 		}
 		if len(raw) == 0 {
 			return scope, errHistoryNotEstablished
@@ -215,6 +215,21 @@ func (service *Service) unestablishedHistoryError() error {
 		}
 	}
 	return errHistoryNotEstablished
+}
+
+// historyReadError names a failed history read. A store failure is named for
+// the store with historyStoreError's classes. A context that ended outside a
+// store call (the caller's deadline passed before or around the read) is
+// returned as it is, so it is not blamed on the store. Any other error keeps
+// historyStoreError's classes.
+func historyReadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if !isStoreFailure(err) && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+		return err
+	}
+	return historyStoreError(err)
 }
 
 func historyStoreError(err error) error {
@@ -291,7 +306,7 @@ func (service *Service) persistedHistoryQuery(ctx context.Context, query storage
 		return page, errors.Join(ErrInvalidArguments, err)
 	}
 	if err != nil {
-		return page, historyStoreError(err)
+		return page, historyReadError(err)
 	}
 	// A principal may retire during a database read. No old-principal payload
 	// escapes that race; transient refresh failures do not retire an epoch.
@@ -300,7 +315,7 @@ func (service *Service) persistedHistoryQuery(ctx context.Context, query storage
 	}
 	latest, err := service.evidenceStore().EvidenceCheckpoint(storage.EvidenceReadContext(ctx), scope)
 	if err != nil {
-		return storage.EvidencePage{}, historyStoreError(err)
+		return storage.EvidencePage{}, historyReadError(err)
 	}
 	if latest.Principal != checkpoint.Principal {
 		return storage.EvidencePage{}, errHistoryAuthority

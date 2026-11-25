@@ -170,12 +170,28 @@ type CrashPage struct {
 	Authority   string `json:"authority,omitempty"`
 	CountCapped bool   `json:"count_capped,omitempty"`
 	// Total is the first page's bounded count; CountCapped marks it as a lower
-	// bound. A non-zero Limit marks Total as present.
-	Total int `json:"total,omitempty"`
-	Limit int `json:"limit,omitempty"`
+	// bound. A non-zero Limit marks Total as present, except on a page with
+	// CountUnknown: a cursor page is not recounted, so it carries no Total or
+	// crash count and the client keeps the first page's.
+	Total        int  `json:"total,omitempty"`
+	Limit        int  `json:"limit,omitempty"`
+	CountUnknown bool `json:"count_unknown,omitempty"`
 	kubechanges.CrashPage
 	Capture CaptureStatus `json:"capture"`
 	Sync    SyncStatus    `json:"sync"`
+}
+
+// MarshalJSON leaves the crash count out of a page that was not counted, so a
+// client never reads a zero count over a list of crashes.
+func (page CrashPage) MarshalJSON() ([]byte, error) {
+	type plain CrashPage
+	if !page.CountUnknown {
+		return json.Marshal(plain(page))
+	}
+	return json.Marshal(struct {
+		plain
+		CrashCount *int `json:"crash_count,omitempty"`
+	}{plain: plain(page)})
 }
 
 func (service *Service) Crashes(ctx context.Context, query kubechanges.CrashQuery) (CrashPage, error) {

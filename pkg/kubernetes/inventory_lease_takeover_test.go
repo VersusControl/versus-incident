@@ -371,3 +371,93 @@ func TestRestartGraceSurvivesAFailedFirstRestore(t *testing.T) {
 		t.Fatalf("the crashed lease changed hands during the test: %+v", record)
 	}
 }
+
+// heldSaveStore lets the first history save land and holds the next one in
+// the store, as a commit already sent to the database is, until the test
+// lets it go.
+type heldSaveStore struct {
+	storage.Provider
+	storage.BlobCAS
+	storage.EvidenceStore
+	mu      sync.Mutex
+	saved   bool
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (store *heldSaveStore) CommitEvidence(ctx context.Context, scope storage.EvidenceScope, batch storage.EvidenceBatch) error {
+	store.mu.Lock()
+	first := !store.saved
+	store.mu.Unlock()
+	if first {
+		err := store.EvidenceStore.CommitEvidence(ctx, scope, batch)
+		store.mu.Lock()
+		store.saved = store.saved || err == nil
+		store.mu.Unlock()
+		return err
+	}
+	held := false
+	store.once.Do(func() { held = true; close(store.entered) })
+	if !held {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	<-store.release
+	return store.EvidenceStore.CommitEvidence(context.WithoutCancel(ctx), scope, batch)
+}
+
+// A stopping worker refuses new history saves, waits for the one in flight
+// and gives up its lease only after that: a save never lands after another
+// replica could have claimed the lease that fenced it.
+func TestStoppingWorkerKeepsItsLeaseUntilItsSaveEnds(t *testing.T) {
+	endpoint := saveDelayCluster(t)
+	base := storage.NewMemory()
+	t.Cleanup(func() { _ = base.Close() })
+	store := &heldSaveStore{Provider: base, BlobCAS: base.(storage.BlobCAS), EvidenceStore: base.(storage.EvidenceStore),
+		entered: make(chan struct{}), release: make(chan struct{})}
+	var letGo sync.Once
+	free := func() { letGo.Do(func() { close(store.release) }) }
+	service := saveDelayReplica(t, endpoint, store, "release-order", fixturePace)
+	// Registered after the replica, so it runs first and a failed check never
+	// leaves the worker stop waiting on the held save.
+	t.Cleanup(free)
+	eventually(t, "a history save held in flight", func() bool {
+		select {
+		case <-store.entered:
+			return true
+		default:
+			return false
+		}
+	})
+	owner := func() string {
+		raw, err := base.ReadBlob(inventoryKey(service.scope))
+		var record inventoryLeaseRecord
+		if err != nil || json.Unmarshal(raw, &record) != nil {
+			t.Fatalf("lease record unreadable: %v", err)
+		}
+		return record.Owner
+	}
+	if owner() == "" {
+		t.Fatal("no lease holder while a save is in flight")
+	}
+	cache := service.inventoryCache()
+	savesClosed := func() bool {
+		cache.mu.RLock()
+		defer cache.mu.RUnlock()
+		return cache.historySave.running == nil
+	}
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); service.StopCapture() }()
+	// The held save ends only when the test lets it go, so the worker is
+	// now either waiting for it or has already given the lease up.
+	eventually(t, "the worker closed its saves or released its lease", func() bool { return savesClosed() || owner() == "" })
+	if owner() == "" {
+		t.Fatal("the lease was released while the save started under it was still in flight")
+	}
+	free()
+	<-stopped
+	if owner() != "" {
+		t.Fatal("the lease was not released once the worker stopped")
+	}
+}

@@ -140,6 +140,25 @@ func issueObservationBounds(view kubeindex.Snapshot) (time.Time, time.Time, bool
 	return oldest, latest, complete
 }
 
+// captureMoment is the time a capture of view is saved under: the newest
+// complete listing among its ready kinds. A LIST starts at ObservedAt, but
+// returned objects can change while the request is in flight, so their
+// evidence counts as observed by completion. A view with no ready issue kind
+// yields the zero time.
+func captureMoment(view kubeindex.Snapshot) time.Time {
+	_, at, _ := issueObservationBounds(view)
+	if at.IsZero() {
+		return at
+	}
+	for _, state := range view.Kinds {
+		if state.State != "ready" || state.Partial || state.Absent || state.ObservedAt.IsZero() {
+			continue
+		}
+		at = maxTime(maxTime(at, state.ObservedAt), state.CompletedAt)
+	}
+	return at
+}
+
 // listedBefore reports whether the previous generation holds a listing of kind
 // that a new listing can be compared with. History records only what was seen
 // to change. The first generation a cluster commits has no earlier listing of
@@ -176,16 +195,12 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 	}
 	viewIdentity, _ := json.Marshal(generation.View)
 	batchID := "capture:" + logIdentity(identity+"\x00"+string(viewIdentity)+"\x00"+generation.PodSampledAt.UTC().Format(time.RFC3339Nano))
-	batch := storage.EvidenceBatch{ObservationHeartbeat: service.evidenceHeartbeat, ScopeBinding: service.historyScopeKey(), ID: batchID, Expected: checkpoint.ID, Generation: checkpoint.Generation, At: latest, Epoch: service.scope.CredentialID, Principal: service.historyPrincipal(), Authority: historyProofs(*generation)}
+	batch := storage.EvidenceBatch{ObservationHeartbeat: service.evidenceHeartbeat, ScopeBinding: service.historyScopeKey(), ID: batchID, Expected: checkpoint.ID, Generation: checkpoint.Generation, At: captureMoment(generation.View), Epoch: service.scope.CredentialID, Principal: service.historyPrincipal(), Authority: historyProofs(*generation)}
 	batch.Coverage = map[string]storage.EvidenceInterval{}
 	for kind, state := range generation.View.Kinds {
 		if state.State != "ready" || state.Partial || state.Absent || state.ObservedAt.IsZero() {
 			continue
 		}
-		batch.At = maxTime(batch.At, state.ObservedAt)
-		// LIST starts at ObservedAt, but returned objects can change while the
-		// request is in flight. Their evidence was observed by completion.
-		batch.At = maxTime(batch.At, state.CompletedAt)
 		from := checkpoint.Coverage[kind].From
 		if from.IsZero() {
 			from = state.ObservedAt
@@ -387,12 +402,16 @@ func (service *Service) commitEvidence(ctx context.Context, generation inventory
 		}
 		batch.Records[i] = record
 	}
-	// The credential epoch fence is held for one store transaction at a time,
-	// never for the whole save: a large capture is saved in several
-	// transactions, and live reads that need the fence run between them.
+	// Each store transaction is admitted by the credential epoch fence, but
+	// the fence is not held while the database works: live reads and a
+	// connector rebuild need it, and a slow history store must never hold
+	// them. The save runs under the epoch's own context instead, so an epoch
+	// that ends cancels whatever part of the save is still in flight.
+	ctx, cancelEpoch := service.credentialContext(ctx)
+	defer cancelEpoch()
 	var fenced error
 	batch.Fence = func(ctx context.Context, transaction func() error) error {
-		fenced = service.commitStorage(ctx, "journal", transaction)
+		fenced = service.commitAdmitted(ctx, "journal", transaction)
 		return fenced
 	}
 	err := store.CommitEvidence(ctx, generation.EvidenceScope, batch)
@@ -426,7 +445,7 @@ func (service *Service) commitEvidence(ctx context.Context, generation inventory
 		err = storageStageFailure("journal", err)
 	}
 	if err != nil && historySaveRejected(err) {
-		service.recordHistorySaveRejection(generation.EvidenceBatch.ID)
+		service.recordHistorySaveRejection(generation.EvidenceBatch.ID, batch.Expected)
 	}
 	if err == nil {
 		err = service.rememberHistoryScope(generation.EvidenceScope)
@@ -668,7 +687,8 @@ func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuer
 	}
 	// Gaps are kept out of the keyset, so Total and the pages it implies count
 	// exactly the rows the walk shows; the page's gaps come from their own read.
-	source, err := service.queryEvidence(ctx, storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, Kind: query.Kind, RootUID: query.RootUID, PodUID: query.PodUID, ResourceUID: query.ResourceUID, Type: kind, GapsApart: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor})
+	evidenceQuery := storage.EvidenceQuery{Since: query.Since, Until: query.Until, Namespace: query.Namespace, Kind: query.Kind, RootUID: query.RootUID, PodUID: query.PodUID, ResourceUID: query.ResourceUID, Type: kind, GapsApart: true, Limit: normalizePageLimit(query.Limit), Cursor: query.Cursor}
+	source, err := service.queryEvidence(ctx, evidenceQuery)
 	if err != nil {
 		return TimelinePage{}, err
 	}
@@ -677,6 +697,11 @@ func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuer
 	if !source.Checkpoint.PrunedThrough.IsZero() {
 		page.Gaps = append(page.Gaps, kubechanges.Gap{From: query.Since, To: source.Checkpoint.PrunedThrough})
 	}
+	// The store keeps gaps out of this keyset, so every gap among the items is
+	// a row the store counted that the read could not verify and shows only as
+	// unavailable evidence. Those rows are in the store's counts but never in
+	// the list.
+	hidden := 0
 	for _, record := range source.Items {
 		item := TimelineItem{ID: record.ID, At: record.At}
 		switch record.Type {
@@ -716,6 +741,7 @@ func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuer
 				return page, evidenceReadFailure(evidencePayloadDecode, err)
 			}
 			page.Gaps = append(page.Gaps, gap)
+			hidden++
 			continue
 		default:
 			continue
@@ -726,7 +752,32 @@ func (service *Service) evidenceTimeline(ctx context.Context, query TimelineQuer
 	if page.Gaps, err = appendEvidenceGaps(page.Gaps, source.Gaps); err != nil {
 		return page, err
 	}
-	page.Counts = map[string]int{"change": source.Counts["change"], "crash": source.Counts["crash"], "break": source.Counts["issue_opened"] + source.Counts["issue_resolved"]}
+	// The store counts rows before the read verifies them, so its count is
+	// the list's only once every counted row was read and none was hidden.
+	// The first page verifies the rest of the window, as far as the store
+	// counted it. A cursor page is not recounted, so it carries no count and
+	// says so; the client keeps the first page's.
+	if query.Cursor == "" {
+		visible, verifiedHidden, verified := page.Counts, hidden, source.Next == ""
+		if !verified {
+			visible, verifiedHidden, verified = service.verifyTimelineCount(ctx, evidenceQuery, source, page.Counts, hidden)
+		}
+		switch {
+		case !verified:
+			// Rows the read could not verify are counted, so no number here
+			// would describe the list.
+			page.Counts = map[string]int{"change": 0, "crash": 0, "break": 0}
+			page.CountUnknown, page.CountCapped = true, false
+		case verifiedHidden == 0:
+			page.Counts = timelineStoreCounts(source.Counts)
+		default:
+			// Every counted row was read: the rows the list shows are the count.
+			page.Counts, page.CountCapped = visible, false
+		}
+	} else {
+		page.Counts = nil
+		page.CountUnknown, page.CountCapped, page.uncounted = true, false, true
+	}
 	page.CrashCount, page.Total = page.Counts["crash"], page.Counts["change"]+page.Counts["crash"]+page.Counts["break"]
 	if !source.Checkpoint.CoveredThrough.IsZero() {
 		page.Sync.AgeSeconds = max(0, time.Since(source.Checkpoint.CoveredThrough).Seconds())
@@ -792,9 +843,12 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 		}
 	}
 	page.Next = source.Next
-	if !source.CountCapped && source.Total == 0 && options.Cursor != "" {
+	if options.Cursor != "" {
+		// A cursor page is not recounted, so it carries no totals and says so;
+		// the client keeps the first page's.
 		page.Totals = map[string]int{}
 		page.Broken = BrokenTotals{BySeverity: map[string]int{}}
+		page.Total, page.CountCapped, page.CountUnknown = 0, false, true
 	} else if !source.CountCapped || source.Total > 0 {
 		totals := map[string]int{}
 		broken := BrokenTotals{BySeverity: map[string]int{}}
@@ -888,6 +942,10 @@ func (service *Service) evidenceChanges(ctx context.Context, query ChangeQuery) 
 	if err != nil {
 		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
+	if query.Cursor != "" {
+		// A cursor page is not recounted; the client keeps the first page's count.
+		page.Total, page.CountCapped, page.CountUnknown = 0, false, true
+	}
 	for _, record := range source.Items {
 		if record.Type == "coverage_gap" {
 			var gap kubechanges.Gap
@@ -950,6 +1008,10 @@ func (service *Service) evidenceCrashes(ctx context.Context, query kubechanges.C
 		return page, err
 	}
 	page.CrashCount = source.Counts["crash"]
+	if query.Cursor != "" {
+		// A cursor page is not recounted; the client keeps the first page's count.
+		page.Total, page.CrashCount, page.CountCapped, page.CountUnknown = 0, 0, false, true
+	}
 	page.Since, page.Until = source.Since, source.Until
 	page.StartedAt = source.Checkpoint.StartedAt
 	page.RetentionFrom = source.Checkpoint.PrunedThrough
@@ -1521,4 +1583,54 @@ func generationHoldsRecords(generation inventoryGeneration) bool {
 		}
 	}
 	return false
+}
+
+// timelineStoreCounts is the store's count of a timeline window by item type.
+func timelineStoreCounts(counts map[string]int) map[string]int {
+	return map[string]int{"change": counts["change"], "crash": counts["crash"], "break": counts["issue_opened"] + counts["issue_resolved"]}
+}
+
+// timelineVerifyLimit is the page size of the walk that verifies a timeline
+// window's count past its first page.
+const timelineVerifyLimit = 500
+
+// verifyTimelineCount reads the rest of a timeline window after its first
+// page, as far as the store counted it, and counts the rows the list can show
+// by type and the rows it hides. verified is false when the walk could not
+// read every counted row: a read failed, or the store's count is a lower
+// bound with rows hidden among those it covers.
+func (service *Service) verifyTimelineCount(ctx context.Context, query storage.EvidenceQuery, first storage.EvidencePage, shown map[string]int, hidden int) (map[string]int, int, bool) {
+	visible := map[string]int{}
+	for kind, count := range shown {
+		visible[kind] = count
+	}
+	read := len(first.Items)
+	limit := 0
+	for _, count := range first.Counts {
+		limit += count
+	}
+	query.Limit = timelineVerifyLimit
+	for cursor := first.Next; cursor != "" && read < limit; {
+		query.Cursor = cursor
+		page, err := service.queryEvidence(ctx, query)
+		if err != nil {
+			return nil, 0, false
+		}
+		for _, record := range page.Items {
+			switch record.Type {
+			case "change", "crash":
+				visible[record.Type]++
+			case "issue_opened", "issue_resolved":
+				visible["break"]++
+			case "coverage_gap":
+				hidden++
+			}
+		}
+		read += len(page.Items)
+		if len(page.Items) == 0 && page.Next == cursor {
+			return nil, 0, false
+		}
+		cursor = page.Next
+	}
+	return visible, hidden, read >= limit && (!first.CountCapped || hidden == 0)
 }

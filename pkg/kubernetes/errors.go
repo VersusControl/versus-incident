@@ -441,6 +441,29 @@ func (err *connectionError) Unwrap() error {
 	return err.cause
 }
 
+// kubernetesTimeout is a deadline that fired while this server waited on the
+// Kubernetes API server: inside a request's round trip, or in a backoff the
+// server asked for. Only this deadline is reported as a Kubernetes timeout; a
+// deadline that ran out anywhere else was spent inside Versus.
+type kubernetesTimeout struct{ cause error }
+
+func (err *kubernetesTimeout) Error() string { return err.cause.Error() }
+func (err *kubernetesTimeout) Unwrap() error { return err.cause }
+
+// markKubernetesTimeout marks err as a Kubernetes timeout when it is a
+// deadline; any other error is returned as it is.
+func markKubernetesTimeout(err error) error {
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || isKubernetesTimeout(err) {
+		return err
+	}
+	return &kubernetesTimeout{cause: err}
+}
+
+func isKubernetesTimeout(err error) bool {
+	var timeout *kubernetesTimeout
+	return errors.As(err, &timeout)
+}
+
 // DiagnoseError classifies connector failures without exposing their raw cause.
 func DiagnoseError(err error) ErrorDetail {
 	var dnsError *net.DNSError
@@ -485,6 +508,8 @@ func DiagnoseError(err error) ErrorDetail {
 		return ErrorDetail{Code: "history_store_timeout", Message: "The history database read timed out.", Action: "Retry the saved history read.", Retryable: true}
 	case errors.Is(err, errHistoryUnavailable):
 		return ErrorDetail{Code: "history_store_unavailable", Message: "The history database is temporarily unavailable.", Action: "Restore the history store and retry.", Retryable: true}
+	case errors.Is(err, errConnectorReconnecting):
+		return ErrorDetail{Code: "connector_reconnecting", Message: "Versus is reconnecting to the Kubernetes cluster.", Action: "Retry shortly; Versus reconnects on its own. If this lasts, check the server log for the cause.", Retryable: true}
 	// The two connector states are answered before any credential or network
 	// class, because a configured connector whose credential is gone still
 	// unwraps to a credential fault and must not be named as one: a surface has
@@ -538,8 +563,17 @@ func DiagnoseError(err error) ErrorDetail {
 		return ErrorDetail{Code: "cluster_permission_denied", Message: "Kubernetes denied access to this resource.", Action: "Grant the connector identity the required read-only Kubernetes RBAC permissions.", Retryable: false}
 	case errors.Is(err, ErrNotFound):
 		return ErrorDetail{Code: "resource_unavailable", Message: "The Kubernetes resource or optional API is unavailable.", Action: "Verify the resource ID, namespace, API group, and whether the optional API is installed.", Retryable: false}
-	case errors.Is(err, context.DeadlineExceeded):
+	// A deadline is named for what the request was waiting on when it fired:
+	// the history store, the Kubernetes API server, or neither. Only a
+	// deadline that fired inside a Kubernetes round trip blames the cluster.
+	case isStoreFailure(err):
+		var stored *storeFailure
+		errors.As(err, &stored)
+		return DiagnoseError(historyStoreError(stored.cause))
+	case isKubernetesTimeout(err):
 		return ErrorDetail{Code: "request_timeout", Message: "The Kubernetes read timed out.", Action: "Check API-server reachability and increase connectors.kubernetes.timeout only after resolving network or control-plane latency.", Retryable: true}
+	case errors.Is(err, context.DeadlineExceeded):
+		return ErrorDetail{Code: "server_timeout", Message: "Versus did not finish this read in time.", Action: "Retry shortly. If it keeps happening, check the Versus server log for the component that is slow.", Retryable: true}
 	case errors.Is(err, ErrOperationBudget):
 		return ErrorDetail{Code: "operation_budget_exhausted", Message: "The Kubernetes read reached its safety budget.", Action: "Narrow the namespace, resource category, search query, or requested result limits.", Retryable: true}
 	case errors.Is(err, ErrGraphIncomplete):

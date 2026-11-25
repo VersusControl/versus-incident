@@ -43,7 +43,7 @@ func ec2Tags(tags []ec2types.Tag) map[string]string {
 // nameTag is the Name tag value, used as the display name only while the
 // Name tag is allowlisted; otherwise, or without one, the fallback ID.
 func (c *call) nameTag(tags []ec2types.Tag, fallback string) string {
-	if !c.allowlist[model.NameTagKey] {
+	if !model.TagAllowed(c.allowlist, model.NameTagKey) {
 		return fallback
 	}
 	for _, tag := range tags {

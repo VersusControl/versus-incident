@@ -170,7 +170,7 @@ func TestPumpAlertsEachIncreaseOnceAndRetriesFailures(t *testing.T) {
 }
 
 // The Name tag's values may be shown only when "Name" is on the tag-value
-// allowlist, matched exactly like every other tag key.
+// allowlist, matched without regard to case like every other tag key.
 func TestFromConfigAllowsNamesOnlyWithTheNameTagAllowlisted(t *testing.T) {
 	targets := []Target{{AccountID: "111111111111", Credentials: testCreds}}
 	for _, c := range []struct {
@@ -179,7 +179,9 @@ func TestFromConfigAllowsNamesOnlyWithTheNameTagAllowlisted(t *testing.T) {
 	}{
 		{[]string{"Name", "team"}, true},
 		{[]string{"team", "env"}, false},
-		{[]string{"name"}, false},
+		{[]string{"name"}, true},
+		{[]string{"NAME "}, true},
+		{[]string{"names"}, false},
 		{nil, false},
 	} {
 		if got := FromConfig(awsConfig(""), targets, c.allowlist, "prod").NameAllowlisted; got != c.want {
@@ -188,12 +190,15 @@ func TestFromConfigAllowsNamesOnlyWithTheNameTagAllowlisted(t *testing.T) {
 	}
 }
 
-// The team tag's values are allowlisted only by its exact key: the team tag
-// key setting ("team") is not matched by "Team".
-func TestFromConfigMatchesTheTeamTagKeyExactly(t *testing.T) {
+// The team tag's values are allowlisted by its key in any case: "Team"
+// allowlists the "team" tag key setting, another key does not.
+func TestFromConfigMatchesTheTeamTagKeyInAnyCase(t *testing.T) {
 	targets := []Target{{AccountID: "111111111111", Credentials: testCreds}}
-	if FromConfig(awsConfig(""), targets, []string{"Team"}, "prod").TagAllowlisted {
-		t.Fatal(`"Team" must not allowlist the "team" tag`)
+	if !FromConfig(awsConfig(""), targets, []string{"Team"}, "prod").TagAllowlisted {
+		t.Fatal(`"Team" allowlists the "team" tag`)
+	}
+	if FromConfig(awsConfig(""), targets, []string{"teams", "owner"}, "prod").TagAllowlisted {
+		t.Fatal(`"teams" must not allowlist the "team" tag`)
 	}
 	if !FromConfig(awsConfig(""), targets, []string{" team "}, "prod").TagAllowlisted {
 		t.Fatal(`"team" allowlists the "team" tag`)

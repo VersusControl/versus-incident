@@ -44,7 +44,7 @@ func TestStorageFailuresThroughTheSavePathNeverCloseTheCredentialGate(t *testing
 				ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 				defer cancel()
 				ran := false
-				err := service.commitStorage(ctx, stage, func() error { ran = true; return failure.fail(ctx) })
+				err := service.commitStorage(ctx, stage, func(ctx context.Context) error { ran = true; return failure.fail(ctx) })
 				if !ran || err == nil {
 					t.Fatalf("save did not run or did not fail: ran=%t err=%v", ran, err)
 				}
@@ -108,6 +108,8 @@ func TestHistorySaveStatusContract(t *testing.T) {
 	now := time.Now().UTC()
 	saved := now.Add(-10 * time.Minute)
 	checkpoint := storage.EvidenceCheckpoint{ID: "saved", Generation: 4, At: saved}
+	// A save one cycle behind the capture waiting for it.
+	recent := storage.EvidenceCheckpoint{ID: "saved", Generation: 4, At: now.Add(-50 * time.Second)}
 	pending := func(id string, generation uint64, at time.Time) *storage.EvidenceBatch {
 		return &storage.EvidenceBatch{ID: id, Generation: generation, At: at}
 	}
@@ -118,7 +120,11 @@ func TestHistorySaveStatusContract(t *testing.T) {
 		failure    string
 		checkpoint storage.EvidenceCheckpoint
 		note       string
-		want       string
+		// noteExpected is the saved checkpoint the refused capture expected.
+		noteExpected string
+		// listed, when set, is when the published view last listed Pods.
+		listed time.Time
+		want   string
 	}{
 		{name: "no published capture", want: ""},
 		{name: "store failed before the save was prepared", cache: true, failure: "storage_unavailable", checkpoint: checkpoint, want: "history_save_delayed"},
@@ -128,9 +134,20 @@ func TestHistorySaveStatusContract(t *testing.T) {
 		{name: "a capture the store would refuse is rejected", cache: true, failure: "storage_rejected", checkpoint: checkpoint, want: "history_save_rejected"},
 		{name: "save outstanding past the grace", cache: true, batch: pending("next", 4, now.Add(-2*time.Minute)), checkpoint: checkpoint, want: "history_save_delayed"},
 		{name: "save refused by the store", cache: true, batch: pending("next", 4, now.Add(-2*time.Minute)), checkpoint: checkpoint, note: "next", want: "history_save_rejected"},
-		{name: "refusal of an older capture is not this one", cache: true, batch: pending("next", 4, now.Add(-2*time.Minute)), checkpoint: checkpoint, note: "older", want: "history_save_delayed"},
-		{name: "save still inside the grace", cache: true, batch: pending("next", 4, now.Add(-10*time.Second)), checkpoint: checkpoint, want: ""},
-		{name: "refused save still inside the grace", cache: true, batch: pending("next", 4, now.Add(-10*time.Second)), checkpoint: checkpoint, note: "next", want: ""},
+		{name: "refusal of an older capture is not this one", cache: true, batch: pending("next", 4, now.Add(-2*time.Minute)), checkpoint: checkpoint, note: "older", noteExpected: "before-saved", want: "history_save_delayed"},
+		// A replica whose published capture lags the owner's still reports a
+		// refusal of the owner's later capture: neither is saved.
+		{name: "refusal of a later capture holds this one back too", cache: true, batch: pending("next", 4, now.Add(-10*time.Second)), checkpoint: recent, note: "later", noteExpected: "saved", want: "history_save_rejected"},
+		// A replica with no capture published right now still reports the
+		// refusal history is stuck behind.
+		{name: "a refusal holding history back is reported with no capture published", cache: true, checkpoint: recent, note: "refused", noteExpected: "saved", listed: now.Add(-10 * time.Second), want: "history_save_rejected"},
+		// The lease moved to a replica whose clock is behind: its capture is
+		// stamped before the old refusal was, but its own save moved the
+		// checkpoint on, so the old refusal says nothing about it.
+		{name: "after a handover to a replica with a slower clock an old refusal does not apply", cache: true, batch: pending("handover", 4, now.Add(-10*time.Second)), checkpoint: storage.EvidenceCheckpoint{ID: "moved", Generation: 4, At: now.Add(-50 * time.Second)}, note: "refused-before-handover", noteExpected: "saved", want: ""},
+		{name: "a refusal whose checkpoint has moved on never applies", cache: true, batch: pending("next", 4, now.Add(-2*time.Minute)), checkpoint: storage.EvidenceCheckpoint{ID: "moved", Generation: 4, At: saved}, note: "refused-earlier", noteExpected: "saved", want: "history_save_delayed"},
+		{name: "save still inside the grace", cache: true, batch: pending("next", 4, now.Add(-10*time.Second)), checkpoint: recent, want: ""},
+		{name: "a refused save is reported at once", cache: true, batch: pending("next", 4, now.Add(-10*time.Second)), checkpoint: recent, note: "next", want: "history_save_rejected"},
 		{name: "capture already saved", cache: true, batch: pending("saved", 4, now.Add(-2*time.Minute)), checkpoint: checkpoint, want: ""},
 		{name: "capture fenced by a history deletion", cache: true, batch: pending("next", 3, now.Add(-2*time.Minute)), checkpoint: checkpoint, want: ""},
 		{name: "capture no newer than the checkpoint", cache: true, batch: pending("next", 4, saved), checkpoint: checkpoint, want: ""},
@@ -142,10 +159,13 @@ func TestHistorySaveStatusContract(t *testing.T) {
 			t.Cleanup(func() { _ = provider.Close() })
 			service.SetChangeStorage(provider)
 			if test.note != "" {
-				service.recordHistorySaveRejection(test.note)
+				service.recordHistorySaveRejection(test.note, test.noteExpected)
 			}
 			if test.cache {
 				cache := &inventoryCache{generation: inventoryGeneration{EvidenceBatch: test.batch, EvidenceFailure: test.failure}}
+				if !test.listed.IsZero() {
+					cache.generation.View = kubeindex.Snapshot{Kinds: map[string]kubeindex.KindStatus{"Pod": {State: "ready", ObservedAt: test.listed, CompletedAt: test.listed}}}
+				}
 				service.changes.mu.Lock()
 				service.changes.inventories[service.indexScope()] = cache
 				service.changes.mu.Unlock()
@@ -228,7 +248,110 @@ func TestEveryUnpreparedCaptureIsReportedBehind(t *testing.T) {
 	cache.mu.Lock()
 	cache.generation.EvidenceBatch, cache.generation.EvidenceFailure = nil, ""
 	cache.mu.Unlock()
-	if status := service.historyCapture(storage.EvidenceCheckpoint{ID: "saved", At: savedThrough}); status.HistorySave != nil {
+	// Saved through the published listing, so nothing is behind.
+	cache.mu.RLock()
+	current := captureMoment(cache.generation.View)
+	cache.mu.RUnlock()
+	if status := service.historyCapture(storage.EvidenceCheckpoint{ID: "saved", At: current}); status.HistorySave != nil {
 		t.Fatalf("a capture without a save failure was reported behind: %+v", status.HistorySave)
 	}
+}
+
+// Whether history is behind comes from the published generation and the
+// stored checkpoint, which every replica reads alike, never from what one
+// replica's own saves did: a replica that lost the lease after its saves
+// failed, and one that never saved while the holder's saves fail, both
+// answer as the holder does.
+func TestHistorySaveNoticeIsTheSameOnEveryReplica(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	listedAt := func(at time.Time) kubeindex.Snapshot {
+		kinds := map[string]kubeindex.KindStatus{}
+		for _, kind := range []string{"Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "Event"} {
+			kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: at, CompletedAt: at}
+		}
+		return kubeindex.Snapshot{Kinds: kinds}
+	}
+	capture := func(generation uint64, at time.Time) *storage.EvidenceBatch {
+		return &storage.EvidenceBatch{ID: "next", Generation: generation, At: at}
+	}
+	for _, test := range []struct {
+		name   string
+		saved  time.Time
+		view   kubeindex.Snapshot
+		batch  *storage.EvidenceBatch
+		behind bool
+	}{
+		{name: "saved through the latest listing", saved: now, view: listedAt(now), behind: false},
+		{name: "a save in flight one cycle behind", saved: now.Add(-40 * time.Second), view: listedAt(now.Add(-10 * time.Second)), batch: capture(4, now.Add(-10*time.Second)), behind: false},
+		{name: "listed long past the last save, no capture published", saved: now.Add(-10 * time.Minute), view: listedAt(now), behind: true},
+		{name: "listed long past the last save, a fresh capture published", saved: now.Add(-10 * time.Minute), view: listedAt(now), batch: capture(4, now), behind: true},
+		{name: "a capture fenced by a history deletion", saved: now.Add(-10 * time.Minute), view: listedAt(now), batch: capture(3, now), behind: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checkpoint := storage.EvidenceCheckpoint{ID: "saved", Generation: 4, At: test.saved}
+			// The same shared state, read by a replica whose own last save
+			// failed and by one whose saves never failed.
+			for _, ownSaveFailed := range []bool{true, false} {
+				service := newTestService(t, "http://127.0.0.1:1", Scope{OrgID: "default", ClusterID: "save-notice", CredentialID: "unchanged"})
+				service.historySaveGrace = time.Minute
+				provider := storage.NewMemory()
+				t.Cleanup(func() { _ = provider.Close() })
+				service.SetChangeStorage(provider)
+				cache := &inventoryCache{generation: inventoryGeneration{View: test.view, EvidenceBatch: test.batch}}
+				cache.historySave.failing = ownSaveFailed
+				service.changes.mu.Lock()
+				service.changes.inventories[service.indexScope()] = cache
+				service.changes.mu.Unlock()
+				status := service.historyCapture(checkpoint)
+				if (status.HistorySave != nil) != test.behind || test.behind && !status.Behind {
+					t.Fatalf("own save failed=%t: behind=%t save=%+v, want behind=%t", ownSaveFailed, status.Behind, status.HistorySave, test.behind)
+				}
+				if test.behind && status.HistorySave.Code != "history_save_delayed" {
+					t.Fatalf("own save failed=%t: code %q, want history_save_delayed", ownSaveFailed, status.HistorySave.Code)
+				}
+			}
+		})
+	}
+}
+
+// A replica that stops holding the lease drops the backoff of its own failed
+// save: the holder's saves are what history waits on now, and the first
+// capture it saves when it takes the lease back is not held up by an old
+// failure.
+func TestReplicaWithoutTheLeaseDropsItsSaveBackoff(t *testing.T) {
+	endpoint := saveDelayCluster(t)
+	store := storage.NewMemory()
+	t.Cleanup(func() { _ = store.Close() })
+	holder := saveDelayReplica(t, endpoint, store, "backoff-drop", fixturePace)
+	eventually(t, "the holder publishing", func() bool {
+		cache := holder.inventoryCache()
+		if cache == nil {
+			return false
+		}
+		cache.mu.RLock()
+		defer cache.mu.RUnlock()
+		return len(cache.generation.View.Kinds) > 0
+	})
+	peer := saveDelayReplica(t, endpoint, store, "backoff-drop", fixturePace)
+	var cache *inventoryCache
+	eventually(t, "the peer reading the holder's generation", func() bool {
+		cache = peer.inventoryCache()
+		if cache == nil {
+			return false
+		}
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		if len(cache.generation.View.Kinds) == 0 {
+			return false
+		}
+		// A store failure of a save this peer ran before the holder took
+		// the lease.
+		cache.historySave.failing, cache.historySave.failures, cache.historySave.next = true, 3, time.Now().Add(time.Hour)
+		return true
+	})
+	eventually(t, "the peer dropping its old save backoff", func() bool {
+		cache.mu.RLock()
+		defer cache.mu.RUnlock()
+		return !cache.historySave.failing && cache.historySave.failures == 0 && cache.historySave.next.IsZero()
+	})
 }

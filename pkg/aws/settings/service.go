@@ -1192,14 +1192,16 @@ func (conn *Service) applyBudget(options Options) {
 }
 
 // allowlistWithSource resolves the tag-value allowlist the same way for the
-// privacy card and the self-test: config wins, then a saved wizard value, then
-// the least-privilege default.
+// privacy card and the self-test: config wins, then the list the user saved
+// (an empty one included), then the default.
 func (conn *Service) allowlistWithSource(org string) ([]string, string) {
 	if configured := conn.connector().Tags.ValueAllowlist; len(configured) > 0 {
 		return SanitizeAllowlist(configured), string(SourceConfig)
 	}
-	if stored, err := conn.store.LoadPrivacy(org); err == nil && len(stored.TagValueAllowlist) > 0 {
-		return SanitizeAllowlist(stored.TagValueAllowlist), string(SourceWizard)
+	if stored, err := conn.store.LoadPrivacy(org); err == nil {
+		if saved, ok := userAllowlist(stored); ok {
+			return SanitizeAllowlist(saved), string(SourceWizard)
+		}
 	}
 	return DefaultTagValueAllowlist(), sourceDefault
 }
@@ -1340,12 +1342,11 @@ func (conn *Service) SavePrivacy(org string, allowlist []string) error {
 	if len(allowlist) > 32 {
 		return ErrInvalidArguments
 	}
-	privacy, err := conn.store.LoadPrivacy(org)
-	if err != nil {
-		return err
-	}
-	privacy.TagValueAllowlist = SanitizeAllowlist(allowlist)
-	return conn.store.SavePrivacy(org, privacy)
+	clean := SanitizeAllowlist(allowlist)
+	return conn.store.UpdatePrivacy(org, func(privacy *privacyRecord) {
+		privacy.TagValueAllowlist = clean
+		privacy.Saved = true
+	})
 }
 
 // Commit turns a verified draft into a stored account.

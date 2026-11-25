@@ -31,6 +31,7 @@ func assemble(generations map[string]*Generation, sources []string) accountView 
 	}
 	resources := make([]model.Resource, 0)
 	tagSets := make(map[string]map[string]string)
+	clusterTags := make(map[string]string)
 	tagApps := make(map[string]model.Resource)
 	tagPairs := make(map[string]bool)
 	alarmPairs := make(map[string]bool)
@@ -53,6 +54,9 @@ func assemble(generations map[string]*Generation, sources []string) accountView 
 			tagPairs[pairKey(unit.Account, unit.Region)] = true
 			for _, tagged := range generation.Resources {
 				tagSets[tagged.ARN] = tagged.Tags
+				if clusters := tagged.Attributes[model.AttrClusterTags]; clusters != "" {
+					clusterTags[tagged.ARN] = clusters
+				}
 				if tagged.App != "" && tagged.AppSource == AppSourceTags {
 					tagApps[tagged.ARN] = tagged
 				}
@@ -99,6 +103,14 @@ func assemble(generations map[string]*Generation, sources []string) accountView 
 			if _, present := resources[position].Tags[key]; !present {
 				resources[position].Tags[key] = value
 			}
+		}
+		// The cluster markers the tagging API read before redaction travel
+		// with its tags.
+		if clusters := clusterTags[arn]; clusters != "" && resources[position].Attributes[model.AttrClusterTags] == "" {
+			if resources[position].Attributes == nil {
+				resources[position].Attributes = make(map[string]string)
+			}
+			resources[position].Attributes[model.AttrClusterTags] = clusters
 		}
 		// Services whose list call carries no tags learn their tag-based
 		// application from the tagging API.

@@ -118,6 +118,9 @@ type inventoryCache struct {
 	// abandonedSave is the published capture whose history save the store
 	// rejected for good. It is not retried; the next capture records the gap.
 	abandonedSave string
+	// historySave is the one capture whose history save failed and waits for
+	// its retry. Collection never waits on it.
+	historySave pendingHistorySave
 	// refusal is the last capture refusal logged for this scope, so a lasting
 	// condition is logged once rather than on every publish.
 	refusal struct {
@@ -282,9 +285,14 @@ func (service *Service) readInventory(ctx context.Context) (inventoryGeneration,
 		for _, org := range orgs {
 			scope := service.scope
 			scope.OrgID = org
-			generation, record, err := readInventoryGeneration(provider, scope, "")
+			generation, record, err := readInventoryGenerationContext(ctx, provider, scope, "")
 			if err != nil {
-				return inventoryGeneration{}, err
+				// The worker may have loaded its generation while the store
+				// held this read; that one answers without the store.
+				if current, answered, cacheErr := fromCache(); answered {
+					return current, cacheErr
+				}
+				return inventoryGeneration{}, inventoryReadAnswer(err)
 			}
 			generation = withFirstReady(generation, record)
 			if len(generation.View.Kinds) > 0 {
@@ -407,7 +415,10 @@ func inventoryCycleClass(class string) string {
 	switch class {
 	case "":
 		return "unavailable"
-	case "record_rejected", "record_limit", "incomplete_pages", "commit_conflict", "forbidden", "unauthorized", "timeout", "throttled", "unavailable", "budget_exhausted", "unsupported", "syncing", "namespace_scope", "proof_unreachable", "proof_unavailable", "proof_host_not_allowed", "token_endpoint_unreachable":
+	case "record_rejected", "record_limit", "incomplete_pages", "commit_conflict", "forbidden", "unauthorized", "timeout", "throttled", "unavailable", "budget_exhausted", "unsupported", "syncing", "namespace_scope", "proof_unreachable", "proof_unavailable", "proof_host_not_allowed", "token_endpoint_unreachable",
+		// A cycle that read the cluster but could not save or load its
+		// snapshot names the store, never a failed cluster read.
+		"storage_unavailable", "storage_rejected":
 		return class
 	default:
 		return "unavailable"
@@ -492,7 +503,16 @@ func (service *Service) CachedNamespaceSnapshot(ctx context.Context, namespace s
 	if cycleForbidden {
 		return kubeindex.Snapshot{}, kubeindex.Status{}, ErrForbidden
 	}
-	if !observed && !service.recordedFirstReadyAt().IsZero() {
+	firstReady, firstReadyErr := time.Time{}, error(nil)
+	if !observed {
+		firstReady, firstReadyErr = service.recordedFirstReadyAtContext(ctx)
+	}
+	if firstReadyErr != nil {
+		// Whether this cluster was ever ready decides the answer below, and
+		// the store did not say: the read fails for the store.
+		return kubeindex.Snapshot{}, kubeindex.Status{}, firstReadyErr
+	}
+	if !observed && !firstReady.IsZero() {
 		if unauthorized {
 			return kubeindex.Snapshot{}, kubeindex.Status{}, ErrUnauthorized
 		}
@@ -786,6 +806,12 @@ func (service *Service) inventoryRead(ctx context.Context, path string, value an
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			// This pause is Versus's own retry pacing, not a wait the API
+			// server asked for: a deadline here is not a Kubernetes timeout,
+			// unless the attempt before it already was one.
+			if isKubernetesTimeout(err) {
+				return err
+			}
 			return ctx.Err()
 		case <-timer.C:
 		}

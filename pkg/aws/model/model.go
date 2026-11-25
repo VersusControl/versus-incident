@@ -248,6 +248,12 @@ const (
 	// AttrSubject is the ARN of the resource a resource-policy entry
 	// describes.
 	AttrSubject = "subject"
+	// AttrClusterTags records each Kubernetes cluster a
+	// kubernetes.io/cluster/<name> tag names and whether the resource is
+	// owned by it or shared with it ("data-eks=owned,prod-eks=shared").
+	// Collectors read it from the tag values before they are redacted, so
+	// a hidden "shared" is never taken for ownership.
+	AttrClusterTags = "cluster_tags"
 )
 
 var allowedAttributes = map[string]bool{
@@ -256,7 +262,7 @@ var allowedAttributes = map[string]bool{
 	AttrRunning: true, AttrDNSName: true, AttrRollout: true, AttrPublicIP: true,
 	AttrStackName: true, AttrBucketRegion: true, AttrApplicationID: true,
 	AttrResourceID: true, AttrOrganizationID: true, AttrManagementAccount: true,
-	AttrOwnerAccount: true, AttrSubject: true,
+	AttrOwnerAccount: true, AttrSubject: true, AttrClusterTags: true,
 }
 
 // AllowedAttribute reports whether key is part of the closed attribute set.
@@ -629,22 +635,82 @@ func ResourceID(arn string) string {
 	return resource
 }
 
+// ClusterTagKeyPrefix starts the tag Kubernetes puts on what a cluster
+// owns or shares: kubernetes.io/cluster/<name>.
+const ClusterTagKeyPrefix = "kubernetes.io/cluster/"
+
+// Cluster tag markers.
+const (
+	ClusterOwned  = "owned"
+	ClusterShared = "shared"
+)
+
+// ClusterTagAttribute is the AttrClusterTags value for a resource's
+// unredacted tags: each cluster tag whose value is owned or shared (any
+// case), sorted by cluster. Any other value is left out. It is empty when
+// there is none.
+func ClusterTagAttribute(tags map[string]string) string {
+	var parts []string
+	for key, value := range tags {
+		name, ok := strings.CutPrefix(key, ClusterTagKeyPrefix)
+		if !ok || name == "" || strings.ContainsAny(name, "=,") {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case ClusterOwned:
+			parts = append(parts, name+"="+ClusterOwned)
+		case ClusterShared:
+			parts = append(parts, name+"="+ClusterShared)
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
+}
+
+// ParseClusterTags reads an AttrClusterTags value: cluster name to owned
+// or shared.
+func ParseClusterTags(value string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(value, ",") {
+		name, marker, ok := strings.Cut(part, "=")
+		if ok && name != "" && (marker == ClusterOwned || marker == ClusterShared) {
+			out[name] = marker
+		}
+	}
+	return out
+}
+
+// TagAllowed reports whether the allowlist holds key. Tag keys are matched
+// without regard to case, so "app" allows "App" and "APP".
+func TagAllowed(allowlist map[string]bool, key string) bool {
+	if allowlist[key] {
+		return true
+	}
+	for allowed, on := range allowlist {
+		if on && strings.EqualFold(allowed, key) {
+			return true
+		}
+	}
+	return false
+}
+
 // RedactName applies the tag-value allowlist to a resource's display name,
-// application and tags. Unless the Name tag is allowlisted (exact key), a
-// name taken from the Name tag is replaced by the resource ID. An application
-// read from a tag is a tag value too: unless the tag key it came from is
-// allowlisted (exact, case-sensitive key), it is left empty. Every tag value
+// application and tags. Allowlist keys match tag keys without regard to
+// case (TagAllowed). Unless the Name tag is allowlisted, a name taken from
+// the Name tag is replaced by the resource ID. An application read from a
+// tag is a tag value too: unless the tag key it came from is allowlisted,
+// it is left empty. Every tag value
 // whose key is not allowlisted is redacted. Collectors call it before a
 // resource is stored and readers call it again on every read, so narrowing
 // the allowlist hides values stored while it was wider.
 func RedactName(resource *Resource, allowlist map[string]bool) {
-	if !allowlist[NameTagKey] {
+	if !TagAllowed(allowlist, NameTagKey) {
 		value, tagged := resource.Tags[NameTagKey]
 		if tagged && (NameFromTag(resource.Type) || (value != "" && resource.Name == value)) {
 			resource.Name = ResourceID(resource.ARN)
 		}
 	}
-	if resource.AppSource == AppSourceTags && (resource.AppTag == "" || !allowlist[resource.AppTag]) {
+	if resource.AppSource == AppSourceTags && (resource.AppTag == "" || !TagAllowed(allowlist, resource.AppTag)) {
 		resource.App, resource.AppSource = "", ""
 	}
 	if len(resource.Tags) > 0 {
@@ -653,14 +719,14 @@ func RedactName(resource *Resource, allowlist map[string]bool) {
 }
 
 // RedactTags keeps every key and replaces each value whose key is not in
-// allowlist. Key matching is exact, like AWS tag keys.
+// allowlist. Keys match without regard to case.
 func RedactTags(tags map[string]string, allowlist map[string]bool) map[string]string {
 	if len(tags) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(tags))
 	for key, value := range tags {
-		if allowlist[key] {
+		if TagAllowed(allowlist, key) {
 			out[key] = value
 		} else {
 			out[key] = RedactedValue

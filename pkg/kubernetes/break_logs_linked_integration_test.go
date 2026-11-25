@@ -245,7 +245,7 @@ func TestRetainedBreakExcerptReopensAfterAuthorizationRecovery(t *testing.T) {
 				t.Fatalf("unlinked page: lines=%d total=%d err=%v", len(unlinked.Lines), unlinked.Counts.All, err)
 			}
 			first.client.rejectCredential()
-			if err := first.commitCredential(t.Context(), func() error { t.Fatal("retired process published"); return nil }); err == nil {
+			if err := first.commitCredential(t.Context(), func(context.Context) error { t.Fatal("retired process published"); return nil }); err == nil {
 				t.Fatal("retired process was not fenced")
 			}
 			reopened := open(0, "verified-reader")

@@ -5,7 +5,7 @@ import { createElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "./api";
 import { hasKubernetesPublication, kubernetesAccessLost, kubernetesReadNeedsRecovery, kubernetesReportAuthorityLost, kubernetesQueryUsesKinds, kubernetesInventoryNotReady, retainKubernetesPublication } from "./kubernetesContinuity";
-import { commitStreamGraceMs, commitStreamRetryCapMs, commitStreamRetryDelay, useKubernetesCommitEvents, useKubernetesQuery } from "./useKubernetesCluster";
+import { commitRefreshIntervalMs, commitStreamGraceMs, commitStreamRetryCapMs, commitStreamRetryDelay, useKubernetesCommitEvents, useKubernetesQuery } from "./useKubernetesCluster";
 
 const committed = { items: ["checkout"], broken: { total: 3 }, allocatable_cpu: "8", observed_at: "2026-10-28T00:00:00Z", sync: { state: "ready", age_s: 20, partial: false } };
 const warming = { items: [], broken: { total: 0 }, allocatable_cpu: undefined, observed_at: "2026-10-28T00:13:00Z", sync: { state: "syncing", age_s: 800, partial: false } };
@@ -162,15 +162,19 @@ describe("Kubernetes commit refresh", () => {
     expect(read).toHaveBeenCalledTimes(1);
     await act(async () => { finish?.(committed); });
     await advance();
+    // The commits that landed during the slow read are refreshed for once,
+    // when the refresh interval has passed, not as soon as the read settles.
+    expect(read).toHaveBeenCalledTimes(1);
+    await advance(commitRefreshIntervalMs);
     expect(read).toHaveBeenCalledTimes(2);
     callback(event(13));
-    await advance(101);
+    await advance(commitRefreshIntervalMs);
     expect(read).toHaveBeenCalledTimes(2);
     unmount();
     cache.clear();
   });
 
-  it("resumes with the last ID but invalidates a repeated reconnect snapshot and ignores a retired callback", async () => {
+  it("resumes with the last ID, skips a reconnect snapshot whose generation has not moved and ignores a retired callback", async () => {
     vi.useFakeTimers();
     let close: (() => void) | undefined;
     const stream = vi.spyOn(api, "kubernetesCommitStream").mockImplementation(() => new Promise<void>(resolve => { close = resolve; }));
@@ -192,9 +196,12 @@ describe("Kubernetes commit refresh", () => {
     await advance(101);
     expect(read).toHaveBeenCalledTimes(2);
     act(() => stream.mock.calls[1][0](event(9)));
-    await advance(101);
-    expect(read).toHaveBeenCalledTimes(3);
+    await advance(commitRefreshIntervalMs);
+    expect(read).toHaveBeenCalledTimes(2);
     expect(result.current.feed.streamState).toBe("live");
+    act(() => stream.mock.calls[1][0](event(10)));
+    await advance(commitRefreshIntervalMs);
+    expect(read).toHaveBeenCalledTimes(3);
     unmount();
     cache.clear();
   });

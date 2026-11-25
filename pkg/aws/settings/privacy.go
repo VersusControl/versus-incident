@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/agent/egress"
+	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/redaction"
 )
 
@@ -55,23 +56,21 @@ func NewSelfTester(store *Store, now func() time.Time) *SelfTester {
 }
 
 // Run projects the fixture, counts surviving canaries, and records the answer.
-// A nil allowlist loads the saved value (or the default) and records it; an
-// explicit allowlist is used as-is, which is how a config-managed allowlist
-// stays read-only.
+// A nil allowlist reads the list the user saved, or the default when none
+// was saved; a non-nil allowlist, even an empty one, is used as given, which
+// is how a config-managed allowlist is tested. Run records only its samples
+// and result: it never stores an allowlist, so the default is never saved as
+// if the user had chosen it.
 func (tester *SelfTester) Run(ctx context.Context, org string, allowlist []string) (SelfTestRecord, error) {
 	privacySelfTestMu.Lock()
 	defer privacySelfTestMu.Unlock()
 
-	persistAllowlist := len(allowlist) == 0
-	if persistAllowlist {
+	if allowlist == nil {
 		privacy, err := tester.store.LoadPrivacy(org)
 		if err != nil {
 			return SelfTestRecord{}, err
 		}
-		allowlist = privacy.TagValueAllowlist
-		if len(allowlist) == 0 {
-			allowlist = DefaultTagValueAllowlist()
-		}
+		allowlist = savedOrDefaultAllowlist(privacy)
 	}
 	allowlist = SanitizeAllowlist(allowlist)
 
@@ -82,29 +81,25 @@ func (tester *SelfTester) Run(ctx context.Context, org string, allowlist []strin
 	leaks := countLeaks(projection, allowlist)
 
 	now := tester.now().UTC()
-	privacy, err := tester.store.LoadPrivacy(org)
-	if err != nil {
-		return SelfTestRecord{}, err
-	}
-	if persistAllowlist {
-		privacy.TagValueAllowlist = allowlist
-	}
-	samples := make([]leakSample, 0, len(privacy.Samples)+1)
-	cutoff := now.Add(-24 * time.Hour)
-	for _, sample := range privacy.Samples {
-		if sample.At.After(cutoff) {
-			samples = append(samples, sample)
+	var record SelfTestRecord
+	// Only the samples are the self-test's own: the update re-reads the
+	// record, so an allowlist saved meanwhile is kept.
+	if err := tester.store.UpdatePrivacy(org, func(privacy *privacyRecord) {
+		samples := make([]leakSample, 0, len(privacy.Samples)+1)
+		cutoff := now.Add(-24 * time.Hour)
+		for _, sample := range privacy.Samples {
+			if sample.At.After(cutoff) {
+				samples = append(samples, sample)
+			}
 		}
-	}
-	samples = append(samples, leakSample{At: now, Leaks: leaks})
-	privacy.Samples = samples
-
-	total := 0
-	for _, sample := range samples {
-		total += sample.Leaks
-	}
-	record := SelfTestRecord{LastRunAt: now, Passing: leaks == 0, Leaks24h: total}
-	if err := tester.store.SavePrivacy(org, privacy); err != nil {
+		samples = append(samples, leakSample{At: now, Leaks: leaks})
+		privacy.Samples = samples
+		total := 0
+		for _, sample := range samples {
+			total += sample.Leaks
+		}
+		record = SelfTestRecord{LastRunAt: now, Passing: leaks == 0, Leaks24h: total}
+	}); err != nil {
 		return SelfTestRecord{}, err
 	}
 	if err := tester.store.SaveSelfTest(org, record); err != nil {
@@ -117,9 +112,10 @@ func (tester *SelfTester) Run(ctx context.Context, org string, allowlist []strin
 // allowlist does not sanction. A tag value whose key is allowlisted is sent on
 // purpose and is not a leak.
 func countLeaks(projection string, allowlist []string) int {
+	allowed := allowlistSet(allowlist)
 	leaks := 0
 	for _, canary := range canaries {
-		if key, ok := canaryTagKeys[canary]; ok && containsValue(allowlist, normalizeAllowed(key)) {
+		if key, ok := canaryTagKeys[canary]; ok && model.TagAllowed(allowed, key) {
 			continue
 		}
 		if containsString(projection, canary) {
@@ -135,8 +131,9 @@ func countLeaks(projection string, allowlist []string) int {
 func (tester *SelfTester) project(ctx context.Context, org string, allowlist []string) (string, error) {
 	redactor, _ := redaction.NewRedactor(false, selfTestExtraRules)
 	filteredTags := make(map[string]string)
+	allowed := allowlistSet(allowlist)
 	for key, value := range privacyFixtureTags() {
-		if containsValue(allowlist, normalizeAllowed(key)) {
+		if model.TagAllowed(allowed, key) {
 			filteredTags[key] = value
 		}
 	}
@@ -222,6 +219,25 @@ func containsString(value, needle string) bool {
 		}
 	}
 	return false
+}
+
+// allowlistSet is the allowlist as the set model.TagAllowed reads, so the
+// self-test matches keys exactly as the real redaction does: in any case.
+func allowlistSet(allowlist []string) map[string]bool {
+	set := make(map[string]bool, len(allowlist))
+	for _, key := range allowlist {
+		set[key] = true
+	}
+	return set
+}
+
+// savedOrDefaultAllowlist is the list the user saved (userAllowlist), or the
+// default when there is none.
+func savedOrDefaultAllowlist(privacy privacyRecord) []string {
+	if saved, ok := userAllowlist(privacy); ok {
+		return saved
+	}
+	return DefaultTagValueAllowlist()
 }
 
 func containsValue(values []string, needle string) bool {

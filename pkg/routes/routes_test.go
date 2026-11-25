@@ -13,7 +13,11 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-func TestSetupRoutes_GatewaySessionExchangePrecedesExtensionAuth(t *testing.T) {
+// loadRouteTestConfig loads a minimal config with the given gateway secret so
+// each test sets up the process config it needs instead of relying on an
+// earlier test to have loaded one.
+func loadRouteTestConfig(t *testing.T, gatewaySecret string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("name: test\nhost: 127.0.0.1\nport: 3000\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -23,11 +27,13 @@ func TestSetupRoutes_GatewaySessionExchangePrecedesExtensionAuth(t *testing.T) {
 	}
 	cfg := config.GetConfig()
 	previous := cfg.GatewaySecret
-	cfg.GatewaySecret = "route-order-secret"
-	t.Cleanup(func() {
-		cfg.GatewaySecret = previous
-		middleware.SetAuthMiddleware(nil)
-	})
+	cfg.GatewaySecret = gatewaySecret
+	t.Cleanup(func() { cfg.GatewaySecret = previous })
+}
+
+func TestSetupRoutes_GatewaySessionExchangePrecedesExtensionAuth(t *testing.T) {
+	loadRouteTestConfig(t, "route-order-secret")
+	t.Cleanup(func() { middleware.SetAuthMiddleware(nil) })
 
 	middleware.SetAuthMiddleware(func(c *fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusTeapot)
@@ -58,6 +64,7 @@ func TestSetupRoutes_GatewaySessionExchangePrecedesExtensionAuth(t *testing.T) {
 }
 
 func TestSetupRoutesWithTopologyMountsGatewayProtectedEndpoint(t *testing.T) {
+	loadRouteTestConfig(t, "topology-route-secret")
 	middleware.SetAuthMiddleware(nil)
 	t.Cleanup(func() { middleware.SetAuthMiddleware(nil) })
 	app := fiber.New(fiber.Config{Immutable: true})

@@ -7,9 +7,10 @@ import { ApiError, kubernetesAllContainers, type KubernetesBreakLogPage, type Ku
 import { useKubernetesCluster } from "@/lib/useKubernetesCluster";
 import { BreakLogsContext, maximumLogWindow as maximumWindow, useBreakLogs, useBreakLogsState } from "@/lib/useKubernetesBreakLogs";
 import { kubernetesAccessLost } from "@/lib/kubernetesContinuity";
+import { clockLabel, fullClock } from "@/lib/kubernetesClock";
 
 const minimumWindow = 30_000;
-const time = (value: string) => new Date(value).toLocaleTimeString([], { hour12: false });
+const time = (value: string) => clockLabel(value, fullClock);
 
 export function KubernetesBreakLogsProvider({ issue, onSelectResource, children, onAccessLost }: { issue?: KubernetesIssue; onSelectResource: (resource: KubernetesResource, tab?: "timeline" | "logs") => void; children: ReactNode; onAccessLost?: (error: Error) => void }) {
   const state = useBreakLogsState(issue, onSelectResource);

@@ -671,3 +671,35 @@ func TestRemovalOnAnotherReplicaPurgesAgainAtTheNewerRevision(t *testing.T) {
 		})
 	}
 }
+
+// The default allowlist carries the keys grouping reads (application,
+// service, Kubernetes namespace and CloudFormation stack keys) and is used
+// only while nothing is saved or configured: a deployment that saved its
+// own list keeps it, unchanged.
+func TestDefaultAllowlistOnlyWhenNoneIsSaved(t *testing.T) {
+	defaults := DefaultTagValueAllowlist()
+	for _, key := range []string{"app", "application", "service", "app.kubernetes.io/name", "kubernetes.io/service-name",
+		"kubernetes.io/created-for/pvc/namespace", "service.k8s.aws/stack", "ingress.k8s.aws/stack", "aws:cloudformation:stack-name"} {
+		found := false
+		for _, value := range defaults {
+			found = found || value == key
+		}
+		if !found {
+			t.Errorf("default allowlist lacks %s", key)
+		}
+	}
+	if clean := SanitizeAllowlist(defaults); len(clean) != len(defaults) {
+		t.Fatalf("the sanitiser drops default keys: %v", clean)
+	}
+	store := testStore(t)
+	connector := NewService(store, WithConfig(func() config.AWSConnectorConfig { return config.AWSConnectorConfig{Enable: true} }))
+	if got := connector.TagValueAllowlist(); len(got) != len(defaults) {
+		t.Fatalf("nothing saved: allowlist = %v", got)
+	}
+	if err := connector.SavePrivacy(connector.storageOrg(), []string{"app", "team"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := connector.TagValueAllowlist(); len(got) != 2 || got[0] != "app" || got[1] != "team" {
+		t.Fatalf("a saved allowlist was widened: %v", got)
+	}
+}

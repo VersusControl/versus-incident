@@ -31,6 +31,9 @@ type memoryTables struct {
 	// accountLabels holds the AWS account labels by organization and
 	// account.
 	accountLabels map[string]map[string]AWSAccountLabel
+	// groupCorrections holds the AWS group corrections by organization
+	// and key.
+	groupCorrections map[string]map[AWSGroupCorrectionKey]AWSGroupCorrection
 }
 
 type memoryUnitKey struct {

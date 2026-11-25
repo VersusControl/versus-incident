@@ -187,10 +187,15 @@ type EvidenceBatch struct {
 	Coverage             map[string]EvidenceInterval
 	GuardKey             string
 	GuardExpected        []byte
-	ID                   string
-	Expected             string
-	At                   time.Time
-	Epoch                string
+	// GuardOwner, when set, fences the save by who holds the lease rather
+	// than by its exact bytes: the JSON document at GuardKey must name
+	// GuardOwner in its Owner field, and its Expires time must not have
+	// passed. The holder's own renewals then never conflict with its save.
+	GuardOwner string
+	ID         string
+	Expected   string
+	At         time.Time
+	Epoch      string
 	// Only sufficient successful observations may advance CoveredThrough.
 	// A partial batch can add findings but cannot close absent issues.
 	CoveredThrough time.Time
@@ -386,7 +391,7 @@ func validEvidenceBatch(batch EvidenceBatch) error {
 			return ErrInvalidEvidence
 		}
 	}
-	if len(batch.GuardKey) > 1024 || len(batch.GuardExpected) > 16<<10 || len(batch.Expected) > 256 {
+	if len(batch.GuardKey) > 1024 || len(batch.GuardExpected) > 16<<10 || len(batch.GuardOwner) > 256 || len(batch.Expected) > 256 {
 		return ErrEvidenceLimit
 	}
 	if batch.HistoricalOnly && (!batch.CoveredThrough.IsZero() || len(batch.Coverage) > 0) {
@@ -1038,6 +1043,16 @@ func blobEvidenceCommitUnfenced(ctx context.Context, p Provider, policy Evidence
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// The lease that fences the save can move while it runs, as the
+		// caller keeps collecting; each attempt is guarded by its current
+		// value, as every transaction of a Postgres save is.
+		if batch.KeepLease != nil && batch.GuardKey != "" {
+			expected, err := batch.KeepLease(ctx)
+			if err != nil {
+				return err
+			}
+			batch.GuardExpected = expected
+		}
 		raw, err := p.ReadBlob(key)
 		if err != nil {
 			return err
@@ -1142,12 +1157,12 @@ func blobEvidenceCommitUnfenced(ctx context.Context, p Provider, policy Evidence
 		var won bool
 		if batch.GuardKey != "" {
 			guarded, ok := p.(interface {
-				compareEvidenceBlob(string, []byte, []byte, string, []byte) (bool, error)
+				compareEvidenceBlob(string, []byte, []byte, string, []byte, string) (bool, error)
 			})
 			if !ok {
 				return ErrUnsupported
 			}
-			won, err = guarded.compareEvidenceBlob(key, raw, replacement, batch.GuardKey, batch.GuardExpected)
+			won, err = guarded.compareEvidenceBlob(key, raw, replacement, batch.GuardKey, batch.GuardExpected, batch.GuardOwner)
 		} else {
 			won, err = cas.CompareAndSwapBlob(key, raw, replacement)
 		}
@@ -1522,10 +1537,10 @@ func blobEvidenceDelete(ctx context.Context, p Provider, scope EvidenceScope) er
 	return ErrEvidenceConflict
 }
 
-func (p *memoryProvider) compareEvidenceBlob(key string, expected, replacement []byte, guard string, guardExpected []byte) (bool, error) {
+func (p *memoryProvider) compareEvidenceBlob(key string, expected, replacement []byte, guard string, guardExpected []byte, guardOwner string) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !bytes.Equal(p.blobs[guard], guardExpected) {
+	if !evidenceGuardHolds(p.blobs[guard], guardExpected, guardOwner) {
 		return false, ErrEvidenceConflict
 	}
 	current, exists := p.blobs[key]
@@ -1549,7 +1564,7 @@ func (p *memoryProvider) compareEvidenceBlob(key string, expected, replacement [
 	return true, nil
 }
 
-func (p *fileProvider) compareEvidenceBlob(key string, expected, replacement []byte, guard string, guardExpected []byte) (bool, error) {
+func (p *fileProvider) compareEvidenceBlob(key string, expected, replacement []byte, guard string, guardExpected []byte, guardOwner string) (bool, error) {
 	index, err := p.evidenceIndex()
 	if err != nil {
 		return false, err
@@ -1581,7 +1596,7 @@ func (p *fileProvider) compareEvidenceBlob(key string, expected, replacement []b
 	if err != nil {
 		return false, err
 	}
-	if !bytes.Equal(guardData, guardExpected) {
+	if !evidenceGuardHolds(guardData, guardExpected, guardOwner) {
 		return false, ErrEvidenceConflict
 	}
 	return index.swap(context.Background(), key, expected, replacement, false)
@@ -1622,4 +1637,18 @@ func pruneEvidenceLatest(state *evidenceState) {
 			delete(state.Latest, id)
 		}
 	}
+}
+
+// evidenceGuardHolds reports whether the lease document current still fences
+// a save: by its holder and expiry when owner is set, otherwise by its exact
+// bytes.
+func evidenceGuardHolds(current, expected []byte, owner string) bool {
+	if owner == "" {
+		return bytes.Equal(current, expected)
+	}
+	var lease struct {
+		Owner   string
+		Expires time.Time
+	}
+	return json.Unmarshal(current, &lease) == nil && lease.Owner == owner && lease.Expires.After(time.Now())
 }
