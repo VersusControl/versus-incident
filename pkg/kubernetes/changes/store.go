@@ -2,6 +2,7 @@ package changes
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -128,7 +129,13 @@ func NewCaptureState(provider storage.Provider, scope index.Scope) *Store {
 
 // Append adds projected changes and evicts only the oldest records as required by bounds.
 func (store *Store) Append(changes []Change, now time.Time) error {
-	return store.Commit(changes, nil, nil, "", now)
+	return store.AppendContext(context.Background(), changes, now)
+}
+
+// AppendContext is Append with its store reads and writes stopping when ctx
+// ends.
+func (store *Store) AppendContext(ctx context.Context, changes []Change, now time.Time) error {
+	return store.CommitCaptureContext(ctx, changes, nil, nil, "", now, nil, nil, false)
 }
 
 // MarkGap records a bounded interval for which the timeline cannot guarantee completeness.
@@ -141,6 +148,12 @@ func (store *Store) Commit(changes []Change, gaps []Gap, coverage map[string]Gap
 }
 
 func (store *Store) CommitCapture(changes []Change, gaps []Gap, coverage map[string]Gap, owner string, now time.Time, crashes []CrashEvent, crashGaps []Gap, podRead bool) error {
+	return store.CommitCaptureContext(context.Background(), changes, gaps, coverage, owner, now, crashes, crashGaps, podRead)
+}
+
+// CommitCaptureContext is CommitCapture with its store reads and writes
+// stopping when ctx ends.
+func (store *Store) CommitCaptureContext(ctx context.Context, changes []Change, gaps []Gap, coverage map[string]Gap, owner string, now time.Time, crashes []CrashEvent, crashGaps []Gap, podRead bool) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -169,7 +182,7 @@ func (store *Store) CommitCapture(changes []Change, gaps []Gap, coverage map[str
 			return ErrInvalidQuery
 		}
 	}
-	return store.commitSnapshot(func(current *snapshot) error {
+	return store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if owner == "" && current.Lease != nil {
 			if current.Lease.Expires.After(time.Now().UTC()) {
 				return ErrLeaseLost
@@ -397,13 +410,19 @@ func historySize(current snapshot) int {
 }
 
 func (store *Store) commitSnapshot(update func(*snapshot) error) error {
+	return store.commitSnapshotContext(context.Background(), update)
+}
+
+// commitSnapshotContext applies update in a compare-and-swap loop, with each
+// store read and write stopping when ctx ends.
+func (store *Store) commitSnapshotContext(ctx context.Context, update func(*snapshot) error) error {
 	if store == nil || store.provider == nil {
 		return ErrStoreLimit
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	for attempt := 0; attempt < 64; attempt++ {
-		expected, err := store.provider.ReadBlob(store.key)
+		expected, err := storage.ReadBlobContext(ctx, store.provider, store.key)
 		if err != nil {
 			return err
 		}
@@ -426,7 +445,7 @@ func (store *Store) commitSnapshot(update func(*snapshot) error) error {
 			return nil
 		}
 		if cas, ok := store.provider.(storage.BlobCAS); ok {
-			swapped, err := cas.CompareAndSwapBlob(store.key, expected, replacement)
+			swapped, err := storage.CompareAndSwapBlobContext(ctx, cas, store.key, expected, replacement)
 			if err != nil {
 				return err
 			}
@@ -435,12 +454,17 @@ func (store *Store) commitSnapshot(update func(*snapshot) error) error {
 			}
 			continue
 		}
-		return store.provider.WriteBlob(store.key, replacement)
+		return storage.WriteBlobContext(ctx, store.provider, store.key, replacement)
 	}
 	return ErrStoreLimit
 }
 
 func (store *Store) ClaimLease(owner string, now time.Time, ttl time.Duration) error {
+	return store.ClaimLeaseContext(context.Background(), owner, now, ttl)
+}
+
+// ClaimLeaseContext is ClaimLease with its store reads and writes stopping when ctx ends.
+func (store *Store) ClaimLeaseContext(ctx context.Context, owner string, now time.Time, ttl time.Duration) error {
 	if owner == "" || len(owner) > 128 || ttl <= 0 || ttl > 5*time.Minute {
 		return ErrInvalidQuery
 	}
@@ -450,7 +474,7 @@ func (store *Store) ClaimLease(owner string, now time.Time, ttl time.Duration) e
 	if _, ok := store.provider.(storage.BlobCAS); !ok {
 		return ErrLeaseLost
 	}
-	return store.commitSnapshot(func(current *snapshot) error {
+	return store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if current.Lease != nil && current.Lease.Owner != owner && current.Lease.Expires.After(now) {
 			return ErrLeaseLost
 		}
@@ -464,7 +488,12 @@ func (store *Store) ClaimLease(owner string, now time.Time, ttl time.Duration) e
 }
 
 func (store *Store) RenewLease(owner string, now time.Time, ttl time.Duration) error {
-	return store.commitSnapshot(func(current *snapshot) error {
+	return store.RenewLeaseContext(context.Background(), owner, now, ttl)
+}
+
+// RenewLeaseContext is RenewLease with its store reads and writes stopping when ctx ends.
+func (store *Store) RenewLeaseContext(ctx context.Context, owner string, now time.Time, ttl time.Duration) error {
+	return store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if current.Lease == nil || current.Lease.Owner != owner || !current.Lease.Expires.After(now) {
 			return ErrLeaseLost
 		}
@@ -474,7 +503,12 @@ func (store *Store) RenewLease(owner string, now time.Time, ttl time.Duration) e
 }
 
 func (store *Store) ReleaseLease(owner string) error {
-	return store.commitSnapshot(func(current *snapshot) error {
+	return store.ReleaseLeaseContext(context.Background(), owner)
+}
+
+// ReleaseLeaseContext is ReleaseLease with its store reads and writes stopping when ctx ends.
+func (store *Store) ReleaseLeaseContext(ctx context.Context, owner string) error {
+	return store.commitSnapshotContext(ctx, func(current *snapshot) error {
 		if current.Lease != nil && current.Lease.Owner == owner {
 			current.Lease = nil
 		}
@@ -492,6 +526,12 @@ type changeCursor struct {
 
 // Query returns a stable keyset page over the retained journal.
 func (store *Store) Query(query Query, now time.Time) (Page, error) {
+	return store.QueryContext(context.Background(), query, now)
+}
+
+// QueryContext is Query with its store reads stopping when ctx ends, so a
+// request's read of the journal ends at the request's deadline.
+func (store *Store) QueryContext(ctx context.Context, query Query, now time.Time) (Page, error) {
 	if store == nil || store.provider == nil {
 		return Page{}, ErrStoreLimit
 	}
@@ -529,7 +569,7 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 	cursor.Since, cursor.Until = query.Since, query.Until
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	current, err := store.read()
+	current, err := store.readContext(ctx)
 	if err != nil {
 		return Page{}, err
 	}
@@ -538,7 +578,7 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 	for _, source := range append([]*Store{store}, store.archives...) {
 		part := current
 		if source != store {
-			part, err = source.read()
+			part, err = source.readContext(ctx)
 			if err != nil {
 				return Page{}, err
 			}
@@ -591,7 +631,11 @@ func (store *Store) Query(query Query, now time.Time) (Page, error) {
 }
 
 func (store *Store) read() (snapshot, error) {
-	encoded, err := store.provider.ReadBlob(store.key)
+	return store.readContext(context.Background())
+}
+
+func (store *Store) readContext(ctx context.Context) (snapshot, error) {
+	encoded, err := storage.ReadBlobContext(ctx, store.provider, store.key)
 	if err != nil {
 		return snapshot{}, err
 	}

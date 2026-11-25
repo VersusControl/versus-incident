@@ -55,6 +55,37 @@ var ErrReadOnlyIncident = errors.New("storage: incident belongs to read-only arc
 // visible through a read scope but does not belong to its write org.
 var ErrReadOnlyAnalysis = errors.New("storage: analysis belongs to read-only archive")
 
+// answers are the errors with which a working store answers a call: a record
+// that is not there, a checkpoint another writer moved, a page cursor that no
+// longer matches, a request the store refuses, a read model still being built.
+var answers = []error{
+	ErrNotFound,
+	ErrUnsupported,
+	ErrUnknownDomain,
+	ErrReadOnlyIncident,
+	ErrReadOnlyAnalysis,
+	ErrInvalidBlobName,
+	ErrInvalidModelKey,
+	ErrInvalidEvidence,
+	ErrEvidenceConflict,
+	ErrEvidenceLimit,
+	ErrEvidenceNotReady,
+	ErrInvalidDetectionOccurrence,
+	ErrDetectionClaimLost,
+}
+
+// IsAnswer reports whether err is an answer the store gave rather than a sign
+// that it did not answer. A caller that tells a store outage from a store
+// answer (to name a failure for the store, say) treats these as answers.
+func IsAnswer(err error) bool {
+	for _, answer := range answers {
+		if errors.Is(err, answer) {
+			return true
+		}
+	}
+	return false
+}
+
 // Lifecycle domains. A small fixed set so a backend can map each to its
 // physical table(s) without ever trusting caller-supplied input.
 const (

@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math"
@@ -98,14 +99,31 @@ type IssuePage struct {
 	Sync               SyncStatus            `json:"sync"`
 	Broken             BrokenTotals          `json:"broken"`
 	// Total and Limit size the pager: Total counts every item the filters
-	// match, and a non-zero Limit marks Total as present.
-	Total int `json:"total,omitempty"`
-	Limit int `json:"limit,omitempty"`
+	// match, and a non-zero Limit marks Total as present, except on a page
+	// with CountUnknown: a saved-history cursor page is not recounted, so it
+	// carries no Total, Totals or Broken and the client keeps the first page's.
+	Total        int  `json:"total,omitempty"`
+	Limit        int  `json:"limit,omitempty"`
+	CountUnknown bool `json:"count_unknown,omitempty"`
 
 	// Capture is present on pages served from saved history.
 	Capture *CaptureStatus `json:"capture,omitempty"`
 	// resume mints cursors inside the page for callers that show fewer rows.
 	resume snapshotResume
+}
+
+// MarshalJSON leaves the totals out of a page that was not counted, so a
+// client never reads zero totals over a list of occurrences.
+func (page IssuePage) MarshalJSON() ([]byte, error) {
+	type plain IssuePage
+	if !page.CountUnknown {
+		return json.Marshal(plain(page))
+	}
+	return json.Marshal(struct {
+		plain
+		Totals map[string]int `json:"totals,omitempty"`
+		Broken *BrokenTotals  `json:"broken,omitempty"`
+	}{plain: plain(page)})
 }
 
 // ResumeAfter returns the cursor that continues this list after the first

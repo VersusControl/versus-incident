@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, type KubernetesPodLogLine, type KubernetesWorkloadLogEvent, type KubernetesWorkloadLogPod } from "@/lib/api";
 import { useKubernetesCluster } from "@/lib/useKubernetesCluster";
 import { SSELimitError } from "@/lib/sse";
+import { clockLabel } from "@/lib/kubernetesClock";
 
 export const POD_LOG_MAX_LINES = 10_000;
 export const POD_LOG_MAX_BYTES = 4 << 20;
@@ -254,7 +255,7 @@ export function usePodLogStream(options: ResourceLogOptions) {
       }
       if (newest !== undefined && cursorTime !== undefined && newest - cursorTime > POD_LOG_CURSOR_MAX_LAG_MS) {
         session.current.clampedResume = true;
-        setGap(`resumed at ${new Date(newest).toLocaleTimeString()}; lines before that time may be missing`);
+        setGap(`resumed at ${clockLabel(newest, {})}; lines before that time may be missing`);
         return { since_time: sinceTime(newest) };
       }
       return { cursor };

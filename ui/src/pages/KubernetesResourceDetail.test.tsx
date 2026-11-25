@@ -808,7 +808,7 @@ describe("Resource detail surfaces", () => {
     }));
     mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
     const time = new Date(savedThrough).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const notice = await screen.findByText(`History is temporarily not saving — showing data from ${time}`);
+    const notice = await screen.findByText(`History is temporarily not saving to the database — showing data from ${time}`);
     const status = notice.closest("[role=status]") as HTMLElement;
     expect(status.dataset.historySaveNotice).toBe("delayed");
     expect(status.className).not.toContain("text-sev-warning");
@@ -824,7 +824,7 @@ describe("Resource detail surfaces", () => {
     }));
     mount(<ResourceTimeline resource={pod} onCrash={vi.fn()} />);
     const time = new Date(savedThrough).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const label = await screen.findByText(`History could not save the latest data — showing data from ${time}`);
+    const label = await screen.findByText(`History could not save the latest data to the database — showing data from ${time}`);
     const notice = label.closest("[role=status]") as HTMLElement;
     expect(notice.dataset.historySaveNotice).toBe("rejected");
     expect(notice.className).toContain("text-sev-warning");

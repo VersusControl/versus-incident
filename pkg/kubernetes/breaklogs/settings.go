@@ -2,6 +2,7 @@ package breaklogs
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -101,12 +102,18 @@ func LoadSettings(provider storage.Provider, key string) (SettingsState, error) 
 }
 
 func UpdateSettings(provider storage.Provider, key string, update func(*SettingsState) error) error {
+	return UpdateSettingsContext(context.Background(), provider, key, update)
+}
+
+// UpdateSettingsContext is UpdateSettings with its store reads and writes
+// stopping when ctx ends.
+func UpdateSettingsContext(ctx context.Context, provider storage.Provider, key string, update func(*SettingsState) error) error {
 	cas, ok := provider.(storage.BlobCAS)
 	if !ok {
 		return ErrInvalid
 	}
 	for attempt := 0; attempt < 16; attempt++ {
-		encoded, err := provider.ReadBlob(key)
+		encoded, err := storage.ReadBlobContext(ctx, provider, key)
 		if err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
@@ -128,7 +135,7 @@ func UpdateSettings(provider storage.Provider, key string, update func(*Settings
 		if bytes.Equal(encoded, replacement) {
 			return nil
 		}
-		swapped, err := cas.CompareAndSwapBlob(key, encoded, replacement)
+		swapped, err := storage.CompareAndSwapBlobContext(ctx, cas, key, encoded, replacement)
 		if err != nil {
 			return err
 		}

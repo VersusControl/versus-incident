@@ -54,7 +54,7 @@ export default {
           warn: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid") },
           warning: { DEFAULT: v("sev-warn"), solid: v("sev-warn-solid"), text: v("sev-warn-text") },
           info: { DEFAULT: v("sev-info"), solid: v("sev-info-solid") },
-          ok: { DEFAULT: v("sev-ok"), solid: v("sev-ok-solid") },
+          ok: { DEFAULT: v("sev-ok"), solid: v("sev-ok-solid"), text: v("sev-ok-text") },
         },
 
         // Legacy aliases — existing call sites keep compiling; tones

@@ -1489,3 +1489,147 @@ func TestSyncHealthOneFailingKindIsPartialNotAClusterError(t *testing.T) {
 		})
 	}
 }
+
+// The sync report says how long until it turns stale, so a surface can mark
+// the last sync at the same moment the server would: across the collected
+// kinds, the least time left before a kind's age passes its own stale limit,
+// never below zero. A kind the cluster does not serve, one the identity may not
+// read, and one never collected have no age to run out; with none left the
+// report carries no deadline at all.
+func TestSyncReportSaysHowLongUntilTheFirstCollectedKindTurnsStale(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	at := func(age time.Duration) kubeindex.KindStatus {
+		return kubeindex.KindStatus{State: "ready", ObservedAt: now.Add(-age), CompletedAt: now.Add(-age)}
+	}
+	forbidden := kubeindex.KindStatus{State: "error", Partial: true, Error: "forbidden", ObservedAt: now.Add(-400 * time.Second), LastAttemptAt: now, FailingSince: now}
+	absent := kubeindex.KindStatus{Absent: true, ObservedAt: now.Add(-400 * time.Second)}
+	for _, test := range []struct {
+		name  string
+		kinds map[string]kubeindex.KindStatus
+		// startedAgo, when set, is how long ago this process started
+		// collecting, with nothing published since.
+		startedAgo time.Duration
+		want       any
+	}{
+		// ConfigMap collects every 5 minutes, so it is stale after 10.
+		{name: "slow kind past three minutes is still within its own limit", kinds: map[string]kubeindex.KindStatus{"ConfigMap": at(270 * time.Second)}, want: float64(330)},
+		// Pod collects every 30 seconds, so it is stale after the 3-minute floor.
+		{name: "least time left across a fast and a slow kind", kinds: map[string]kubeindex.KindStatus{"ConfigMap": at(270 * time.Second), "Pod": at(100 * time.Second)}, want: float64(80)},
+		// 0.6 s left reads as 1, never 0 while the kind is still fresh.
+		{name: "a fraction of a second left rounds up", kinds: map[string]kubeindex.KindStatus{"Pod": at(179400 * time.Millisecond)}, want: float64(1)},
+		{name: "a kind already past its limit gives zero", kinds: map[string]kubeindex.KindStatus{"ConfigMap": at(10 * time.Second), "Pod": at(400 * time.Second)}, want: float64(0)},
+		{name: "kinds not served or not readable are left out", kinds: map[string]kubeindex.KindStatus{"ConfigMap": at(270 * time.Second), "Pod": absent, "Node": forbidden}, want: float64(330)},
+		// Observed 500 s ago, still fresh when collection restarted 100 s
+		// ago: its age counts from the restart, as the stale state does.
+		{name: "after a restart the age counts from when collection started", kinds: map[string]kubeindex.KindStatus{"ConfigMap": at(500 * time.Second)}, startedAgo: 100 * time.Second, want: float64(500)},
+		{name: "no collected kind carries no deadline", kinds: map[string]kubeindex.KindStatus{"Pod": absent, "Node": forbidden, "Deployment": {State: "pending"}}, want: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+			service.client = &Client{now: func() time.Time { return now }}
+			publishInventoryKinds(t, service, test.kinds, nil)
+			if test.startedAgo > 0 {
+				service.changes.inventories[service.indexScope()].startedAt = now.Add(-test.startedAgo)
+			}
+			health, err := service.SyncHealth(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(health)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var report map[string]any
+			if err := json.Unmarshal(raw, &report); err != nil {
+				t.Fatal(err)
+			}
+			if test.want == nil {
+				for key, value := range report {
+					if strings.HasPrefix(key, "stale_") {
+						t.Fatalf("a report with no collected kind carries %s=%v", key, value)
+					}
+				}
+				return
+			}
+			if report["stale_in_s"] != test.want {
+				t.Fatalf("stale_in_s = %v, want %v", report["stale_in_s"], test.want)
+			}
+		})
+	}
+}
+
+// syncReportJSON reads the service's sync report, the failed-cycle report
+// included, as the JSON the route serves.
+func syncReportJSON(t *testing.T, service *Service) map[string]any {
+	t.Helper()
+	health, err := service.SyncHealth(t.Context())
+	if carried, ok := SyncHealthReport(err); ok {
+		health, err = carried, nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report map[string]any
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+// The report's stale state and its time left are read on one clock: moving
+// the cluster client's clock past a kind's limit turns the report stale at
+// the moment the time left reaches zero, whatever the wall clock says.
+func TestSyncReportTurnsStaleWhenItsTimeLeftRunsOut(t *testing.T) {
+	// Far from the wall clock, so a report that reads the wall clock anywhere
+	// disagrees with this one.
+	observed := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	now := observed
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.client = &Client{now: func() time.Time { return now }}
+	// Every kind is observed at once; the fastest, Pod among them, go stale
+	// at the 3-minute floor.
+	publishInventoryKinds(t, service, fullySyncedKinds(observed), nil)
+
+	for _, step := range []struct {
+		age    time.Duration
+		state  string
+		left   float64
+		ageNow float64
+	}{
+		{age: 170 * time.Second, state: "ready", left: 10, ageNow: 170},
+		{age: 180 * time.Second, state: "ready", left: 0, ageNow: 180},
+		{age: 181 * time.Second, state: "stale", left: 0, ageNow: 181},
+	} {
+		now = observed.Add(step.age)
+		report := syncReportJSON(t, service)
+		if report["state"] != step.state || report["stale_in_s"] != step.left || report["age_s"] != step.ageNow {
+			t.Fatalf("at age %s: state=%v stale_in_s=%v age_s=%v, want %s, %v, %v", step.age, report["state"], report["stale_in_s"], report["age_s"], step.state, step.left, step.ageNow)
+		}
+	}
+}
+
+// A failed cycle answers with the report a surface keeps on screen, so it says
+// how long the last good snapshot has before it turns stale, by the same rule
+// and on the same clock as a healthy report.
+func TestFailedSyncReportSaysHowLongUntilTheSnapshotTurnsStale(t *testing.T) {
+	observed := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	now := observed.Add(100 * time.Second)
+	service := NewService(nil, Scope{OrgID: "default", ClusterID: "cluster"}, 0)
+	service.client = &Client{now: func() time.Time { return now }}
+	publishFailedInventory(t, service, fullySyncedKinds(observed), "timeout")
+
+	report := syncReportJSON(t, service)
+	// Every known kind stands behind the failed report; the fastest ones go
+	// stale at the 3-minute floor.
+	if report["state"] != "error" || report["stale_in_s"] != float64(80) || report["age_s"] != float64(100) {
+		t.Fatalf("failed report: state=%v stale_in_s=%v age_s=%v, want error, 80, 100", report["state"], report["stale_in_s"], report["age_s"])
+	}
+	now = observed.Add(200 * time.Second)
+	if report = syncReportJSON(t, service); report["stale_in_s"] != float64(0) {
+		t.Fatalf("failed report past the limit: stale_in_s=%v, want 0", report["stale_in_s"])
+	}
+}

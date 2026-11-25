@@ -123,7 +123,7 @@ export function ResourceEvents({ events }: { events: KubernetesResource[] }) {
           ))}
         </div>
         <div className="mt-2 flex justify-between text-2xs text-ink-400">
-          {[60, 45, 30, 15, 0].map((minutes) => <span key={minutes}>{minutes === 0 ? "now" : clock(new Date(now - minutes * 60000).toISOString()).slice(0, 5)}</span>)}
+          {[60, 45, 30, 15, 0].map((minutes) => <span key={minutes}>{minutes === 0 ? "now" : new Date(now - minutes * 60000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</span>)}
         </div>
       </figure>
       {!visible.length && (

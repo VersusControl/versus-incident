@@ -453,7 +453,7 @@ func TestNativeSigningSessionExpiryFencesPaginationAndPublication(t *testing.T) 
 					clock.Store(origin.Add(lifetime + time.Minute).UnixNano())
 				}
 				committed := false
-				if err := service.commitCredential(t.Context(), func() error { committed = true; return nil }); err == nil || committed {
+				if err := service.commitCredential(t.Context(), func(context.Context) error { committed = true; return nil }); err == nil || committed {
 					t.Fatal("retired signing-session work committed after renewal")
 				}
 				if role.calls.Load() != 2 {
@@ -1067,7 +1067,7 @@ func TestHangingTokenHostAtBootAnswersRetryableAndWarnsOnce(t *testing.T) {
 		if detail := DiagnoseError(err); detail.Code != "credential_unavailable" || !detail.Retryable || !strings.Contains(detail.Action, "token endpoint") {
 			t.Fatalf("poll %d described as %+v", polls, detail)
 		}
-		if class := service.failedSyncHealth(err).Class; class != "token_endpoint_unreachable" {
+		if class := service.failedSyncHealth(t.Context(), err).Class; class != "token_endpoint_unreachable" {
 			t.Fatalf("sync class during the outage = %q, want token_endpoint_unreachable", class)
 		}
 		polls++
@@ -1346,5 +1346,206 @@ func TestDarkTokenHostWithCaptureRunningNeverQueuesRequests(t *testing.T) {
 	}
 	if dials.Load() < 2 {
 		t.Fatalf("the dark token host was dialled %d times, want several failed refreshes inside the window", dials.Load())
+	}
+}
+
+// A recovery failure that says nothing against the credential — an attempt
+// that ran out of time, a cluster that did not answer, the history store, or a
+// rebuild whose previous collection would not stop — never closes the gate on
+// live reads and never answers a waiting request with a credential to restore
+// or rotate. The retry is still backed off, and a real credential failure
+// afterwards is still answered as one.
+func TestRecoveryFailureThatIsNotACredentialFaultIsNamedForItsCause(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"attempt timed out", context.DeadlineExceeded, "connector_reconnecting"},
+		{"cluster did not answer", ErrClusterUnavailable, "connector_reconnecting"},
+		{"history store", storageStageFailure("read", errors.New("connection pool exhausted")), "history_store_unavailable"},
+		{"history store timed out", historyStoreError(context.DeadlineExceeded), "history_store_timeout"},
+		{"previous collection waiting on the history store", &rebuildStalled{cause: errHistoryUnavailable}, "history_store_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			isolateProblems(t, 0, nil)
+			recovery := &clusterRecovery{cluster: "cluster"}
+			recovery.failed(test.err, nil, "org")
+			if gated := recovery.requestGateError("org"); gated != nil {
+				t.Fatalf("%v closed the gate on live reads: %v", test.err, gated)
+			}
+			held := recovery.gatedError("org")
+			if errors.Is(held, ErrCredentialUnavailable) || errors.Is(held, ErrUnauthorized) {
+				t.Fatalf("a request waiting after %v was answered as a credential fault: %v", test.err, held)
+			}
+			if detail := DiagnoseError(held); detail.Code != test.code || !detail.Retryable {
+				t.Fatalf("a request waiting after %v was described as %+v, want retryable %s", test.err, detail, test.code)
+			}
+			if !ConnectorRecovering(held) {
+				t.Fatalf("held answer %v is not recognised as the connector's own recovery", held)
+			}
+			recovery.mu.Lock()
+			next := recovery.next
+			recovery.mu.Unlock()
+			if !time.Now().Before(next) {
+				t.Fatalf("%v scheduled no backed-off retry", test.err)
+			}
+
+			recovery.mu.Lock()
+			recovery.next = time.Time{}
+			recovery.mu.Unlock()
+			recovery.failed(ErrCredentialUnavailable, nil, "org")
+			if gated := recovery.requestGateError("org"); !errors.Is(gated, ErrCredentialUnavailable) {
+				t.Fatalf("a credential failure after %v answered %v, want the credential fault", test.err, gated)
+			}
+			if held := recovery.gatedError("org"); !errors.Is(held, ErrCredentialUnavailable) {
+				t.Fatalf("a credential failure after %v left the held answer %v", test.err, held)
+			}
+		})
+	}
+
+	// A stall while the gate already holds a cause, here a token host that
+	// gave no answer, keeps that cause: it never brings back a credential to
+	// rotate.
+	for _, stalled := range []error{&rebuildStalled{cause: errConnectorReconnecting}, &rebuildStalled{cause: errHistoryUnavailable}, ErrClusterUnavailable} {
+		isolateProblems(t, 0, nil)
+		recovery := &clusterRecovery{cluster: "cluster"}
+		recovery.failed(tokenEndpointCause, nil, "org")
+		recovery.mu.Lock()
+		recovery.next = time.Time{}
+		recovery.mu.Unlock()
+		recovery.failed(stalled, nil, "org")
+		held := recovery.gatedError("org")
+		if !errors.Is(held, ErrTokenEndpointUnavailable) {
+			t.Fatalf("%v after a token host outage left the held answer %v (%s)", stalled, held, DiagnoseError(held).Code)
+		}
+		if gated := recovery.requestGateError("org"); gated != nil && !errors.Is(gated, ErrTokenEndpointUnavailable) {
+			t.Fatalf("%v after a token host outage gated requests with %v", stalled, gated)
+		}
+	}
+}
+
+// A stalled rebuild that arrives while the gate holds a credential cause is
+// still a stall: it neither extends the gate on live reads nor goes
+// unrecorded, so a request that waits once the credential gate reopens hears
+// why the rebuild waits.
+func TestStallWhileACauseIsRecordedKeepsTheGateAndRecordsTheStall(t *testing.T) {
+	isolateProblems(t, 0, nil)
+	recovery := &clusterRecovery{cluster: "cluster"}
+	recovery.failed(tokenEndpointCause, nil, "org")
+	recovery.mu.Lock()
+	gateBefore := recovery.scopes["org"].next
+	recovery.next = time.Time{}
+	recovery.mu.Unlock()
+	recovery.failed(&rebuildStalled{cause: errHistoryUnavailable}, nil, "org")
+	recovery.mu.Lock()
+	gateAfter, stall := recovery.scopes["org"].next, recovery.stall
+	recovery.mu.Unlock()
+	if gateAfter.After(gateBefore) {
+		t.Fatalf("a stalled rebuild extended the credential gate from %s to %s", gateBefore, gateAfter)
+	}
+	if !errors.Is(stall, errHistoryUnavailable) {
+		t.Fatalf("a stalled rebuild while a cause was recorded left the stall answer %v", stall)
+	}
+}
+
+// A request that waits on a rebuild for a routine token renewal is told the
+// connector is reconnecting; only a rebuild of a retired credential is still
+// answered as a credential fault.
+func TestHeldAnswerDuringARenewalRebuildIsReconnecting(t *testing.T) {
+	recovery := &clusterRecovery{cluster: "cluster"}
+	recovery.noteRebuild(true)
+	recovery.beginAttempt("org", ErrCredentialUnavailable)
+	held := recovery.gatedError("org")
+	if errors.Is(held, ErrCredentialUnavailable) || DiagnoseError(held).Code != "connector_reconnecting" {
+		t.Fatalf("a request held during a renewal rebuild was answered %v (%s)", held, DiagnoseError(held).Code)
+	}
+	recovery.endAttempt()
+
+	recovery.noteRebuild(false)
+	if held := recovery.gatedError("org"); !errors.Is(held, ErrCredentialUnavailable) {
+		t.Fatalf("a request held while a retired credential is rebuilt was answered %v", held)
+	}
+}
+
+// stalledDeadline is a context whose deadline the test decides: it ends with
+// DeadlineExceeded when the test fires it, not after a wall-clock interval.
+type stalledDeadline struct {
+	context.Context
+	fired atomic.Bool
+}
+
+func (ctx *stalledDeadline) Err() error {
+	if ctx.fired.Load() {
+		return context.DeadlineExceeded
+	}
+	return ctx.Context.Err()
+}
+
+// A renewal rebuild that cannot finish because the collection it replaces is
+// stuck on the history store is answered as a history store fault: the attempt
+// that ran out of time and every request waiting on the next one name the
+// store, never a credential to rotate.
+func TestRebuildBlockedByAStuckHistorySaveNamesTheHistoryStore(t *testing.T) {
+	isolateProblems(t, 0, nil)
+	fixture := newFakeCluster(t, "synthetic-a", "api")
+	client, err := NewClient(fixture.trustedConfig(&credentialSource{authorization: func(context.Context) (string, error) {
+		return "Bearer synthetic-a", nil
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(client, Scope{OrgID: "org", ClusterID: "cluster", CredentialID: "configured"}, 0)
+	service.recovery = &clusterRecovery{cluster: "cluster"}
+	registry := NewServiceRegistry(service)
+	defer registry.Close()
+	served, err := registry.ResolveCluster("org", "cluster")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The served scope's collection is waiting on a history store that does
+	// not answer, so it cannot stop.
+	stuck := make(chan struct{})
+	defer close(stuck)
+	scope := served.indexScope()
+	served.changes.mu.Lock()
+	served.changes.inventories[scope] = &inventoryCache{done: stuck, cancel: func() {}, failed: true, failedClass: "storage_unavailable"}
+	served.changes.mu.Unlock()
+	service.identity.mu.Lock()
+	service.identity.retired, service.identity.renewal = true, true
+	service.identity.mu.Unlock()
+
+	base, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ctx := &stalledDeadline{Context: base}
+	result := make(chan error, 1)
+	go func() {
+		_, err := registry.resolveCluster(ctx, "org", "cluster", nil)
+		result <- err
+	}()
+	eventually(t, "the rebuild waits for the previous collection to stop", func() bool {
+		served.changes.mu.Lock()
+		defer served.changes.mu.Unlock()
+		return served.changes.stopped[scope]
+	})
+	ctx.fired.Store(true)
+	cancel()
+	err = waitFor(t, result, "the rebuild attempt to end")
+	if errors.Is(err, ErrCredentialUnavailable) || DiagnoseError(err).Code != "history_store_unavailable" {
+		t.Fatalf("rebuild stuck behind the history store ended with %v (%s)", err, DiagnoseError(err).Code)
+	}
+	service.recovery.mu.Lock()
+	recorded := service.recovery.stall
+	service.recovery.mu.Unlock()
+	if recorded != nil {
+		t.Fatalf("the attempt whose own wait ran out recorded %v; only the supervisor records a stall", recorded)
+	}
+	service.recovery.failed(err, nil, "org")
+	_, err = registry.ResolveCluster("org", "cluster")
+	if err == nil || errors.Is(err, ErrCredentialUnavailable) || errors.Is(err, ErrConnectorCredentialUnresolved) {
+		t.Fatalf("request waiting on the next rebuild was answered %v, want the history store", err)
+	}
+	if detail := DiagnoseError(err); detail.Code != "history_store_unavailable" {
+		t.Fatalf("request waiting on the next rebuild was described as %+v", detail)
 	}
 }

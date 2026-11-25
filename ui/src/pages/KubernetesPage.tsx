@@ -53,8 +53,11 @@ import { SkCard } from "@/components/Skeleton";
 import { KubernetesSyncHealthSurface } from "@/components/KubernetesSyncHealth";
 import { KubernetesPreparingPanel } from "@/components/KubernetesPreparingPanel";
 import { KubernetesSyncStateIndicator } from "@/components/KubernetesSyncStateIndicator";
+import { datedClockTime } from "@/lib/kubernetesClock";
+import { kubernetesReconnecting, listRefreshNote, reconnectingMessage, syncStatusRefreshNote, usageRefreshNote } from "@/lib/kubernetesLiveFailure";
+import { kubernetesFailureRefetchInterval } from "@/lib/kubernetesFailureBackoff";
 import { kubernetesAccessLost, kubernetesReadNeedsRecovery, kubernetesReportAuthorityLost, kubernetesQueryUsesKinds, kubernetesInventoryNotReady, kubernetesFailureCode } from "@/lib/kubernetesContinuity";
-import { clusterSyncEnvelope, firstReadyAt, isZeroTime, reportSyncHealth, syncDataTime, syncFailureLabel, syncFailureReport, syncHealth, syncPollIntervalMs, syncReportPollIntervalMs } from "@/lib/kubernetesSyncHealth";
+import { clusterSyncEnvelope, firstReadyAt, isZeroTime, reportSyncHealth, syncDataTime, syncFailureLabel, syncFailureReport, syncHealth, syncPollIntervalMs, syncReportPollIntervalMs, syncReportStaleAt, syncStatusUnloadedAfterMs } from "@/lib/kubernetesSyncHealth";
 import { isNotConfiguredAnswer, reportProvesConfigured } from "@/lib/kubernetesConnector";
 import { KubernetesMetricsServerNotice } from "@/components/KubernetesAccessNotices";
 import { connectorSetupDetail, countsKnown, metricsApiMissing, metricsState, KubernetesNamespaceAccessContext, kubernetesQuickstartUrl, namespaceAccess, namespaceAccessLabel, notCollectedKinds } from "@/lib/kubernetesNamespaceAccess";
@@ -279,6 +282,21 @@ function usageAggregate(usage?: KubernetesUsage, overview?: KubernetesOverview) 
   };
 }
 
+/**
+ * The cadence the cluster sync report is read at; the cluster query wraps it in
+ * the shared failure backoff. A denial or a missing route is not asked again
+ * on its own. After a failure that carried Retry-After, the cadence is that
+ * wait rather than the slower poll, so the backoff (never shorter than
+ * Retry-After) asks again when "try again in Ns" says.
+ */
+function syncReportCadence(query: Query<KubernetesSyncHealthReport>): number | false {
+  const error = query.state.error;
+  if (isNotConfiguredAnswer(error) || error instanceof ApiError && [401, 403, 404].includes(error.status)) return false;
+  const normal = syncReportPollIntervalMs(clusterSyncEnvelope(query.state.data));
+  const hint = query.state.status === "error" && error instanceof ApiError ? error.retryAfterMs : undefined;
+  return hint !== undefined && hint > 0 ? Math.min(normal, hint) : normal;
+}
+
 export function KubernetesPage() {
   const [params, setParams] = useSearchParams();
   const [notice, setNotice] = useState("");
@@ -391,7 +409,8 @@ function KubernetesDashboard() {
       && !kubernetesAccessLost(queryClient.getQueryState(key("kubernetes-sync-health"))?.error),
     retry: false,
     // Follow the first sync closely, and keep asking while the sync cannot
-    // finish so the blocking surface and its Retry clear on their own.
+    // finish so the blocking surface and its Retry clear on their own. A
+    // failing read backs off from this cadence (see useKubernetesQuery).
     refetchInterval: (query) => {
       const error = query.state.error;
       if (isNotConfiguredAnswer(error) || error instanceof ApiError && [401, 403, 404].includes(error.status)) return false;
@@ -420,12 +439,7 @@ function KubernetesDashboard() {
     // when the concurrently fetched overview is forbidden. Inventory stays fenced.
     enabled: (query) => !clusterUnavailable && (!overviewAccessDenied || kubernetesReportAuthorityLost(query.state.data)),
     retry: false,
-    refetchInterval: (query) => {
-      const error = query.state.error;
-      // A denial/missing route from the app itself is not an upstream recovery signal.
-      if (isNotConfiguredAnswer(error) || error instanceof ApiError && [401, 403, 404].includes(error.status)) return false;
-      return syncReportPollIntervalMs(clusterSyncEnvelope(query.state.data));
-    },
+    refetchInterval: syncReportCadence,
   });
   /**
    * A cluster is configured when its report answers. So the setup card is owed
@@ -453,9 +467,50 @@ function KubernetesDashboard() {
     () => syncFailureReport(syncReport.isError && syncReport.error instanceof ApiError ? syncReport.error.body : undefined),
     [syncReport.isError, syncReport.error],
   );
+  // A report route that answers "reconnecting" has not learned anything new
+  // about the sync: the last report it gave stays the authority meanwhile.
+  const reportReconnecting = kubernetesReconnecting(syncReport.error);
+  // A status read that timed out, or found the history database silent, says
+  // nothing about the cluster sync: the last report stays the authority and a
+  // neutral line says why it is not newer. Only a report that says the sync
+  // failed shows a failed sync.
+  // The note's "try again in Ns" is the wait the status read is scheduled for.
+  const statusQuery = queryClient.getQueryCache().find<KubernetesSyncHealthReport>({ queryKey: key("kubernetes-sync-health"), exact: true });
+  const statusWait = statusQuery ? kubernetesFailureRefetchInterval(statusQuery, syncReportCadence(statusQuery)) : undefined;
+  const reportRefresh = syncReport.isError ? syncStatusRefreshNote(syncReport.error) : undefined;
+  const reportPassing = Boolean(reportRefresh);
+  // The countdown runs to the read the backoff has scheduled.
+  const statusRetryAt = reportRefresh?.retries && statusQuery && typeof statusWait === "number" ? statusQuery.state.errorUpdatedAt + statusWait : undefined;
+  // How long status reads have been failing with no report to fall back on.
+  const statusFailingSince = useRef<number | undefined>(undefined);
+  if (!syncReport.isError || syncReport.data) statusFailingSince.current = undefined;
+  else statusFailingSince.current ??= syncReport.errorUpdatedAt || Date.now();
+  // The last report stays in charge until the moment it said its first kind
+  // would go stale, counted from when it was received. Only failing status
+  // reads can get there; a report that names no such moment never does.
+  const reportStaleAt = reportPassing ? syncReportStaleAt(syncReport.data, syncReport.dataUpdatedAt) : undefined;
+  const unloadedAt = reportPassing && !syncReport.data && statusFailingSince.current !== undefined ? statusFailingSince.current + syncStatusUnloadedAfterMs : undefined;
+  // Either moment can pass between reads, which back off to a minute; one
+  // render is scheduled for it.
+  const [, setStatusClock] = useState(0);
+  useEffect(() => {
+    const at = Math.min(reportStaleAt ?? Infinity, unloadedAt ?? Infinity);
+    if (!Number.isFinite(at) || at <= Date.now()) return;
+    const timer = window.setTimeout(() => setStatusClock((tick) => tick + 1), at - Date.now());
+    return () => window.clearTimeout(timer);
+  }, [reportStaleAt, unloadedAt]);
+  const grownAge = reportPassing && syncReport.data ? syncReport.data.age_s + Math.max(0, (Date.now() - syncReport.dataUpdatedAt) / 1000) : undefined;
+  // The age the status names is the snapshot the page shows, the one Cluster
+  // health dates, so the top bar and the card never give two ages at once. It
+  // grows by itself while reads fail. The report's age (its oldest
+  // observation) is used only when no snapshot time is on screen.
+  const shownObservedAt = overview.data && !isZeroTime(overview.data.observed_at) ? Date.parse(overview.data.observed_at) : NaN;
+  const snapshotAge = Number.isFinite(shownObservedAt) ? Math.max(0, (Date.now() - shownObservedAt) / 1000) : undefined;
+  const statusStaleSeconds = reportStaleAt !== undefined && Date.now() >= reportStaleAt ? snapshotAge ?? grownAge : undefined;
+  const statusUnavailable = unloadedAt !== undefined && Date.now() >= unloadedAt;
   const classifiedHealth = useMemo(
     () => {
-      if (syncReport.isError) {
+      if (syncReport.isError && !reportPassing && !(reportReconnecting && syncReport.data)) {
         const age = reportFailure.ageSeconds ?? syncReport.data?.age_s ?? 0;
         return syncHealth({
           sync: { state: "error", age_s: age, partial: true },
@@ -474,11 +529,11 @@ function KubernetesDashboard() {
       // Read progress and aggregate readiness from the same authoritative report.
       return reportSyncHealth(syncReport.data);
     },
-    [clusterReachable, reportFailure, syncReport.data, syncReport.isError],
+    [clusterReachable, reportFailure, reportPassing, reportReconnecting, syncReport.data, syncReport.isError],
   );
   // Which namespaces the identity reads. The report decides; the overview
   // carries the same fact for the moment before the report answers.
-  const scopeKey = JSON.stringify(namespaceAccess(syncReport.isError ? undefined : syncReport.data, overview.data));
+  const scopeKey = JSON.stringify(namespaceAccess(syncReport.isError && !reportPassing ? undefined : syncReport.data, overview.data));
   const readerScope = useMemo(() => JSON.parse(scopeKey) as ReturnType<typeof namespaceAccess>, [scopeKey]);
   const connectorDetail = connectorSetupDetail(syncReport.error, overview.error);
   // History reads that answered "off" are not refreshed on their own, so a
@@ -629,6 +684,19 @@ function KubernetesDashboard() {
   }, [queryClient]);
   const getOverviewChanges = useCallback(() => queryClient.getQueryData<KubernetesChangesPage>(overviewChangesKey), [queryClient, overviewChangesKey]);
   const overviewChanges = useSyncExternalStore(subscribeOverviewChanges, getOverviewChanges, getOverviewChanges);
+  // Whether the open view (other than Overview) has loaded anything of its
+  // own. Reads the page makes for every view, and the namespace list a view
+  // offers as a filter, are not that view's content.
+  const getViewDataOnScreen = useCallback(() => view !== "overview" && queryClient.getQueryCache().findAll({
+    queryKey: key(),
+    predicate: query => {
+      const family = String(query.queryKey[2]);
+      if (["kubernetes-overview", "kubernetes-sync-health", "kubernetes-usage", "kubernetes-namespaces", "issue-alerts", "kubernetes-authority-fence"].includes(family)) return false;
+      if (family === "kubernetes-workloads" && view !== "resources" || family === "kubernetes-nodes" && view !== "nodes") return false;
+      return query.isActive() && query.state.data !== undefined && !kubernetesAccessLost(query.state.error);
+    },
+  }).length > 0, [queryClient, key, view]);
+  const viewDataOnScreen = useSyncExternalStore(subscribeOverviewChanges, getViewDataOnScreen, getViewDataOnScreen);
 
   useEffect(() => {
     if (!clusterUnavailable) return;
@@ -943,6 +1011,7 @@ function KubernetesDashboard() {
     : undefined;
   const usageAccessDenied = usage.error instanceof ApiError && [401, 403].includes(usage.error.status);
   const workloadsAccessDenied = overviewAccessDenied || workloads.error instanceof ApiError && [401, 403].includes(workloads.error.status);
+  const workloadsRefreshFailed = Boolean(workloads.data) && workloads.isError && !workloadsAccessDenied && !workloadCursorExpired && !workloadCursorReset;
   const nodesAccessDenied = overviewAccessDenied || nodes.error instanceof ApiError && [401, 403].includes(nodes.error.status);
   const aggregateUsage = usageAggregate(usageAccessDenied ? undefined : usage.data, overview.data);
   const metricsMissing = !usage.isError && metricsApiMissing(usage.data);
@@ -958,8 +1027,13 @@ function KubernetesDashboard() {
   // A published cluster with nothing on screen once the reads have settled —
   // access lost, or the overview answered with nothing — gets the full failure
   // panel in place of the overview skeleton, which would otherwise never end.
-  const syncPanelDataOnScreen = !authorityLost && (overview.isPending || overview.data !== undefined);
-  const syncPanelShown = !syncReport.isPending && (health.state === "failed" || health.state === "degraded")
+  // Any other view reads its own data and names its own failures, so a failed
+  // overview read never replaces what that view has loaded.
+  const syncPanelDataOnScreen = !authorityLost
+    && (overview.isPending || overview.data !== undefined || clusterQueriesEnabled && viewDataOnScreen);
+  // A reconnect in progress keeps the page as it is and says so calmly.
+  const reconnecting = kubernetesReconnecting(overview.error) || reportReconnecting;
+  const syncPanelShown = !syncReport.isPending && !reconnecting && (health.state === "failed" || health.state === "degraded")
     && (health.firstReadyAt === undefined || !syncPanelDataOnScreen);
   // The coverage marker explains data that is on screen. While the sync is not
   // healthy nothing is on screen, and the blocking surface names the failures.
@@ -968,7 +1042,7 @@ function KubernetesDashboard() {
   const brokenIssuesDenial = !overviewAccessDenied && brokenIssues.error instanceof ApiError && [401, 403].includes(brokenIssues.error.status)
     ? [{ scope: "Broken issues", class: brokenIssues.error.status === 401 ? "unauthorized" : "forbidden", message: brokenIssues.error.status === 401 ? "Broken issues could not be read because the cluster rejected the connector's credential." : "Broken issues are not readable with this connector's permissions." }]
     : [];
-  const notCollected = notCollectedKinds(syncReport.isError ? undefined : syncReport.data?.not_collected);
+  const notCollected = notCollectedKinds(syncReport.isError && !reportPassing ? undefined : syncReport.data?.not_collected);
   const notCollectedKey = notCollected.join("\u0000");
   const partialByDesign = !readerScope.clusterWide || Boolean(health.namespaceScoped?.length);
   // What the views read about this identity's reach: the namespaces, whether a
@@ -1023,7 +1097,11 @@ function KubernetesDashboard() {
       <TopBar
         title="Kubernetes"
         actions={
-          <div className="flex items-center gap-1">
+          // Below sm the top bar stacks its actions on their own row. This
+          // group takes the room the row has left instead of its text width,
+          // so a long sync status truncates in place and never pushes the
+          // theme button to another line or moves the page.
+          <div data-kubernetes-topbar-status className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-1 sm:flex-none sm:basis-auto">
             {multiple && <><Link to="/agent/kubernetes" className="btn">Clusters</Link><select aria-label="Cluster" className="input h-8 w-32 min-w-0 py-0 text-xs sm:w-48" value={cluster} onChange={(event) => {
               const next = new URLSearchParams(window.location.search);
               next.set("cluster", event.target.value);
@@ -1036,7 +1114,11 @@ function KubernetesDashboard() {
               streamState={streamState}
               syncReason={reportedSyncReason}
               syncState={commitSync?.state}
-              ageSeconds={syncReport.isError ? reportFailure.ageSeconds : indexStatus?.age_s}
+              ageSeconds={snapshotAge ?? grownAge ?? (syncReport.isError ? reportFailure.ageSeconds : indexStatus?.age_s)}
+              refreshNote={reportRefresh?.text}
+              refreshRetryAt={statusRetryAt}
+              statusStaleSeconds={statusStaleSeconds}
+              statusUnavailable={statusUnavailable}
               lastSyncedAt={overview.data?.observed_at}
               dataOnScreen={dataOnScreen}
               problems={health.problems}
@@ -1056,7 +1138,7 @@ function KubernetesDashboard() {
               disabled={overview.isRefetching}
               aria-label="Refresh Kubernetes data"
               title="Refresh Kubernetes data"
-              className="inline-flex size-9 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700 hover:text-ink-100 disabled:opacity-50"
+              className="inline-flex size-9 shrink-0 items-center justify-center rounded-control text-ink-300 hover:bg-ink-700 hover:text-ink-100 disabled:opacity-50"
             >
               <RefreshCw
                 size={15}
@@ -1083,11 +1165,14 @@ function KubernetesDashboard() {
           health={health}
           onRetry={refreshAll}
           retrying={overview.isRefetching}
-          dataOnScreen={syncPanelDataOnScreen}
+          dataOnScreen={syncPanelDataOnScreen || reconnecting}
           connectorDetail={connectorDetail}
           cluster={clusters.find((entry) => entry.id === cluster)?.display_name || cluster || overview.data?.cluster_id}
         />}
-        {view === "overview" && !syncPanelShown && overview.isError && !overviewWarming && (!overview.data || overviewAccessDenied) && (
+        {reconnecting && <p role="status" data-kubernetes-reconnecting className="flex items-center gap-2 rounded-card border border-ink-600 bg-ink-800/60 px-3 py-2 text-xs text-ink-300">
+          <RefreshCw size={12} aria-hidden="true" className="animate-spin motion-reduce:animate-none" />{reconnectingMessage}
+        </p>}
+        {view === "overview" && !syncPanelShown && !reconnecting && overview.isError && !overviewWarming && (!overview.data || overviewAccessDenied) && (
           <RetryableError
             error={overview.error}
             onRetry={() => overview.refetch()}
@@ -1197,7 +1282,7 @@ function KubernetesDashboard() {
                 {usage.isPending || metricsSyncing
                   ? "Loading usage snapshot"
                   : usage.isError
-                    ? aggregateUsage.fromOverview ? "Usage snapshot unavailable; using overview snapshot" : "Usage snapshot unavailable"
+                    ? usageRefreshNote(usage.error, { kept: Boolean(usage.data) && !usageAccessDenied, fromOverview: Boolean(aggregateUsage.fromOverview) })
                     : `Usage ${aggregateUsage.availability === "unavailable" ? "unavailable" : aggregateUsage.fresh ? "fresh" : "stale"}; ${usage.data?.pod_metrics?.complete === true ? usage.data.pod_metrics.total : "Unavailable"} pod metrics; ${usage.data?.node_metrics?.complete === true ? usage.data.node_metrics.total : "Unavailable"} node metrics${usage.data?.truncated ? "; sample list partial" : ""}${aggregateUsage.incomplete ? aggregateUsage.fromOverview ? "; latest metrics source incomplete; using overview snapshot" : "; metrics source incomplete; aggregate unavailable" : ""}`}
               </span>
               {aggregateUsage.observedAt && (
@@ -1220,7 +1305,11 @@ function KubernetesDashboard() {
             title="Workloads"
             icon={<Boxes size={16} />}
             trailing={
-              <span className="text-xs text-ink-400">
+              workloadsRefreshFailed
+                // A failed refresh is named in place of the total, on the
+                // header's one line, so the list below never moves.
+                ? <span role="status" data-workloads-refresh-note title={listRefreshNote(workloads.error)} className="min-w-0 truncate text-xs text-ink-300">{listRefreshNote(workloads.error)}</span>
+                : <span className="text-xs text-ink-400">
                 {workloadsAccessDenied ? "Inventory unavailable" : !workloads.data ? workloads.isPending || workloadWarming ? "Loading inventory" : "Inventory unavailable" : workloads.data.counts && !unknownWorkloadCounts.length ? `${workloadTotal} total` : "Count unavailable"}
               </span>
             }
@@ -1249,7 +1338,6 @@ function KubernetesDashboard() {
             <KindTabs label="Workload kind" kinds={workloadKindOptions} counts={workloadsAccessDenied ? {} : workloadCounts} allKnown={!unknownWorkloadCounts.length} selected={workloadKind} onSelect={setWorkloadKind} />
             {workloadCursorExpired && <p role="status" className="px-4 py-2 text-xs text-sev-warning">This inventory page expired or its filters changed. Restart paging.<button type="button" className="ml-2 text-link" onClick={workloadPaging.resetPage}>Restart inventory paging</button></p>}
             {workloadCursorReset === "notice" && <ListChangedNotice onBack={workloadPaging.resetPage} />}
-            {workloads.data && workloads.isError && !workloadsAccessDenied && !workloadCursorExpired && !workloadCursorReset && <p role="status" className="px-4 py-2 text-xs text-sev-warning">Resource inventory refresh is unavailable. Showing the last authorized observation.</p>}
             {(workloads.isPending || workloadWarming && !workloads.data) && (
               <div className="p-4">
                 <SkCard lines={4} />
@@ -1412,7 +1500,7 @@ function KubernetesDashboard() {
           health={health}
           onRetry={refreshAll}
           retrying={overview.isRefetching}
-          dataOnScreen={syncPanelDataOnScreen}
+          dataOnScreen={syncPanelDataOnScreen || reconnecting}
           connectorDetail={connectorDetail}
           cluster={clusters.find((entry) => entry.id === cluster)?.display_name || cluster || overview.data?.cluster_id}
         /></div>}
@@ -1546,9 +1634,9 @@ function CommandPalette({
       <div id="kubernetes-palette-results" role="listbox" className="max-h-[65vh] overflow-y-auto">
         {matchingTabs.length > 0 && <div className="border-b border-ink-700 p-2"><p className="px-2 py-1 text-2xs uppercase text-ink-400">Views</p>{matchingTabs.map((tab) => <button type="button" role="option" aria-selected="false" className="block w-full rounded-control px-3 py-2 text-left text-sm text-ink-200 hover:bg-ink-800" onClick={() => onSelectView(tab.id)} key={tab.id}>{tab.label}</button>)}</div>}
         {!query.trim() && recent.length > 0 && <div className="border-b border-ink-700 p-2"><p className="px-2 py-1 text-2xs uppercase text-ink-400">Recent resources</p>{recent.map((item) => <button type="button" role="option" aria-selected="false" className="block w-full truncate rounded-control px-3 py-2 text-left text-xs text-ink-200 hover:bg-ink-800" onClick={() => onRecent(item)} key={item}>{item}</button>)}</div>}
-        {loading && <p role="status" className="p-4 text-xs text-ink-400">Searching discovered resources.</p>}
+        {loading && <p role="status" className="p-4 text-xs text-ink-300">Searching discovered resources.</p>}
         {results.map((resource) => <button type="button" role="option" aria-selected="false" className="flex w-full items-center justify-between gap-3 border-b border-ink-700 px-4 py-3 text-left hover:bg-ink-800" onClick={() => onSelectResource(resource)} key={`${resource.resource_id}:${resource.namespace}:${resource.name}`}><span className="min-w-0"><span className="block truncate text-sm text-ink-100">{resource.name}</span><span className="block truncate text-2xs text-ink-400">{resource.kind} {resource.namespace || "Cluster scope"}</span></span><span className="pill">Open</span></button>)}
-        {query.trim() && !loading && results.length === 0 && <p role="status" className="p-4 text-xs text-ink-400">No matching resources found.</p>}
+        {query.trim() && !loading && results.length === 0 && <p role="status" className="p-4 text-xs text-ink-300">No matching resources found.</p>}
       </div>
       <p className="border-t border-ink-700 px-4 py-2 text-2xs text-ink-400">Search uses projected names and metadata only.</p>
     </section>
@@ -1787,15 +1875,17 @@ function ClusterHealthHeader({
           <ShipWheel size={18} aria-hidden="true" />
         </span>
         <div className="min-w-0">
-          <h2 className="flex flex-wrap items-center gap-1 text-xs font-semibold text-ink-50 sm:gap-2 sm:text-sm">
-            Cluster health
-            <span className={`pill ${!partial && sync?.state === "ready" ? "pill-good" : "text-ink-300"}`}>
-              {syncLabel}
+          <h2 className="flex min-w-0 items-center gap-1 text-xs font-semibold text-ink-50 sm:gap-2 sm:text-sm">
+            <span className="shrink-0">Cluster health</span>
+            {/* One line at every width: a long state truncates, with the full
+                words in its title, instead of wrapping and moving the cards. */}
+            <span data-cluster-health-state title={syncLabel} className={`pill min-w-0 max-w-full ${!partial && sync?.state === "ready" ? "pill-good" : "text-ink-300"}`}>
+              <span className="truncate">{syncLabel}</span>
             </span>
           </h2>
           <p className="mt-0.5 text-2xs text-ink-400">
             {Number.isFinite(observed)
-              ? isZeroTime(overview.observed_at) ? "Snapshot unavailable" : `Snapshot ${new Date(observed).toLocaleTimeString([], { hour12: false })}`
+              ? isZeroTime(overview.observed_at) ? "Snapshot unavailable" : `Snapshot ${datedClockTime(new Date(observed), Date.now(), { hour12: false })}`
               : "Snapshot time not reported"}
           </p>
         </div>

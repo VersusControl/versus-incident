@@ -93,6 +93,8 @@ export async function focusedCrashes(fetch: (cursor?: string) => Promise<Kuberne
   return { ...first, ...result, sync: syncOf(pages), coverage,
     incomplete_range: result.incomplete_range || Boolean(captureFailure),
     crash_count: first.crash_count ?? result.items.filter(item => item.type === "termination").length,
+    // Later pages count nothing and say so; the first page owns the count.
+    count_unknown: first.count_unknown,
     gaps: unique(pages.flatMap(page => page.gaps ?? [])),
     capture_gaps: unique(pages.flatMap(page => page.capture_gaps ?? [])),
     limitations: unique(pages.flatMap(page => page.limitations ?? [])),

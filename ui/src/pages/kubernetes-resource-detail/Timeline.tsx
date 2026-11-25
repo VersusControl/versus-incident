@@ -171,10 +171,10 @@ export function ResourceTimeline({
           No changes or crashes in this range.
         </p>
       )}
-      {data && data.total > 0 && <p className="text-2xs text-ink-400">{counted(data.total, "event")} and {counted(data.crash_count, "crash")}</p>}
+      {data && !data.count_unknown && data.total !== undefined && data.total >= Math.max(1, data.items.length) && <p className="text-2xs text-ink-300">{counted(data.total, "event")} and {counted(data.crash_count ?? 0, "crash")}</p>}
       {!data && !timeline.isPending && !syncing && <p className="py-4 text-xs text-ink-400">History unavailable.</p>}
       {timeline.isError && <button type="button" className="btn text-link" onClick={() => { paging.resetPage(); setGeneration((value) => value + 1); }}>{paging.cursor ? "Restart history" : "Retry history"}</button>}
-      <CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} total={data?.total} limit={data?.limit} capped={data?.count_capped} count={data?.items.length} />
+      <CursorPagination state={paging} busy={timeline.isFetching} next={data?.next} total={data?.count_unknown ? undefined : data?.total} limit={data?.limit} capped={data?.count_capped} count={data?.items.length} />
       </>}
     </section>
   );

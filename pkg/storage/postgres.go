@@ -587,9 +587,17 @@ func blobTable(name string) string {
 }
 
 func (p *postgresProvider) ReadBlob(name string) ([]byte, error) {
+	return p.ReadBlobContext(context.Background(), name)
+}
+
+// ReadBlobContext reads a blob and stops when ctx ends or the blob operation
+// bound passes, so a database that does not answer never holds the caller.
+func (p *postgresProvider) ReadBlobContext(parent context.Context, name string) ([]byte, error) {
+	ctx, cancel := blobOperationContext(parent)
+	defer cancel()
 	var data []byte
 	q := fmt.Sprintf(`SELECT data FROM %s WHERE name = $1`, blobTable(name))
-	err := p.db.QueryRow(q, name).Scan(&data)
+	err := p.db.QueryRowContext(ctx, q, name).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil // missing blob → nil,nil per Provider contract
 	}
@@ -600,13 +608,21 @@ func (p *postgresProvider) ReadBlob(name string) ([]byte, error) {
 }
 
 func (p *postgresProvider) WriteBlob(name string, data []byte) error {
+	return p.WriteBlobContext(context.Background(), name, data)
+}
+
+// WriteBlobContext writes a blob and stops when ctx ends or the blob operation
+// bound passes.
+func (p *postgresProvider) WriteBlobContext(parent context.Context, name string, data []byte) error {
+	ctx, cancel := blobOperationContext(parent)
+	defer cancel()
 	q := fmt.Sprintf(`
 		INSERT INTO %s (name, data, updated_at)
 		VALUES ($1, $2, NOW())
 		ON CONFLICT (name) DO UPDATE
 		SET data = EXCLUDED.data, updated_at = NOW()
 	`, blobTable(name))
-	if _, err := p.db.Exec(q, name, data); err != nil {
+	if _, err := p.db.ExecContext(ctx, q, name, data); err != nil {
 		return fmt.Errorf("storage: write blob %q: %w", name, err)
 	}
 	return nil
@@ -655,6 +671,14 @@ func (p *postgresProvider) CreateBlobIfAbsent(name string, data []byte) (bool, e
 }
 
 func (p *postgresProvider) CompareAndSwapBlob(name string, expected, replacement []byte) (bool, error) {
+	return p.CompareAndSwapBlobContext(context.Background(), name, expected, replacement)
+}
+
+// CompareAndSwapBlobContext is CompareAndSwapBlob that stops when ctx ends or
+// the blob operation bound passes.
+func (p *postgresProvider) CompareAndSwapBlobContext(parent context.Context, name string, expected, replacement []byte) (bool, error) {
+	ctx, cancel := blobOperationContext(parent)
+	defer cancel()
 	table := blobTable(name)
 	if expected == nil {
 		if replacement == nil {
@@ -665,7 +689,7 @@ func (p *postgresProvider) CompareAndSwapBlob(name string, expected, replacement
 			VALUES ($1, $2, NOW())
 			ON CONFLICT (name) DO NOTHING
 		`, table)
-		result, err := p.db.Exec(query, name, replacement)
+		result, err := p.db.ExecContext(ctx, query, name, replacement)
 		if err != nil {
 			return false, fmt.Errorf("storage: compare-and-swap blob %q: %w", name, err)
 		}
@@ -674,7 +698,7 @@ func (p *postgresProvider) CompareAndSwapBlob(name string, expected, replacement
 	}
 	if replacement == nil {
 		query := fmt.Sprintf(`DELETE FROM %s WHERE name = $1 AND data = $2`, table)
-		result, err := p.db.Exec(query, name, expected)
+		result, err := p.db.ExecContext(ctx, query, name, expected)
 		if err != nil {
 			return false, fmt.Errorf("storage: compare-and-swap blob %q: %w", name, err)
 		}
@@ -688,7 +712,7 @@ func (p *postgresProvider) CompareAndSwapBlob(name string, expected, replacement
 		UPDATE %s SET data = $3, updated_at = NOW()
 		WHERE name = $1 AND data = $2
 	`, table)
-	result, err := p.db.Exec(query, name, expected, replacement)
+	result, err := p.db.ExecContext(ctx, query, name, expected, replacement)
 	if err != nil {
 		return false, fmt.Errorf("storage: compare-and-swap blob %q: %w", name, err)
 	}

@@ -242,6 +242,26 @@ func evidenceSaveGuard(ctx context.Context, tx *sql.Tx, batch EvidenceBatch) err
 	if batch.GuardKey == "" {
 		return nil
 	}
+	if batch.GuardOwner != "" {
+		// A conditional read, not a row lock: the holder's own publications
+		// and renewals write the lease row while a save runs and never wait
+		// on it. Without the lock, a takeover can commit between this check
+		// and this transaction's commit; what protects the history then is
+		// the checkpoint chain, since the new holder's save and this one
+		// cannot both advance the same checkpoint, and the later one fails
+		// with a conflict. The expiry is read against the clock at the
+		// check, not the transaction's start: the check runs after the
+		// partition lock wait, which can outlast the lease.
+		var holds bool
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM %s WHERE name=$1 AND convert_from(data,'UTF8')::jsonb->>'Owner'=$2 AND (convert_from(data,'UTF8')::jsonb->>'Expires')::timestamptz>clock_timestamp())`, blobTable(batch.GuardKey)), batch.GuardKey, batch.GuardOwner).Scan(&holds)
+		if err != nil {
+			return err
+		}
+		if !holds {
+			return ErrEvidenceConflict
+		}
+		return nil
+	}
 	var actual []byte
 	err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT data FROM %s WHERE name=$1 FOR UPDATE", blobTable(batch.GuardKey)), batch.GuardKey).Scan(&actual)
 	if err == sql.ErrNoRows {
