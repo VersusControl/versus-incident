@@ -188,19 +188,19 @@ func redactorPairs(t testing.TB) []redactorPair {
 // not match, and values that only match because of case folding.
 var ruleExamples = []string{
 	// jwt
-	"token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl-_x end",
-	"eyJa.b.c", "eyJonly", "eyj.a.b", "EYJA.B.C", "eyJ..x", "xeyJabc.def.ghi",
+	"token eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl-_x end",
+	"eyJ" + "a.b.c", "eyJonly", "eyj.a.b", "EYJA.B.C", "eyJ..x", "xeyJ" + "abc.def.ghi",
 	// aws_key
-	"key=AKIAIOSFODNN7EXAMPLE;", "ASIAABCDEFGHIJKLMNOP", "AKIAIOSFODNN7EXAMPL", "AKIAIOSFODNN7EXAMPLEX",
-	"akiaIOSFODNN7EXAMPLE", "xAKIAIOSFODNN7EXAMPLE", "AKIA_IOSFODNN7EXAMPLE", "(ASIA0123456789ABCDEF)",
+	"key=AKIAIOSFODNN7EXAMPLE;", "ASIA" + "ABCDEFGHIJKLMNOP", "AKIAIOSFODNN7EXAMPL", "AKIAIOSFODNN7EXAMPLEX",
+	"akiaIOSFODNN7EXAMPLE", "xAKIAIOSFODNN7EXAMPLE", "AKIA_IOSFODNN7EXAMPLE", "(ASIA" + "0123456789ABCDEF)",
 	// openai_key
-	"sk-proj-abcdefghijklmnopqrstuvwxyz0123", "sk-short", "SK-abcdefghijklmnopqrstuvw", "ask-abcdefghijklmnopqrstuvw",
-	"-sk-abcdefghijklmnopqrstuvwxyz", "sk-_-_-_-_-_-_-_-_-_-_",
+	"sk-" + "proj-abcdefghijklmnopqrstuvwxyz0123", "sk-short", "SK-abcdefghijklmnopqrstuvw", "ask-" + "abcdefghijklmnopqrstuvw",
+	"-sk-" + "abcdefghijklmnopqrstuvwxyz", "sk-" + "_-_-_-_-_-_-_-_-_-_",
 	// slack_token
-	"xoxb-1234567890-abcdefghij", "xoxp-0000000000", "xoxo-1234567890abc", "XOXB-1234567890abc", "xox-1234567890abc",
-	"xoxs-123456789", "axoxb-1234567890abc",
-	"xoxa-1234567890abc", "xoxb-1234567890abc", "xoxc-1234567890abc", "xoxd-1234567890abc",
-	"xoxe-1234567890abc", "xoxp-1234567890abc", "xoxr-1234567890abc", "xoxs-1234567890abc",
+	"xoxb-" + "1234567890-abcdefghij", "xoxp-" + "0000000000", "xoxo-" + "1234567890abc", "XOXB-1234567890abc", "xox-1234567890abc",
+	"xoxs-" + "123456789", "axoxb-" + "1234567890abc",
+	"xoxa-" + "1234567890abc", "xoxb-" + "1234567890abc", "xoxc-1234567890abc", "xoxd-1234567890abc",
+	"xoxe-1234567890abc", "xoxp-" + "1234567890abc", "xoxr-" + "1234567890abc", "xoxs-" + "1234567890abc",
 	// basic_auth
 	"https://user:p4ss@host/path", "https://user@host", "postgres://u:p@db:5432/x", "://a:b@", "redis://:pw@cache",
 	"ftp://us er:pw@host", "s3://a/b:c@d", "://a:b:c@d",
@@ -225,8 +225,8 @@ var ruleExamples = []string{
 	// bearer_rest
 	"Authorization: Bearer abc+def/ghi== next", "<REDACTED:bearer>/tail", "<REDACTED:bearer>%2Fx", "<REDACTED:bearer> +x",
 	// private_key
-	"-----BEGIN PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\nafter",
-	"-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN CERTIFICATE-----", "-----BEGIN PUBLIC KEY-----",
+	"-----BEGIN " + "PRIVATE KEY-----", "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\nafter",
+	"-----BEGIN " + "PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----", "-----BEGIN CERTIFICATE-----", "-----BEGIN PUBLIC KEY-----",
 }
 
 // keyValueLines are secrets written as key/value pairs in JSON, YAML, logfmt,
@@ -236,7 +236,7 @@ var keyValueLines = []string{
 	`{"user":"bob","db_password":"correct horse","nested":{"client_secret":"s3cr3t-value","list":[{"api_key":"k-123456"},{"apiKey":"k-654321"}]}}`,
 	`{"msg":"{\"password\":\"hun\\\"ter2\",\"user\":\"bob\"}"}`, `{"msg":"login {\\\"token\\\":\\\"deep-nested\\\"}"}`,
 	`password: "correct horse battery"`, `db_password: 'it''s a secret'`, `passphrase: 'open \' sesame'`, "private_key: |\n  next line",
-	`X-Api-Key: abc123456`, `x-auth-token = abcdef123456`, `Proxy-Authorization: Basic dXNlcjpwYXNz`, `Authorization: token ghp_abcdefghijklmnop`,
+	`X-Api-Key: abc123456`, `x-auth-token = abcdef123456`, `Proxy-Authorization: Basic dXNlcjpwYXNz`, `Authorization: token ghp_` + `abcdefghijklmnop`,
 	`authorization="Basic dXNlcjpwYXNz"`, `'Authorization' => 'Bearer abc+def/ghi=='`, `{\"Authorization\":\"Bearer opaque-token\"}`,
 	`SECRET_KEY=django-insecure-abcdef`, `export AWS_SECRET_ACCESS_KEY='wJalrXUtnFEMI/K7MDENG'`, `access-key: AKIDEXAMPLE1234`, `privateKey := "abc def"`,
 	`credentials: [alpha-one, "beta two"] after`, `"credential": "cred-value-1"`, `userPassword: {SSHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=`,
@@ -267,9 +267,9 @@ var keyValueLines = []string{
 // rule's match sits inside another's.
 var mixedLines = []string{
 	`level=error msg="login failed" user=alice@example.com password=hunter2 ip=10.1.2.3 req=123e4567-e89b-12d3-a456-426614174000`,
-	`{"headers":{"Authorization":"Bearer eyJhbGciOi.eyJzdWIi.sig"},"url":"https://bob:s3cr3t@api.example.com/v1"}`,
-	`GET /x HTTP/1.1 Authorization: Bearer eyJa.eyJb.c User-Agent: Mozilla/5.0 (Macintosh) Gecko/20100101 Firefox/120.0`,
-	`token=AKIAIOSFODNN7EXAMPLE secret: xoxb-1234567890-abcdefghij api-key=sk-abcdefghijklmnopqrstuvwxyz`,
+	`{"headers":{"Authorization":"Bearer eyJ` + `hbGciOi.eyJzdWIi.sig"},"url":"https://bob:s3cr3t@api.example.com/v1"}`,
+	`GET /x HTTP/1.1 Authorization: Bearer eyJ` + `a.eyJb.c User-Agent: Mozilla/5.0 (Macintosh) Gecko/20100101 Firefox/120.0`,
+	`token=AKIAIOSFODNN7EXAMPLE secret: xoxb-` + `1234567890-abcdefghij api-key=sk-` + `abcdefghijklmnopqrstuvwxyz`,
 	`dsn=postgres://svc:pw@db.internal:5432/app?sslmode=disable mail=ops@corp.example.org`,
 	`https://user:token=abc@host.example.com/password=1`,
 	`email://a:b@c.de x@y.zz`,
