@@ -13,6 +13,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/kubernetes"
 	"github.com/VersusControl/versus-incident/pkg/storage"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
 // CreateIncidentFromKubernetesIssue uses the same detection episode and fan-out as AI findings.
@@ -73,6 +74,7 @@ func kubernetesIssueContent(a kubernetes.IssueAlert, publicHost string) map[stri
 		"ServiceName": a.Namespace + "/" + a.Workload, "Service": a.Namespace + "/" + a.Workload,
 		"Source": "kubernetes:" + a.Cluster, "PatternID": "kubernetes:" + a.Rule, "Status": "firing",
 	}
+	utils.MarkInternalAlert(c)
 	if a.Changes == nil && !a.HistoryIncomplete {
 		// Coalesced observations omit optional enrichment so the stored incident
 		// retains the bounded history collected on its first admission.

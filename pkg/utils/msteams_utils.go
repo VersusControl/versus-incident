@@ -23,6 +23,8 @@ type AdaptiveCard struct {
 	// Required MS Teams fields
 	Text    string `json:"text,omitempty"`    // Fallback text for clients that don't support cards
 	Summary string `json:"summary,omitempty"` // Required by MS Teams for notification
+	// Actions are the card's buttons.
+	Actions []interface{} `json:"actions,omitempty"`
 }
 
 // ConvertToTeamsPayload takes the rendered template message and converts it to the
@@ -30,7 +32,7 @@ type AdaptiveCard struct {
 func ConvertToTeamsPayload(powerAutomateURL, messageText string, incident *m.Incident) ([]byte, error) {
 	// Check if the power_automate_url is an Office 365 Connector webhook URL
 	// These usually start with https://<domain>.webhook.office.com/
-	isLegacyWebhook := strings.Contains(powerAutomateURL, "webhook.office.com")
+	isLegacyWebhook := IsTeamsConnectorURL(powerAutomateURL)
 
 	// For legacy Office 365 Connector webhooks
 	if isLegacyWebhook {
@@ -68,6 +70,12 @@ func ConvertToTeamsPayload(powerAutomateURL, messageText string, incident *m.Inc
 	return json.Marshal(payload)
 }
 
+// IsTeamsConnectorURL reports an Office 365 connector webhook, which takes
+// Markdown text rather than an Adaptive Card.
+func IsTeamsConnectorURL(powerAutomateURL string) bool {
+	return strings.Contains(powerAutomateURL, "webhook.office.com")
+}
+
 // ContainsMarkdownSyntax checks if the message contains any Markdown formatting
 func ContainsMarkdownSyntax(text string) bool {
 	// Check for common Markdown syntax
@@ -101,8 +109,32 @@ func ConvertMarkdownToAdaptiveCard(markdown string) AdaptiveCard {
 	// Pre-compile the ordered list regex pattern for better performance
 	orderedListRegex := regexp.MustCompile(`^\d+\.\s`)
 
-	for lineNum, line := range lines {
-		line = strings.TrimSpace(line)
+	var fence string
+	for lineNum, raw := range lines {
+		line := strings.TrimSpace(raw)
+
+		// Inside a code block every line is kept as written, indentation
+		// included, until a line that closes the block's own fence.
+		if codeBlock {
+			if !closesFence(line, fence) {
+				codeBlockText.WriteString(strings.TrimRight(raw, "\r"))
+				codeBlockText.WriteByte('\n')
+				continue
+			}
+			codeBlock = false
+			body = append(body, codeBlockElement(strings.TrimSuffix(codeBlockText.String(), "\n")))
+			codeBlockText.Reset()
+			continue
+		}
+		if opening := openingFence(line); opening != "" {
+			if inList && len(listItems) > 0 {
+				body = append(body, createListContainer(listItems, isOrderedList))
+				listItems = nil
+				inList = false
+			}
+			codeBlock, fence = true, opening
+			continue
+		}
 
 		// Save first non-empty line for summary fallback
 		if lineNum == 0 || (firstLine == "" && line != "") {
@@ -128,38 +160,6 @@ func ConvertMarkdownToAdaptiveCard(markdown string) AdaptiveCard {
 			} else if strings.HasPrefix(line, "### ") {
 				firstHeading = strings.TrimPrefix(line, "### ")
 			}
-		}
-
-		// Handle code blocks
-		if strings.HasPrefix(line, "```") {
-			if codeBlock {
-				// End of code block
-				codeBlock = false
-				body = append(body, map[string]interface{}{
-					"type":  "Container",
-					"style": "emphasis",
-					"items": []interface{}{
-						map[string]interface{}{
-							"type":     "TextBlock",
-							"text":     codeBlockText.String(),
-							"wrap":     true,
-							"fontType": "Monospace",
-						},
-					},
-				})
-				codeBlockText.Reset()
-			} else {
-				// Start of code block
-				codeBlock = true
-			}
-			continue
-		}
-
-		if codeBlock {
-			// Inside code block, collect text
-			codeBlockText.WriteString(line)
-			codeBlockText.WriteByte('\n')
-			continue
 		}
 
 		// Check for list items
@@ -306,6 +306,12 @@ func ConvertMarkdownToAdaptiveCard(markdown string) AdaptiveCard {
 		})
 	}
 
+	// A block that is never closed is still code: show it, rather than drop
+	// it and everything after its opening line.
+	if codeBlock {
+		body = append(body, codeBlockElement(strings.TrimSuffix(codeBlockText.String(), "\n")))
+	}
+
 	// Check if we need to finalize a list
 	if inList && len(listItems) > 0 {
 		body = append(body, createListContainer(listItems, isOrderedList))
@@ -353,11 +359,16 @@ func ConvertMarkdownToPlainText(markdown string) string {
 	lines := strings.Split(markdown, "\n")
 	var result strings.Builder
 	inCodeBlock := false
+	var fence string
 
 	for _, line := range lines {
 		// Handle code blocks
-		if strings.HasPrefix(line, "```") {
-			inCodeBlock = !inCodeBlock
+		if inCodeBlock && closesFence(strings.TrimSpace(line), fence) {
+			inCodeBlock = false
+			continue
+		}
+		if opening := openingFence(strings.TrimSpace(line)); !inCodeBlock && opening != "" {
+			inCodeBlock, fence = true, opening
 			continue
 		}
 
@@ -397,4 +408,49 @@ func createListContainer(items []map[string]interface{}, ordered bool) map[strin
 	}
 
 	return container
+}
+
+// openingFence is the fence a line opens a code block with: three or more
+// backticks, as the converter has always read them. Empty when the line
+// opens none. Tildes are not a fence here: a line of them is text, such
+// as a rule or the marker under a Python traceback.
+func openingFence(line string) string {
+	count := 0
+	for count < len(line) && line[count] == '`' {
+		count++
+	}
+	if count >= 3 {
+		return line[:count]
+	}
+	return ""
+}
+
+// closesFence reports whether a line closes a block opened with fence. A
+// block opened with three backticks closes on any line that starts with
+// three, trailing text included, as it always has. A longer fence is the
+// one a command holding backticks is written with: it closes only on a
+// line of nothing but backticks, so a command that starts with them stays
+// code.
+func closesFence(line, fence string) bool {
+	if fence == "" || !strings.HasPrefix(line, "```") {
+		return false
+	}
+	return len(fence) == 3 || strings.Trim(line, "`") == ""
+}
+
+// codeBlockElement shows code in a RichTextBlock: a TextRun is never read
+// as Markdown, so the code shows, selects and copies exactly as written.
+func codeBlockElement(code string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":  "Container",
+		"style": "emphasis",
+		"items": []interface{}{
+			map[string]interface{}{
+				"type": "RichTextBlock",
+				"inlines": []interface{}{
+					map[string]interface{}{"type": "TextRun", "text": code, "fontType": "Monospace"},
+				},
+			},
+		},
+	}
 }

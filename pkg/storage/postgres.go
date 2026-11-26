@@ -84,6 +84,8 @@ type postgresProvider struct {
 	// evidenceChunkFault lets in-package tests act inside one save
 	// transaction, before it writes, for example to fail or delay it.
 	evidenceChunkFault func(ctx context.Context, tx *sql.Tx, part, size int) error
+	// sessionLocks counts the connections pinned by held session locks.
+	sessionLocks sessionLockPool
 }
 
 var (

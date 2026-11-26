@@ -51,8 +51,9 @@ func finalSaveDuration(sorted []time.Duration, q float64) time.Duration {
 // of existing events, half new events) and 5,000 issues, of which 1,000 are
 // new, 2,000 changed and 2,000 seen again, while 1,000 others resolve. It
 // times every transaction of each save and checks that the final one, like
-// every part, finishes well inside the 20 s lease, that each whole save
-// completes, and that the issues and journal it leaves are right. It runs once
+// every part, finishes in 5 s, a quarter of the 20 s lease (stretched in a
+// race build), that each whole save completes, and that the issues and
+// journal it leaves are right. It runs once
 // with planner statistics gathered after the first capture and once before
 // the database has gathered any, as in the first minute after a busy cluster
 // is connected, until autovacuum's first pass.

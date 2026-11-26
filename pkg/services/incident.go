@@ -77,7 +77,10 @@ type incidentCreateResult struct {
 	NotifyStatus string
 	NotifyError  string
 	OnCallError  string
-	Err          error
+	// OnCallTriggered reports that the on-call workflow accepted this
+	// incident for escalation.
+	OnCallTriggered bool
+	Err             error
 }
 
 func createIncident(teamID string, content *map[string]interface{}, options incidentCreateOptions, params ...*map[string]string) incidentCreateResult {
@@ -232,7 +235,10 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 			applyDetectionDecision(rec, *options.Detection)
 		}
 		if !options.SkipOnCall {
-			rec.OnCallTriggered = !resolved && cfg.OnCall.Enable
+			// On-call is recorded as started only once the provider has
+			// accepted the page, below. A send that dies before then leaves
+			// the flag off, so its retry still pages.
+			rec.OnCallTriggered = false
 		}
 		rec.ChannelsEnabled = attempted
 		rec.NotifyStatus = "pending"
@@ -320,28 +326,24 @@ func createIncident(teamID string, content *map[string]interface{}, options inci
 			// at boot — escalation is simply skipped so the incident still
 			// persists and the caller keeps running instead of panicking.
 			log.Printf("incident: on-call requested for %s but workflow not initialized; skipping on-call", incident.ID)
-			if store != nil && rec != nil && rec.OnCallTriggered {
-				rec.OnCallTriggered = false
-				if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
-					log.Printf("incident: persist oncall status warning: %v", err)
-				}
-			}
 		} else {
 			workflow := core.GetOnCallWorkflow()
-			if err := workflow.StartContext(ctx, incident.ID, cfg.OnCall); err != nil {
+			err := workflow.StartContext(ctx, incident.ID, cfg.OnCall)
+			result.OnCallTriggered = err == nil
+			if err != nil {
 				err = utils.SafeError(err)
 				oncallErr = err
 				result.OnCallError = err.Error()
-				// Walk back the optimistic OnCallTriggered flag set at
-				// build time so the UI does not lie. Best-effort
-				// persistence; the alert outcome above is the source of
-				// truth.
-				if store != nil && rec != nil {
-					rec.OnCallTriggered = false
-					rec.OnCallError = err.Error()
-					if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
-						log.Printf("incident: persist oncall status warning: %v", err)
-					}
+			}
+			// Record the outcome only now that the provider answered: the
+			// stored flag says on-call started only when it did. A failed
+			// save leaves the flag off, so a retry pages rather than
+			// trusting a page that never went out.
+			if store != nil && rec != nil {
+				rec.OnCallTriggered = err == nil
+				rec.OnCallError = result.OnCallError
+				if err := saveIncidentRecord(rec, options.Detection != nil); err != nil {
+					log.Printf("incident: persist oncall status warning: %v", err)
 				}
 			}
 		}
@@ -469,8 +471,8 @@ func applyDetectionDecision(rec *storage.IncidentRecord, decision storage.Detect
 // ChannelsEnabled snapshots the channels configured at fire time;
 // ChannelsNotified stays empty here and is filled in after the
 // fan-out so it reflects channels that ACTUALLY succeeded.
-// OnCallTriggered likewise starts at the optimistic value and is
-// flipped back to false if workflow.Start fails. hint is the ingress
+// OnCallTriggered starts off and is set once the on-call workflow
+// accepts the page. hint is the ingress
 // source hint ("sns"/"sqs"/...) supplied by the calling adapter; it is
 // ignored for agent-originated incidents, which carry their own Source.
 func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[string]interface{}, resolved bool, hint string) *storage.IncidentRecord {
@@ -493,7 +495,6 @@ func buildIncidentRecord(incident *m.Incident, cfg *config.Config, content map[s
 		Origin:          origin,
 		Resolved:        resolved,
 		ChannelsEnabled: enabledChannels(cfg),
-		OnCallTriggered: !resolved && cfg.OnCall.Enable,
 		CreatedAt:       time.Now().UTC(),
 		Content:         content,
 	}

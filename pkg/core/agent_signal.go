@@ -172,6 +172,16 @@ type DetectionEmissionResult struct {
 	EpisodeAction       string
 	NotificationOutcome string
 	EpisodeError        string
+	// OnCallTriggered reports that this send started on-call escalation:
+	// the workflow accepted the incident. It is what this send did, not
+	// what the stored incident says, so a failed save or read of the
+	// incident cannot change it.
+	OnCallTriggered bool
+	// CoalescedNotifyStatus is the stored incident's delivery status when
+	// the send joined an episode whose notification another attempt holds
+	// or already finished: "pending" or empty while that attempt has not
+	// recorded a result, otherwise the result it recorded.
+	CoalescedNotifyStatus string
 }
 
 // Detector consumes signals and emits AgentResults.

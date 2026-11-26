@@ -131,7 +131,8 @@ func snapshotRestore(t *testing.T, dsn, dir string) {
 
 // snapshotOwnDatabase creates a fresh qa_ database on the test server for
 // this run alone, points TEST_POSTGRES_DSN at it, and drops it when the test
-// ends, so the schema rewind below never touches a shared database.
+// ends, so the schema rewind below never touches a shared database. Without
+// a test server the calling test skips, like every other Postgres test.
 func snapshotOwnDatabase(t *testing.T) string {
 	t.Helper()
 	server := os.Getenv("TEST_POSTGRES_DSN")

@@ -41,7 +41,7 @@ func (controller *ServiceHealthController) Register(router fiber.Router) {
 func (controller *ServiceHealthController) getServiceTopology(ctx *fiber.Ctx) error {
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureView))
 	if !explicit || !allowed {
-		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:view permission is required"})
+		return refusePermission(ctx, core.PermissionInfrastructureView)
 	}
 	return ctx.JSON(controller.topology.Snapshot(ctx.UserContext(), middleware.OrgFromContext(ctx)))
 }

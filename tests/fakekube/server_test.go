@@ -1735,3 +1735,46 @@ func TestQuiesceBarrierAttributesArrivalsAndDefaultsOff(t *testing.T) {
 		t.Fatalf("final barrier status=%s", final.Body.String())
 	}
 }
+
+// TestResponsesCarryNonHTMLContentTypeAndNoSniff checks that a body written
+// without a content type is labelled plain text, that every response turns
+// off content sniffing, and that a handler's own JSON type is kept.
+func TestResponsesCarryNonHTMLContentTypeAndNoSniff(t *testing.T) {
+	t.Parallel()
+	recorder := httptest.NewRecorder()
+	untyped := &countingWriter{ResponseWriter: recorder}
+	if _, err := untyped.Write([]byte("<script>alert(1)</script>")); err != nil {
+		t.Fatal(err)
+	}
+	if got := recorder.Result().Header.Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Errorf("untyped body Content-Type = %q, want plain text", got)
+	}
+	if got := recorder.Result().Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("untyped body X-Content-Type-Options = %q, want nosniff", got)
+	}
+
+	server, err := NewServer(Config{Scenario: "crash-evidence"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		path, contentType string
+		status            int
+	}{
+		{"/version", "application/json", http.StatusOK},
+		{"/not-a-kubernetes-path/%3Cscript%3E", "text/plain; charset=utf-8", http.StatusNotFound},
+	} {
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, check.path, nil))
+		response := recorder.Result()
+		if response.StatusCode != check.status {
+			t.Errorf("%s status = %d, want %d", check.path, response.StatusCode, check.status)
+		}
+		if got := response.Header.Get("Content-Type"); got != check.contentType {
+			t.Errorf("%s Content-Type = %q, want %q", check.path, got, check.contentType)
+		}
+		if got := response.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s X-Content-Type-Options = %q, want nosniff", check.path, got)
+		}
+	}
+}

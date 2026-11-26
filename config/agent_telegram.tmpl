@@ -31,7 +31,7 @@
 {{ escapeHTML (or .Summary "(no summary)") }}
 
 {{- if .Frequency }}
-<b>Frequency:</b> {{ .Frequency }} (baseline {{ printf "%.2f" .Baseline }})
+<b>Frequency:</b> {{ .Frequency }}{{ if ne .Baseline nil }} (baseline {{ printf "%.2f" .Baseline }}){{ end }}
 {{- end }}
 {{- if .PatternID }}
 <b>Pattern:</b> <code>{{ escapeHTML .PatternID }}</code>

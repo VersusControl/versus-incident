@@ -6,18 +6,18 @@
 package prompt
 
 import (
-	"embed"
 	"fmt"
+	"io/fs"
 	"strings"
 )
 
-// Assemble reads the named files from fs in order and concatenates
+// Assemble reads the named files from fsys in order and concatenates
 // them with a blank-line separator. Missing files return an error
-// (no silent skip).
-func Assemble(fs embed.FS, order []string) (string, error) {
+// (no silent skip). Agents pass their embedded prompts (an embed.FS).
+func Assemble(fsys fs.FS, order []string) (string, error) {
 	var b strings.Builder
 	for i, name := range order {
-		data, err := fs.ReadFile(name)
+		data, err := fs.ReadFile(fsys, name)
 		if err != nil {
 			return "", fmt.Errorf("prompt: read %q: %w", name, err)
 		}
@@ -33,8 +33,8 @@ func Assemble(fs embed.FS, order []string) (string, error) {
 // package-init wiring where a missing fragment is a programmer error
 // (go:embed guarantees the files exist at build time, so a failure
 // means the order slice drifted from the actual files on disk).
-func MustAssemble(fs embed.FS, order []string) string {
-	s, err := Assemble(fs, order)
+func MustAssemble(fsys fs.FS, order []string) string {
+	s, err := Assemble(fsys, order)
 	if err != nil {
 		panic(err)
 	}
