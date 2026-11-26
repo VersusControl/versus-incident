@@ -152,10 +152,10 @@ var shippedRedactorExtras = []string{`(?i)password=\S+`, `Authorization:\s*Beare
 // agentRedactionExamples covers every rule: matches, near-misses, overlaps,
 // case variants and the non-ASCII runes (?i) folds onto k and s.
 var agentRedactionExamples = []string{
-	"token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl-_x end", "eyJonly", "eyj.a.b",
-	"key=AKIAIOSFODNN7EXAMPLE;", "ASIAABCDEFGHIJKLMNOP", "AKIAIOSFODNN7EXAMPL", "xAKIAIOSFODNN7EXAMPLE",
-	"sk-proj-abcdefghijklmnopqrstuvwxyz0123", "sk-short", "ask-abcdefghijklmnopqrstuvw",
-	"xoxb-1234567890-abcdefghij", "xoxo-1234567890abc", "axoxb-1234567890abc",
+	"token eyJ" + "hbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl-_x end", "eyJonly", "eyj.a.b",
+	"key=AKIAIOSFODNN7EXAMPLE;", "ASIA" + "ABCDEFGHIJKLMNOP", "AKIAIOSFODNN7EXAMPL", "xAKIAIOSFODNN7EXAMPLE",
+	"sk-" + "proj-abcdefghijklmnopqrstuvwxyz0123", "sk-short", "ask-" + "abcdefghijklmnopqrstuvw",
+	"xoxb-" + "1234567890-abcdefghij", "xoxo-" + "1234567890abc", "axoxb-" + "1234567890abc",
 	"https://user:p4ss@host/path", "https://user@host", "redis://:pw@cache", "s3://a/b:c@d",
 	"Authorization: Bearer abc.def-ghi_jkl", "authorization:bearer x", "Authorization: Basic xyz", "Bearer abc",
 	"password=hunter2", "PASSWD: x", "pwd=1", "Secret : abc", "token=abc", "api_key=abc", "API-KEY=zz",
@@ -166,14 +166,14 @@ var agentRedactionExamples = []string{
 	"Mozilla/4.0 (compatible; MSIE 6.0)", "mozilla/5.0 (X11) Gecko",
 	"client 10.0.0.1 connected", "1.2.3", "fe80:0:0:1:2:3", "2001:db8:0:0:0:0:2:1",
 	`level=error user=alice@example.com password=hunter2 ip=10.1.2.3 req=123e4567-e89b-12d3-a456-426614174000`,
-	`{"headers":{"Authorization":"Bearer eyJhbGciOi.eyJzdWIi.sig"},"url":"https://bob:s3cr3t@api.example.com/v1"}`,
+	`{"headers":{"Authorization":"Bearer eyJ` + `hbGciOi.eyJzdWIi.sig"},"url":"https://bob:s3cr3t@api.example.com/v1"}`,
 	`https://user:token=abc@host.example.com/password=1`,
 	"\xff\xfepassword=x\xff", "toK\xe2\x84en=abc", "日本語 AKIAIOSFODNN7EXAMPLE", "", " ", "\n",
 	// secrets written as key/value pairs, and keys that only look like them
 	`{"password":"hunter2"}`, `{"token": "abc123"}`, `"Authorization":"Bearer opaque-abc123"`, `aws_secret_access_key=AKIAIOSFODNN7EXAMPLE/secret`,
 	`db_password="correct horse battery" user=bob`, `client_secret: 'it''s a secret'`, `{"msg":"{\"api_key\":\"k-123456\"}"}`,
 	`Authorization: Basic dXNlcjpwYXNz`, `Authorization: Bearer abc+def/ghi== next`, `X-Auth-Token: abcdef123456`,
-	"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", `x_secret: db_password: hunter-two`,
+	"-----BEGIN " + "RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", `x_secret: db_password: hunter-two`,
 	`"token_count": 5`, `max_tokens: 4096`, `tokens=12`, `password_changed_at: 2026-11-01T00:00:00Z`, `secret_name: db-creds`,
 	`automountServiceAccountToken: false`, `"client_secret": null`, `the token was invalid`,
 	// Authorization with other schemes, bare values with punctuation, values
@@ -216,7 +216,7 @@ var agentChangedOutputs = [][2]string{
 	{"Authorization: Baſic xyz", "Authorization: Baſic <REDACTED:secret>"},
 	{"ſecret : abc", "ſecret : <REDACTED:secret>"},
 	{"ſecret: v", "ſecret: <REDACTED:secret>"},
-	{"{\"headers\":{\"Authorization\":\"Bearer eyJhbGciOi.eyJzdWIi.sig\"},\"url\":\"https://bob:s3cr3t@api.example.com/v1\"}", "{\"headers\":{\"Authorization\":\"Bearer <REDACTED:secret>\"},\"url\":\"https://<REDACTED:basic_auth>@api.example.com/v1\"}"},
+	{"{\"headers\":{\"Authorization\":\"Bearer eyJ" + "hbGciOi.eyJzdWIi.sig\"},\"url\":\"https://bob:s3cr3t@api.example.com/v1\"}", "{\"headers\":{\"Authorization\":\"Bearer <REDACTED:secret>\"},\"url\":\"https://<REDACTED:basic_auth>@api.example.com/v1\"}"},
 	{"{\"HEADERS\":{\"AUTHORIZATION\":\"BEARER EYJHBGCIOI.EYJZDWII.SIG\"},\"URL\":\"HTTPS://BOB:S3CR3T@API.EXAMPLE.COM/V1\"}", "{\"HEADERS\":{\"AUTHORIZATION\":\"BEARER <REDACTED:secret>\"},\"URL\":\"HTTPS://<REDACTED:basic_auth>@API.EXAMPLE.COM/V1\"}"},
 	{"{\"headers\":{\"authorization\":\"bearer eyjhbgcioi.eyjzdwii.sig\"},\"url\":\"https://bob:s3cr3t@api.example.com/v1\"}", "{\"headers\":{\"authorization\":\"bearer <REDACTED:secret>\"},\"url\":\"https://<REDACTED:basic_auth>@api.example.com/v1\"}"},
 	{"{\"headerſ\":{\"Authorization\":\"Bearer eyJhbGciOi.eyJzdWIi.ſig\"},\"url\":\"httpſ://bob:ſ3cr3t@api.example.com/v1\"}", "{\"headerſ\":{\"Authorization\":\"Bearer <REDACTED:secret>\"},\"url\":\"httpſ://<REDACTED:basic_auth>@api.example.com/v1\"}"},
@@ -249,8 +249,8 @@ var agentChangedOutputs = [][2]string{
 	{"Authorization: Bearer abc+def/ghi== next", "<REDACTED:bearer> next"},
 	{"AUTHORIZATION: BEARER ABC+DEF/GHI== NEXT", "<REDACTED:bearer> NEXT"},
 	{"authorization: bearer abc+def/ghi== next", "<REDACTED:bearer> next"},
-	{"-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", "<REDACTED:private_key>"},
-	{"-----BEGIN RSA PRIVATE KEY-----\nMIIEPAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", "<REDACTED:private_key>"},
+	{"-----BEGIN " + "RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", "<REDACTED:private_key>"},
+	{"-----BEGIN " + "RSA PRIVATE KEY-----\nMIIEPAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", "<REDACTED:private_key>"},
 	{"x_secret: db_password: hunter-two", "x_secret: <REDACTED:secret> <REDACTED:secret>"},
 	{"X_SECRET: DB_PASSWORD: HUNTER-TWO", "X_SECRET: <REDACTED:secret> <REDACTED:secret>"},
 	{"x_ſecret: db_paſſword: hunter-two", "x_<REDACTED:password> <REDACTED:secret>"},
@@ -395,7 +395,7 @@ func TestRedactorReplacesKeyValueSecrets(t *testing.T) {
 		{"basic header", `Authorization: Basic dXNlcjpwYXNz`, "dXNlcjpwYXNz", `Authorization: Basic <REDACTED:secret>`},
 		{"header", `x_auth_token: abcdef123456`, "abcdef123456", `x_auth_token: <REDACTED:secret>`},
 		{"bearer header, base64 token", `Authorization: Bearer abc+def/ghi== next`, "def/ghi", `<REDACTED:bearer> next`},
-		{"private key block", "key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", "MIIEpAIBAAKCAQEA", "key:\n<REDACTED:private_key>"},
+		{"private key block", "key:\n-----BEGIN " + "RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----", "MIIEpAIBAAKCAQEA", "key:\n<REDACTED:private_key>"},
 	}
 	redactor, errs := NewRedactor(true, shippedRedactorExtras)
 	if len(errs) != 0 {

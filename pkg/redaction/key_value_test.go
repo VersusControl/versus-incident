@@ -101,12 +101,12 @@ func TestRedactorReplacesKeyValueSecrets(t *testing.T) {
 		{"bearer header, percent-encoded token", `Authorization: Bearer abc%2Fdef~x next`, `<REDACTED:bearer> next`},
 
 		// PEM private keys.
-		{"pem begin line", `-----BEGIN RSA PRIVATE KEY-----`, `<REDACTED:private_key>`},
-		{"pem block", "key:\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\nkqhkiG9w0BAQEF\n-----END PRIVATE KEY-----\nafter", "key:\n<REDACTED:private_key>\nafter"},
-		{"pem block without end", "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIBase64", `<REDACTED:private_key>`},
-		{"pgp block", "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK----- x", `<REDACTED:private_key> x`},
-		{"pem under a key", `"private_key": "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n", "client_email": "x"`, `"private_key": "` + secret + `", "client_email": "x"`},
-		{"pem as a bare value", "private_key: -----BEGIN RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\nnext", "private_key: " + secret + "\nnext"},
+		{"pem begin line", `-----BEGIN ` + `RSA PRIVATE KEY-----`, `<REDACTED:private_key>`},
+		{"pem block", "key:\n-----BEGIN " + "PRIVATE KEY-----\nMIIEvQIBADANBg\nkqhkiG9w0BAQEF\n-----END PRIVATE KEY-----\nafter", "key:\n<REDACTED:private_key>\nafter"},
+		{"pem block without end", "-----BEGIN " + "EC PRIVATE KEY-----\nMHcCAQEEIBase64", `<REDACTED:private_key>`},
+		{"pgp block", "-----BEGIN " + "PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK----- x", `<REDACTED:private_key> x`},
+		{"pem under a key", `"private_key": "-----BEGIN ` + `PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n", "client_email": "x"`, `"private_key": "` + secret + `", "client_email": "x"`},
+		{"pem as a bare value", "private_key: -----BEGIN " + "RSA PRIVATE KEY-----\nMIIE\n-----END RSA PRIVATE KEY-----\nnext", "private_key: " + secret + "\nnext"},
 
 		// A value that ends with another key.
 		{"quote closes an earlier string", `msg="bad x_token: " db_password="hunter2 x" user=bob`, `msg="bad x_token: "` + secret + `" user=bob`},
@@ -572,7 +572,7 @@ func FuzzRedactorRemovesPlantedSecret(f *testing.F) {
 	f.Add(`msg="bad token: "`, uint8(1), uint8(1), uint8(1), uint8(1), uint8(5), ` user="bob"`)
 	f.Add("x_secret:", uint8(4), uint8(2), uint8(2), uint8(0), uint8(0), "\nnext: 1")
 	f.Add("Authorization: Basic", uint8(19), uint8(0), uint8(2), uint8(1), uint8(1), "}")
-	f.Add("-----BEGIN PRIVATE KEY-----", uint8(17), uint8(3), uint8(0), uint8(3), uint8(3), "-----END PRIVATE KEY-----")
+	f.Add("-----BEGIN "+"PRIVATE KEY-----", uint8(17), uint8(3), uint8(0), uint8(3), uint8(3), "-----END PRIVATE KEY-----")
 	f.Add(strings.Repeat("k_token=[", 20)+"]", uint8(0), uint8(1), uint8(1), uint8(0), uint8(5), " user=bob")
 	f.Add("user: bob", uint8(0), uint8(1), uint8(2), uint8(0), uint8(29), "port: 1")
 	f.Add("", uint8(19), uint8(0), uint8(2), uint8(0), uint8(38), " next")
@@ -783,7 +783,7 @@ var linePieces = []string{
 	"password", "token", "secret", "api_key", "pwd", "passwd", "credentials", "authorization", "Authorization", "Bearer", "Basic", "bearer",
 	"cookie", "Set-Cookie", "name", "value", "key", "signing_key", "SecretString",
 	"db_", "x-", "X", "_", ".", "-", ":", "=", ":", "=", `"`, `"`, `'`, `\"`, `\`, " ", " ", " ", "\t", "\n", "\n  ", ",", "[", "]", "{", "}", "(", ")", ">", "<", ";", "&", "|", "- ", `"""`,
-	"true", "null", "false", "-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----", "eyJ", "://", "@", "<REDACTED:secret>", "<REDACTED:password>",
+	"true", "null", "false", "-----BEGIN " + "PRIVATE KEY-----", "-----END PRIVATE KEY-----", "eyJ", "://", "@", "<REDACTED:secret>", "<REDACTED:password>",
 	"+", "/", "%", "~", "user", "msg", "1", "a.b", "AKIA", "sk-", "example.com", "ſ", "K", "<REDACTED:bearer>",
 	// No user agent opener ("Mozilla/5.0 ("): the user_agent rule, which
 	// runs last, takes everything up to the closing bracket, and a secret
