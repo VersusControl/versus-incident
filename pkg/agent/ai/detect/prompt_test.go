@@ -121,3 +121,15 @@ func TestSystemPrompt_KeepsCriticalRules(t *testing.T) {
 		}
 	}
 }
+
+// A model reply cannot name the finding's subject or add evidence: both come
+// from the detector, and log text in the prompt can steer the reply.
+func TestParseFinding_IgnoresModelSubjectAndEvidence(t *testing.T) {
+	f, err := ParseFinding(`{"title":"t","summary":"s","severity":"high","subject":{"kind":"pod","name":"kube-system/attacker"},"evidence":[{"source":"model","summary":"made up"}]}`)
+	if err != nil {
+		t.Fatalf("ParseFinding: %v", err)
+	}
+	if !f.Subject.IsZero() || f.Evidence != nil {
+		t.Fatalf("model-written subject/evidence kept: %+v / %+v", f.Subject, f.Evidence)
+	}
+}

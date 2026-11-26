@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 )
 
 const (
@@ -230,7 +231,30 @@ func (service *Service) FieldValues(ctx context.Context, signal Signal, request 
 	setOptional(query, "searchText", request.SearchText)
 	setOptional(query, "fieldContext", request.Context)
 	query.Set("limit", strconv.Itoa(service.policy.MaximumFieldKeys))
-	return service.execute(ctx, FieldValuesPath, query, nil, responseDiscovery, service.policy.MaximumFieldKeys, 0, service.policy.MaximumFieldKeys)
+	result, err := service.execute(ctx, FieldValuesPath, query, nil, responseDiscovery, service.policy.MaximumFieldKeys, 0, service.policy.MaximumFieldKeys)
+	if err != nil {
+		return Result{}, err
+	}
+	// The values listed are those of the field asked for, so they are judged
+	// by its name: under a name like db_password the list is replaced by one
+	// marker, whatever shape the values come in (a list, or a map keyed by
+	// value).
+	if marker := redaction.ScrubLabel(request.Name, "", func(value string) string { return value }); marker != "" {
+		replaceFieldValues(result.Data, marker)
+	}
+	return result, nil
+}
+
+// replaceFieldValues replaces what stands under every values field of a
+// field-values response with the marker alone.
+func replaceFieldValues(data map[string]any, marker string) {
+	for key, child := range data {
+		if key == "values" {
+			data[key] = []any{marker}
+		} else if object, ok := child.(map[string]any); ok {
+			replaceFieldValues(object, marker)
+		}
+	}
 }
 
 // ListMetrics discovers bounded metric metadata from the configured source.
@@ -368,7 +392,7 @@ func (service *Service) boundValue(value any, shape responseShape, limit int) (a
 						continue
 					}
 				}
-				out[service.scrub(key, 256)] = walk(child)
+				out[service.scrub(key, 256)] = service.walkField(typed, key, walk)
 			}
 			return out
 		case []any:
@@ -390,6 +414,20 @@ func (service *Service) boundValue(value any, shape responseShape, limit int) (a
 	}
 	sort.Strings(truncation)
 	return bounded, count, truncation
+}
+
+// walkField walks the value held under key in fields. Under a name like
+// password (or as the value of an entry that names a secret) it is a secret:
+// it goes to the shared field walk, which replaces it whole, list items
+// included. An object is the exception there and, like every value under
+// another name, goes through walk, which bounds it and judges each field
+// inside by its own name.
+func (service *Service) walkField(fields map[string]any, key string, walk func(any) any) any {
+	child := fields[key]
+	if _, object := child.(map[string]any); object || !redaction.SecretFieldIn(fields, key) {
+		return walk(child)
+	}
+	return redaction.ScrubFieldIn(fields, key, child, func(text string) string { return service.scrub(text, 4096) })
 }
 
 func boundedItemKey(shape responseShape, key string) bool {
@@ -432,7 +470,7 @@ func (service *Service) boundDiscovery(value any, limit int, walk func(any) any)
 		}
 		out := make(map[string]any, len(keys))
 		for _, key := range keys {
-			out[service.scrub(key, 256)] = walk(typed[key])
+			out[service.scrub(key, 256)] = service.walkField(typed, key, walk)
 		}
 		return out, len(typed), truncated
 	case []any:

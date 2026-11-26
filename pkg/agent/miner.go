@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -77,6 +78,9 @@ func (m *Miner) AddCluster(id string, template string, size int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cl := &MinerCluster{ID: id, Tokens: tokens, Size: size}
+	if previous := m.clusters[id]; previous != nil {
+		m.unfile(previous)
+	}
 	m.clusters[id] = cl
 	m.indexCluster(cl)
 }
@@ -98,7 +102,10 @@ func (m *Miner) Cluster(message string) (id string, template string, isNew bool)
 	var match *MinerCluster
 	for _, c := range leaf.clusters {
 		sim := tokenSimilarity(c.Tokens, tokens)
-		if sim > best {
+		// Equal similarity goes to the lower ID, not the template filed
+		// first, so a miner restored from a snapshot, whose order is not
+		// kept, picks the same template.
+		if sim > best || sim == best && c.ID < match.ID {
 			best = sim
 			match = c
 		}
@@ -116,19 +123,28 @@ func (m *Miner) Cluster(message string) (id string, template string, isNew bool)
 		Tokens: append([]string(nil), tokens...),
 		Size:   1,
 	}
-	leaf.clusters = append(leaf.clusters, cl)
-	if len(leaf.clusters) > m.maxChildren {
-		// LRU-ish eviction: drop the smallest-Size cluster
+	if len(leaf.clusters) >= m.maxChildren {
+		// LRU-ish eviction: drop the smallest-Size cluster already filed,
+		// never the one being created. Ties go to the lower ID, so a
+		// restored miner evicts the same one. The evicted template leaves
+		// both the leaf and the cluster set.
 		minIdx := 0
 		for i, c := range leaf.clusters {
-			if c.Size < leaf.clusters[minIdx].Size {
+			smallest := leaf.clusters[minIdx]
+			if c.Size < smallest.Size || c.Size == smallest.Size && c.ID < smallest.ID {
 				minIdx = i
 			}
 		}
 		evicted := leaf.clusters[minIdx]
-		leaf.clusters = append(leaf.clusters[:minIdx], leaf.clusters[minIdx+1:]...)
+		leaf.clusters = slices.Delete(leaf.clusters, minIdx, minIdx+1)
 		delete(m.clusters, evicted.ID)
 	}
+	if previous := m.clusters[cl.ID]; previous != nil {
+		// An ID already in the set, such as a restored template's, is
+		// unfiled first, so no template stays filed outside the set.
+		m.unfile(previous)
+	}
+	leaf.clusters = append(leaf.clusters, cl)
 	m.clusters[cl.ID] = cl
 	return cl.ID, strings.Join(cl.Tokens, " "), true
 }
@@ -147,6 +163,55 @@ func (m *Miner) Snapshot() []MinerCluster {
 		})
 	}
 	return out
+}
+
+// Remove forgets one learned template and reports whether the ID was known.
+// A later line of the same shape is learned again as a new template; a line
+// that first taught the removed template gets the same ID back, since IDs are
+// derived from the line's tokens.
+func (m *Miner) Remove(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cluster, ok := m.clusters[id]
+	if !ok {
+		return false
+	}
+	delete(m.clusters, id)
+	m.unfile(cluster)
+	return true
+}
+
+// unfile takes a template out of the tree. Its leaf is found from its leading
+// tokens, which merging never changes; the walk covers a template whose
+// tokens no longer lead to the leaf it was filed under.
+func (m *Miner) unfile(cluster *MinerCluster) {
+	if leaf := m.descend(cluster.Tokens, false); leaf != nil && removeFromLeaf(leaf, cluster) {
+		return
+	}
+	if root := m.tree[len(cluster.Tokens)]; root != nil {
+		removeFromTree(root, cluster)
+	}
+}
+
+func removeFromLeaf(node *minerNode, cluster *MinerCluster) bool {
+	index := slices.Index(node.clusters, cluster)
+	if index < 0 {
+		return false
+	}
+	node.clusters = slices.Delete(node.clusters, index, index+1)
+	return true
+}
+
+func removeFromTree(node *minerNode, cluster *MinerCluster) bool {
+	if removeFromLeaf(node, cluster) {
+		return true
+	}
+	for _, child := range node.children {
+		if removeFromTree(child, cluster) {
+			return true
+		}
+	}
+	return false
 }
 
 // Reset forgets every learned drain cluster and the whole bucket tree so the

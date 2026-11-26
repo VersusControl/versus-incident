@@ -178,9 +178,7 @@ func (verifier *projectedTokenVerifier) get(ctx context.Context, apiPath, token 
 	}
 	if response.StatusCode == http.StatusTooManyRequests {
 		delay := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-		verifier.client.backoffMu.Lock()
-		verifier.client.backoffUntil = maxTime(verifier.client.backoffUntil, time.Now().UTC().Add(delay))
-		verifier.client.backoffMu.Unlock()
+		verifier.client.extendBackoff(ctx, time.Now().UTC().Add(delay))
 		return false, &ErrThrottled{RetryAfter: delay}
 	}
 	if response.StatusCode >= http.StatusInternalServerError {

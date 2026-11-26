@@ -286,16 +286,15 @@ func BenchmarkLogLineLearningCost(b *testing.B) {
 	}
 }
 
-// BenchmarkLogLineRedactionRule splits the redaction cost by rule on the
-// realistic mix, so the expensive rules are visible.
+// BenchmarkLogLineRedactionRule splits the cost of running each rule's
+// expression on every line of the realistic mix, so the expensive rules are
+// visible. It times the reference redactor, which runs every expression on
+// every line.
 func BenchmarkLogLineRedactionRule(b *testing.B) {
 	mixed := benchMixedLines()
-	full, errs := NewRedactor(false, []string{`(?i)password=\S+`, `Authorization:\s*Bearer\s+\S+`})
-	if len(errs) != 0 {
-		b.Fatal(errs)
-	}
+	full := newReferenceAgentRedactor(b, false, []string{`(?i)password=\S+`, `Authorization:\s*Bearer\s+\S+`})
 	for _, rule := range full.rules {
-		single := &Redactor{rules: []redactRule{rule}}
+		single := &referenceAgentRedactor{rules: []referenceAgentRule{rule}}
 		b.Run(rule.name, func(b *testing.B) {
 			b.ReportAllocs()
 			sink := 0

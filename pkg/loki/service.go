@@ -20,6 +20,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/providerhttp"
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 )
 
 var ErrInvalidArgument = errors.New("loki: invalid argument")
@@ -179,8 +180,19 @@ func (service *Service) Discover(ctx context.Context, request DiscoveryRequest) 
 	}
 	unique := map[string]bool{}
 	for _, item := range candidates {
+		clean := service.scrub(item, 256)
+		if request.Label != "" {
+			// The values of one label are judged by its name, as Read
+			// judges them. A value replaced for the name is listed whatever
+			// the search says, so that a search cannot tell which values
+			// the label holds.
+			if judged := service.scrubLabel(map[string]string{request.Label: item}, request.Label); judged != clean {
+				unique[judged] = true
+				continue
+			}
+		}
 		if strings.Contains(strings.ToLower(item), strings.ToLower(request.Search)) {
-			unique[service.scrub(item, 256)] = true
+			unique[clean] = true
 		}
 	}
 	items := make([]string, 0, len(unique))
@@ -342,7 +354,7 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 					fieldsTruncated = true
 					break
 				}
-				labels[service.scrub(name, 128)] = service.scrub(stream.Stream[name], 256)
+				labels[service.scrub(name, 128)] = service.scrubLabel(stream.Stream, name)
 			}
 			all = append(all, Record{Timestamp: time.Unix(0, nanos).UTC(), Message: service.scrub(entry[1], 4096), Labels: labels})
 		}
@@ -387,6 +399,18 @@ func validLiteral(value string) bool {
 	return len(value) <= 256 && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\r\n\x00")
 }
 func encodedSize(value any) int { data, _ := json.Marshal(value); return len(data) }
+
+// scrubLabel scrubs a label value with its name known, so a value under a
+// name like db_password is replaced whole. A label called exactly secret is
+// the exception: kube-state-metrics and Kubernetes log shippers put the name
+// of a Secret object there, which tells one stream from another.
+func (service *Service) scrubLabel(labels map[string]string, name string) string {
+	if name == "secret" {
+		return service.scrub(labels[name], 256)
+	}
+	return redaction.ScrubLabelIn(labels, name, labels[name], func(text string) string { return service.scrub(text, 256) })
+}
+
 func (service *Service) scrub(value string, maximum int) string {
 	for _, secret := range []string{service.config.BearerToken, service.config.Username, service.config.Password, service.config.TenantID} {
 		if secret != "" {

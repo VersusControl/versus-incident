@@ -909,3 +909,37 @@ func TestGuardedDialRejectsUnsafeDestinationBeforeConnect(t *testing.T) {
 		}
 	}
 }
+
+// TestFieldValuesReplacesTheValuesOfASecretNamedField covers the values of
+// one field: under a name like db_password they are replaced, whether they
+// come as a list or as a map keyed by value; under another name they are
+// kept.
+func TestFieldValuesReplacesTheValuesOfASecretNamedField(t *testing.T) {
+	server, rootCAs := newTLSTestServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("searchText") == "list" {
+			fmt.Fprint(writer, `{"data":{"values":{"stringValues":["hunter2","other"]},"complete":true}}`)
+			return
+		}
+		fmt.Fprint(writer, `{"data":{"values":{"hunter2":1,"other":3},"complete":true}}`)
+	}))
+	service, err := NewService(testConfig(server, rootCAs, testAPIKey), Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, search := range []string{"", "list"} {
+		secret, err := service.FieldValues(context.Background(), SignalLogs, FieldRequest{Name: "db_password", SearchText: search})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprint(secret.Data); strings.Contains(got, "hunter2") || strings.Contains(got, "other") || !strings.Contains(got, "<REDACTED:secret>") {
+			t.Errorf("values of db_password (search %q) = %s", search, got)
+		}
+		kept, err := service.FieldValues(context.Background(), SignalLogs, FieldRequest{Name: "token_count", SearchText: search})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fmt.Sprint(kept.Data); !strings.Contains(got, "hunter2") || strings.Contains(got, "REDACTED") {
+			t.Errorf("values of token_count (search %q) = %s", search, got)
+		}
+	}
+}

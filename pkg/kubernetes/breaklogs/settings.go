@@ -20,6 +20,19 @@ type Scope struct {
 	Exclude []string `json:"exclude"`
 }
 
+// Allows reports whether the scope lets a reader into namespace. It has the
+// meaning the settings page shows: an empty include list reads "All
+// namespaces", a non-empty one names the only namespaces read, and a
+// namespace on the exclude list is never read, even when it is also
+// included. Names match exactly. An empty namespace is never allowed, so a
+// cluster-scoped or unnamed object cannot pass as "every namespace".
+func (scope Scope) Allows(namespace string) bool {
+	if namespace == "" || slices.Contains(scope.Exclude, namespace) {
+		return false
+	}
+	return len(scope.Include) == 0 || slices.Contains(scope.Include, namespace)
+}
+
 type Learning struct {
 	Logs    bool  `json:"logs"`
 	Metrics bool  `json:"metrics"`

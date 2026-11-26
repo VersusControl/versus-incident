@@ -2,29 +2,15 @@ package agent
 
 import (
 	"context"
-	"log"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 )
 
-// emitDetect handles one Unknown / Spike pattern in detect mode. Returns
-// a short outcome label ("emitted" | "cached" | "emitted_basic" |
-// "emitted_basic_quota" | "emitted_basic_error" | "send_error") used as a
-// stat suffix in the tick log.
-//
-// A brain-detected anomaly is NEVER silently dropped: detection is AI-free, so
-// whenever AI is unavailable the worker builds a deterministic (templated)
-// finding and sends it through the exact same emitter path the AI finding uses.
-// AI is an enrichment layer on top of that finding, not the switch that decides
-// whether anyone is paged.
-//
-//   - w.ai.Detect == nil / AI disabled → deterministic finding → emit (emitted_basic).
-//   - w.ai.Cache hit                   → reuse the prior AI finding (cached).
-//   - w.ai.Rate.Allow == false         → deterministic finding → emit (emitted_basic_quota).
-//   - w.ai.Detect.Run error            → deterministic finding → emit (emitted_basic_error).
-//   - w.emitter == nil                 → still no incident is sent; send() logs the
-//     would-be call and returns the ok label (shadow-of-detect).
+// emitDetect handles one Unknown / Spike pattern in detect mode through the
+// worker's DetectEmitter and returns its outcome label ("emitted" | "cached" |
+// "emitted_basic" | "emitted_basic_quota" | "emitted_basic_error" |
+// "send_error"), used as a stat suffix in the tick log.
 func (w *Worker) emitDetect(
 	ctx context.Context,
 	source, signalKind, patternID, template, service string,
@@ -36,126 +22,62 @@ func (w *Worker) emitDetect(
 	explanation string,
 	fullObservationSeverity ...string,
 ) string {
-	ruleSeverity := strongestSeverity(signals)
-	if len(fullObservationSeverity) > 0 && utils.SeverityRank(fullObservationSeverity[0]) > utils.SeverityRank(ruleSeverity) {
-		ruleSeverity = utils.NormalizeSeverity(fullObservationSeverity[0])
-	}
-	result := core.AgentResult{
-		Verdict:           verdict,
-		PatternID:         patternID,
-		Template:          template,
-		SampleSignals:     signals,
-		Frequency:         frequency,
-		Baseline:          prevBaseline,
-		AgentKind:         "detect",
-		SignalKind:        signalKind,
-		DetectionEmission: &core.DetectionEmissionResult{},
-		RuleSeverity:      ruleSeverity,
-	}
-
-	// Build a partial DetectEvent up front so every outcome path can
-	// stamp itself into the audit log.
-	evt := &DetectEvent{
+	request := DetectRequest{
 		Source:       source,
-		PatternID:    patternID,
-		Template:     template,
+		SignalKind:   signalKind,
+		ConditionKey: patternID,
+		Title:        template,
 		Service:      service,
-		Verdict:      verdict.String(),
 		Frequency:    frequency,
+		Samples:      signals,
+		Verdict:      verdict,
 		Baseline:     prevBaseline,
-		BaselineStd:  baselineStd,
 		Score:        score,
+		BaselineStd:  baselineStd,
 		Explanation:  explanation,
-		Samples:      sampleMessages(signals, 3),
-		RuleSeverity: result.RuleSeverity,
 	}
-
-	// 1. AI unavailable — analyzer not configured, or a runtime resolver
-	// disabled AI for this tick. Detection already happened AI-free, so build
-	// a deterministic (templated) finding and emit it: a real anomaly must
-	// never silently drop just because AI is off. The resolver is read live so
-	// an enterprise off→on toggle takes effect on the next call without a
-	// restart; OSS registers no resolver so this collapses to the original
-	// `w.ai.Detect == nil` check.
-	if w.ai.Detect == nil || !w.effectiveAIEnabled(ctx) {
-		log.Printf("%sagent[detect:basic]: templated alert pattern=%q service=%q verdict=%s freq=%d %s",
-			colorGreen, patternID, service, verdict, len(signals), colorReset)
-		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
-		evt.Finding = finding
-		evt.Model = "heuristic"
-		outcome := w.send(finding, result, source, service, "emitted_basic")
-		evt.Outcome = outcome
-		if outcome == "send_error" {
-			evt.Error = "emitter returned error"
-		}
-		w.recordDetectEvent(evt, result.DetectionEmission)
-		return outcome
+	if len(fullObservationSeverity) > 0 {
+		request.Severity = fullObservationSeverity[0]
 	}
-
-	// 2. Cache hit — reuse the prior finding.
-	if cached, ok := w.ai.Cache.Get(patternID); ok {
-		log.Printf("%sagent[detect]: cache hit pattern=%q verdict=%s freq=%d%s",
-			colorGreen, patternID, verdict, len(signals), colorReset)
-		evt.Finding = cached
-		outcome := w.send(cached, result, source, service, "cached")
-		evt.Outcome = outcome
-		if outcome == "send_error" {
-			evt.Error = "emitter returned error (see logs)"
-		}
-		w.recordDetectEvent(evt, result.DetectionEmission)
-		return outcome
+	emitter := w.detectEmitter
+	if emitter == nil {
+		emitter = w.newDetectEmitter()
 	}
-
-	// 3. Rate limit guard. AI is over its hourly cap — fall back to the
-	// deterministic finding so a transient budget exhaustion never drops a
-	// page.
-	if !w.ai.Rate.Allow() {
-		log.Printf("agent[detect]: AI quota exceeded; templated alert pattern=%q freq=%d", patternID, len(signals))
-		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
-		evt.Finding = finding
-		evt.Model = "heuristic"
-		outcome := w.send(finding, result, source, service, "emitted_basic_quota")
-		evt.Outcome = outcome
-		if outcome == "send_error" {
-			evt.Error = "emitter returned error"
-		}
-		w.recordDetectEvent(evt, result.DetectionEmission)
-		return outcome
-	}
-
-	// 4. Real AI call. On error, fall back to the deterministic finding so a
-	// transient AI outage never drops a page.
-	call, err := w.ai.Detect.Run(ctx, core.DetectTask{Result: result})
-	if err != nil {
-		log.Printf("agent[detect]: AI failed pattern=%q: %v; sending templated alert", patternID, err)
-		finding := deterministicFinding(result, verdict, service, score, baselineStd, explanation)
-		evt.Finding = finding
-		evt.Model = "heuristic"
-		evt.Error = err.Error()
-		outcome := w.send(finding, result, source, service, "emitted_basic_error")
-		evt.Outcome = outcome
-		w.recordDetectEvent(evt, result.DetectionEmission)
-		return outcome
-	}
-	finding := call.Finding
-	w.ai.Cache.Put(patternID, finding)
-
-	evt.Finding = finding
-	evt.Model = call.Model
-	evt.UserPrompt = call.UserPrompt
-	evt.RawResponse = call.RawResponse
-	evt.DurationMs = call.DurationMs
-
-	outcome := w.send(finding, result, source, service, "emitted")
-	evt.Outcome = outcome
-	if outcome == "send_error" {
-		evt.Error = "emitter returned error (see logs)"
-	}
-	w.recordDetectEvent(evt, result.DetectionEmission)
-	return outcome
+	return emitter.Emit(ctx, request)
 }
 
+// newDetectEmitter wires the worker's AI bundle, live AI toggle, emitter and
+// detect log into the shared emission path. The toggle and the detect log are
+// read through the worker on every call, so a runtime change applies to the
+// next emission. Evidence is scrubbed with the worker's redactor, the same
+// rules its samples went through; without one the built-in rules apply.
+func (w *Worker) newDetectEmitter() *DetectEmitter {
+	e := &DetectEmitter{
+		AI:        w.ai,
+		AIEnabled: w.effectiveAIEnabled,
+		Emitter:   w.emitter,
+		Audit:     workerDetectAudit{w: w},
+	}
+	if w.redactor != nil {
+		e.Scrub = w.redactor.Scrub
+	}
+	return e
+}
+
+// workerDetectAudit records into whichever detect log the worker holds at the
+// time of the call (nil records nothing).
+type workerDetectAudit struct{ w *Worker }
+
+func (a workerDetectAudit) Record(event *DetectEvent) { a.w.detect.Record(event) }
+
 func (w *Worker) recordDetectEvent(event *DetectEvent, emission *core.DetectionEmissionResult) {
+	stampDetectEmission(event, emission)
+	w.detect.Record(event)
+}
+
+// stampDetectEmission copies the episode and notification result onto the
+// audit record.
+func stampDetectEmission(event *DetectEvent, emission *core.DetectionEmissionResult) {
 	if emission != nil {
 		event.EpisodeID = emission.EpisodeID
 		event.IncidentID = emission.IncidentID
@@ -165,29 +87,6 @@ func (w *Worker) recordDetectEvent(event *DetectEvent, emission *core.DetectionE
 		event.NotificationOutcome = emission.NotificationOutcome
 		event.EpisodeError = emission.EpisodeError
 	}
-	w.detect.Record(event)
-}
-
-// send delegates to the configured emitter and translates errors into
-// the worker's outcome vocabulary.
-func (w *Worker) send(finding *core.AIFinding, result core.AgentResult, source, service, okLabel string) string {
-	// Honour an operator-declared severity as a floor: the AI may escalate
-	// but must not silently demote below the rule-declared severity.
-	clampSeverityFloor(finding, result.RuleSeverity)
-	if w.emitter == nil {
-		log.Printf("%sagent[detect]: pattern=%q service=%q severity=%q confidence=%.2f title=%q (no emitter wired)%s",
-			colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
-			truncateString(finding.Title, 80), colorReset)
-		return okLabel
-	}
-	if err := w.emitter(finding, result, source, service); err != nil {
-		log.Printf("agent[detect]: emit failed pattern=%q: %v", result.PatternID, err)
-		return "send_error"
-	}
-	log.Printf("%sagent[detect]: emitted pattern=%q service=%q severity=%q confidence=%.2f title=%q%s",
-		colorGreen, result.PatternID, service, finding.Severity, finding.Confidence,
-		truncateString(finding.Title, 80), colorReset)
-	return okLabel
 }
 
 // sampleMessages returns up to `max` non-empty Message fields from

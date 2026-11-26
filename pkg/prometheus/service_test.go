@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
 )
 
@@ -290,5 +292,86 @@ func TestDiscoverReportsServiceAndByteTruncationWithoutSkipping(t *testing.T) {
 	}
 	if result.Count != 1 || result.NextOffset != 1 || !result.Metrics[0].ServicesTruncated || !slices.Contains(result.Truncation, "service_limit") || !slices.Contains(result.Truncation, "byte_limit") {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+// hostScrubber replaces one host name and nothing else.
+type hostScrubber struct{}
+
+func (hostScrubber) Scrub(value string) string {
+	return strings.ReplaceAll(value, "node-7", "[host]")
+}
+
+// TestReadReplacesValuesUnderSecretLabelNames covers series labels named
+// like secrets: the value is replaced, the label name and the other labels
+// are kept.
+func TestReadReplacesValuesUnderSecretLabelNames(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	reader := &fakeReader{labels: map[string][]string{"service": {"api"}}, series: []signalsources.MetricSeries{
+		{Metric: map[string]string{"service": "api", "db_password": "hunter2", "token_count": "5", "secret": "db-creds", "db_secret": "hunter3", "Secret": "hunter4"}, Samples: []signalsources.MetricSample{{Timestamp: now, Value: 1}}},
+	}}
+	service, err := NewService(reader, Config{ScopeFilter: `{cluster="prod"}`, Scrubber: hostScrubber{}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Read(context.Background(), ReadRequest{MetricName: "http_requests_total", Service: "api", Lookback: time.Hour, Step: time.Minute})
+	if err != nil || len(result.Series) != 1 {
+		t.Fatalf("read = %+v, %v", result, err)
+	}
+	// A label called exactly secret holds the name of a Secret object
+	// (kube-state-metrics) and is kept; any other name ending in secret is
+	// not.
+	want := map[string]string{"service": "api", "db_password": "<REDACTED:secret>", "token_count": "5", "secret": "db-creds", "db_secret": "<REDACTED:secret>", "Secret": "<REDACTED:secret>"}
+	if got := result.Series[0].Labels; !reflect.DeepEqual(got, want) {
+		t.Fatalf("labels = %#v, want %#v", got, want)
+	}
+}
+
+// TestReadKeepsSeriesApartByTheSecretLabel covers two series that differ only
+// in the secret label, which holds the name of a Secret object: both names
+// come back, while the labels that hold secrets are still replaced.
+func TestReadKeepsSeriesApartByTheSecretLabel(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	series := func(name string) signalsources.MetricSeries {
+		return signalsources.MetricSeries{
+			Metric:  map[string]string{"namespace": "shop", "secret": name, "token": "hunter2", "db_password": "hunter3"},
+			Samples: []signalsources.MetricSample{{Timestamp: now, Value: 1}},
+		}
+	}
+	reader := &fakeReader{labels: map[string][]string{"service": {"api"}}, series: []signalsources.MetricSeries{series("db-creds"), series("tls-cert")}}
+	service, err := NewService(reader, Config{ScopeFilter: `{cluster="prod"}`, Scrubber: hostScrubber{}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Read(context.Background(), ReadRequest{MetricName: "kube_secret_info", Service: "api", Lookback: time.Hour, Step: time.Minute})
+	if err != nil || len(result.Series) != 2 {
+		t.Fatalf("read = %+v, %v", result, err)
+	}
+	for index, name := range []string{"db-creds", "tls-cert"} {
+		want := map[string]string{"namespace": "shop", "secret": name, "token": "<REDACTED:secret>", "db_password": "<REDACTED:secret>"}
+		if got := result.Series[index].Labels; !reflect.DeepEqual(got, want) {
+			t.Errorf("series %d labels = %#v, want %#v", index, got, want)
+		}
+	}
+}
+
+// TestDiscoverScrubsServiceLabelValues covers the label values Discover lists
+// as a metric's services: they go through the same label rule as Read, so a
+// secret written into a value is removed and an ordinary value is kept.
+func TestDiscoverScrubsServiceLabelValues(t *testing.T) {
+	reader := &fakeReader{names: []string{"http_requests_total"}, metadata: map[string]signalsources.MetricMeta{"http_requests_total": {}},
+		labels: map[string][]string{"service": {"api", "db_password=hunter2", "Authorization: ApiKey hunter3"}}}
+	redactor, _ := redaction.NewRedactor(false, nil)
+	service, err := NewService(reader, Config{Scrubber: redactor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Discover(context.Background(), DiscoveryRequest{})
+	if err != nil || len(result.Metrics) != 1 {
+		t.Fatalf("discover = %+v, %v", result, err)
+	}
+	services := result.Metrics[0].Services
+	if joined := strings.Join(services, " "); strings.Contains(joined, "hunter") || !slices.Contains(services, "api") || len(services) != 3 {
+		t.Fatalf("services = %q", services)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 	"github.com/VersusControl/versus-incident/pkg/signalsources"
 )
 
@@ -283,8 +284,8 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 			break
 		}
 		item := Series{Labels: make(map[string]string, len(source.Metric))}
-		for key, value := range source.Metric {
-			item.Labels[service.scrub(key, 128)] = service.scrub(value, 512)
+		for key := range source.Metric {
+			item.Labels[service.scrub(key, 128)] = service.scrubLabel(source.Metric, key, 512)
 		}
 		for _, point := range source.Samples {
 			if result.Datapoints >= service.policy.MaxDatapoints {
@@ -319,7 +320,11 @@ func (service *Service) serviceEvidence(ctx context.Context, metric string, star
 		if err != nil {
 			return "", nil, false, safeError(err)
 		}
-		values, truncated := boundedStrings(values, MaximumLimit, service.scrub)
+		// The values of one label are judged by its name, as Read judges
+		// them in a label map.
+		values, truncated := boundedStrings(values, MaximumLimit, func(value string, limit int) string {
+			return service.scrubLabel(map[string]string{label: value}, label, limit)
+		})
 		if len(values) > 0 {
 			return label, values, truncated, nil
 		}
@@ -462,6 +467,18 @@ func boundedStrings(values []string, limit int, scrub func(string, int) string) 
 	}
 	return result, truncated
 }
+
+// scrubLabel scrubs a label value with its name known, so a value under a
+// name like db_password is replaced whole. A label called exactly secret is
+// the exception: kube-state-metrics puts the name of a Secret object there,
+// which tells one series from another.
+func (service *Service) scrubLabel(labels map[string]string, name string, limit int) string {
+	if name == "secret" {
+		return service.scrub(labels[name], limit)
+	}
+	return redaction.ScrubLabelIn(labels, name, labels[name], func(text string) string { return service.scrub(text, limit) })
+}
+
 func (service *Service) scrub(value string, limit int) string {
 	for _, secret := range service.secrets {
 		value = strings.ReplaceAll(value, secret, "[redacted]")

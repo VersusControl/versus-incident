@@ -253,7 +253,7 @@ func TestRegistryProviderOutageHasStableCooldownAndRecoversWithoutRequests(t *te
 	}
 }
 
-func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *testing.T) {
+func TestNativeBearerRefreshThenRejectedTrafficNeverPublishesFalseZero(t *testing.T) {
 	fixture := newFakeCluster(t, "initially-unaccepted")
 	fixture.serve("pods", map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": "api", "uid": "pod-uid", "namespace": "default"}, "spec": map[string]any{"containers": []any{map[string]any{"name": "app"}}}, "status": map[string]any{"phase": "Running", "containerStatuses": []any{map[string]any{"name": "app", "restartCount": 2, "state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}}}}}})
 	var clock atomic.Int64
@@ -317,12 +317,14 @@ func TestNativeBearerRefreshThenRejectedLogTrafficNeverPublishesFalseZero(t *tes
 	clear(fixture.extra)
 	fixture.token = "reject-all"
 	fixture.mu.Unlock()
-	logCtx, cancelLog := renewed.credentialContext(t.Context())
-	if body, err := renewed.client.openPodLogStream(logCtx, "/api/v1/namespaces/default/pods/api/log?follow=true", false); err == nil {
-		body.Close()
-		t.Fatal("rejected log stream succeeded")
+	// A rejected list read proves the credential rejected; a Pod log 401
+	// would not, since the API server relays the kubelet's answer there.
+	readCtx, cancelRead := renewed.credentialContext(t.Context())
+	var pods map[string]any
+	if err := renewed.client.GetJSON(readCtx, "/api/v1/pods", &pods); err == nil {
+		t.Fatal("rejected read succeeded")
 	}
-	cancelLog()
+	cancelRead()
 	if _, err := renewed.Overview(t.Context()); err == nil {
 		t.Fatal("credential outage returned a successful zero-filled snapshot")
 	}

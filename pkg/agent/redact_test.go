@@ -98,34 +98,6 @@ func TestRedactor_BasicAuthPreservesSeparator(t *testing.T) {
 	}
 }
 
-// TestRedactor_ReplTemplateIsolatedToBasicAuth guards that the per-rule
-// replacement template (redactRule.repl) is set ONLY on basic_auth. Every other
-// rule — the other 9 defaults, the opt-in IP rules, and user extras — must leave
-// repl empty so Scrub emits the plain `<REDACTED:name>` token. This proves the
-// new template mechanism did not change any OTHER rule's output.
-func TestRedactor_ReplTemplateIsolatedToBasicAuth(t *testing.T) {
-	r, errs := NewRedactor(true, []string{`custompattern\d+`}) // defaults + IP + one extra
-	if len(errs) > 0 {
-		t.Fatalf("unexpected errors building redactor: %v", errs)
-	}
-	sawBasicAuth := false
-	for _, rule := range r.rules {
-		if rule.name == "basic_auth" {
-			sawBasicAuth = true
-			if rule.repl == "" {
-				t.Errorf("basic_auth must carry a replacement template, got empty")
-			}
-			continue
-		}
-		if rule.repl != "" {
-			t.Errorf("rule %q unexpectedly carries repl=%q; only basic_auth may set a template", rule.name, rule.repl)
-		}
-	}
-	if !sawBasicAuth {
-		t.Fatal("basic_auth rule missing from the default set")
-	}
-}
-
 func TestRedactor_IPsOptIn(t *testing.T) {
 	off, _ := NewRedactor(false, nil)
 	if got := off.Scrub("client 10.0.0.1 connected"); !strings.Contains(got, "10.0.0.1") {

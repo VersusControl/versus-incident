@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -737,4 +738,32 @@ func TestSearchReportsShardFailuresInsteadOfEmptyResult(t *testing.T) {
 func mustJSON(value any) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+// TestSearchReplacesValuesUnderSecretFieldNames covers documents whose
+// fields are named like secrets: the value alone carries nothing a rule can
+// match, so it is the field name that gets it replaced.
+func TestSearchReplacesValuesUnderSecretFieldNames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte(`{"hits":{"total":{"value":1,"relation":"eq"},"hits":[{"_id":"doc-1","_source":{"message":"login ok","password":"hunter2","token_count":5,"user":{"name":"bob","api_key":"k-123","active":true}}}]}}`))
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentElasticsearchSourceConfig{Addresses: []string{server.URL}, AllowLoopback: true, Index: "logs-*", MessageField: "message", ExtraFields: []string{"password", "token_count", "user"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetScrubber(replacingScrubber{})
+	result, err := service.Search(context.Background(), SearchOptions{Fields: []string{"message", "password", "token_count", "user"}, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"message":     "login ok",
+		"password":    "<REDACTED:secret>",
+		"token_count": float64(5),
+		"user":        map[string]any{"name": "bob", "api_key": "<REDACTED:secret>", "active": true},
+	}
+	if got := result.Hits[0].Fields; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fields = %#v, want %#v", got, want)
+	}
 }

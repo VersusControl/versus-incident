@@ -17,6 +17,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/providerhttp"
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 )
 
 var ErrInvalidArgument = errors.New("graylog: invalid argument")
@@ -367,7 +368,7 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 				if len(text) > 512 {
 					valueTruncated = true
 				}
-				record.Fields[key] = service.scrub(text, 512)
+				record.Fields[key] = redaction.ScrubLabelIn(hit.Message, name, text, func(value string) string { return service.scrub(value, 512) })
 			}
 			record.Timestamp, _ = hit.Message["timestamp"].(string)
 			if len(record.Timestamp) > 64 {

@@ -2,7 +2,10 @@ package core
 
 import (
 	"context"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Canonical Signal.Fields keys shared across the agent pipeline. They name
@@ -212,6 +215,67 @@ type AIFinding struct {
 	Evidence            []EvidenceItem        `json:"evidence,omitempty"`
 	RelatedPatternIDs   []string              `json:"related_pattern_ids,omitempty"`
 	NextSteps           []string              `json:"next_steps,omitempty"`
+
+	// Subject names the one object a finding is about (a pod, a workload, a
+	// node, a zone or a rollout) when the detector knows it. Zero for
+	// findings about a pattern or a service, and then it is not marshalled.
+	Subject FindingSubject `json:"subject,omitzero"`
+}
+
+// Kinds of object a finding can be about.
+const (
+	FindingSubjectPod      = "pod"
+	FindingSubjectWorkload = "workload"
+	FindingSubjectNode     = "node"
+	FindingSubjectZone     = "zone"
+	FindingSubjectRollout  = "rollout"
+)
+
+// FindingSubject is the object a finding is about: its kind (one of the
+// FindingSubject* constants) and its name as the operator would type it,
+// for example "checkout/checkout-7d9f" for a pod.
+type FindingSubject struct {
+	Kind string `json:"kind,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+// IsZero reports whether the subject is unset.
+func (s FindingSubject) IsZero() bool { return s.Kind == "" && s.Name == "" }
+
+// maxFindingSubjectPart is the longest a Kubernetes object name can be.
+const maxFindingSubjectPart = 253
+
+// Valid reports whether the subject has a known kind and a name that is safe
+// to show: valid UTF-8, printable, no spaces, each part 1 to 253 bytes. Pods,
+// workloads and rollouts may be written namespace/name; nodes and zones are
+// a single part.
+func (s FindingSubject) Valid() bool {
+	namespaced := false
+	switch s.Kind {
+	case FindingSubjectPod, FindingSubjectWorkload, FindingSubjectRollout:
+		namespaced = true
+	case FindingSubjectNode, FindingSubjectZone:
+	default:
+		return false
+	}
+	if !utf8.ValidString(s.Name) {
+		return false
+	}
+	parts := strings.Split(s.Name, "/")
+	if len(parts) > 2 || (len(parts) == 2 && !namespaced) {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || len(part) > maxFindingSubjectPart {
+			return false
+		}
+		for _, r := range part {
+			if !unicode.IsPrint(r) || unicode.IsSpace(r) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // RootCauseHypothesis is one candidate explanation produced by an
