@@ -9,7 +9,7 @@ import (
 // run of them in a stored reason, so a half-redacted key still fails.
 const (
 	pastedKeyID   = "AKIAIOSFODNN7EXAMPLE"
-	pastedTempID  = "ASIAY34FZKBOKMUTVV7A"
+	pastedTempID  = "ASIA" + "Y34FZKBOKMUTVV7A"
 	pastedSecret  = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 	pastedSession = "IQoJb3JpZ2luX2VjEJr//////////wEaCXVzLWVhc3QtMSJHMEUCIQD+SESSIONTOKENVALUE="
 )

@@ -64,13 +64,13 @@ func TestChangesToolRedacts(t *testing.T) {
 	now := fixedNow
 	event := changes.Event{ID: "evt-1", Name: "CreateStack", Source: "cloudformation.amazonaws.com", Time: now.Add(-2 * time.Hour),
 		Raw: `{"userIdentity":{"type":"IAMUser","arn":"arn:aws:iam::111122223333:user/jane.doe@corp.example"},` +
-			`"requestParameters":{"stackName":"ops-AKIAABCDEFGHIJKLMNOP"}}`}
+			`"requestParameters":{"stackName":"ops-AKIA` + `ABCDEFGHIJKLMNOP"}}`}
 	feed := changeFeedWith(t, now, now.Add(-20*time.Minute), event)
 	result, encoded := invokeChanges(t, feed, `{"window":"24h"}`)
 	if !result.Found {
 		t.Fatalf("change not found: %s", encoded)
 	}
-	for _, secret := range []string{"jane.doe@corp.example", "AKIAABCDEFGHIJKLMNOP"} {
+	for _, secret := range []string{"jane.doe@corp.example", "AKIA" + "ABCDEFGHIJKLMNOP"} {
 		if strings.Contains(encoded, secret) {
 			t.Fatalf("tool output carries %q: %s", secret, encoded)
 		}

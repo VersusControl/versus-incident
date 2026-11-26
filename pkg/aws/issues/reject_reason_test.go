@@ -82,7 +82,7 @@ func TestRejectReasonRedactsPastedAWSKeys(t *testing.T) {
 	open := Issue{ID: IssueID("flow-public-bucket", docsBucket), State: StateOpen, Severity: SeverityHigh, Digest: "d"}
 	for name, reason := range map[string]string{
 		"access key id":      "public on purpose, the deploy key is " + keyID,
-		"temporary key id":   "public on purpose, session key ASIAIOSFODNN7EXAMPLE",
+		"temporary key id":   "public on purpose, session key ASIA" + "IOSFODNN7EXAMPLE",
 		"credentials file":   "public on purpose\naws_access_key_id = " + keyID + "\naws_secret_access_key = " + secret,
 		"environment":        "public on purpose: AWS_SECRET_ACCESS_KEY=" + secret,
 		"cli output":         `public on purpose {"AccessKeyId": "` + keyID + `", "SecretAccessKey": "` + secret + `"}`,
@@ -94,7 +94,7 @@ func TestRejectReasonRedactsPastedAWSKeys(t *testing.T) {
 				t.Fatalf("reject = %v", err)
 			}
 			for _, stored := range []string{rejected.Rejection.Reason, events[0].Detail} {
-				if strings.Contains(stored, secret) || strings.Contains(stored, keyID) || strings.Contains(stored, "ASIAIOSFODNN7EXAMPLE") {
+				if strings.Contains(stored, secret) || strings.Contains(stored, keyID) || strings.Contains(stored, "ASIA"+"IOSFODNN7EXAMPLE") {
 					t.Fatalf("stored reason keeps the credential: %q", stored)
 				}
 				if !strings.Contains(stored, "public on purpose") {

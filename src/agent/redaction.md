@@ -42,7 +42,7 @@ Redaction is **on by default** when the agent is enabled (`agent.redaction.enabl
 | `<REDACTED:jwt>` | JSON Web Tokens (`header.payload.signature`) | `eyJhbGciOi….eyJzdWIi….sig` |
 | `<REDACTED:aws_key>` | AWS access key IDs (`AKIA…` / `ASIA…`) | `AKIAIOSFODNN7EXAMPLE` |
 | `<REDACTED:openai_key>` | OpenAI API keys (`sk-…`, including project keys `sk-proj-…`) | `sk-proj-A1b2C3d4…` |
-| `<REDACTED:slack_token>` | Slack tokens (`xoxb-` bot, `xoxp-` user, `xoxa-`/`xoxr-`/`xoxs-`) | `xoxb-24012345678-…` |
+| `<REDACTED:slack_token>` | Slack tokens (`xoxb-` bot, `xoxp-` user, `xoxa-`/`xoxr-`/`xoxs-`) | `xoxb-<workspace-id>-<token>` |
 | `<REDACTED:basic_auth>` | Basic-auth credentials in a URL (`user:pass@…`) | `://alice:s3cr3t@` |
 | `<REDACTED:bearer>` | `Authorization: Bearer …` headers | `Authorization: Bearer ab12._-` |
 | `<REDACTED:password>` | `password` / `passwd` / `pwd` / `secret` / `token` / `api_key` followed by `=` or `:` and a value | `token=sk_live_9f2ab`, `password: hunter2` |

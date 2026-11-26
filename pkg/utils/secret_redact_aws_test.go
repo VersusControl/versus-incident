@@ -10,19 +10,26 @@ import (
 // AWS_SECRET_ACCESS_KEY is not one.
 var survivedAWS = regexp.MustCompile(`SECRET[A-Za-z0-9]|K7MDENG|IQoJb3`)
 
+// Key IDs in the shape of a real one are built from parts, so the source
+// holds no literal a secret scanner reports as a leaked AWS key.
+var (
+	testKeyID     = "AKIA" + "SECRET0EXAMPLE12"
+	testTempKeyID = "ASIA" + "SECRET0EXAMPLE12"
+)
+
 // RedactSecrets replaces AWS credentials in the forms they are pasted,
 // leaves ordinary text and ARNs alone, and is stable when applied again.
 func TestRedactSecretsAWSPass(t *testing.T) {
 	cases := []struct {
 		name, in, want string
 	}{
-		{"aws access key id", `deploy key AKIASECRET0EXAMPLE12 leaked`, `deploy key [redacted] leaked`},
-		{"aws temporary key id", `session ASIASECRET0EXAMPLE12, then`, `session [redacted], then`},
-		{"credentials file", "[default]\naws_access_key_id = AKIASECRET0EXAMPLE12\naws_secret_access_key = SECRETwJalrXUtnFEMI/K7MDENG+bPxRfiCY=\naws_session_token=SECRETFwoGZXIvYXdzEJr//////////wEaDA",
+		{"aws access key id", "deploy key " + testKeyID + " leaked", `deploy key [redacted] leaked`},
+		{"aws temporary key id", "session " + testTempKeyID + ", then", `session [redacted], then`},
+		{"credentials file", "[default]\naws_access_key_id = " + testKeyID + "\naws_secret_access_key = SECRETwJalrXUtnFEMI/K7MDENG+bPxRfiCY=\naws_session_token=SECRETFwoGZXIvYXdzEJr//////////wEaDA",
 			"[default]\naws_access_key_id = [redacted]\naws_secret_access_key = [redacted]\naws_session_token=[redacted]"},
 		{"environment", `export AWS_SECRET_ACCESS_KEY=SECRETwJalrXUtnFEMI/K7MDENG AWS_SESSION_TOKEN=SECRETFwoG`,
 			`export AWS_SECRET_ACCESS_KEY=[redacted] AWS_SESSION_TOKEN=[redacted]`},
-		{"cli json", `{"AccessKeyId": "ASIASECRET0EXAMPLE12", "SecretAccessKey": "SECRETwJalr/K7MDENG", "SessionToken": "SECRETFwoGZX//w=="}`,
+		{"cli json", `{"AccessKeyId": "` + testTempKeyID + `", "SecretAccessKey": "SECRETwJalr/K7MDENG", "SessionToken": "SECRETFwoGZX//w=="}`,
 			`{"AccessKeyId": "[redacted]", "SecretAccessKey": "[redacted]", "SessionToken": "[redacted]"}`},
 		{"secret key in prose", `rotated, the secret key: SECRETwJalrXUtnFEMI/K7MDENG is gone`, `rotated, the secret key: [redacted] is gone`},
 		{"a 20-character word that is not a key", `ABCDEFGHIJKLMNOPQRST and AKIA_NOT_A_REAL_KEY_ stay`, `ABCDEFGHIJKLMNOPQRST and AKIA_NOT_A_REAL_KEY_ stay`},

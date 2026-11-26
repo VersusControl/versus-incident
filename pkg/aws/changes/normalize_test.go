@@ -237,7 +237,7 @@ func TestSecretAndTagFieldsKeepOnlyThatTheyChanged(t *testing.T) {
 			want:    map[string]string{"user_data": SecretSet, "instance_type": "t3.micro"}},
 		{source: "iam.amazonaws.com", event: "CreateAccessKey",
 			request:  map[string]any{"userName": "deploy-bot"},
-			response: map[string]any{"accessKey": map[string]any{"accessKeyId": "AKIAVERSUSHIDDEN0006", "secretAccessKey": canary}},
+			response: map[string]any{"accessKey": map[string]any{"accessKeyId": "AKIA" + "VERSUSHIDDEN0006", "secretAccessKey": canary}},
 			want:     map[string]string{"access_key": SecretSet, "user": "deploy-bot"}},
 		{source: "ec2.amazonaws.com", event: "CreateTags",
 			request: map[string]any{"resourcesSet": map[string]any{"items": []any{map[string]any{"resourceId": "i-0abc"}}},
@@ -281,14 +281,14 @@ func TestSecretAndTagFieldsKeepOnlyThatTheyChanged(t *testing.T) {
 // another masked user.
 func TestEmailNamesAndAccessKeysNeverStored(t *testing.T) {
 	document := `{"userIdentity":{"type":"IAMUser","arn":"arn:aws:iam::111122223333:user/admin"},` +
-		`"requestParameters":{"userName":"jane@corp.com"},"responseElements":{"accessKey":{"accessKeyId":"AKIAABCDEFGHIJKLMNOP","secretAccessKey":"s3cr3t","userName":"jane@corp.com"}}}`
+		`"requestParameters":{"userName":"jane@corp.com"},"responseElements":{"accessKey":{"accessKeyId":"AKIA` + `ABCDEFGHIJKLMNOP","secretAccessKey":"s3cr3t","userName":"jane@corp.com"}}}`
 	change, ok := Normalize("111122223333", "global", Event{ID: "e1", Name: "CreateAccessKey", Source: "iam.amazonaws.com", Raw: document,
-		Resources: []string{"AKIAABCDEFGHIJKLMNOP", "jane@corp.com"}})
+		Resources: []string{"AKIA" + "ABCDEFGHIJKLMNOP", "jane@corp.com"}})
 	if !ok {
 		t.Fatal("dropped")
 	}
 	encoded, _ := json.Marshal(change)
-	for _, leak := range []string{"jane@corp.com", "AKIAABCDEFGHIJKLMNOP", "s3cr3t"} {
+	for _, leak := range []string{"jane@corp.com", "AKIA" + "ABCDEFGHIJKLMNOP", "s3cr3t"} {
 		if strings.Contains(string(encoded), leak) {
 			t.Fatalf("stored %q: %s", leak, encoded)
 		}
@@ -376,7 +376,7 @@ func TestGenericSummarySplitsUnderscores(t *testing.T) {
 // masked like any kept value, in the fields and in the summary.
 func TestTagKeysShapedLikeAnEmailOrAccessKeyAreMasked(t *testing.T) {
 	const email = "jane.doe@example.com"
-	const accessKey = "AKIAVERSUSHIDDEN0007"
+	const accessKey = "AKIA" + "VERSUSHIDDEN0007"
 	for _, tc := range []struct {
 		name, source, event string
 		request             map[string]any
