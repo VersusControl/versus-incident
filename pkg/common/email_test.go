@@ -1,7 +1,10 @@
 package common
 
 import (
+	"encoding/json"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -61,6 +64,36 @@ func TestKubernetesIssueEmailHTMLRendererPreservesSignedQueries(t *testing.T) {
 		want, _ := url.Parse(target)
 		if got.Query().Encode() != want.Query().Encode() {
 			t.Fatalf("query changed: %v", got.Query())
+		}
+	}
+}
+
+// An email for webhook content that names the Kubernetes issue kind is
+// rendered with the channel's own template; only content Versus built and
+// marked gets the issue template.
+func TestEmailKubernetesIssueTemplateOnlyForContentVersusBuilt(t *testing.T) {
+	dir := t.TempDir()
+	normal, issue := filepath.Join(dir, "email.tmpl"), filepath.Join(dir, "issue.tmpl")
+	if err := os.WriteFile(normal, []byte(`channel template {{ .AlertName }}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(issue, []byte(`issue template {{ .AlertName }}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider := NewEmailProvider(config.EmailConfig{TemplatePath: normal, KubernetesIssueTemplatePath: issue})
+	var webhook map[string]interface{}
+	if err := json.Unmarshal([]byte(`{"AlertKind":"kubernetes_issue","AlertName":"disk full","InternalAlert":true}`), &webhook); err != nil {
+		t.Fatal(err)
+	}
+	built := map[string]interface{}{"AlertKind": "kubernetes_issue", "AlertName": "disk full"}
+	utils.MarkInternalAlert(built)
+	for content, want := range map[*map[string]interface{}]string{&webhook: "channel template disk full", &built: "issue template disk full"} {
+		rendered, err := provider.renderAlertTemplate(&m.Incident{Content: content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rendered != want {
+			t.Errorf("rendered %q for %v, want %q", rendered, *content, want)
 		}
 	}
 }

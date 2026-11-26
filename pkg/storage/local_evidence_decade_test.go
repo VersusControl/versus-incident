@@ -229,8 +229,8 @@ func BenchmarkLocalEvidencePublish(b *testing.B) {
 	}
 	states := [2][]byte{after, before}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for i := 0; b.Loop(); i++ {
 		won, err := index.swap(b.Context(), name, states[i%2], states[(i+1)%2], false)
 		if err != nil || !won {
 			b.Fatalf("swap %d: won %t, %v", i, won, err)
