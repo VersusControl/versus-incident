@@ -135,6 +135,9 @@ func (s *Server) refuseState(writer http.ResponseWriter, request awsRequest, ses
 
 // regionNotEnabled reports a request signed for the not-enabled Region.
 func (s *Server) regionNotEnabled(request awsRequest) bool {
+	if request.scenario == ScenarioSizingLarge && sizingOff(request.region) && request.service != "sts" {
+		return true
+	}
 	if request.region != NotEnabledRegion {
 		return false
 	}

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"time"
 
@@ -210,6 +211,37 @@ type AWSChangeFeedQuery struct {
 	IncludeDetail bool
 	// ServiceCounts asks for AWSChangeFeed.ServiceCounts.
 	ServiceCounts bool
+	// Inherited, when set, limits what the read takes from the
+	// organizations the scope inherits.
+	Inherited *AWSInheritedLimit
+}
+
+// AWSInheritedLimit limits the rows a read takes from the organizations a
+// scope inherits (every read organization but the write one) to the listed
+// accounts. The write organization's rows are always read. A licensed
+// deployment uses it to stop showing what the open-source default
+// organization kept for an account that is no longer connected.
+type AWSInheritedLimit struct {
+	Accounts []string
+}
+
+// keeps reports whether a row an organization keeps for an account is
+// read under the limit.
+func (limit *AWSInheritedLimit) keeps(write, org, account string) bool {
+	return limit == nil || org == write || slices.Contains(limit.Accounts, account)
+}
+
+// inheritedCondition is the SQL form of keeps for table alias, whose
+// account column is column. ok is false when nothing is limited.
+func (limit *AWSInheritedLimit) inheritedCondition(write, alias, column string) (condition string, args []any, ok bool) {
+	if limit == nil {
+		return "", nil, false
+	}
+	if len(limit.Accounts) == 0 {
+		return alias + ".org_id = ?", []any{write}, true
+	}
+	return "(" + alias + ".org_id = ? OR " + alias + "." + column + " IN (" + placeholders(len(limit.Accounts)) + "))",
+		append([]any{write}, stringArgs(limit.Accounts)...), true
 }
 
 // AWSChangeServiceCount counts one service's successful changes.

@@ -11,8 +11,11 @@ type Permission string
 const (
 	PermissionInfrastructureView          Permission = "infrastructure:view"
 	PermissionInfrastructureSettingsWrite Permission = "infrastructure:settings:write"
-	PermissionServiceHealthSettingsWrite  Permission = "service-health:settings:write"
-	PermissionAgentApprove                Permission = "agent:approve"
+	// PermissionInfrastructureIssuesWrite acknowledges, rejects and reopens
+	// infrastructure issues. Reading them needs PermissionInfrastructureView.
+	PermissionInfrastructureIssuesWrite  Permission = "infrastructure:issues:write"
+	PermissionServiceHealthSettingsWrite Permission = "service-health:settings:write"
+	PermissionAgentApprove               Permission = "agent:approve"
 	// PermissionFinOpsView reads cost data without the wider infrastructure view.
 	PermissionFinOpsView Permission = "finops:view"
 )

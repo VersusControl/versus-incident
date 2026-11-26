@@ -13,6 +13,8 @@
         "cloudformation:ListStackResources",
         "cloudfront:List*",
         "cloudtrail:LookupEvents",
+        "cloudtrail:DescribeTrails",
+        "cloudtrail:GetEventSelectors",
         "cloudwatch:DescribeAlarms*",
         "config:Describe*",
         "dynamodb:DescribeTable",

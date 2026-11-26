@@ -10,6 +10,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/aws/grouping"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
@@ -43,10 +44,11 @@ func NewAWSGroupCorrectionsController(store storage.AWSGroupCorrectionStore, sco
 // on writes. GET filters by the account_id query parameter; DELETE names
 // the correction with account_id, kind, and group_id or member_arn.
 func (c *AWSGroupCorrectionsController) Register(router fiber.Router) {
-	g := router.Group("/admin/aws/groups/corrections", adminGatewayGuard, requireChangesView)
+	write := core.PermissionInfrastructureSettingsWrite
+	g := router.Group("/admin/aws/groups/corrections", auditAWSRefusal(write), adminGatewayGuard, requireChangesView)
 	g.Get("/", c.list)
-	g.Post("/", requireAWSSettingsWrite, c.create)
-	g.Delete("/", requireAWSSettingsWrite, c.delete)
+	g.Post("/", auditAWSWrite("aws.group.correction.saved", write, auditFixed("group correction")), requireAWSSettingsWrite, c.create)
+	g.Delete("/", auditAWSWrite("aws.group.correction.deleted", write, correctionAuditQuery), requireAWSSettingsWrite, c.delete)
 }
 
 // awsGroupCorrectionView is one stored correction and what became of it on
@@ -165,6 +167,7 @@ func (c *AWSGroupCorrectionsController) create(ctx *fiber.Ctx) error {
 	request = awsGroupCorrectionRequest{AccountID: strings.Clone(request.AccountID), Kind: strings.Clone(request.Kind),
 		GroupID: strings.Clone(request.GroupID), MemberARN: strings.Clone(request.MemberARN),
 		TargetGroupID: strings.Clone(request.TargetGroupID), Name: strings.Clone(request.Name)}
+	setAWSAuditTarget(ctx, correctionAuditTarget(request.AccountID, request.Kind, request.GroupID, request.MemberARN))
 	if message := validGroupCorrectionRequest(request); message != "" {
 		return badGroupCorrection(ctx, message)
 	}
@@ -209,4 +212,18 @@ func (c *AWSGroupCorrectionsController) delete(ctx *fiber.Ctx) error {
 		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "no such correction"})
 	}
 	return ctx.SendStatus(fiber.StatusNoContent)
+}
+
+// correctionAuditTarget names a correction in the audit trail by its key.
+func correctionAuditTarget(account, kind, group, member string) string {
+	target := "account=" + account + " kind=" + kind
+	if member != "" {
+		return target + " member=" + member
+	}
+	return target + " group=" + group
+}
+
+// correctionAuditQuery names the correction a delete asks for.
+func correctionAuditQuery(ctx *fiber.Ctx) string {
+	return correctionAuditTarget(ctx.Query("account_id"), ctx.Query("kind"), ctx.Query("group_id"), ctx.Query("member_arn"))
 }

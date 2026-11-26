@@ -109,7 +109,14 @@ func (p *postgresProvider) TryLockSession(ctx context.Context, key int64) (func(
 	if sessionLockQueried != nil {
 		sessionLockQueried()
 	}
-	if err := row.Scan(&acquired); err != nil {
+	// A caller that gave up after the query was sent does not read the
+	// answer: the server may have granted the lock, so the session is
+	// discarded below, the same as when the read itself fails.
+	readErr := ctx.Err()
+	if readErr == nil {
+		readErr = row.Scan(&acquired)
+	}
+	if err := readErr; err != nil {
 		discardSession(conn)
 		pool.release(p)
 		return nil, false, fmt.Errorf("storage: session lock: %w", err)

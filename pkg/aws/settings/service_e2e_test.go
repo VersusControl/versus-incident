@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/aws/limit"
 	"github.com/VersusControl/versus-incident/pkg/aws/probe"
@@ -29,18 +28,13 @@ func fakeService(t *testing.T, scenario string) (*Service, *Store, *fakeaws.Serv
 
 func waitForVerified(t *testing.T, connector *Service, draftID string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
+	eventually(t, "the draft to finish verifying", func() bool {
 		view, err := connector.Draft("default", draftID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if view.Status == DraftVerified {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("draft did not finish verifying")
+		return view.Status == DraftVerified
+	})
 }
 
 func TestNewAccountConnectEndToEnd(t *testing.T) {

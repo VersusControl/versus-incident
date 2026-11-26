@@ -500,8 +500,23 @@ connectors:
       secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
     tags:
       valueAllowlist: [Name, app, service, team, env]
+    # Every AWS call Versus makes is a CloudTrail event that the account's
+    # GuardDuty, extra trail copies and log pipeline price. perCycle caps the
+    # calls one run of a source makes per account and Region (pages for
+    # findings); over it the run stops, keeps its last good data and shows
+    # the rest as capped. callsPerDay is the daily target per account: over
+    # it, inventory and policy reads slow down first and Settings says so.
     budgets:
       maxRequestsPerSecond: 2
+      callsPerDay: 20000
+      perCycle:
+        health: 200
+        inventory: 700
+        changes: 60
+        identity: 120
+        policies: 250
+        credentialReport: 3
+        findings: 50
     optionalData:
       # Turns the FinOps page on (paid Cost Explorer reads, capped per day).
       # Env override: VERSUS_CONNECTORS_AWS_OPTIONAL_DATA_COST_EXPLORER.
@@ -516,10 +531,23 @@ connectors:
     # VERSUS_CONNECTORS_AWS_COLLECT_HISTORY_{MAX_GENERATIONS,MAX_AGE,CHANGE_RETENTION}.
     collect:
       enable: true
+      # Health runs every 10m, and every 2m while a unit is unhealthy or
+      # changed in the last hour. Setting health alone turns the fast
+      # cadence off; set healthHot too to keep it. inventory is the full
+      # read; the change feed re-reads what changed in between.
+      # policies defaults to 6h, or the inventory interval when that is
+      # slower, and may not be set below it.
+      #   health: "10m"
+      #   healthHot: "2m"
+      #   policies: "6h"
       intervals:
-        inventory: "15m"
-        health: "2m"
+        inventory: "6h"
         changes: "5m"
+        identity: "1h"
+        credentialReport: "4h"
+        findings: "1h"
+        trails: "24h"
+        regionsOff: "24h"
       # Bounds for the file store; Postgres keeps every generation.
       history:
         maxGenerations: 48

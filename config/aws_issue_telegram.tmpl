@@ -1,0 +1,12 @@
+{{ if eq .IssueAlert "coverage" }}⚪ <b>Not read</b>{{ else if eq .Severity "critical" }}🔴 <b>Critical</b>{{ else }}🟠 <b>High</b>{{ end }} {{ escapeTelegram (or .AlertName "AWS issue") }}
+{{ if .Where }}{{ escapeTelegram .Where }}
+{{ end }}{{ if .Reopened }}<b>Why it reopened:</b> {{ escapeTelegram .Reopened }}
+{{ end }}{{ range .Evidence }}• {{ escapeTelegram . }}
+{{ end }}{{ if .LikelyCause }}<b>Likely cause:</b> {{ escapeTelegram .LikelyCause }}
+{{ end }}{{ if .Steps }}<b>What to do</b>
+{{ range .Steps }}• {{ escapeTelegram .text }}{{ if .command }}
+{{ telegramCode .command }}{{ end }}
+{{ end }}{{ end }}{{ range .Notes }}• {{ escapeTelegram . }}
+{{ end }}{{ if .AckURL }}<a href="{{ escapeHTML .AckURL }}">Acknowledge</a>
+{{ end }}{{ range .Links }}<a href="{{ escapeHTML .url }}">{{ escapeTelegram .label }}</a>
+{{ end }}

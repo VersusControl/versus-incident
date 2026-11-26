@@ -23,7 +23,7 @@ import (
 )
 
 // awsRoutes is every route the AWS surface serves: the connector settings,
-// the Changes page, the coverage page and FinOps. GET routes also answer HEAD.
+// the Changes page, the coverage page, the collection cost card, the issues and FinOps. GET routes also answer HEAD.
 var awsRoutes = []string{
 	"GET /api/admin/aws/settings",
 	"PUT /api/admin/aws/settings/options",
@@ -47,8 +47,16 @@ var awsRoutes = []string{
 	"PUT /api/admin/aws/accounts/labels/:id",
 	"DELETE /api/admin/aws/accounts/labels/:id",
 	"GET /api/admin/aws/groups/corrections/",
+	"GET /api/admin/aws/settings/cost/",
 	"POST /api/admin/aws/groups/corrections/",
 	"DELETE /api/admin/aws/groups/corrections/",
+	"GET /api/admin/aws/issues/",
+	"GET /api/admin/aws/issues/report",
+	"POST /api/admin/aws/issues/reject",
+	"GET /api/admin/aws/issues/:id",
+	"POST /api/admin/aws/issues/:id/acknowledge",
+	"POST /api/admin/aws/issues/:id/reject",
+	"POST /api/admin/aws/issues/:id/reopen",
 	"GET /api/admin/aws/finops/summary",
 	"GET /api/admin/aws/finops/bridge",
 	"GET /api/admin/aws/finops/trend",
@@ -138,6 +146,8 @@ func TestMountKeepsEachRouteMiddlewareChain(t *testing.T) {
 	controllers.NewAWSCoverageController(nil, nil).Register(direct.Group("/api"))
 	controllers.NewAWSAccountLabelsController(nil, tenancy.DefaultOrgScope()).Register(direct.Group("/api"))
 	controllers.NewAWSGroupCorrectionsController(nil, tenancy.DefaultOrgScope(), nil).Register(direct.Group("/api"))
+	controllers.NewAWSCollectionCostController(nil).Register(direct.Group("/api"))
+	controllers.NewAWSIssuesController(nil, nil, nil, nil).Register(direct.Group("/api"))
 	controllers.NewAWSFinOpsController(nil).Register(direct.Group("/api"))
 	mounted := fiber.New()
 	mountForTest(t, mounted, Deps{})

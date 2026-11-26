@@ -77,6 +77,10 @@ type CoverageSummary struct {
 	NotRead       int `json:"not_read"`
 	Capped        int `json:"capped"`
 	OffInAWS      int `json:"off_in_aws"`
+	// ResourcesNotRead counts the resources whose detail a call budget
+	// skipped on their last read: their flags, grants and target health
+	// are not read, never clear.
+	ResourcesNotRead int `json:"resources_not_read"`
 }
 
 // CoverageNotGaps counts answers that leave nothing missing: services AWS
@@ -108,9 +112,10 @@ type WarningLine struct {
 // accounts is one row naming four accounts. A unit that has never been
 // attempted is still on its first read and is not listed on its own; an
 // account with nothing attempted yet is one account row.
-func (store *Store) Coverage(_ context.Context, scope CoverageScope) (CoverageView, error) {
+func (store *Store) Coverage(ctx context.Context, scope CoverageScope) (CoverageView, error) {
 	view := CoverageView{NotRead: []CoverageRow{}, Capped: []CoverageRow{}, OffInAWS: []CoverageRow{}}
-	units, err := store.units(scope.Account, "", "", time.Time{})
+	filter := store.inherited(ctx)
+	units, err := store.units(filter, scope.Account, "", "", time.Time{})
 	if err != nil {
 		return view, err
 	}
@@ -314,6 +319,15 @@ func (store *Store) Coverage(_ context.Context, scope CoverageScope) (CoverageVi
 	view.Summary.NotRead = len(view.NotRead)
 	view.Summary.Capped = len(view.Capped)
 	view.Summary.OffInAWS = len(view.OffInAWS)
+	resources, err := store.resources(filter, Query{Account: scope.Account, Region: scope.Region, PolicyEntries: true}, false)
+	if err != nil {
+		return view, err
+	}
+	for _, resource := range resources.Resources {
+		if len(model.NotReadOperations(resource)) > 0 {
+			view.Summary.ResourcesNotRead++
+		}
+	}
 	view.NotGaps.ServicesNotOffered = len(notOffered)
 	view.NotGaps.RegionsNotEnabled = len(regionsOff)
 	return view, nil

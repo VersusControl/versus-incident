@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"text/template"
 
 	m "github.com/VersusControl/versus-incident/pkg/models"
 )
@@ -197,5 +198,85 @@ func TestConvertToTeamsPayload_PowerAutomateMessageTextNotOverwritten(t *testing
 	_ = json.Unmarshal(body, &got)
 	if got["messageText"] != "rendered" {
 		t.Errorf("messageText = %v, want rendered", got["messageText"])
+	}
+}
+
+// cardBody is the card's body as JSON, for asserting on its elements.
+func cardBody(card AdaptiveCard) string {
+	encoded, _ := json.Marshal(card.Body)
+	return string(encoded)
+}
+
+// A Python traceback marks the failing expression with a line of tildes.
+// Through the default Teams template it stays text: the card keeps every
+// element after it, the error, the time, the Kubernetes metadata and the
+// acknowledge link.
+func TestTeamsCardKeepsATracebackAndWhatFollows(t *testing.T) {
+	traceback := "ERROR checkout failed\nTraceback (most recent call last):\n  File \"/app/pay.py\", line 41, in charge\n    total = price(cart)[\"amount\"] / cart.count\n            ~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~\nZeroDivisionError: division by zero"
+	content := map[string]interface{}{"log": traceback, "time": "2026-11-26 02:50:00",
+		"kubernetes": map[string]interface{}{"pod_name": "checkout-1", "namespace_name": "shop", "container_name": "app", "labels": map[string]interface{}{"app": "checkout"}},
+		"AckURL":     "https://versus.example/api/ack/1"}
+	tmpl, err := template.New("msteams_message.tmpl").Funcs(GetTemplateFuncMaps()).ParseFiles("../../config/msteams_message.tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message strings.Builder
+	if err := tmpl.Execute(&message, content); err != nil {
+		t.Fatal(err)
+	}
+	card := ConvertMarkdownToAdaptiveCard(message.String())
+	body := cardBody(card)
+	if len(card.Body) != 14 {
+		t.Errorf("card has %d elements; want the 14 the template renders:\n%s", len(card.Body), body)
+	}
+	for _, want := range []string{"~~~~~~^~~~", "ZeroDivisionError", "Time:", "Namespace: shop", "versus.example/api/ack/1"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("card lost %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "RichTextBlock") {
+		t.Errorf("a line of tildes opened a code block:\n%s", body)
+	}
+}
+
+// Fences the converter has always read keep their meaning, and whatever
+// follows a block still renders: a line of tildes is text, a closing fence
+// may carry text after it, a longer fence closes on a shorter line of
+// backticks, and a block never closed is shown as code, not dropped.
+func TestTeamsCardRendersWhatFollowsAFence(t *testing.T) {
+	for name, tc := range map[string]struct {
+		markdown string
+		code     string // the code shown, or empty for none
+		after    []string
+	}{
+		"tilde rule":                       {"**Deploy**\n~~~~~~~~\nservice api\n- step one\n[Open](https://versus.example/x)", "", []string{"~~~~~~~~", "service api", "• step one", "https://versus.example/x"}},
+		"tilde block":                      {"**Deploy**\n~~~\ncode here\n~~~\nafter", "", []string{"code here", "after"}},
+		"closing fence with trailing text": {"**Deploy**\n```\ncode\n``` done\nafter\n- item", "code", []string{"after", "• item"}},
+		"fence closed by a shorter one":    {"**Deploy**\n````\ncode\n```\nafter", "code", []string{"after"}},
+		"fence never closed":               {"**Deploy**\n```\ncode\nmore\n[Open](https://versus.example/x)", "code\nmore\n[Open](https://versus.example/x)", nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := cardBody(ConvertMarkdownToAdaptiveCard(tc.markdown))
+			if tc.code == "" && strings.Contains(body, "RichTextBlock") {
+				t.Errorf("no code block expected:\n%s", body)
+			}
+			if tc.code != "" {
+				run, _ := json.Marshal(map[string]string{"fontType": "Monospace", "text": tc.code, "type": "TextRun"})
+				if !strings.Contains(body, string(run)) {
+					t.Errorf("code %q not shown as a text run:\n%s", tc.code, body)
+				}
+			}
+			for _, want := range tc.after {
+				if !strings.Contains(body, want) {
+					t.Errorf("lost %q after the fence:\n%s", want, body)
+				}
+			}
+			plain := ConvertMarkdownToPlainText(tc.markdown)
+			for _, want := range tc.after {
+				if !strings.Contains(plain, StripMarkdown(strings.TrimPrefix(want, "• "))) && !strings.Contains(want, "https://") {
+					t.Errorf("fallback text lost %q:\n%s", want, plain)
+				}
+			}
+		})
 	}
 }

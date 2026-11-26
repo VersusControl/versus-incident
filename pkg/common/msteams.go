@@ -2,6 +2,7 @@ package common
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,10 +37,8 @@ func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := m.templatePath
-	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
-		tplPath = utils.KubernetesIssueTemplatePath(m.kubernetesIssueTemplatePath, utils.KubernetesIssueMSTeamsTemplatePath)
-	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
-		tplPath = utils.AgentMSTeamsTemplatePath
+	if i.Content != nil {
+		tplPath = utils.AlertTemplatePath(*i.Content, utils.ChannelMSTeams, tplPath, m.kubernetesIssueTemplatePath)
 	}
 
 	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
@@ -47,18 +46,40 @@ func (m *MSTeamsProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
+	// An AWS issue alert sent to a workflow is its own card: the links
+	// become buttons, the heading is accented by what the alert is, and
+	// the whole card is fitted to the message limit. An Office 365
+	// connector shows the Markdown text, links included.
+	if i.Content != nil && utils.IsAWSIssueIncident(*i.Content) && !utils.IsTeamsConnectorURL(m.powerAutomateURL) {
+		content := *i.Content
+		body := utils.WithoutAlertLinks(content)
+		card := func(text string) []byte {
+			encoded, _ := json.Marshal(utils.AWSIssueTeamsCard(text, content))
+			return encoded
+		}
+		message, err := utils.RenderAlert(tmpl, &body, utils.MSTeamsAlertBudget, func(text string) int { return len(card(text)) })
+		if err != nil {
+			return err
+		}
+		return m.post(i, card(message))
+	}
+
 	// Execute template - this preserves the existing template format
-	var message bytes.Buffer
-	if err := tmpl.Execute(&message, i.Content); err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
+	message, err := utils.RenderAlert(tmpl, i.Content, utils.MSTeamsAlertBudget, utils.JSONLength)
+	if err != nil {
+		return err
 	}
 
 	// Convert the message to the appropriate payload format
-	jsonData, err := utils.ConvertToTeamsPayload(m.powerAutomateURL, message.String(), i)
+	jsonData, err := utils.ConvertToTeamsPayload(m.powerAutomateURL, message, i)
 	if err != nil {
 		return fmt.Errorf("failed to prepare message payload: %w", err)
 	}
+	return m.post(i, jsonData)
+}
 
+// post sends one payload to the configured Teams URL.
+func (m *MSTeamsProvider) post(i *m.Incident, jsonData []byte) error {
 	// Send to Power Automate
 	client := m.client
 	if client == nil {

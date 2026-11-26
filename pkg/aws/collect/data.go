@@ -20,9 +20,10 @@ import (
 )
 
 func collectDynamoDB(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("dynamodb", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := dynamodb.NewFromConfig(c.env.config(c.endpointRegion), func(options *dynamodb.Options) {
 		options.BaseEndpoint = &endpoint
@@ -30,12 +31,11 @@ func collectDynamoDB(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var start *string
 	for {
 		page, err := api.ListTables(ctx, &dynamodb.ListTablesInput{Limit: aws.Int32(100), ExclusiveStartTableName: start})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, name := range page.TableNames {
 			resource := c.newResource(c.arn("dynamodb", "table/"+name), "table", name, "")
@@ -50,9 +50,10 @@ func collectDynamoDB(ctx context.Context, c *call) (result, error) {
 }
 
 func collectElastiCache(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("elasticache", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := elasticache.NewFromConfig(c.env.config(c.endpointRegion), func(options *elasticache.Options) {
 		options.BaseEndpoint = &endpoint
@@ -60,12 +61,11 @@ func collectElastiCache(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var marker *string
 	for {
 		page, err := api.DescribeCacheClusters(ctx, &elasticache.DescribeCacheClustersInput{MaxRecords: aws.Int32(100), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, cluster := range page.CacheClusters {
 			id := deref(cluster.CacheClusterId)
@@ -118,9 +118,10 @@ var queueAttributes = []sqstypes.QueueAttributeName{
 }
 
 func collectSQS(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("sqs", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := sqs.NewFromConfig(c.env.config(c.endpointRegion), func(options *sqs.Options) {
 		options.BaseEndpoint = &endpoint
@@ -133,14 +134,13 @@ func collectSQS(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.ListQueues(ctx, &sqs.ListQueuesInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		urls = append(urls, page.QueueUrls...)
 		if token = page.NextToken; deref(token) == "" {
 			break
 		}
 	}
-	var out result
 	for index, url := range urls {
 		arn, name := c.queueARN(url)
 		resource := c.newResource(arn, "queue", name, "")
@@ -152,7 +152,7 @@ func collectSQS(ctx context.Context, c *call) (result, error) {
 			out.resources = append(out.resources, resource)
 			continue
 		}
-		c.tried("GetQueueAttributes")
+		c.tried("GetQueueAttributes", arn)
 		attributes, err := api.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{QueueUrl: aws.String(url), AttributeNames: queueAttributes})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("GetQueueAttributes", err))
@@ -183,9 +183,10 @@ func collectSQS(ctx context.Context, c *call) (result, error) {
 // endpoint is an ARN become relations; email, SMS and URL endpoints are
 // personal or external and are never kept.
 func collectSNS(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("sns", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := sns.NewFromConfig(c.env.config(c.endpointRegion), func(options *sns.Options) {
 		options.BaseEndpoint = &endpoint
@@ -193,13 +194,12 @@ func collectSNS(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	topics := make(map[string]int)
 	var token *string
 	for {
 		page, err := api.ListTopics(ctx, &sns.ListTopicsInput{NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, topic := range page.Topics {
 			arn := deref(topic.TopicArn)
@@ -236,9 +236,10 @@ func collectSNS(ctx context.Context, c *call) (result, error) {
 }
 
 func collectEventBridge(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("events", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := eventbridge.NewFromConfig(c.env.config(c.endpointRegion), func(options *eventbridge.Options) {
 		options.BaseEndpoint = &endpoint
@@ -246,12 +247,11 @@ func collectEventBridge(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var token *string
 	for {
 		page, err := api.ListRules(ctx, &eventbridge.ListRulesInput{Limit: aws.Int32(100), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, rule := range page.Rules {
 			name := deref(rule.Name)
@@ -268,7 +268,7 @@ func collectEventBridge(ctx context.Context, c *call) (result, error) {
 			out.gaps = append(out.gaps, c.capGap("ListTargetsByRule", maxRuleTargets, len(out.resources)))
 			break
 		}
-		c.tried("ListTargetsByRule")
+		c.tried("ListTargetsByRule", out.resources[index].ARN)
 		targets, err := api.ListTargetsByRule(ctx, &eventbridge.ListTargetsByRuleInput{Rule: aws.String(out.resources[index].Name), Limit: aws.Int32(100)})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("ListTargetsByRule", err))
@@ -284,9 +284,10 @@ func collectEventBridge(ctx context.Context, c *call) (result, error) {
 }
 
 func collectStepFunctions(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("sfn", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := sfn.NewFromConfig(c.env.config(c.endpointRegion), func(options *sfn.Options) {
 		options.BaseEndpoint = &endpoint
@@ -294,12 +295,11 @@ func collectStepFunctions(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var token *string
 	for {
 		page, err := api.ListStateMachines(ctx, &sfn.ListStateMachinesInput{MaxResults: 100, NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, machine := range page.StateMachines {
 			name := deref(machine.Name)
@@ -315,9 +315,10 @@ func collectStepFunctions(ctx context.Context, c *call) (result, error) {
 }
 
 func collectKinesis(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("kinesis", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := kinesis.NewFromConfig(c.env.config(c.endpointRegion), func(options *kinesis.Options) {
 		options.BaseEndpoint = &endpoint
@@ -325,12 +326,11 @@ func collectKinesis(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var token *string
 	for {
 		page, err := api.ListStreams(ctx, &kinesis.ListStreamsInput{Limit: aws.Int32(100), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, summary := range page.StreamSummaries {
 			name := deref(summary.StreamName)
@@ -357,9 +357,10 @@ func collectKinesis(ctx context.Context, c *call) (result, error) {
 }
 
 func collectAPIGateway(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("apigateway", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := apigateway.NewFromConfig(c.env.config(c.endpointRegion), func(options *apigateway.Options) {
 		options.BaseEndpoint = &endpoint
@@ -367,12 +368,11 @@ func collectAPIGateway(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var position *string
 	for {
 		page, err := api.GetRestApis(ctx, &apigateway.GetRestApisInput{Limit: aws.Int32(500), Position: position})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, item := range page.Items {
 			id := deref(item.Id)

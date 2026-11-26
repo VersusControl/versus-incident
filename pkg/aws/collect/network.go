@@ -17,9 +17,10 @@ import (
 // health is summarised per target group so a 5xx alarm can be read next to
 // "3 of 4 targets unhealthy".
 func collectELB(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("elbv2", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := elasticloadbalancingv2.NewFromConfig(c.env.config(c.endpointRegion), func(options *elasticloadbalancingv2.Options) {
 		options.BaseEndpoint = &endpoint
@@ -27,13 +28,12 @@ func collectELB(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	balancers := make(map[string]int)
 	var marker *string
 	for {
 		page, err := api.DescribeLoadBalancers(ctx, &elasticloadbalancingv2.DescribeLoadBalancersInput{PageSize: aws.Int32(400), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, balancer := range page.LoadBalancers {
 			arn := deref(balancer.LoadBalancerArn)
@@ -75,7 +75,7 @@ func collectELB(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeTargetGroups(ctx, &elasticloadbalancingv2.DescribeTargetGroupsInput{PageSize: aws.Int32(400), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		groups = append(groups, page.TargetGroups...)
 		if marker = page.NextMarker; deref(marker) == "" {
@@ -101,7 +101,7 @@ func collectELB(ctx context.Context, c *call) (result, error) {
 			out.resources = append(out.resources, resource)
 			continue
 		}
-		c.tried("DescribeTargetHealth")
+		c.tried("DescribeTargetHealth", arn)
 		health, err := api.DescribeTargetHealth(ctx, &elasticloadbalancingv2.DescribeTargetHealthInput{TargetGroupArn: aws.String(arn)})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("DescribeTargetHealth", err))
@@ -176,9 +176,10 @@ func splitCamel(value string) []string {
 // collectRDS lists database instances and clusters, plus database events
 // from the last hour as health signals.
 func collectRDS(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("rds", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := rds.NewFromConfig(c.env.config(c.endpointRegion), func(options *rds.Options) {
 		options.BaseEndpoint = &endpoint
@@ -186,12 +187,11 @@ func collectRDS(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var marker *string
 	for {
 		page, err := api.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{MaxRecords: aws.Int32(100), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, instance := range page.DBInstances {
 			arn := deref(instance.DBInstanceArn)

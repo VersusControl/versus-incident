@@ -118,6 +118,7 @@ type CompareAnswer struct {
 // earliest time that can be picked. Only allowlisted attributes are
 // compared; hidden values never appear.
 func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (CompareAnswer, error) {
+	ctx, _ = feed.store.withInherited(ctx)
 	feeds, err := feed.feeds()
 	if err != nil {
 		return CompareAnswer{}, err
@@ -177,7 +178,7 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	for _, unit := range history {
 		// Policy entries are not resources, so their unit never limits or
 		// is named in a compare.
-		if unit.Unit.Service == ChangeService || unit.Unit.Service == model.PolicyEntryService {
+		if unit.Unit.Service == ChangeService || unit.Unit.Service == model.PolicyEntryService || unit.Unit.Service == model.TrailService {
 			continue
 		}
 		if scoped && !inScope[pairKey(unit.Unit.Account, unit.Unit.Region)] {
@@ -229,7 +230,8 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	query := Query{Account: request.Account, Region: request.Region, Service: request.Service, AsOf: from}
 	// Tag values are read as stored so a change to an unallowlisted tag
 	// is still seen; diffResource hides its values.
-	before, err := feed.store.resources(query, true)
+	filter := feed.store.inherited(ctx)
+	before, err := feed.store.resources(filter, query, true)
 	if err != nil {
 		return CompareAnswer{}, err
 	}
@@ -237,7 +239,7 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	if to.Before(now) {
 		query.AsOf = to
 	}
-	after, err := feed.store.resources(query, true)
+	after, err := feed.store.resources(filter, query, true)
 	if err != nil {
 		return CompareAnswer{}, err
 	}
@@ -262,7 +264,9 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 		resource := is[arn]
 		old, existed := was[arn]
 		if !existed {
-			answer.Added = append(answer.Added, compareResource(resource))
+			if !childOfNotRead(resource, was) {
+				answer.Added = append(answer.Added, compareResource(resource))
+			}
 			continue
 		}
 		if fields := diffResource(old, resource, allowlist); len(fields) > 0 {
@@ -271,7 +275,9 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	}
 	for _, arn := range sortedKeysOf(was) {
 		if _, still := is[arn]; !still {
-			answer.Removed = append(answer.Removed, compareResource(was[arn]))
+			if !childOfNotRead(was[arn], is) {
+				answer.Removed = append(answer.Removed, compareResource(was[arn]))
+			}
 		}
 	}
 	// A unit with a gap at either time is named with its reason, so an
@@ -279,7 +285,7 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	named := map[string]bool{}
 	for _, gap := range append(append([]model.Gap(nil), before.Gaps...), after.Gaps...) {
 		key := unitKey(gap.Account, gap.Region, gap.Service)
-		if gap.Service == model.PolicyEntryService || scoped && !inScope[pairKey(gap.Account, gap.Region)] || named[key] || missing[key] || gap.Service != "" && !serviceInFilter(request.Services, gap.Service) {
+		if gap.Service == model.PolicyEntryService || gap.Service == model.TrailService || scoped && !inScope[pairKey(gap.Account, gap.Region)] || named[key] || missing[key] || gap.Service != "" && !serviceInFilter(request.Services, gap.Service) {
 			continue
 		}
 		named[key] = true
@@ -295,7 +301,7 @@ func (feed *ChangeFeed) Compare(ctx context.Context, request CompareRequest) (Co
 	setIDHints(&answer)
 
 	stored, err := feeds.AWSChangeFeed(ctx, feed.store.scope, storage.AWSChangeFeedQuery{Account: request.Account, Region: request.Region, Service: request.Service,
-		Services: request.Services, Since: from, Until: to, RowLimit: maxChangesBetween})
+		Services: request.Services, Since: from, Until: to, RowLimit: maxChangesBetween, Inherited: feed.store.inherited(ctx).limit()})
 	if err != nil {
 		return CompareAnswer{}, err
 	}
@@ -388,12 +394,35 @@ func compareResource(resource model.Resource) CompareResource {
 	return CompareResource{ResourceARN: resource.ARN, Type: resource.Type, Name: resource.Name, Account: resource.Account, Region: resource.Region}
 }
 
+// childOfNotRead reports a resource read through its parent's detail (a
+// node group through its cluster) whose parent, on the other side, had
+// that detail skipped by a call budget: the child's absence there is not
+// read, not a removal or an addition.
+func childOfNotRead(resource model.Resource, other map[string]model.Resource) bool {
+	for _, relation := range resource.Relations {
+		if relation.Type != model.RelationMemberOf {
+			continue
+		}
+		if parent, ok := other[relation.Target]; ok && len(model.NotReadOperations(parent)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // diffResource lists the differing fields of one resource: name, state,
-// allowlisted attributes and tags. Hidden fields keep only the fact.
+// allowlisted attributes and tags. Hidden fields keep only the fact. A
+// side whose detail a call budget skipped could not read the fields it
+// lacks, so those are left out rather than reported as cleared or set;
+// the not-read marker itself is never a change.
 func diffResource(old, current model.Resource, allowlist map[string]bool) []CompareField {
 	var out []CompareField
+	oldUnread, currentUnread := len(model.NotReadOperations(old)) > 0, len(model.NotReadOperations(current)) > 0
 	add := func(field, before, after string, hidden bool) {
-		if before == after {
+		if before == after || field == model.AttrNotRead {
+			return
+		}
+		if oldUnread && before == "" || currentUnread && after == "" {
 			return
 		}
 		item := CompareField{Field: field, Hidden: hidden}

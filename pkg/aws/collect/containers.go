@@ -18,9 +18,10 @@ import (
 // deployment gives its rollout state, which becomes a health signal while a
 // rollout is in progress or has failed.
 func collectECS(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("ecs", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := ecs.NewFromConfig(c.env.config(c.endpointRegion), func(options *ecs.Options) {
 		options.BaseEndpoint = &endpoint
@@ -34,14 +35,13 @@ func collectECS(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.ListClusters(ctx, &ecs.ListClustersInput{MaxResults: aws.Int32(100), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		clusters = append(clusters, page.ClusterArns...)
 		if token = page.NextToken; deref(token) == "" {
 			break
 		}
 	}
-	var out result
 	if len(clusters) > maxClusters {
 		out.gaps = append(out.gaps, c.capGap("DescribeServices", maxClusters, len(clusters)))
 		clusters = clusters[:maxClusters]
@@ -52,7 +52,7 @@ func collectECS(ctx context.Context, c *call) (result, error) {
 
 	described, err := api.DescribeClusters(ctx, &ecs.DescribeClustersInput{Clusters: clusters, Include: []ecstypes.ClusterField{ecstypes.ClusterFieldTags}})
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	for _, cluster := range described.Clusters {
 		resource := c.newResource(deref(cluster.ClusterArn), "cluster", deref(cluster.ClusterName), strings.ToLower(deref(cluster.Status)))
@@ -67,7 +67,7 @@ func collectECS(ctx context.Context, c *call) (result, error) {
 		for {
 			page, err := api.ListServices(ctx, &ecs.ListServicesInput{Cluster: aws.String(cluster), MaxResults: aws.Int32(100), NextToken: token})
 			if err != nil {
-				return result{}, err
+				return out, err
 			}
 			serviceARNs = append(serviceARNs, page.ServiceArns...)
 			if token = page.NextToken; deref(token) == "" {
@@ -82,7 +82,7 @@ func collectECS(ctx context.Context, c *call) (result, error) {
 				Include:  []ecstypes.ServiceField{ecstypes.ServiceFieldTags},
 			})
 			if err != nil {
-				return result{}, err
+				return out, err
 			}
 			for _, service := range page.Services {
 				out.resources = append(out.resources, c.ecsService(cluster, service, &out))
@@ -166,9 +166,10 @@ func (c *call) ecsService(cluster string, service ecstypes.Service, out *result)
 
 // collectEKS lists clusters and node groups, metadata only.
 func collectEKS(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("eks", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := eks.NewFromConfig(c.env.config(c.endpointRegion), func(options *eks.Options) {
 		options.BaseEndpoint = &endpoint
@@ -181,61 +182,69 @@ func collectEKS(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.ListClusters(ctx, &eks.ListClustersInput{MaxResults: aws.Int32(100), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		names = append(names, page.Clusters...)
 		if token = page.NextToken; deref(token) == "" {
 			break
 		}
 	}
-	var out result
 	if len(names) > maxClusters {
 		out.gaps = append(out.gaps, c.capGap("DescribeCluster", maxClusters, len(names)))
 		names = names[:maxClusters]
 	}
 	nodegroups := 0
 	for _, name := range names {
-		c.tried("DescribeCluster")
+		listedARN := c.arn("eks", "cluster/"+name)
+		c.tried("DescribeCluster", listedARN)
 		described, err := api.DescribeCluster(ctx, &eks.DescribeClusterInput{Name: aws.String(name)})
+		arn := listedARN
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("DescribeCluster", err))
-			continue
-		}
-		cluster := described.Cluster
-		if cluster == nil {
-			continue
-		}
-		arn := deref(cluster.Arn)
-		if arn == "" {
-			arn = c.arn("eks", "cluster/"+name)
-		}
-		resource := c.newResource(arn, "cluster", name, strings.ToLower(string(cluster.Status)))
-		resource.Attributes = map[string]string{model.AttrID: name, model.AttrEngine: "kubernetes " + deref(cluster.Version)}
-		if vpc := cluster.ResourcesVpcConfig; vpc != nil {
-			if id := deref(vpc.VpcId); id != "" {
-				resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationInVPC, Target: c.ec2ARN("vpc", id)})
-				resource.Attributes[model.AttrVPC] = id
+			if errorCode(err) != CodeCapped {
+				continue
 			}
-			for _, subnet := range vpc.SubnetIds {
-				resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationInSubnet, Target: c.ec2ARN("subnet", subnet)})
+			// Listed but not described: the cluster is there, its detail
+			// is not read, and its node groups are still listed.
+			resource := c.newResource(listedARN, "cluster", name, "")
+			resource.Attributes = map[string]string{model.AttrID: name}
+			out.resources = append(out.resources, resource)
+		} else {
+			cluster := described.Cluster
+			if cluster == nil {
+				continue
 			}
-			for _, group := range vpc.SecurityGroupIds {
-				resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationSecurityGroup, Target: c.ec2ARN("security-group", group)})
+			if full := deref(cluster.Arn); full != "" {
+				arn = full
 			}
-			if vpc.EndpointPublicAccess {
-				for _, cidr := range vpc.PublicAccessCidrs {
-					if cidr == "0.0.0.0/0" {
-						out.flags = append(out.flags, c.flag(arn, model.FlagPublicExposure, "Cluster API endpoint is reachable from the internet"))
-						break
+			resource := c.newResource(arn, "cluster", name, strings.ToLower(string(cluster.Status)))
+			resource.Attributes = map[string]string{model.AttrID: name, model.AttrEngine: "kubernetes " + deref(cluster.Version)}
+			if vpc := cluster.ResourcesVpcConfig; vpc != nil {
+				if id := deref(vpc.VpcId); id != "" {
+					resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationInVPC, Target: c.ec2ARN("vpc", id)})
+					resource.Attributes[model.AttrVPC] = id
+				}
+				for _, subnet := range vpc.SubnetIds {
+					resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationInSubnet, Target: c.ec2ARN("subnet", subnet)})
+				}
+				for _, group := range vpc.SecurityGroupIds {
+					resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationSecurityGroup, Target: c.ec2ARN("security-group", group)})
+				}
+				if vpc.EndpointPublicAccess {
+					for _, cidr := range vpc.PublicAccessCidrs {
+						if cidr == "0.0.0.0/0" {
+							out.flags = append(out.flags, c.flag(arn, model.FlagPublicExposure, "Cluster API endpoint is reachable from the internet"))
+							break
+						}
 					}
 				}
 			}
+			c.applyTags(&resource, cluster.Tags)
+			out.resources = append(out.resources, resource)
 		}
-		c.applyTags(&resource, cluster.Tags)
-		out.resources = append(out.resources, resource)
 
 		token = nil
-		c.tried("ListNodegroups")
+		c.listed("ListNodegroups")
 		for {
 			page, err := api.ListNodegroups(ctx, &eks.ListNodegroupsInput{ClusterName: aws.String(name), MaxResults: aws.Int32(100), NextToken: token})
 			if err != nil {
@@ -248,10 +257,20 @@ func collectEKS(ctx context.Context, c *call) (result, error) {
 					break
 				}
 				nodegroups++
-				c.tried("DescribeNodegroup")
+				c.tried("DescribeNodegroup", arn)
 				detail, err := api.DescribeNodegroup(ctx, &eks.DescribeNodegroupInput{ClusterName: aws.String(name), NodegroupName: aws.String(group)})
 				if err != nil || detail.Nodegroup == nil {
 					out.gaps = append(out.gaps, c.detailGap("DescribeNodegroup", err))
+					if errorCode(err) == CodeCapped {
+						// Listed but not described: the node group is
+						// there, its detail is not read. Its full ARN
+						// carries an ID only the describe gives, so the
+						// collector takes it from the last read.
+						member := c.newResource(c.arn("eks", "nodegroup/"+name+"/"+group), "node-group", group, "")
+						member.Attributes = map[string]string{model.AttrID: group, model.AttrNotRead: "DescribeNodegroup"}
+						member.Relations = []model.Relation{{Type: model.RelationMemberOf, Target: arn}}
+						out.resources = append(out.resources, member)
+					}
 					continue
 				}
 				nodegroup := detail.Nodegroup
@@ -280,9 +299,10 @@ func collectEKS(ctx context.Context, c *call) (result, error) {
 // collectLambda lists functions and their event source mappings. Function
 // environment variables are never read into the model.
 func collectLambda(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("lambda", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := lambda.NewFromConfig(c.env.config(c.endpointRegion), func(options *lambda.Options) {
 		options.BaseEndpoint = &endpoint
@@ -290,13 +310,12 @@ func collectLambda(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	byARN := make(map[string]int)
 	var marker *string
 	for {
 		page, err := api.ListFunctions(ctx, &lambda.ListFunctionsInput{MaxItems: aws.Int32(50), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, function := range page.Functions {
 			arn := deref(function.FunctionArn)

@@ -143,19 +143,15 @@ func TestFailureDuringAProbeIsNeverOverwrittenByConnected(t *testing.T) {
 	account := regionAccount("444455556666", "us-east-1")
 	first := make(chan error, 1)
 	go func() { _, err := service.CheckAccount(context.Background(), account); first <- err }()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if record, err := service.store.GetHealth("default", account.AccountID); err == nil && record.Status == StatusConnected {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("first check never saved its identity result")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	eventually(t, "the first check to save its identity result", func() bool {
+		record, err := service.store.GetHealth("default", account.AccountID)
+		return err == nil && record.Status == StatusConnected
+	})
 	second := make(chan error, 1)
 	go func() { _, err := service.CheckAccount(context.Background(), account); second <- err }()
-	time.Sleep(100 * time.Millisecond)
+	// The second check waits on the account's health lock while the first
+	// probes; a check that did not wait would finish its failure here.
+	eventually(t, "the second check to wait for the first", func() bool { return blockedIn(".(*Service).lockHealth") })
 	gate.open()
 	if err := errors.Join(<-first, <-second); err != nil {
 		t.Fatal(err)

@@ -33,10 +33,11 @@ func NewAWSAccountLabelsController(store storage.AWSAccountLabelStore, scope ten
 // guard and the infrastructure view, plus the settings permission on
 // writes.
 func (c *AWSAccountLabelsController) Register(router fiber.Router) {
-	g := router.Group("/admin/aws/accounts/labels", adminGatewayGuard, requireChangesView)
+	write := core.PermissionInfrastructureSettingsWrite
+	g := router.Group("/admin/aws/accounts/labels", auditAWSRefusal(write), adminGatewayGuard, requireChangesView)
 	g.Get("/", c.list)
-	g.Put("/:id", requireAWSSettingsWrite, c.put)
-	g.Delete("/:id", requireAWSSettingsWrite, c.delete)
+	g.Put("/:id", auditAWSWrite("aws.account.label.saved", write, auditParam("id")), requireAWSSettingsWrite, c.put)
+	g.Delete("/:id", auditAWSWrite("aws.account.label.deleted", write, auditParam("id")), requireAWSSettingsWrite, c.delete)
 }
 
 // requireAWSSettingsWrite admits only a caller with the infrastructure

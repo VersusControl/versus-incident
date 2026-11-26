@@ -126,7 +126,10 @@ type env struct {
 	retries int
 	// identity is the account's health when the sync started.
 	identity AccountHealth
-	sleep    func(context.Context, time.Duration) error
+	// meter counts the unit run's requests and enforces its budget; nil
+	// counts nothing.
+	meter *meter
+	sleep func(context.Context, time.Duration) error
 }
 
 // host returns the exact host a client may reach in endpointRegion.
@@ -212,6 +215,9 @@ func (handler limitMiddleware) HandleInitialize(ctx context.Context, input middl
 				return output, metadata, waitErr
 			}
 		}
+		if err := environment.meter.take(ctx); err != nil {
+			return output, metadata, err
+		}
 		output, metadata, err = next.HandleInitialize(ctx, input)
 		if err != nil && isThrottle(err) {
 			pause := 2 * time.Second
@@ -266,6 +272,9 @@ func isThrottle(err error) bool {
 func errorCode(err error) string {
 	if err == nil {
 		return ""
+	}
+	if errors.Is(err, errCallBudget) {
+		return CodeCapped
 	}
 	if isThrottle(err) {
 		return codeThrottledWord

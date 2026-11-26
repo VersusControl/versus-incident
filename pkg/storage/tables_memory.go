@@ -34,6 +34,13 @@ type memoryTables struct {
 	// groupCorrections holds the AWS group corrections by organization
 	// and key.
 	groupCorrections map[string]map[AWSGroupCorrectionKey]AWSGroupCorrection
+	// callCounts holds the AWS call ledger by organization and row.
+	callCounts map[string]map[AWSCallCountKey]AWSCallCount
+	// issues, issueEvents and issueBaselines hold the AWS issues, their
+	// events and the rules' first assessments by organization.
+	issues         map[string]map[string]AWSIssueRecord
+	issueEvents    map[string]map[string][]AWSIssueEvent
+	issueBaselines map[string]map[AWSIssueBaselineKey]AWSIssueBaseline
 }
 
 type memoryUnitKey struct {
@@ -637,7 +644,7 @@ func (m *memoryTables) AWSChanges(_ context.Context, scope tenancy.OrgScope, que
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]AWSChange, 0)
-	for _, change := range m.firstChangeCopiesLocked(scope, time.Time{}) {
+	for _, change := range m.firstChangeCopiesLocked(scope, time.Time{}, nil) {
 		switch {
 		case query.Account != "" && change.Account != query.Account,
 			query.Region != "" && change.Region != query.Region,
@@ -669,17 +676,18 @@ func (m *memoryTables) AWSChangeCoverage(_ context.Context, scope tenancy.OrgSco
 	scope = inventoryScope(scope)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.changeCoverageLocked(scope, account, region), nil
+	return m.changeCoverageLocked(scope, account, region, nil), nil
 }
 
-func (m *memoryTables) changeCoverageLocked(scope tenancy.OrgScope, account, region string) []AWSPairCoverage {
+func (m *memoryTables) changeCoverageLocked(scope tenancy.OrgScope, account, region string, limit *AWSInheritedLimit) []AWSPairCoverage {
 	// Every read organization's coverage counts: change history only grows,
 	// so what the default organization read stays read after a key is added.
 	byPair := map[[2]string]*AWSPairCoverage{}
 	intervals := map[[2]string][]AWSInterval{}
 	for _, org := range scope.Read {
 		for key, stored := range m.coverage {
-			if key.org != org || account != "" && key.account != account || region != "" && key.region != region || len(stored) == 0 {
+			if key.org != org || account != "" && key.account != account || region != "" && key.region != region || len(stored) == 0 ||
+				!limit.keeps(scope.Write, org, key.account) {
 				continue
 			}
 			pair := [2]string{key.account, key.region}

@@ -64,10 +64,8 @@ func (v *ViberProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := v.templatePath
-	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
-		tplPath = utils.KubernetesIssueTemplatePath(v.kubernetesIssueTemplatePath, utils.KubernetesIssueViberTemplatePath)
-	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
-		tplPath = utils.AgentViberTemplatePath
+	if i.Content != nil {
+		tplPath = utils.AlertTemplatePath(*i.Content, utils.ChannelViber, tplPath, v.kubernetesIssueTemplatePath)
 	}
 
 	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
@@ -75,16 +73,17 @@ func (v *ViberProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	var message bytes.Buffer
-	if err := tmpl.Execute(&message, i.Content); err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
+	// An AWS issue alert is fitted to the message limit.
+	message, err := utils.RenderAlert(tmpl, i.Content, utils.ViberAlertBudget, utils.UTF16Length)
+	if err != nil {
+		return err
 	}
 
 	if v.apiType == "channel" {
-		return v.sendChannelMessage(message.String())
+		return v.sendChannelMessage(message)
 	}
 
-	return v.sendBotMessage(message.String())
+	return v.sendBotMessage(message)
 }
 
 // SendText implements core.TextSender: the image-fallback path for Viber,

@@ -38,10 +38,8 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := l.templatePath
-	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
-		tplPath = utils.KubernetesIssueTemplatePath(l.kubernetesIssueTemplatePath, utils.KubernetesIssueLarkTemplatePath)
-	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
-		tplPath = utils.AgentLarkTemplatePath
+	if i.Content != nil {
+		tplPath = utils.AlertTemplatePath(*i.Content, utils.ChannelLark, tplPath, l.kubernetesIssueTemplatePath)
 	}
 
 	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
@@ -49,13 +47,19 @@ func (l *LarkProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	var message bytes.Buffer
-	if err := tmpl.Execute(&message, i.Content); err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
+	// An AWS issue alert is fitted to the card limit and framed by what
+	// it is; any other alert keeps the firing or resolved header.
+	message, err := utils.RenderAlert(tmpl, i.Content, utils.LarkAlertBudget, utils.JSONLength)
+	if err != nil {
+		return err
 	}
 
 	// Create interactive card message
-	larkMsg := utils.CreateLarkMessage(message.String(), i.Resolved)
+	larkMsg := utils.CreateLarkMessage(message, i.Resolved)
+	if i.Content != nil && utils.IsAWSIssueIncident(*i.Content) && !i.Resolved {
+		title, colour := utils.AWSIssueLarkHeader(*i.Content)
+		larkMsg = utils.CreateLarkCard(message, title, colour)
+	}
 
 	jsonData, err := json.Marshal(larkMsg)
 	if err != nil {

@@ -61,16 +61,16 @@ func (c *call) ec2ARN(kind, id string) string {
 // collectEC2 lists instances and their status checks. A failed status read
 // keeps the inventory and names the gap.
 func collectEC2(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := ec2Client(c)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
-	var out result
 	var token *string
 	for {
 		page, err := api.DescribeInstances(ctx, &ec2.DescribeInstancesInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, reservation := range page.Reservations {
 			for _, instance := range reservation.Instances {
@@ -185,11 +185,11 @@ func exposesAdminPort(permission ec2types.IpPermission) (int32, bool) {
 // collectVPC lists the network: VPCs, subnets, route tables, gateways,
 // security groups, network interfaces and endpoints.
 func collectVPC(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := ec2Client(c)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
-	var out result
 	inVPC := func(resource *model.Resource, vpc string) {
 		if vpc != "" {
 			resource.Relations = append(resource.Relations, model.Relation{Type: model.RelationInVPC, Target: c.ec2ARN("vpc", vpc)})
@@ -204,7 +204,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, vpc := range page.Vpcs {
 			id := deref(vpc.VpcId)
@@ -222,7 +222,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, subnet := range page.Subnets {
 			id := deref(subnet.SubnetId)
@@ -241,7 +241,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeRouteTables(ctx, &ec2.DescribeRouteTablesInput{MaxResults: aws.Int32(100), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, table := range page.RouteTables {
 			id := deref(table.RouteTableId)
@@ -273,7 +273,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeInternetGateways(ctx, &ec2.DescribeInternetGatewaysInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, gateway := range page.InternetGateways {
 			id := deref(gateway.InternetGatewayId)
@@ -296,7 +296,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeNatGateways(ctx, &ec2.DescribeNatGatewaysInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, gateway := range page.NatGateways {
 			id := deref(gateway.NatGatewayId)
@@ -318,7 +318,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, group := range page.SecurityGroups {
 			id := deref(group.GroupId)
@@ -346,7 +346,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeNetworkInterfaces(ctx, &ec2.DescribeNetworkInterfacesInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, networkInterface := range page.NetworkInterfaces {
 			id := deref(networkInterface.NetworkInterfaceId)
@@ -381,7 +381,7 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeVpcEndpoints(ctx, &ec2.DescribeVpcEndpointsInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, endpoint := range page.VpcEndpoints {
 			id := deref(endpoint.VpcEndpointId)
@@ -402,9 +402,10 @@ func collectVPC(ctx context.Context, c *call) (result, error) {
 }
 
 func collectAutoScaling(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("autoscaling", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := autoscaling.NewFromConfig(c.env.config(c.endpointRegion), func(options *autoscaling.Options) {
 		options.BaseEndpoint = &endpoint
@@ -412,12 +413,11 @@ func collectAutoScaling(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var token *string
 	for {
 		page, err := api.DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{MaxRecords: aws.Int32(100), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, group := range page.AutoScalingGroups {
 			out.resources = append(out.resources, c.autoScalingGroup(group, &out))

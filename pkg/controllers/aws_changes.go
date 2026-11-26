@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/utils"
 
@@ -38,13 +39,14 @@ func (c *AWSChangesController) WithPreferences(store *snapshot.ChangePreferenceS
 // Register mounts the Changes routes behind the same admin chain as the
 // other AWS pages: the gateway guard and the infrastructure view.
 func (c *AWSChangesController) Register(router fiber.Router) {
-	g := router.Group("/admin/aws/changes", adminGatewayGuard, requireChangesView)
+	view := core.PermissionInfrastructureView
+	g := router.Group("/admin/aws/changes", auditAWSRefusal(view), adminGatewayGuard, requireChangesView)
 	g.Get("/", c.changes)
 	g.Get("/groups/:id", c.group)
 	g.Get("/compare", c.compare)
 	// Any caller who may view the page may save their own choices.
 	g.Get("/preferences", c.getPreferences)
-	g.Put("/preferences", c.putPreferences)
+	g.Put("/preferences", auditAWSWrite("aws.changes.preferences.saved", view, auditFixed("change preferences")), c.putPreferences)
 }
 
 // requireChangesView admits only a caller with the infrastructure view: the
@@ -83,6 +85,7 @@ func (c *AWSChangesController) putPreferences(ctx *fiber.Ctx) error {
 	if err := json.Unmarshal(ctx.Body(), &body); err != nil || body.Services == nil {
 		return ctx.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "body must be {\"services\": [...]}"})
 	}
+	setAWSAuditTarget(ctx, "services="+strings.Join(*body.Services, ","))
 	saved, err := c.preferences.Save(strings.Clone(middleware.RequestActor(ctx)), snapshot.ChangePreferences{Services: *body.Services})
 	if err != nil {
 		return preferencesError(ctx, err)

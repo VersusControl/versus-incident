@@ -66,6 +66,10 @@ const (
 	NodeGroup        = "group"
 )
 
+// policyReads are the detail reads that read a resource's policy: when one
+// is not read, the resource's grants are not known.
+var policyReads = map[string]bool{"GetKeyPolicy": true, "GetRepositoryPolicy": true, "GetBucketPolicy": true}
+
 // Node is one resource, or one thing a link ends on that we did not read.
 // Account is the owning account, empty when it cannot be known (a host name
 // with no matching load balancer, a deleted principal). ReadBy lists the
@@ -82,7 +86,11 @@ type Node struct {
 	Dangling    bool     `json:"dangling,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Members     []string `json:"members,omitempty"`
-	dns         string
+	// NotRead names the detail reads a call budget skipped for the node
+	// ("GetKeyPolicy"); "policy" when its resource policy was not read,
+	// so a missing grant reads "policy not read", never "no grant".
+	NotRead []string `json:"not_read,omitempty"`
+	dns     string
 }
 
 // Edge is one link. Sides is set when the link joins two accounts.
@@ -212,6 +220,10 @@ func Build(resources []model.Resource, accounts []Account, labels []Label) Graph
 				}
 			}
 			continue
+		case model.TrailType, model.HealthEventType:
+			// A trail is cost evidence and a health event record marks an
+			// unread detail; neither is part of the topology.
+			continue
 		case model.ResourcePolicyType:
 			subject := resource.Attributes[model.AttrSubject]
 			if subject == "" {
@@ -221,6 +233,15 @@ func Build(resources []model.Resource, accounts []Account, labels []Label) Graph
 				return Node{ID: subject, Account: resource.Account, Region: resource.Region, Service: "s3", Type: "bucket", Name: resource.Name}
 			})
 			node.ReadBy = appendUnique(node.ReadBy, resource.Account)
+			for _, operation := range model.NotReadOperations(resource) {
+				node.NotRead = appendUnique(node.NotRead, operation)
+				if policyReads[operation] {
+					node.NotRead = appendUnique(node.NotRead, "policy")
+				}
+			}
+			if len(model.NotReadOperations(resource)) > 0 {
+				node.NotRead = appendUnique(node.NotRead, "policy")
+			}
 			holders = append(holders, held{holder: subject, reader: resource.Account, relations: resource.Relations})
 			continue
 		}
@@ -236,6 +257,12 @@ func Build(resources []model.Resource, accounts []Account, labels []Label) Graph
 			node.Service, node.Type, node.Name, node.Region = resource.Service, resource.Type, resource.Name, resource.Region
 		}
 		node.ReadBy = appendUnique(node.ReadBy, resource.Account)
+		for _, operation := range model.NotReadOperations(resource) {
+			node.NotRead = appendUnique(node.NotRead, operation)
+			if policyReads[operation] {
+				node.NotRead = appendUnique(node.NotRead, "policy")
+			}
+		}
 		if dns := resource.Attributes[model.AttrDNSName]; dns != "" {
 			node.dns = model.NormalizeDNSName(dns)
 			b.byDNS[node.dns] = node.ID

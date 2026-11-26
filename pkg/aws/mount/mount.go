@@ -14,8 +14,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 
 	"github.com/VersusControl/versus-incident/pkg/agent"
+	"github.com/VersusControl/versus-incident/pkg/aws/callcost"
 	awscollect "github.com/VersusControl/versus-incident/pkg/aws/collect"
 	awscost "github.com/VersusControl/versus-incident/pkg/aws/cost"
+	"github.com/VersusControl/versus-incident/pkg/aws/issues"
 	awslimit "github.com/VersusControl/versus-incident/pkg/aws/limit"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	awssettings "github.com/VersusControl/versus-incident/pkg/aws/settings"
@@ -67,6 +69,9 @@ type Deps struct {
 	// license is current. Nil is the open-source 13. What the page shows
 	// follows FinOpsOptions().RetentionMonths instead.
 	CostStorageRetentionMonths func() int
+	// Clock is the time the collection cost card reads at. Nil is the
+	// wall clock; a test pins it.
+	Clock func() time.Time
 }
 
 // Mounted is the AWS surface Mount built: the parts the binary starts and
@@ -79,12 +84,22 @@ type Mounted struct {
 	Changes    *awssnapshot.ChangeFeed
 	Cost       *awscost.Scheduler
 	FinOps     *awscost.Backend
+	// Issues evaluates the issue rules after collector writes; nil when
+	// the provider has no issue tables.
+	Issues *issues.Evaluator
+	// IssueActions are the user's writes on issues; nil with Issues.
+	IssueActions *issues.Actions
 	// HTTPClient is the AWS transport override every AWS caller shares.
 	HTTPClient aws.HTTPClient
 
 	deployment       string
 	finOpsOptions    func() finops.EditionOptions
 	storageRetention func() int
+	// written is told about every unit write of the snapshot store.
+	written *writeHook
+	// accountsChanged is told when an account is removed or reads fewer
+	// Regions.
+	accountsChanged *changeHook
 }
 
 // Mount builds the AWS connector, its collectors, the Changes feed and the
@@ -96,10 +111,12 @@ type Mounted struct {
 // lacks one degrades that feature exactly as the file backend does:
 // storage.AWSInventoryStore, storage.AWSChangeFeedStore,
 // storage.AWSUnitHistoryStore, storage.AWSAccountLabelStore,
-// storage.AWSGroupCorrectionStore, storage.AWSRetentionSweeper,
+// storage.AWSGroupCorrectionStore, storage.AWSCallCountStore (the call
+// ledger), storage.AWSIssueStore (the issues), storage.AWSRetentionSweeper,
 // storage.FinOpsStore, storage.FinOpsSavingDecisionStore,
 // storage.FinOpsSavingDecisionSubjects, storage.FinOpsRollupStore,
-// storage.SessionLocker (the change-pair and cost refresh locks),
+// storage.SessionLocker (the change-pair, cost refresh and issue
+// evaluation locks),
 // storage.SessionLockVerifier and storage.BlobCAS. The Changes preferences
 // are a blob under settings/aws-changes-preferences/.
 func Mount(deps Deps) (*Mounted, error) {
@@ -122,6 +139,8 @@ func Mount(deps Deps) (*Mounted, error) {
 	mountCoverage(deps, mounted)
 	mountAccountLabels(deps)
 	mountGroupCorrections(deps, mounted)
+	mountCollectionCost(deps, mounted)
+	mountIssues(deps, mounted)
 	cost, backend, err := mountFinOps(deps, mounted)
 	if err != nil {
 		return nil, err
@@ -136,6 +155,9 @@ func (m *Mounted) Start(ctx context.Context) {
 	m.Settings.Start(ctx)
 	m.Collectors.Start(ctx)
 	m.Cost.Start(ctx)
+	if m.Issues != nil {
+		m.Issues.Start(ctx)
+	}
 }
 
 // Wait waits, after the context given to Start ended, for the collectors and
@@ -147,6 +169,9 @@ func (m *Mounted) Wait(grace time.Duration) {
 	}
 	if !waitForStop(m.Cost.Stopped(), grace) {
 		log.Printf("aws cost: refresh did not stop within %s", grace)
+	}
+	if m.Issues != nil && !waitForStop(m.Issues.Stopped(), grace) {
+		log.Printf("aws issues: evaluation did not stop within %s", grace)
 	}
 }
 
@@ -207,7 +232,16 @@ func mountConnector(deps Deps) *Mounted {
 		log.Printf("aws collect: %s", warning)
 	}
 	var service *awssettings.Service
-	snapshots := awssnapshot.New(store, scope, awssnapshot.WithTagAllowlist(func() []string {
+	written := &writeHook{}
+	accountsChanged := &changeHook{}
+	snapshots := awssnapshot.New(store, scope, awssnapshot.WithAfterWrite(written.notify), awssnapshot.WithConnectedAccounts(func(ctx context.Context) (map[string]bool, bool) {
+		// What an inherited organization keeps for an account that is no
+		// longer connected stays hidden; an unknown list hides nothing.
+		if service == nil {
+			return nil, false
+		}
+		return service.ConnectedAccountSet(ctx)
+	}), awssnapshot.WithTagAllowlist(func() []string {
 		// The same effective allowlist the collectors redact with at write.
 		if service == nil {
 			return awssettings.DefaultTagValueAllowlist()
@@ -231,7 +265,16 @@ func mountConnector(deps Deps) *Mounted {
 			AppSources:      connector.Applications.EffectiveSources(),
 		}
 	}))
-	collector := awscollect.New(snapshots, limiter,
+	ledger, hasLedger := storage.AWSCallCountsOf(store)
+	collectorOptions := []awscollect.Option{}
+	if hasLedger {
+		// The ledger is evidence of cost, not part of the read: a write
+		// that fails is skipped and the next run writes its own hour.
+		collectorOptions = append(collectorOptions, awscollect.WithCallLedger(func(ctx context.Context, counts []storage.AWSCallCount) error {
+			return ledger.AddAWSCallCounts(ctx, scope, counts)
+		}))
+	}
+	collector := awscollect.New(snapshots, limiter, append(collectorOptions,
 		awscollect.WithHTTPClient(deps.HTTPClient),
 		awscollect.WithLogger(log.Printf),
 		awscollect.WithAccountHealth(collectAccountHealth(awssettings.NewStore(store, scope), scope.Write)),
@@ -246,9 +289,20 @@ func mountConnector(deps Deps) *Mounted {
 				ChangePageBudget: collect.Changes.PageBudget,
 				RoutineEvents:    collect.ChangeRoutineEvents(),
 				FailureKeep:      collect.ChangeFailureKeep(),
+				CallBudgets:      current().Budgets.CycleBudgets(),
 			}
 		}),
-	)
+	)...)
+	schedulerOptions := []awscollect.SchedulerOption{
+		awscollect.WithAccounts(func(ctx context.Context) ([]string, error) { return service.AccountIDs(ctx) }),
+	}
+	if hasLedger {
+		schedulerOptions = append(schedulerOptions, awscollect.WithCallTarget(
+			func() int { return current().Budgets.DailyCallTarget() },
+			func(ctx context.Context, since time.Time) (map[string]int64, error) {
+				return callcost.Totals(ctx, ledger, scope, since.Add(24*time.Hour))
+			}))
+	}
 	scheduler := awscollect.NewScheduler(collector,
 		func(ctx context.Context) []awscollect.Target {
 			targets := service.CollectTargets(ctx)
@@ -258,15 +312,12 @@ func mountConnector(deps Deps) *Mounted {
 			}
 			return out
 		},
-		func() awscollect.Intervals {
-			collect := current().Collect
-			return awscollect.Intervals{Inventory: collect.InventoryInterval(), Health: collect.HealthInterval(), Changes: collect.ChangesInterval()}
-		},
+		func() awscollect.Intervals { return CollectIntervals(current().Collect) },
 		func() bool {
 			connector := current()
 			return connector.Enable && connector.Collect.Enable
 		},
-		awscollect.WithAccounts(func(ctx context.Context) ([]string, error) { return service.AccountIDs(ctx) }),
+		schedulerOptions...,
 	)
 	service = awssettings.NewService(
 		awssettings.NewStore(store, scope),
@@ -275,10 +326,63 @@ func mountConnector(deps Deps) *Mounted {
 		awssettings.WithAIInfo(awssettings.AIInfo{Enabled: cfg.Agent.AI.Enable, Provider: cfg.Agent.AI.Provider, Model: cfg.Agent.AI.Model}),
 		awssettings.WithSnapshots(snapshots),
 		awssettings.WithAccountAdded(scheduler.Trigger),
+		awssettings.WithAccountsChanged(accountsChanged.notify),
 		awssettings.WithHTTPClient(deps.HTTPClient),
 	)
 	controllers.NewAWSSettingsController(service).Register(deps.Router)
-	return &Mounted{Settings: service, Snapshots: snapshots, Collectors: scheduler, Limiter: limiter, HTTPClient: deps.HTTPClient}
+	return &Mounted{Settings: service, Snapshots: snapshots, Collectors: scheduler, Limiter: limiter, HTTPClient: deps.HTTPClient,
+		written: written, accountsChanged: accountsChanged}
+}
+
+// CollectIntervals maps the collector block onto the scheduler's
+// cadences.
+func CollectIntervals(collect c.AWSCollectConfig) awscollect.Intervals {
+	return awscollect.Intervals{
+		Inventory:        collect.InventoryInterval(),
+		Health:           collect.HealthInterval(),
+		Changes:          collect.ChangesInterval(),
+		HealthHot:        collect.HealthHotInterval(),
+		Identity:         collect.IdentityInterval(),
+		Policies:         collect.PoliciesInterval(),
+		Trails:           collect.TrailsInterval(),
+		RegionsOff:       collect.RegionsOffInterval(),
+		CredentialReport: collect.CredentialReportInterval(),
+		Findings:         collect.FindingsInterval(),
+	}
+}
+
+// mountCollectionCost mounts the Settings collection cost card over the
+// call ledger and the snapshot store. The connected accounts come from
+// settings at request time; nothing calls AWS. A provider without the
+// ledger answers with no calls and the estimates it can still give.
+func mountCollectionCost(deps Deps, mounted *Mounted) {
+	current := liveAWS(deps.Config)
+	settingsStore := awssettings.NewStore(deps.Store, deps.Scope)
+	ledger, _ := storage.AWSCallCountsOf(deps.Store)
+	clock := deps.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	controllers.NewAWSCollectionCostController(func(context.Context) (callcost.Inputs, bool, error) {
+		conn := current()
+		if !conn.Enable || mounted.Snapshots == nil {
+			return callcost.Inputs{}, false, nil
+		}
+		expected, _, err := coverageScope(settingsStore, deps.Scope.Write, conn, clock)
+		if err != nil {
+			return callcost.Inputs{}, true, err
+		}
+		accounts := make([]string, 0, len(expected))
+		for _, account := range expected {
+			accounts = append(accounts, account.Account)
+		}
+		return callcost.Inputs{
+			Ledger: ledger, Scope: deps.Scope, Snapshots: mounted.Snapshots, Accounts: accounts,
+			Budgets: conn.Budgets.CycleBudgets(), CallsPerDay: conn.Budgets.DailyCallTarget(), Now: clock(),
+			Stretched:         mounted.Collectors.Stretched,
+			LedgerFailedSince: mounted.Collectors.Collector().LedgerFailedSince,
+		}, true, nil
+	}).Register(deps.Router)
 }
 
 // mountChanges mounts the read-only Changes page over the snapshot store.

@@ -57,10 +57,10 @@ const (
 	awsCollectDefaultBudget = 2
 	// One region: six regional health + aws-health, the region's cloudtrail
 	// and the account's global change stream, fourteen regional inventory +
-	// four global inventory units, and the six link-read units (transit
+	// four global inventory units, the six link-read units (transit
 	// gateways, resource shares, the organization, keys, repositories and
-	// bucket policies).
-	awsCollectUnitsOneRegion = 33
+	// bucket policies) and the region's trail read.
+	awsCollectUnitsOneRegion = 34
 )
 
 // awsCollectDenied is what access-denied-burst denies outright.
@@ -95,6 +95,20 @@ func (recorder *awsRequestRecorder) RoundTrip(request *http.Request) (*http.Resp
 	recorder.records = append(recorder.records, awsRequestRecord{at: time.Now(), account: account, region: region, service: service})
 	recorder.mu.Unlock()
 	return recorder.next.RoundTrip(request)
+}
+
+// count returns how many recorded requests one account sent to one Region,
+// STS excluded, as the budget group keys them.
+func (recorder *awsRequestRecorder) count(account, region string) int {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	n := 0
+	for _, record := range recorder.records {
+		if record.service != "sts" && record.account == account && record.region == region {
+			n++
+		}
+	}
+	return n
 }
 
 func (recorder *awsRequestRecorder) snapshot() []awsRequestRecord {
@@ -156,6 +170,8 @@ type awsCollectStack struct {
 	// out the 2-30 s backoffs proves nothing and dominated the suite's time.
 	// Passes that need a retry to succeed keep the real pauses.
 	skipPauses atomic.Bool
+	// passes counts scheduler passes: each pass reads its targets once.
+	passes atomic.Int64
 
 	cfgMu sync.Mutex
 	cfg   config.AWSConnectorConfig
@@ -248,6 +264,7 @@ func newAWSCollectStack(t *testing.T, scenario string, options awsCollectOptions
 	)
 	scheduler := awscollect.NewScheduler(collector,
 		func(ctx context.Context) []awscollect.Target {
+			stack.passes.Add(1)
 			targets := service.CollectTargets(ctx)
 			out := make([]awscollect.Target, 0, len(targets))
 			for _, target := range targets {
@@ -291,11 +308,7 @@ func newAWSCollectStack(t *testing.T, scenario string, options awsCollectOptions
 	t.Cleanup(func() {
 		cancel()
 		for name, done := range map[string]<-chan struct{}{"settings": service.Stopped(), "scheduler": scheduler.Stopped()} {
-			select {
-			case <-done:
-			case <-time.After(15 * time.Second):
-				t.Errorf("%s loop did not stop", name)
-			}
+			waitFor(t, done, "the "+name+" loop to stop")
 		}
 		_ = stack.provider.Close()
 	})
@@ -350,7 +363,7 @@ func waitFirstSync(t *testing.T, client *awsClient, accountID string, deadline t
 	var seen []awsSyncObservation
 	var last awssettings.AccountSyncView
 	previousDone := -1
-	for {
+	for wait := pollingWithin(t, deadline, "the first sync of "+accountID); ; wait.next() {
 		view, ok := accountSync(t, client, accountID)
 		if !ok {
 			t.Fatalf("account %s missing from settings", accountID)
@@ -371,10 +384,9 @@ func waitFirstSync(t *testing.T, client *awsClient, accountID string, deadline t
 		if view.Units == awsCollectUnitsOneRegion && view.UnitsDone == view.Units && !view.FirstSync {
 			return view, seen
 		}
-		if time.Since(started) > deadline {
-			t.Fatalf("first sync did not finish in %s; last=%+v seen=%+v", deadline, last, seen)
+		if wait.expired() {
+			t.Fatalf("first sync did not finish in %s; last=%+v seen=%+v", scaledTimeout(deadline), last, seen)
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -385,8 +397,7 @@ func waitFirstSync(t *testing.T, client *awsClient, accountID string, deadline t
 // policy unit never attempted must be read like any other.
 func waitAttemptedAfter(t *testing.T, store *awssnapshot.Store, accountID string, mark time.Time, deadline time.Duration) []awssnapshot.UnitStatus {
 	t.Helper()
-	stop := time.Now().Add(deadline)
-	for {
+	for wait := pollingWithin(t, deadline, "every unit of "+accountID+" to be attempted"); ; wait.next() {
 		statuses, err := store.Sync(context.Background(), awssnapshot.Query{Account: accountID})
 		if err != nil {
 			t.Fatalf("store sync: %v", err)
@@ -407,10 +418,9 @@ func waitAttemptedAfter(t *testing.T, store *awssnapshot.Store, accountID string
 		if len(statuses) == awsCollectUnitsOneRegion && done == len(statuses) {
 			return fresh
 		}
-		if time.Now().After(stop) {
+		if wait.expired() {
 			t.Fatalf("only %d/%d units attempted after %s", done, len(statuses), mark.Format(time.RFC3339Nano))
 		}
-		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -944,13 +954,27 @@ type awsBudgetPair struct {
 	BucketAllowed string  `json:"bucket_rule"`
 }
 
+// awsBudgetSample is how many requests of the collector's account and Region
+// the budget group observes: about forty seconds of calls at 2 req/s.
+// awsBudgetObserveGuard is the hang guard for that observation, well above
+// the time the budget itself takes.
+const (
+	awsBudgetSample       = 80
+	awsBudgetObserveGuard = 5 * time.Minute
+)
+
 // 5. Budget: at the default 2 req/s, every account x region stays inside a
 // 2 req/s token bucket (burst limit.Burst) for the whole observation window.
 func budgetCollectGroup(t *testing.T) {
 	stack := newAWSCollectStack(t, fakeaws.ScenarioLoad5k, awsCollectOptions{budget: awsCollectDefaultBudget})
 	client := stack.client()
 	connectCollectAccount(t, client, "Load")
-	time.Sleep(40 * time.Second)
+	// Observe until the collector pair has sent the sample; at the budget
+	// that spans about forty seconds, and a missing limiter gets there at
+	// once and shows as excess below.
+	eventuallyWithin(t, awsBudgetObserveGuard, fmt.Sprintf("%d collector requests to reach the fixture", awsBudgetSample), func() bool {
+		return stack.recorder.count(awsCollectAccount, awsCollectRegion) >= awsBudgetSample
+	})
 
 	records := stack.recorder.snapshot()
 	if int64(len(records)) != stack.fake.TotalRequests() {
@@ -1101,8 +1125,10 @@ func deletePurgeOn(t *testing.T, backend, dataDir string) {
 		}
 	}
 	assertPurged("right after delete")
-	// One full scheduler tick: an in-flight or next pass must not resurrect it.
-	time.Sleep(11 * time.Second)
+	// A pass in flight at the delete and the whole next pass must not
+	// resurrect it: wait until a second pass starts after the delete.
+	passes := stack.passes.Load()
+	eventually(t, "a full scheduler pass after the delete", func() bool { return stack.passes.Load() >= passes+2 })
 	assertPurged("after a scheduler tick")
 
 	readded := connectCollectAccount(t, client, "Production again")

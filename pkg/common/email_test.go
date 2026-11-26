@@ -7,6 +7,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 	htmlparser "golang.org/x/net/html"
 )
 
@@ -21,6 +22,7 @@ func TestKubernetesIssueEmailHTMLRendererPreservesSignedQueries(t *testing.T) {
 		"AlertName": `Checkout & shop <script>alert("x")</script>`, "AckURL": targets[0],
 		"Links": []map[string]string{{"label": "Open timeline", "url": targets[1]}, {"label": "Investigate with DevOps Agent", "url": targets[2]}},
 	}
+	utils.MarkInternalAlert(content)
 	provider := NewEmailProvider(config.EmailConfig{KubernetesIssueTemplatePath: "../../config/kubernetes_issue_email.tmpl"})
 	rendered, err := provider.renderAlertTemplate(&m.Incident{Content: &content})
 	if err != nil {

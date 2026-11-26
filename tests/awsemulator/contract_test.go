@@ -64,11 +64,12 @@ func TestDefaultTagValueAllowlistApplies(t *testing.T) {
 }
 
 // Every unit whose API the emulator serves faithfully commits on the first
-// sync. AppRegistry is the one known failure (see TestAppRegistryApplications).
+// sync. AppRegistry and RAM are the known failures (see
+// TestAppRegistryApplications and TestRAMResourceShares).
 func TestEveryFaithfulUnitCommits(t *testing.T) {
 	w := seeded(t)
 	t.Logf("first sync of %d units took %s", len(w.report.Units), w.syncTime)
-	known := map[string]bool{snapshot.AppRegistryService: true}
+	known := map[string]bool{snapshot.AppRegistryService: true, ramService: true}
 	for _, unit := range w.report.Units {
 		if known[unit.Unit.Service] {
 			continue
@@ -570,6 +571,14 @@ func TestTaggingGetResources(t *testing.T) {
 func TestAppRegistryApplications(t *testing.T) {
 	requireEmulator(t)
 	t.Skip("AppRegistry: ListApplications sends creationTime as epoch seconds, which SDK Go v2 cannot decode, and ListAssociatedResources answers NotImplemented (upstream defects); stays on tests/fakeaws")
+}
+
+// ramService is the collector unit that reads resource shares.
+const ramService = "ram"
+
+func TestRAMResourceShares(t *testing.T) {
+	requireEmulator(t)
+	t.Skip("RAM: ListResources answers HTTP 501 NotImplemented (\"scaffolded but not implemented\") for every resource owner, so the unit cannot read the shares it owns or receives (upstream defect); GetResourceShareAssociations is served. Resource shares stay on tests/fakeaws")
 }
 
 func TestAWSHealthEvents(t *testing.T) {

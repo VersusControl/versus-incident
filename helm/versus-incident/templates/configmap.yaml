@@ -488,6 +488,16 @@ data:
           value_allowlist: {{ $awsTags.valueAllowlist | default list | toJson }}
         budgets:
           max_requests_per_second: {{ $awsBudgets.maxRequestsPerSecond | default 2 }}
+          calls_per_day: {{ $awsBudgets.callsPerDay | default 20000 }}
+          {{- $awsPerCycle := $awsBudgets.perCycle | default dict }}
+          per_cycle:
+            health: {{ $awsPerCycle.health | default 200 }}
+            inventory: {{ $awsPerCycle.inventory | default 700 }}
+            changes: {{ $awsPerCycle.changes | default 60 }}
+            identity: {{ $awsPerCycle.identity | default 120 }}
+            policies: {{ $awsPerCycle.policies | default 250 }}
+            credential_report: {{ $awsPerCycle.credentialReport | default 3 }}
+            findings: {{ $awsPerCycle.findings | default 50 }}
         optional_data:
           cost_explorer: {{ dig "costExplorer" false $awsOptional }}
           security_hub: {{ dig "securityHub" false $awsOptional }}
@@ -497,9 +507,22 @@ data:
         collect:
           enable: {{ dig "enable" true $awsCollect }}
           intervals:
-            inventory: {{ $awsIntervals.inventory | default "15m" | quote }}
-            health: {{ $awsIntervals.health | default "2m" | quote }}
+            inventory: {{ $awsIntervals.inventory | default "6h" | quote }}
+            {{- if $awsIntervals.health }}
+            health: {{ $awsIntervals.health | quote }}
+            {{- end }}
             changes: {{ $awsIntervals.changes | default "5m" | quote }}
+            {{- if $awsIntervals.healthHot }}
+            health_hot: {{ $awsIntervals.healthHot | quote }}
+            {{- end }}
+            identity: {{ $awsIntervals.identity | default "1h" | quote }}
+            {{- if $awsIntervals.policies }}
+            policies: {{ $awsIntervals.policies | quote }}
+            {{- end }}
+            credential_report: {{ $awsIntervals.credentialReport | default "4h" | quote }}
+            findings: {{ $awsIntervals.findings | default "1h" | quote }}
+            trails: {{ $awsIntervals.trails | default "24h" | quote }}
+            regions_off: {{ $awsIntervals.regionsOff | default "24h" | quote }}
           history:
             max_generations: {{ $awsHistory.maxGenerations | default 48 }}
             max_age: {{ $awsHistory.maxAge | default "168h" | quote }}

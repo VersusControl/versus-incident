@@ -50,6 +50,9 @@ import (
 
 const finopsStackDeployment = "default"
 
+// finopsBillingRegion is the Region the cost reads are paced and paused in.
+const finopsBillingRegion = "us-east-1"
+
 // finopsStackDay is the day the cost fixtures end; every clock is pinned to it.
 var finopsStackDay = time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
 
@@ -82,6 +85,7 @@ type finopsStack struct {
 	scheduler *awscost.Scheduler
 	clock     *stackClock
 	client    *awsClient
+	limiter   *awslimit.Manager
 
 	pumpAgain func() (int, error)
 	label     string
@@ -145,6 +149,7 @@ func newFinOpsStackWith(t *testing.T, scenario string, connector config.AWSConne
 	// registerAWSSettingsController (collectors are not started: the
 	// snapshot store is seeded from the scenario instead).
 	limiter := awslimit.NewManager(connector.Budgets.MaxRequestsPerSecond)
+	stack.limiter = limiter
 	stack.snapshots = awssnapshot.New(stack.provider, scope, awssnapshot.WithClock(stack.clock.Now), awssnapshot.WithOptions(func() awssnapshot.Options {
 		c := current()
 		return awssnapshot.Options{MaxGenerations: c.Collect.MaxGenerations(), MaxAge: c.Collect.MaxAge(),
@@ -596,9 +601,15 @@ func deniedAccountFinOpsGroup(t *testing.T) {
 	observeFinOps("cost_denied_account", map[string]any{"answer": summary["answer"], "sync": sync, "paid": stack.fake.PaidCostRequests()})
 }
 
-// waitLimiterBackoff lets the shared limiter's throttle pause (real time, at
-// most 30 s) pass before the next pinned-clock day.
-func waitLimiterBackoff() { time.Sleep(32 * time.Second) }
+// endLimiterBackoff ends the shared limiter's throttle pause before the next
+// pinned-clock day. The pause runs on real time (at most 30 s) while the
+// stack's clock jumps a day, so by that day it has long passed; clearing it
+// for every configured payer's billing Region is what that day sees.
+func (stack *finopsStack) endLimiterBackoff() {
+	for _, account := range config.GetConfig().Connectors.AWS.Accounts {
+		stack.limiter.Succeeded(account.AccountID, finopsBillingRegion)
+	}
+}
 
 func throttledFinOpsGroup(t *testing.T) {
 	// First read throttled: nothing to show yet, and it says why.
@@ -610,7 +621,7 @@ func throttledFinOpsGroup(t *testing.T) {
 	}
 	// Last good stays: a clean day, then a throttled day.
 	stack.fake.SetCostThrottled(false)
-	waitLimiterBackoff()
+	stack.endLimiterBackoff()
 	stack.clock.Set(finopsStackDay.Add(24 * time.Hour))
 	stack.refresh()
 	_, good, _ := stack.get("/api/admin/aws/finops/summary?period=mtd")
@@ -654,7 +665,7 @@ func capReachedFinOpsGroup(t *testing.T) {
 		t.Errorf("paid requests %d -> %d after the cap", paid, again)
 	}
 	// Day 2 is priced from day 1's pages and commits within the cap.
-	waitLimiterBackoff()
+	stack.endLimiterBackoff()
 	stack.clock.Set(finopsStackDay.Add(24 * time.Hour))
 	stack.refresh()
 	day2Paid := stack.fake.PaidCostRequests() - paid
@@ -934,7 +945,7 @@ func budgetAlertFinOpsGroup(t *testing.T) {
 	if sent, err := stack.pumpAgain(); err != nil || sent != 0 {
 		t.Errorf("repeat pump sent %d (%v)", sent, err)
 	}
-	waitLimiterBackoff()
+	stack.endLimiterBackoff()
 	stack.clock.Set(finopsStackDay.Add(24 * time.Hour))
 	stack.refresh()
 	if again := stack.alertKindCount("budget_status"); again != 1 {

@@ -19,6 +19,9 @@ type LarkCard struct {
 // LarkCardHeader represents the header of a Lark card
 type LarkCardHeader struct {
 	Title LarkCardTitle `json:"title"`
+	// Template is the header colour (red, orange, grey, ...); empty keeps
+	// Lark's default.
+	Template string `json:"template,omitempty"`
 }
 
 // LarkCardTitle represents the title component of a Lark card header
@@ -66,4 +69,13 @@ func CreateLarkMessage(content string, isResolved bool) *LarkMessage {
 			},
 		},
 	}
+}
+
+// CreateLarkCard is a Lark interactive card with the given header title
+// and colour template, for alerts whose frame follows what they are.
+func CreateLarkCard(content, title, colour string) *LarkMessage {
+	message := CreateLarkMessage(content, false)
+	message.Card.Header.Title.Content = title
+	message.Card.Header.Template = colour
+	return message
 }

@@ -101,6 +101,9 @@ func (s *Server) worldFor(request awsRequest) world {
 	if request.scenario == ScenarioLoad5k {
 		load = s.LoadSize()
 	}
+	if request.scenario == ScenarioSizingLarge {
+		load = SizingLoadPerRegion
+	}
 	now := s.clock()
 	s.mu.Lock()
 	extra := append([]trailEvent(nil), s.lateEvents...)
@@ -177,6 +180,17 @@ func (w world) share(kind string) int {
 	if w.load <= 0 {
 		return 0
 	}
+	if w.scenario == ScenarioSizingLarge {
+		switch kind {
+		case "instances":
+			return SizingInstances
+		case "functions":
+			return SizingFunctions
+		case "queues":
+			return SizingQueues
+		}
+		return 0
+	}
 	switch kind {
 	case "instances":
 		return w.load * 4 / 10
@@ -187,9 +201,17 @@ func (w world) share(kind string) int {
 	}
 }
 
-func (w world) tables() int { return (w.load - w.load*4/10 - 2*(w.load*2/10)) / 2 }
+func (w world) tables() int {
+	if w.scenario == ScenarioSizingLarge && w.load > 0 {
+		return SizingTables
+	}
+	return (w.load - w.load*4/10 - 2*(w.load*2/10)) / 2
+}
 
 func (w world) topics() int {
+	if w.scenario == ScenarioSizingLarge && w.load > 0 {
+		return SizingLoadPerRegion - SizingInstances - SizingFunctions - SizingQueues - SizingTables
+	}
 	return w.load - w.load*4/10 - 2*(w.load*2/10) - w.tables()
 }
 

@@ -30,11 +30,21 @@ const redacted = "[redacted]"
 
 // RedactSecrets returns s with every URL cut to scheme://host (no userinfo,
 // path, query or fragment), Telegram-style bot<id>:<token> credentials
-// replaced, and sig=/token=/key= style values replaced. It is idempotent.
+// replaced, and sig=/token=/key= style values replaced; then, in a second
+// pass over that result, AWS credentials a person pastes replaced (see
+// redactAWS). The second pass only replaces more text with the marker, so
+// everything the first pass removes stays removed. Applying it again
+// changes nothing, except where a URL's host was itself cut to the marker.
 func RedactSecrets(s string) string {
 	if s == "" {
 		return s
 	}
+	return redactAWS(redactSecretsFirstPass(s))
+}
+
+// redactSecretsFirstPass is the URL, bot token and name=value redaction
+// every caller has always had.
+func redactSecretsFirstPass(s string) string {
 	s = urlInTextRE.ReplaceAllStringFunc(s, redactURL)
 	s = botTokenRE.ReplaceAllString(s, "bot"+redacted)
 	s = secretParamRE.ReplaceAllString(s, "${1}="+redacted)

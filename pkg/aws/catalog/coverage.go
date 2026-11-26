@@ -15,6 +15,9 @@ const (
 	unitKMS            = "kms"
 	unitECR            = "ecr"
 	unitS3Policy       = "s3-policy"
+	// unitTrails reads the account's trails and their event selectors, to
+	// learn how many copies of each call the account's trails keep.
+	unitTrails = "trails"
 )
 
 // linkUnits are the unit services that read cross-account links through
@@ -26,6 +29,7 @@ var linkUnits = map[string][]string{
 	unitKMS:           {"kms:ListKeys", "kms:GetKeyPolicy"},
 	unitECR:           {"ecr:Describe*", "ecr:GetRepositoryPolicy"},
 	unitS3Policy:      {"s3:ListAllMyBuckets", "s3:GetBucketPolicy"},
+	unitTrails:        {"cloudtrail:DescribeTrails", "cloudtrail:GetEventSelectors"},
 }
 
 // FixActionsFor returns the least-privilege IAM actions that clear a denial
@@ -63,6 +67,7 @@ var operationFixes = map[string][]string{
 	"route53/ListResourceRecordSets":                    {"route53:ListResourceRecordSets"},
 	"s3-policy/GetBucketPolicy":                         {"s3:GetBucketPolicy"},
 	"transit-gateway/DescribeTransitGatewayAttachments": {"ec2:DescribeTransitGatewayAttachments"},
+	"trails/GetEventSelectors":                          {"cloudtrail:GetEventSelectors"},
 	"aws-health/DescribeAffectedEntities":               {"health:DescribeAffectedEntities"},
 	"cloudformation/ListStackResources":                 {"cloudformation:ListStackResources"},
 	"ec2/DescribeInstanceStatus":                        {"ec2:DescribeInstanceStatus"},
@@ -134,7 +139,7 @@ func UnitFixActions() []string {
 	for _, service := range services {
 		add(service.FixActions)
 	}
-	for _, unit := range []string{unitVPC, unitTagging, unitAppRegistry, unitTransitGateway, unitRAM, unitOrganizations, unitKMS, unitECR, unitS3Policy} {
+	for _, unit := range []string{unitVPC, unitTagging, unitAppRegistry, unitTransitGateway, unitRAM, unitOrganizations, unitKMS, unitECR, unitS3Policy, unitTrails} {
 		add(FixActionsFor(unit))
 	}
 	sort.Strings(out)
@@ -187,6 +192,7 @@ var impacts = map[string]Impact{
 	unitKMS:            {Hides: "keys and which accounts may use them"},
 	unitECR:            {Hides: "image repositories and which accounts may pull from them"},
 	unitS3Policy:       {Hides: "which accounts bucket policies let in"},
+	unitTrails:         {Hides: "how many of your trails record our calls, so what extra trail copies cost"},
 
 	"elbv2/DescribeTargetHealth":                        {Hides: "which targets are unhealthy"},
 	"s3/GetPublicAccessBlock":                           {Hides: "whether those buckets are public"},
@@ -213,6 +219,7 @@ var impacts = map[string]Impact{
 	"kms/GetKeyPolicy":                                  {Hides: "which accounts those key policies let in"},
 	"ecr/GetRepositoryPolicy":                           {Hides: "which accounts may pull from those repositories"},
 	"s3-policy/GetBucketPolicy":                         {Hides: "which accounts those bucket policies let in"},
+	"trails/GetEventSelectors":                          {Hides: "whether those trails record read events"},
 }
 
 // ImpactFor returns what a source that is not read leaves out, preferring

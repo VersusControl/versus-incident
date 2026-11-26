@@ -103,6 +103,12 @@ func worldOperation(request awsRequest) string {
 // reports false when the request is left to the probe fixture.
 func (s *Server) writeWorldOperation(writer http.ResponseWriter, request awsRequest) bool {
 	operation := worldOperation(request)
+	if request.scenario == ScenarioSizingLarge {
+		if sized, ok := sizingHandlers[operation]; ok {
+			sized(s, writer, request, s.worldFor(request))
+			return true
+		}
+	}
 	handler, ok := worldHandlers[operation]
 	if !ok {
 		return false
@@ -903,7 +909,11 @@ func (s *Server) worldLookupEvents(writer http.ResponseWriter, request awsReques
 	start, hasStart := jsonTime(fields, "StartTime")
 	end, hasEnd := jsonTime(fields, "EndTime")
 	var matching []trailEvent
-	for _, event := range w.trail() {
+	trail := w.trail()
+	if w.scenario == ScenarioSizingLarge && hasStart && hasEnd {
+		trail = sizingTrail(w, start, end)
+	}
+	for _, event := range trail {
 		if (hasStart && event.at.Before(start)) || (hasEnd && !event.at.Before(end)) {
 			continue
 		}

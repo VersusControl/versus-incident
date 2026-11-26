@@ -314,33 +314,49 @@ agent:
 		"AWS_CONFIG_FILE=" + filepath.Join(r.dir, "no-aws-config"),
 		"AWS_SHARED_CREDENTIALS_FILE=" + filepath.Join(r.dir, "no-aws-credentials"),
 	}
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	if err := r.launch(cmd, logFile); err != nil {
 		t.Fatalf("%s: start: %v", r.name, err)
 	}
 	r.cmd, r.log, r.done = cmd, logFile, make(chan struct{})
 	go func(done chan struct{}) { _ = cmd.Wait(); close(done) }(r.done)
-	deadline := time.Now().Add(90 * time.Second)
-	for {
-		response, err := http.Get(r.url() + "/healthz")
-		if err == nil {
-			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return
-			}
-		}
+	waitFor(t, r.name+" to answer /healthz; see "+filepath.Join(r.dir, "server.log"), 90*time.Second, func() bool {
 		select {
 		case <-r.done:
 			t.Fatalf("%s exited during boot; see %s", r.name, filepath.Join(r.dir, "server.log"))
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s did not become healthy; see %s", r.name, filepath.Join(r.dir, "server.log"))
+		response, err := http.Get(r.url() + "/healthz")
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		response.Body.Close()
+		return response.StatusCode == http.StatusOK
+	})
 }
+
+// launch starts the server in its own process group, with no input and its
+// output in logFile, so it never holds the output of whatever runs the test.
+// It records "<pid> <pgid>" in server.proc in the replica folder until stop or
+// kill ends the group. A test binary that dies before its cleanups run (a
+// -timeout panic, a kill) leaves that file behind, so the runner of the test
+// can still stop the group.
+func (r *replica) launch(cmd *exec.Cmd, logFile *os.File) error {
+	cmd.Stdin = nil
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	record := fmt.Sprintf("%d %d\n", cmd.Process.Pid, cmd.Process.Pid)
+	if err := os.WriteFile(r.processRecord(), []byte(record), 0o600); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		return err
+	}
+	return nil
+}
+
+func (r *replica) processRecord() string { return filepath.Join(r.dir, "server.proc") }
 
 func (r *replica) stop() {
 	if r.cmd == nil {
@@ -349,10 +365,13 @@ func (r *replica) stop() {
 	_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGTERM)
 	select {
 	case <-r.done:
-	case <-time.After(15 * time.Second):
+	case <-time.After(stopGrace):
 		_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
 		<-r.done
 	}
+	// Anything else left in the server's group goes with it.
+	_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
+	_ = os.Remove(r.processRecord())
 	_ = r.log.Close()
 	r.cmd = nil
 }
@@ -412,17 +431,10 @@ func (r *replica) connect(account string) {
 	if verify.status != http.StatusAccepted {
 		t.Fatalf("%s: verify %s = %d %s", r.name, account, verify.status, verify.body)
 	}
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		view := r.call(http.MethodGet, "/api/admin/aws/connect/drafts/"+draft, "")
-		if status, _ := view.json()["status"].(string); status == "verified" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s: draft for %s did not verify: %s", r.name, account, view.body)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	waitFor(t, "the draft for "+account+" on "+r.name+" to verify", 60*time.Second, func() bool {
+		status, _ := r.call(http.MethodGet, "/api/admin/aws/connect/drafts/"+draft, "").json()["status"].(string)
+		return status == "verified"
+	})
 	commit := r.call(http.MethodPost, "/api/admin/aws/accounts",
 		`{"draft_id":"`+draft+`","display_name":"qa-`+account+`","regions":["us-east-1"]}`)
 	if commit.status != http.StatusCreated {
@@ -640,16 +652,33 @@ func (d *database) shiftRows(by time.Duration) {
 	}
 }
 
+// stopGrace is how long a server gets to shut down after SIGTERM before it
+// is killed. It is a hang guard, not a budget: a clean stop takes a second.
+const stopGrace = 60 * time.Second
+
+// waitFor waits until ok reports true and returns how long that took. limit
+// is a hang guard, stretched under race: a correct server reaches the
+// condition long before it, and only a hang fails the test there.
 func waitFor(t *testing.T, what string, limit time.Duration, ok func() bool) time.Duration {
 	t.Helper()
 	started := time.Now()
-	for !ok() {
-		if time.Since(started) > limit {
-			t.Fatalf("timed out after %s waiting for %s", limit, what)
+	guard := scaledTimeout(limit)
+	for pause := 50 * time.Millisecond; !ok(); pause = min(2*pause, time.Second) {
+		if time.Since(started) > guard {
+			t.Fatalf("hang guard (%s) reached waiting for %s", guard, what)
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(pause) // testlint:allow the shared wait helper's own poll pause
 	}
 	return time.Since(started)
+}
+
+// costReady reports whether this replica's scheduler has run its first
+// tick: until that tick reads the live configuration, cost reads answer
+// enabled=false.
+func (r *replica) costReady(period string) bool {
+	got := r.call(http.MethodGet, "/api/admin/aws/finops/summary?period="+period, "")
+	enabled, _ := got.json()["enabled"].(bool)
+	return got.status == http.StatusOK && enabled
 }
 
 // ---- results ----
@@ -732,7 +761,10 @@ func TestAWSTwoReplicasOnOnePostgres(t *testing.T) {
 		a.start(bin, dsn, single)
 		waitFor(t, "replica A's scheduled refresh to reach Cost Explorer", 60*time.Second, func() bool { return a.front.ce.Load() > 0 })
 		b.start(bin, dsn, single)
-		time.Sleep(3 * time.Second) // B's first tick runs at boot
+		// B's first tick runs at boot. While A's refresh is held it leaves no
+		// observable trace (its cost reads stay off), so the claim that B
+		// sends nothing holds over a window that spans that tick.
+		time.Sleep(3 * time.Second) // testlint:allow absence window over replica B's boot tick, which has no observable event while A's refresh is held
 		holders := db.lockHolders()
 		bDuringHold := b.front.ce.Load()
 
@@ -793,7 +825,9 @@ func TestAWSTwoReplicasOnOnePostgres(t *testing.T) {
 		a.t, b.t, db.t = t, t, t
 		// B's next minute tick sees today's refresh done and sends nothing.
 		before := b.front.ce.Load()
-		time.Sleep(65 * time.Second)
+		// The scheduler ticks once a minute with no observable no-op tick, so
+		// the claim (nothing sent) holds over a window that spans one tick.
+		time.Sleep(65 * time.Second) // testlint:allow absence window covering one product scheduler tick
 		if after := b.front.ce.Load(); after != before {
 			t.Errorf("replica B ran a scheduled refresh after A's: %d -> %d Cost Explorer requests", before, after)
 		}
@@ -849,7 +883,9 @@ func TestAWSTwoReplicasOnOnePostgres(t *testing.T) {
 		fromA, fromB := a.logSize(), b.logSize()
 		a.start(bin, dsn, single)
 		b.start(bin, dsn, single)
-		time.Sleep(3 * time.Second) // each replica's first tick runs at boot
+		// Each replica's first tick runs at boot: its configuration read
+		// turns cost reads on, then it tries the rollup reconcile.
+		waitFor(t, "both replicas' first scheduler tick", 60*time.Second, func() bool { return a.costReady(period) && b.costReady(period) })
 		heldA, heldB := a.summaryTotal(period), b.summaryTotal(period)
 		netWhileHeld := db.rollupNet(row)
 		if heldA != truthA || heldB != truthA {
@@ -865,7 +901,9 @@ func TestAWSTwoReplicasOnOnePostgres(t *testing.T) {
 		}
 		released := time.Now()
 		repaired := waitFor(t, "a replica to repair the drifted rollup", 90*time.Second, func() bool { return db.rollupNet(row) == row.net })
-		time.Sleep(time.Until(released.Add(65 * time.Second))) // both replicas' ticks have run
+		// The other replica's next tick compares and finds nothing, which
+		// leaves no trace; the window spans one tick of both replicas.
+		time.Sleep(time.Until(released.Add(65 * time.Second))) // testlint:allow absence window covering one product scheduler tick
 		rebuiltA, rebuiltB := a.logCount(fromA, rebuilt), b.logCount(fromB, rebuilt)
 		if rebuiltA+rebuiltB != 1 {
 			t.Errorf("rollup rebuilds after the release: A %d, B %d; want exactly one (the other replica compares and finds nothing)", rebuiltA, rebuiltB)
@@ -883,7 +921,9 @@ func TestAWSTwoReplicasOnOnePostgres(t *testing.T) {
 		fromA, fromB = a.logSize(), b.logSize()
 		restart(single)
 		repairedOnBoot := waitFor(t, "the restarted replicas to repair the rollup", 90*time.Second, func() bool { return db.rollupNet(row) == row.net })
-		time.Sleep(3 * time.Second)
+		waitFor(t, "both restarted replicas' first tick and the repair's log line", 60*time.Second, func() bool {
+			return a.costReady(period) && b.costReady(period) && a.logCount(fromA, rebuilt)+b.logCount(fromB, rebuilt) > 0
+		})
 		bootA, bootB := a.logCount(fromA, rebuilt), b.logCount(fromB, rebuilt)
 		finalA, finalB := a.summaryTotal(period), b.summaryTotal(period)
 		if bootA+bootB != 1 || finalA != truthA || finalB != truthA {
@@ -1206,8 +1246,10 @@ func TestAWSTwoReplicasHoldTheDailyPaidCap(t *testing.T) {
 		got = r.call(http.MethodPost, "/api/admin/aws/finops/drilldown", `{"account":"`+account+`","service":"Amazon Elastic Compute Cloud - Compute"}`)
 		calls = append(calls, map[string]any{"replica": r.name, "call": "drilldown " + account, "status": got.status, "body": fmt.Sprintf("%.200s", got.body)})
 	}
-	// Two more ticks on each replica.
-	time.Sleep(125 * time.Second)
+	// Two more ticks on each replica. The cap is a "never more than" claim
+	// and the one-minute scheduler tick has no observable no-op, so the
+	// window spans two ticks.
+	time.Sleep(125 * time.Second) // testlint:allow absence window covering two product scheduler ticks
 	paid, meter := fake.PaidCostRequests(), db.meter()
 	if paid > 20 || meter > 20 {
 		t.Errorf("paid requests over the daily cap across two replicas: fixture %d, meter %d", paid, meter)

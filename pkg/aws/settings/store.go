@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -101,6 +102,20 @@ func HealthKey(org, accountID string) string { return HealthPrefix(org) + accoun
 // Store persists connector state through the shared storage provider. It owns
 // the tenancy scope: reads are allowed for any organization in scope.Read and
 // writes only for scope.Write.
+//
+// A read for the write organization walks the whole read scope, the write
+// organization first, so settings kept under an organization the deployment
+// inherited (the open-source default organization once a licence is added)
+// stay in effect until the write organization saves its own. Accounts merge
+// per account ID: the first organization holding a record for the ID
+// answers, and an empty record there is a removal that hides the inherited
+// one, and a removal record there hides the inherited one. An empty record
+// is a deleted one and hides nothing. An account's health is read from the
+// write organization down to the organization holding its effective
+// record, so an inherited record's health never outlives a removal or a
+// record of the write organization's own. Organization-wide settings
+// (options, privacy, self-test) take the first organization's non-empty
+// record. Writes never reach an inherited organization.
 type Store struct {
 	provider storage.Provider
 	scope    tenancy.OrgScope
@@ -142,6 +157,31 @@ func (store *Store) canRead(org string) bool {
 
 func (store *Store) canWrite(org string) bool {
 	return store != nil && store.scope.Normalized().Write == tenancy.NormalizeOrgID(org)
+}
+
+// readOrgs is the order a read for org walks: the whole read scope, write
+// organization first, for the write organization; org alone otherwise.
+func (store *Store) readOrgs(org string) []string {
+	org = tenancy.NormalizeOrgID(org)
+	if store.canWrite(org) {
+		return store.scope.Normalized().Read
+	}
+	return []string{org}
+}
+
+// resolve returns the first non-empty record for key across readOrgs(org).
+// Nothing stored anywhere answers an empty record.
+func (store *Store) resolve(org string, key func(org string) string) ([]byte, error) {
+	for _, each := range store.readOrgs(org) {
+		data, err := store.read(each, key(each))
+		if err != nil {
+			return nil, err
+		}
+		if len(data) > 0 {
+			return data, nil
+		}
+	}
+	return nil, nil
 }
 
 func (store *Store) read(org, key string) ([]byte, error) {
@@ -190,6 +230,17 @@ func (store *Store) delete(org, key string) error {
 	return store.provider.WriteBlob(key, []byte{})
 }
 
+// writeRemoval stores the record that hides an inherited account.
+func (store *Store) writeRemoval(org, key string) error {
+	if store == nil || store.provider == nil {
+		return ErrNoStorage
+	}
+	if !store.canWrite(org) {
+		return ErrOutOfScope
+	}
+	return store.provider.WriteBlob(key, removalRecord)
+}
+
 // ListAccounts returns every stored wizard account, sorted by account ID.
 func (store *Store) ListAccounts(org string) ([]AccountRecord, error) {
 	accounts, _, err := store.listAccounts(org)
@@ -211,7 +262,8 @@ func (store *Store) ListAccountsStrict(org string) ([]AccountRecord, error) {
 }
 
 // listAccounts decodes every stored account and counts the records it could
-// not read. An empty blob is a deleted record, not an unreadable one.
+// not read. An empty blob is a removed record, not an unreadable one; under
+// a higher organization it also hides an inherited record for that account.
 func (store *Store) listAccounts(org string) ([]AccountRecord, int, error) {
 	if store == nil || store.provider == nil {
 		return nil, 0, ErrNoStorage
@@ -219,46 +271,147 @@ func (store *Store) listAccounts(org string) ([]AccountRecord, int, error) {
 	if !store.canRead(org) {
 		return nil, 0, ErrOutOfScope
 	}
-	blobs, err := store.provider.ListBlobs(AccountPrefix(org))
-	if err != nil {
-		return nil, 0, err
-	}
-	accounts := make([]AccountRecord, 0, len(blobs))
+	seen := map[string]bool{}
+	accounts := make([]AccountRecord, 0)
 	unreadable := 0
-	for _, blob := range blobs {
-		if len(blob.Data) == 0 {
-			continue
+	for _, each := range store.readOrgs(org) {
+		prefix := AccountPrefix(each)
+		blobs, err := store.provider.ListBlobs(prefix)
+		if err != nil {
+			return nil, 0, err
 		}
-		var record AccountRecord
-		if json.Unmarshal(blob.Data, &record) != nil || !ValidAccountID(record.AccountID) {
-			unreadable++
-			continue
+		for _, blob := range blobs {
+			id := strings.TrimPrefix(blob.Name, prefix)
+			if seen[id] || len(blob.Data) == 0 {
+				continue
+			}
+			seen[id] = true
+			if isRemoval(blob.Data) {
+				continue
+			}
+			var record AccountRecord
+			if json.Unmarshal(blob.Data, &record) != nil || !ValidAccountID(record.AccountID) {
+				unreadable++
+				continue
+			}
+			record.Source = SourceWizard
+			accounts = append(accounts, record)
 		}
-		record.Source = SourceWizard
-		accounts = append(accounts, record)
 	}
 	sortAccounts(accounts)
 	return accounts, unreadable, nil
 }
 
-// GetAccount returns one stored wizard account.
+// removalRecord hides an inherited account under the write organization.
+// It is distinct from an empty record, which a backend without an exact-key
+// delete leaves for a deleted one and which hides nothing.
+var removalRecord = []byte(`{"removed":true}`)
+
+func isRemoval(data []byte) bool { return bytes.Equal(data, removalRecord) }
+
+// accountState is what one organization holds for an account.
+type accountState int
+
+const (
+	accountAbsent accountState = iota
+	accountRemoved
+	accountStored
+)
+
+// storedAccount reads the record one organization holds for an account.
+// The exact key is listed rather than read, because a read answers a
+// missing record and a deleted one alike.
+func (store *Store) storedAccount(org, accountID string) ([]byte, accountState, error) {
+	if store == nil || store.provider == nil {
+		return nil, accountAbsent, ErrNoStorage
+	}
+	if !store.canRead(org) {
+		return nil, accountAbsent, ErrOutOfScope
+	}
+	key := AccountKey(org, accountID)
+	blobs, err := store.provider.ListBlobs(key)
+	if err != nil {
+		return nil, accountAbsent, err
+	}
+	for _, blob := range blobs {
+		switch {
+		case blob.Name != key || len(blob.Data) == 0:
+		case isRemoval(blob.Data):
+			return nil, accountRemoved, nil
+		default:
+			return blob.Data, accountStored, nil
+		}
+	}
+	return nil, accountAbsent, nil
+}
+
+// GetAccount returns one stored wizard account, from the first organization
+// in read order that holds a record for it.
 func (store *Store) GetAccount(org, accountID string) (AccountRecord, error) {
 	if !ValidAccountID(accountID) {
 		return AccountRecord{}, ErrInvalidRecord
 	}
-	data, err := store.read(org, AccountKey(org, accountID))
-	if err != nil {
-		return AccountRecord{}, err
+	if store == nil || store.provider == nil {
+		return AccountRecord{}, ErrNoStorage
 	}
-	if len(data) == 0 {
-		return AccountRecord{}, ErrNotFound
+	for _, each := range store.readOrgs(org) {
+		data, state, err := store.storedAccount(each, accountID)
+		if err != nil {
+			return AccountRecord{}, err
+		}
+		switch state {
+		case accountAbsent:
+			continue
+		case accountRemoved:
+			return AccountRecord{}, ErrNotFound
+		}
+		var record AccountRecord
+		if json.Unmarshal(data, &record) != nil || record.AccountID != accountID {
+			return AccountRecord{}, ErrInvalidRecord
+		}
+		record.Source = SourceWizard
+		return record, nil
 	}
-	var record AccountRecord
-	if json.Unmarshal(data, &record) != nil || record.AccountID != accountID {
-		return AccountRecord{}, ErrInvalidRecord
+	return AccountRecord{}, ErrNotFound
+}
+
+// inheritedAccount reports whether an organization after org in read order
+// still holds a live record for the account, so removing org's own record
+// alone would bring that one back.
+func (store *Store) inheritedAccount(org, accountID string) (bool, error) {
+	for _, each := range store.readOrgs(org) {
+		if each == tenancy.NormalizeOrgID(org) {
+			continue
+		}
+		_, state, err := store.storedAccount(each, accountID)
+		if err != nil {
+			return false, err
+		}
+		if state != accountAbsent {
+			return state == accountStored, nil
+		}
 	}
-	record.Source = SourceWizard
-	return record, nil
+	return false, nil
+}
+
+// healthOrgs is the order an account's health is read in: from org down to
+// the organization holding the account's effective record (a stored record
+// or a removal), or org alone when none holds one.
+func (store *Store) healthOrgs(org, accountID string) ([]string, error) {
+	orgs := store.readOrgs(org)
+	if len(orgs) == 1 {
+		return orgs, nil
+	}
+	for position, each := range orgs {
+		_, state, err := store.storedAccount(each, accountID)
+		if err != nil {
+			return nil, err
+		}
+		if state != accountAbsent {
+			return orgs[:position+1], nil
+		}
+	}
+	return orgs[:1], nil
 }
 
 // SaveAccount writes one wizard account and raises the account settings
@@ -320,7 +473,18 @@ func (store *Store) RemoveAccount(org, accountID string, purge func(revision uin
 		}
 		before = revision
 	}
-	if err := store.delete(org, AccountKey(org, accountID)); err != nil {
+	// An account the deployment inherited is hidden by a removal record
+	// under the write organization; deleting only that organization's row
+	// would bring the inherited one back. Any other account is deleted.
+	inherited, err := store.inheritedAccount(org, accountID)
+	if err != nil {
+		return err
+	}
+	if inherited {
+		if err := store.writeRemoval(org, AccountKey(org, accountID)); err != nil {
+			return err
+		}
+	} else if err := store.delete(org, AccountKey(org, accountID)); err != nil {
 		return err
 	}
 	if err := store.delete(org, HealthKey(org, accountID)); err != nil {
@@ -345,7 +509,43 @@ type accountsRevision struct {
 // after every account save or removal and kept with the account records, so
 // it only grows across restarts and is independent of any clock. Read it
 // before listing the accounts it describes. A missing record is zero.
+//
+// The write organization's revision adds the counters of every inherited
+// organization in its read scope. Those are never written through this
+// scope, so the sum still only grows, and it starts above any revision an
+// inherited removal was recorded at: an account removed before a licence
+// and connected again after it is not held back by the older removal.
 func (store *Store) AccountsRevision(org string) (uint64, error) {
+	var total uint64
+	for _, each := range store.readOrgs(org) {
+		revision, err := store.orgRevision(each)
+		if err != nil {
+			return 0, err
+		}
+		total += revision
+	}
+	return total, nil
+}
+
+// inheritedRevision is the part of org's revision its inherited
+// organizations contribute.
+func (store *Store) inheritedRevision(org string) (uint64, error) {
+	var total uint64
+	for _, each := range store.readOrgs(org) {
+		if each == tenancy.NormalizeOrgID(org) {
+			continue
+		}
+		revision, err := store.orgRevision(each)
+		if err != nil {
+			return 0, err
+		}
+		total += revision
+	}
+	return total, nil
+}
+
+// orgRevision is the counter one organization stores.
+func (store *Store) orgRevision(org string) (uint64, error) {
 	data, err := store.read(org, AccountsRevisionKey(org))
 	if err != nil {
 		return 0, err
@@ -379,14 +579,18 @@ func (store *Store) raiseRevision(org string) (uint64, error) {
 	if !store.canWrite(org) {
 		return 0, ErrOutOfScope
 	}
+	inherited, err := store.inheritedRevision(org)
+	if err != nil {
+		return 0, err
+	}
 	cas, ok := store.provider.(storage.BlobCAS)
 	if !ok {
-		current, err := store.AccountsRevision(org)
+		current, err := store.orgRevision(org)
 		if err != nil {
 			return 0, err
 		}
 		next := current + 1
-		return next, store.write(org, AccountsRevisionKey(org), accountsRevision{Revision: next})
+		return inherited + next, store.write(org, AccountsRevisionKey(org), accountsRevision{Revision: next})
 	}
 	key := AccountsRevisionKey(org)
 	for range revisionRaiseAttempts {
@@ -408,7 +612,7 @@ func (store *Store) raiseRevision(org string) (uint64, error) {
 			return 0, err
 		}
 		if swapped {
-			return next, nil
+			return inherited + next, nil
 		}
 	}
 	return 0, ErrRevisionContended
@@ -466,7 +670,25 @@ func (store *Store) GetHealth(org, accountID string) (HealthRecord, error) {
 	if !ValidAccountID(accountID) {
 		return HealthRecord{}, ErrInvalidRecord
 	}
-	data, err := store.read(org, HealthKey(org, accountID))
+	if store == nil || store.provider == nil {
+		return HealthRecord{}, ErrNoStorage
+	}
+	if !store.canRead(org) {
+		return HealthRecord{}, ErrOutOfScope
+	}
+	orgs, err := store.healthOrgs(org, accountID)
+	if err != nil {
+		return HealthRecord{}, err
+	}
+	var data []byte
+	for _, each := range orgs {
+		if data, err = store.read(each, HealthKey(each, accountID)); err != nil {
+			return HealthRecord{}, err
+		}
+		if len(data) > 0 {
+			break
+		}
+	}
 	if err != nil {
 		return HealthRecord{}, err
 	}
@@ -503,7 +725,7 @@ func (store *Store) DeleteHealth(org, accountID string) error {
 // LoadSelfTest returns the last privacy self-test. A missing record is the
 // zero value, which the settings API renders as "not run yet".
 func (store *Store) LoadSelfTest(org string) (SelfTestRecord, error) {
-	data, err := store.read(org, SelfTestKey(org))
+	data, err := store.resolve(org, SelfTestKey)
 	if err != nil {
 		return SelfTestRecord{}, err
 	}
@@ -524,7 +746,7 @@ func (store *Store) SaveSelfTest(org string, record SelfTestRecord) error {
 
 // LoadPrivacy returns the persisted tag-value allowlist and leak samples.
 func (store *Store) LoadPrivacy(org string) (privacyRecord, error) {
-	data, err := store.read(org, PrivacyKey(org))
+	data, err := store.resolve(org, PrivacyKey)
 	if err != nil {
 		return privacyRecord{}, err
 	}
@@ -575,6 +797,16 @@ func (store *Store) UpdatePrivacy(org string, change func(*privacyRecord)) error
 		var record privacyRecord
 		if len(stored) > 0 && json.Unmarshal(stored, &record) != nil {
 			return ErrInvalidRecord
+		}
+		if len(stored) == 0 {
+			// The write organization has no record of its own yet: start
+			// from the inherited one, so a change to one field does not
+			// drop the allowlist the deployment inherited.
+			inherited, err := store.LoadPrivacy(org)
+			if err != nil {
+				return err
+			}
+			record = inherited
 		}
 		change(&record)
 		data, err := json.Marshal(record)
@@ -635,7 +867,7 @@ func sameKeysAnyCase(left, right []string) bool {
 // LoadOptions returns the stored wizard overrides. A missing record is empty,
 // meaning the config values apply.
 func (store *Store) LoadOptions(org string) (Options, error) {
-	data, err := store.read(org, OptionsKey(org))
+	data, err := store.resolve(org, OptionsKey)
 	if err != nil {
 		return Options{}, err
 	}

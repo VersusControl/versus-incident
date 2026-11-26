@@ -134,7 +134,8 @@ type Options struct {
 // groupable reports a resource the grouping places: a stored resource, not
 // a policy entry kept beside one.
 func groupable(resource model.Resource) bool {
-	return resource.ARN != "" && resource.Account != "" && resource.Type != model.ResourcePolicyType
+	return resource.ARN != "" && resource.Account != "" && resource.Type != model.ResourcePolicyType && resource.Type != model.TrailType &&
+		resource.Type != model.HealthEventType
 }
 
 // placement is where the ladder put one resource.

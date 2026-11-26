@@ -490,7 +490,7 @@ func TestAWSCollectConfigShapeDefaultsAndClone(t *testing.T) {
 		t.Fatalf("collection must default on: %+v, %v", defaults.AWS.Collect, err)
 	}
 	empty, _ := decodeConnectors(map[string]any{"aws": map[string]any{}})
-	if !empty.AWS.Collect.Enable || empty.AWS.Collect.Intervals.Inventory != "15m0s" || !reflect.DeepEqual(empty.AWS.Applications.Sources, DefaultAWSApplicationSources()) {
+	if !empty.AWS.Collect.Enable || empty.AWS.Collect.Intervals.Inventory != "6h0m0s" || !reflect.DeepEqual(empty.AWS.Applications.Sources, DefaultAWSApplicationSources()) {
 		t.Fatalf("collect defaults = %+v / %+v", empty.AWS.Collect, empty.AWS.Applications)
 	}
 	var zero AWSCollectConfig
@@ -588,5 +588,113 @@ func TestConnectorCollectionScope(t *testing.T) {
 	cloned.Connectors.Kubernetes.ExcludeResources[0] = "changed"
 	if source.Connectors.Kubernetes.Namespaces[0] != "shop" || source.Connectors.Kubernetes.ExcludeResources[0] != "secrets" {
 		t.Fatal("a clone shares the collection scope lists")
+	}
+}
+
+// Per-cycle budgets and the daily call target default per source, take a
+// configured value, refuse an unknown source or a bad number, and clone
+// deep. The cadence keys a user set win over the new defaults.
+func TestAWSCallBudgetsAndCadenceKeys(t *testing.T) {
+	defaults, err := decodeConnectors(map[string]any{"aws": map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgets := defaults.AWS.Budgets
+	if !reflect.DeepEqual(budgets.CycleBudgets(), DefaultAWSCycleBudgets()) || budgets.DailyCallTarget() != 20000 {
+		t.Fatalf("default budgets = %+v / %d", budgets.CycleBudgets(), budgets.DailyCallTarget())
+	}
+	want := map[string]int{"health": 200, "inventory": 700, "changes": 60, "identity": 120, "policies": 250, "credential_report": 3, "findings": 50}
+	if !reflect.DeepEqual(DefaultAWSCycleBudgets(), want) {
+		t.Fatalf("default per-cycle budgets = %v", DefaultAWSCycleBudgets())
+	}
+	collect := defaults.AWS.Collect
+	if collect.HealthInterval() != 10*time.Minute || collect.HealthHotInterval() != 2*time.Minute || collect.InventoryInterval() != 6*time.Hour ||
+		collect.IdentityInterval() != time.Hour || collect.PoliciesInterval() != 6*time.Hour || collect.CredentialReportInterval() != 4*time.Hour ||
+		collect.FindingsInterval() != time.Hour || collect.TrailsInterval() != 24*time.Hour || collect.RegionsOffInterval() != 24*time.Hour {
+		t.Fatalf("default cadence = %+v", collect.Intervals)
+	}
+
+	loaded, err := decodeConnectors(map[string]any{"aws": map[string]any{
+		"budgets": map[string]any{"per_cycle": map[string]any{"health": "25", "findings": "10"}, "calls_per_day": "50000"},
+		"collect": map[string]any{"intervals": map[string]any{"health": "2m", "inventory": "15m", "health_hot": "5m", "identity": "30m"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle := loaded.AWS.Budgets.CycleBudgets()
+	if cycle["health"] != 25 || cycle["findings"] != 10 || cycle["inventory"] != 700 || loaded.AWS.Budgets.DailyCallTarget() != 50000 {
+		t.Fatalf("configured budgets = %v / %d", cycle, loaded.AWS.Budgets.DailyCallTarget())
+	}
+	// An explicit health interval wins, and the fast cadence is never
+	// slower than it.
+	collect = loaded.AWS.Collect
+	if collect.HealthInterval() != 2*time.Minute || collect.HealthHotInterval() != 2*time.Minute || collect.InventoryInterval() != 15*time.Minute ||
+		collect.IdentityInterval() != 30*time.Minute {
+		t.Fatalf("explicit cadence = %+v", collect.Intervals)
+	}
+
+	cloned := cloneConnectorsConfig(loaded)
+	cloned.AWS.Budgets.PerCycle["health"] = 1
+	if loaded.AWS.Budgets.PerCycle["health"] != 25 {
+		t.Fatal("budget clone mutated the source")
+	}
+
+	for name, bad := range map[string]map[string]any{
+		"unknown source":   {"per_cycle": map[string]any{"metrics": "10"}},
+		"zero budget":      {"per_cycle": map[string]any{"health": "0"}},
+		"budget too large": {"per_cycle": map[string]any{"inventory": "100001"}},
+		"negative target":  {"calls_per_day": "-1"},
+	} {
+		connector := AWSConnectorConfig{Budgets: AWSBudgetsConfig{MaxRequestsPerSecond: 2}, HealthCheckInterval: "5m"}
+		decoded, err := decodeConnectors(map[string]any{"aws": map[string]any{"budgets": bad}})
+		if err == nil {
+			connector.Budgets.PerCycle, connector.Budgets.CallsPerDay = decoded.AWS.Budgets.PerCycle, decoded.AWS.Budgets.CallsPerDay
+			err = validateAWSConnector(connector)
+		}
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := decodeConnectors(map[string]any{"aws": map[string]any{"collect": map[string]any{"intervals": map[string]any{"trails": "48h"}}}}); err == nil {
+		t.Error("a trails interval over 24h was accepted")
+	}
+}
+
+// An explicit health interval with no health_hot turns the fast cadence
+// off, and the health history cap follows the explicit interval. A policy
+// interval below the inventory interval is refused; an unset one follows
+// a slower inventory.
+func TestExplicitCadenceWins(t *testing.T) {
+	loaded, err := decodeConnectors(map[string]any{"aws": map[string]any{
+		"collect": map[string]any{"intervals": map[string]any{"health": "30m"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalizeAWSDefaults(&loaded.AWS)
+	collect := loaded.AWS.Collect
+	if collect.HealthHotInterval() != 30*time.Minute || collect.HealthMaxGenerations() != collect.GenerationsFor(30*time.Minute) {
+		t.Fatalf("explicit health: hot %s, cap %d", collect.HealthHotInterval(), collect.HealthMaxGenerations())
+	}
+	var defaults AWSConnectorConfig
+	normalizeAWSDefaults(&defaults)
+	if defaults.Collect.HealthHotInterval() != 2*time.Minute || defaults.Collect.HealthInterval() != 10*time.Minute {
+		t.Fatalf("default cadence after normalize: hot %s, health %s", defaults.Collect.HealthHotInterval(), defaults.Collect.HealthInterval())
+	}
+	both := AWSCollectConfig{Intervals: AWSCollectIntervalsConfig{Health: "30m", HealthHot: "3m"}}
+	if both.HealthHotInterval() != 3*time.Minute {
+		t.Fatalf("explicit health and health_hot: hot %s", both.HealthHotInterval())
+	}
+
+	err = validateAWSCollect(AWSCollectConfig{Intervals: AWSCollectIntervalsConfig{Inventory: "6h", Policies: "1h"}}, AWSApplicationsConfig{})
+	if err == nil || !strings.Contains(err.Error(), "policies must not be shorter than intervals.inventory") {
+		t.Fatalf("policies below inventory = %v", err)
+	}
+	if err := validateAWSCollect(AWSCollectConfig{Intervals: AWSCollectIntervalsConfig{Inventory: "2h", Policies: "8h"}}, AWSApplicationsConfig{}); err != nil {
+		t.Fatalf("policies above inventory = %v", err)
+	}
+	slow := AWSCollectConfig{Intervals: AWSCollectIntervalsConfig{Inventory: "12h"}}
+	if slow.PoliciesInterval() != 12*time.Hour {
+		t.Fatalf("unset policies with a 12h inventory = %s", slow.PoliciesInterval())
 	}
 }

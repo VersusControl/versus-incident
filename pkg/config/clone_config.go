@@ -542,6 +542,12 @@ func cloneConnectorsConfig(src ConnectorsConfig) ConnectorsConfig {
 		out.AWS.Collect.Changes.RoutineEvents = append([]string{}, src.AWS.Collect.Changes.RoutineEvents...)
 	}
 	out.AWS.Tags.ValueAllowlist = append([]string(nil), src.AWS.Tags.ValueAllowlist...)
+	if src.AWS.Budgets.PerCycle != nil {
+		out.AWS.Budgets.PerCycle = make(map[string]int, len(src.AWS.Budgets.PerCycle))
+		for source, value := range src.AWS.Budgets.PerCycle {
+			out.AWS.Budgets.PerCycle[source] = value
+		}
+	}
 	out.AWS.FinOps = cloneAWSFinOpsConfig(src.AWS.FinOps)
 	if src.AWS.Accounts != nil {
 		out.AWS.Accounts = make([]AWSAccountConfig, len(src.AWS.Accounts))

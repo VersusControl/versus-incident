@@ -110,6 +110,8 @@ func (store *Store) Changes(ctx context.Context, query Query, since, until time.
 	}
 	feedQuery := storage.AWSChangeFeedQuery{Account: query.Account, Region: query.Region, Service: query.Service,
 		ResourceARN: query.ARN, ResourceKey: changes.ResourceKey(query.ARN), Since: since, Until: until, IncludeDetail: true}
+	filter := store.inherited(ctx)
+	feedQuery.Inherited = filter.limit()
 	stored, err := feeds.AWSChangeFeed(ctx, store.scope, feedQuery)
 	if err != nil {
 		return ChangesResult{}, err
@@ -130,7 +132,7 @@ func (store *Store) Changes(ctx context.Context, query Query, since, until time.
 		}
 		pairs[pairKey(entry.Account, entry.Region)] = item
 	}
-	units, err := store.units(query.Account, query.Region, ChangeService, time.Time{})
+	units, err := store.units(filter, query.Account, query.Region, ChangeService, time.Time{})
 	if err != nil {
 		return ChangesResult{}, err
 	}

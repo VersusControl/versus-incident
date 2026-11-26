@@ -50,17 +50,56 @@ func postgresReplicaProvider(t *testing.T) storage.Provider {
 // The global stream and the us-east-1 pair both read CloudTrail in
 // us-east-1, so they share one AWS rate bucket; most is the highest number
 // in flight at once.
+//
+// A round arms it: the first LookupEvents of the round is then held until
+// the polls have overlapped in time, either because a replica's sync
+// returned while the request was held or because a second request entered.
+// So the replica holding the pair is always mid-request while the other one
+// polls, without a timed delay.
 type inFlight struct {
 	mu      sync.Mutex
 	current int
 	most    int
+	release chan struct{}
 }
 
-func (f *inFlight) enter() {
+// arm starts a round: the next LookupEvents waits for open.
+func (f *inFlight) arm() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.release = make(chan struct{})
+}
+
+// open lets held requests of the round go on; it is safe to call twice.
+func (f *inFlight) open() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.openLocked()
+}
+
+func (f *inFlight) openLocked() {
+	if f.release == nil {
+		return
+	}
+	select {
+	case <-f.release:
+	default:
+		close(f.release)
+	}
+}
+
+// enter counts one request in flight and returns what it must wait for. A
+// second request in flight at once is the overlap the round looks for, so
+// it opens the round.
+func (f *inFlight) enter() <-chan struct{} {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.current++
 	f.most = max(f.most, f.current)
+	if f.current > 1 {
+		f.openLocked()
+	}
+	return f.release
 }
 
 func (f *inFlight) leave() {
@@ -75,11 +114,11 @@ func (f *inFlight) peak() int {
 	return f.most
 }
 
-// lookupCounter counts the LookupEvents requests one replica sends and can
-// slow them, so two replicas' polls overlap in time.
+// lookupCounter counts the LookupEvents requests one replica sends and,
+// with a shared tracker, holds them as the round asks, so two replicas'
+// polls overlap in time.
 type lookupCounter struct {
 	next    http.RoundTripper
-	delay   time.Duration
 	shared  *inFlight
 	lookups atomic.Int64
 }
@@ -88,11 +127,11 @@ func (counter *lookupCounter) RoundTrip(request *http.Request) (*http.Response, 
 	if strings.HasSuffix(request.Header.Get("X-Amz-Target"), ".LookupEvents") {
 		counter.lookups.Add(1)
 		if counter.shared != nil {
-			counter.shared.enter()
+			hold := counter.shared.enter()
 			defer counter.shared.leave()
-		}
-		if counter.delay > 0 {
-			time.Sleep(counter.delay)
+			if hold != nil {
+				<-hold
+			}
 		}
 	}
 	return counter.next.RoundTrip(request)
@@ -105,11 +144,11 @@ type pgReplica struct {
 	counter   *lookupCounter
 }
 
-func newPGReplica(t *testing.T, fake *fakeaws.Server, delay time.Duration, shared *inFlight) *pgReplica {
+func newPGReplica(t *testing.T, fake *fakeaws.Server, shared *inFlight) *pgReplica {
 	t.Helper()
 	provider := postgresReplicaProvider(t)
 	store := snapshot.New(provider, tenancy.DefaultOrgScope())
-	counter := &lookupCounter{next: fake.HTTPClient().Transport, delay: delay, shared: shared}
+	counter := &lookupCounter{next: fake.HTTPClient().Transport, shared: shared}
 	collector := New(store, limit.NewManager(1000), WithHTTPClient(&http.Client{Transport: counter}), WithSleep(noSleep), WithRetries(0))
 	return &pgReplica{provider: provider, store: store, collector: collector, counter: counter}
 }
@@ -144,8 +183,8 @@ func outcomeOf(t *testing.T, report Report, region string) Outcome {
 // other replica can take it.
 func TestPostgresPairLockSkipsTheOtherReplica(t *testing.T) {
 	fake := fakeaws.New(t, fakeaws.ScenarioBadDeploy)
-	holder := newPGReplica(t, fake, 0, nil)
-	other := newPGReplica(t, fake, 0, nil)
+	holder := newPGReplica(t, fake, nil)
+	other := newPGReplica(t, fake, nil)
 	emptyFeedTables(t, holder.provider)
 	ctx := context.Background()
 
@@ -224,13 +263,9 @@ func TestPostgresPairLockSkipsTheOtherReplica(t *testing.T) {
 	if n, _ := result.RowsAffected(); n == 0 {
 		t.Fatal("no advisory lock session to end")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for holder.store.ChangePairLockHeld(ctx, productionAccount, testRegion) {
-		if time.Now().After(deadline) {
-			t.Fatal("holder still reports the lock after its session ended")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	eventually(t, "the holder to stop reporting the lock after its session ended", func() bool {
+		return !holder.store.ChangePairLockHeld(ctx, productionAccount, testRegion)
+	})
 	taken, acquired, err := other.store.LockChangePair(ctx, productionAccount, testRegion)
 	if err != nil || !acquired {
 		t.Fatalf("lock after the holder's session ended = %v, %v", acquired, err)
@@ -239,7 +274,7 @@ func TestPostgresPairLockSkipsTheOtherReplica(t *testing.T) {
 }
 
 // Two replicas start their change polls at the same moment, round after
-// round, with slow LookupEvents answers so the polls overlap, as two
+// round, with the first LookupEvents answer held until the polls overlap, as two
 // replicas booted by one rollout do. One poller per pair means: each pair
 // is polled by one replica per round and skipped by the other, the two
 // replicas never have LookupEvents in flight against the same account and
@@ -248,8 +283,8 @@ func TestPostgresPairLockSkipsTheOtherReplica(t *testing.T) {
 func TestPostgresReplicasStartingTogetherPollEachPairOnce(t *testing.T) {
 	fake := fakeaws.New(t, fakeaws.ScenarioBadDeploy)
 	shared := &inFlight{}
-	first := newPGReplica(t, fake, 150*time.Millisecond, shared)
-	second := newPGReplica(t, fake, 150*time.Millisecond, shared)
+	first := newPGReplica(t, fake, shared)
+	second := newPGReplica(t, fake, shared)
 	emptyFeedTables(t, first.provider)
 	ctx := context.Background()
 	const rounds = 6
@@ -258,16 +293,21 @@ func TestPostgresReplicasStartingTogetherPollEachPairOnce(t *testing.T) {
 		reports := make([]Report, 2)
 		errs := make([]error, 2)
 		start := make(chan struct{})
+		shared.arm()
 		for index, replica := range []*pgReplica{first, second} {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				<-start
 				reports[index], errs[index] = replica.collector.Sync(ctx, target(productionAccount), KindChanges)
+				// A finished sync ends the overlap: let a held poll go on.
+				shared.open()
 			}()
 		}
 		close(start)
-		wg.Wait()
+		synced := make(chan struct{})
+		go func() { wg.Wait(); close(synced) }()
+		waitFor(t, synced, fmt.Sprintf("round %d: both replicas' syncs to return", round))
 		for index, err := range errs {
 			if err != nil {
 				t.Fatalf("round %d replica %d: %v", round, index, err)

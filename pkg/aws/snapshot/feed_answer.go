@@ -36,6 +36,7 @@ func validActorClass(class string) bool {
 // unsettled tail is reported apart, and a capped read is truncated and
 // incomplete.
 func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (ChangesAnswer, error) {
+	ctx, _ = feed.store.withInherited(ctx)
 	feeds, err := feed.feeds()
 	if err != nil {
 		return ChangesAnswer{}, err
@@ -110,7 +111,7 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 	query := storage.AWSChangeFeedQuery{
 		Account: request.Account, Region: request.Region, Service: request.Service, Services: request.Services, ActorClass: request.ActorClass,
 		ResourceARN: request.Resource, ResourceKey: resourceKey, Text: request.Text, Since: since, Until: until, RecordedBefore: cursor.RecordedBefore,
-		RowLimit: options.ReadCap, ServiceCounts: request.ServiceFacet,
+		RowLimit: options.ReadCap, ServiceCounts: request.ServiceFacet, Inherited: feed.store.inherited(ctx).limit(),
 	}
 	stored, err := feeds.AWSChangeFeed(ctx, feed.store.scope, query)
 	if err != nil {
@@ -299,7 +300,7 @@ func (feed *ChangeFeed) fillItems(ctx context.Context, feeds storage.AWSChangeFe
 	if len(ids) == 0 {
 		return nil
 	}
-	rows, err := feeds.AWSChangesByID(ctx, feed.store.scope, ids)
+	rows, err := feed.store.changesByID(ctx, feeds, ids)
 	if err != nil {
 		return err
 	}
@@ -381,7 +382,7 @@ func (feed *ChangeFeed) findSuspect(ctx context.Context, feeds storage.AWSChange
 		request.Changes = append(request.Changes, change)
 	}
 	request.Load = func(ctx context.Context, ids []string) ([]model.Change, error) {
-		rows, err := feeds.AWSChangesByID(ctx, feed.store.scope, ids)
+		rows, err := feed.store.changesByID(ctx, feeds, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -414,7 +415,7 @@ func (feed *ChangeFeed) findSuspect(ctx context.Context, feeds storage.AWSChange
 			return suspect
 		}
 	}
-	rows, err := feeds.AWSChangesByID(ctx, feed.store.scope, []string{suspect.ChangeID})
+	rows, err := feed.store.changesByID(ctx, feeds, []string{suspect.ChangeID})
 	if err == nil && len(rows) == 1 {
 		item := itemFromRow(rows[0])
 		if change, ok := changeOf(rows[0]); ok {
@@ -427,6 +428,7 @@ func (feed *ChangeFeed) findSuspect(ctx context.Context, feeds storage.AWSChange
 
 // Group lists a burst's or stack group's member changes, newest first.
 func (feed *ChangeFeed) Group(ctx context.Context, id, cursorText string, limit int) (GroupAnswer, error) {
+	ctx, _ = feed.store.withInherited(ctx)
 	feeds, err := feed.feeds()
 	if err != nil {
 		return GroupAnswer{}, err
@@ -447,7 +449,7 @@ func (feed *ChangeFeed) Group(ctx context.Context, id, cursorText string, limit 
 		}
 	}
 	stored, err := feeds.AWSChangeFeed(ctx, feed.store.scope, storage.AWSChangeFeedQuery{Account: key.Account, Region: key.Region, Since: key.From, Until: key.To,
-		RecordedBefore: cursor.RecordedBefore, RowLimit: feed.effectiveOptions().ReadCap})
+		RecordedBefore: cursor.RecordedBefore, RowLimit: feed.effectiveOptions().ReadCap, Inherited: feed.store.inherited(ctx).limit()})
 	if err != nil {
 		return GroupAnswer{}, err
 	}
