@@ -74,3 +74,14 @@ func callerAuthorization(c *fiber.Ctx) core.CallerAuthorization {
 func callerContext(c *fiber.Ctx, parent context.Context) context.Context {
 	return core.WithCallerAuthorization(parent, callerAuthorization(c))
 }
+
+// refusePermission is the 403 every permission guard answers. error keeps the
+// readable text existing clients show; code and permission give a client a
+// stable denial state to render instead of a load error.
+func refusePermission(c *fiber.Ctx, permission core.Permission) error {
+	return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+		"error":      string(permission) + " permission is required",
+		"code":       "permission_required",
+		"permission": string(permission),
+	})
+}

@@ -25,20 +25,21 @@ func SetOrganizationLister(lister OrganizationLister) {
 }
 
 // Organizations returns normalized, deduplicated organizations to collect.
-// The OSS default organization is always included for backward compatibility.
+// Without a registered lister the OSS default organization is the only one;
+// with a lister, its result is authoritative and default is not added.
 func Organizations(ctx context.Context) ([]string, error) {
 	organizationListerMu.RLock()
 	lister := organizationLister
 	organizationListerMu.RUnlock()
-	organizations := []string{storage.DefaultOrgID}
 	if lister == nil {
-		return organizations, nil
+		return []string{storage.DefaultOrgID}, nil
 	}
 	listed, err := lister(ctx)
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]struct{}{storage.DefaultOrgID: {}}
+	organizations := make([]string, 0, len(listed))
+	seen := make(map[string]struct{}, len(listed))
 	for _, orgID := range listed {
 		orgID = storage.NormalizeOrgID(orgID)
 		if _, exists := seen[orgID]; exists {

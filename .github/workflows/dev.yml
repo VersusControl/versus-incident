@@ -472,6 +472,27 @@ jobs:
       - name: Check internal links
         run: go run ./tools/docscheck --root src
 
+  # No file may hold a literal shaped like a real credential (an AWS key, a
+  # GitHub, Slack or OpenAI token, a JWT, a private key block): public secret
+  # scanners raise an alert for it even when it is made up. Runs on every
+  # change, because docs and examples can add one as well as code.
+  credential-literals:
+    name: Credential literals
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.26.11'
+          cache: false
+
+      - name: Scan for credential-shaped literals
+        run: go run ./tools/secretscan --root .
+
   # Tests behind the `integration` build tag. They run the Kubernetes code
   # against the in-process fake API server in tests/fakekube and need nothing
   # beyond Go; the ones that need PostgreSQL skip without TEST_POSTGRES_DSN.
@@ -701,7 +722,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, test, race, coverage, chart, ui, docs-check, aws-emulator]
+    needs: [changes, test, race, coverage, chart, ui, docs-check, credential-literals, aws-emulator]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

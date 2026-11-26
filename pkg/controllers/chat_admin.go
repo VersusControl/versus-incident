@@ -800,8 +800,10 @@ func apiTurnResult(result *core.ChatTurnResult) agentapi.TurnResult {
 	return mapped
 }
 
+// isAgentAPIv1 reads the matched route pattern, not the request path, so a
+// mixed-case request on a case-insensitive app keeps the versioned wire format.
 func isAgentAPIv1(c *fiber.Ctx) bool {
-	return strings.Contains(c.Path(), "/v1/agent/")
+	return strings.Contains(c.Route().Path, "/v1/agent/")
 }
 
 func apiEvent(event core.ChatEvent) agentapi.Event {

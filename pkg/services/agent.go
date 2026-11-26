@@ -1,6 +1,7 @@
 package services
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -122,8 +123,19 @@ func severeDetectionOnCallParams(ctx context.Context) map[string]string {
 	return map[string]string{}
 }
 
+// detectionNow is the clock of episode occurrences and completions; tests
+// move it to place attempts further apart than the quiet period.
+var detectionNow = time.Now
+
 // emitDetection is the single episode claim, heartbeat and completion path for detectors.
 func emitDetection(content map[string]interface{}, identity storage.DetectionIdentity, severity string, params map[string]string, org string, frequency int, emission *core.DetectionEmissionResult, claimLease time.Duration, contexts ...context.Context) error {
+	return emitDetectionQuiet(0, content, identity, severity, params, org, frequency, emission, claimLease, contexts...)
+}
+
+// emitDetectionQuiet is emitDetection with the episode's quiet period: an
+// occurrence within it of the last joins the same episode and incident.
+// Zero keeps the store's default.
+func emitDetectionQuiet(quiet time.Duration, content map[string]interface{}, identity storage.DetectionIdentity, severity string, params map[string]string, org string, frequency int, emission *core.DetectionEmissionResult, claimLease time.Duration, contexts ...context.Context) error {
 	ctx := context.Background()
 	if len(contexts) > 0 && contexts[0] != nil {
 		ctx = contexts[0]
@@ -141,11 +153,17 @@ func emitDetection(content map[string]interface{}, identity storage.DetectionIde
 		if content["AlertKind"] == "kubernetes_issue" {
 			return storage.ErrUnsupported
 		}
-		return createIncident("", &content, incidentCreateOptions{OrgID: org, Context: ctx}, &params).Err
+		result := createIncident("", &content, incidentCreateOptions{OrgID: org, Context: ctx}, &params)
+		if emission != nil {
+			emission.IncidentID = cmp.Or(emission.IncidentID, result.IncidentID)
+			emission.NotificationOutcome = detectionNotificationOutcome(result)
+			emission.OnCallTriggered = result.OnCallTriggered
+		}
+		return result.Err
 	}
 	decision, err := episodeStore.RecordDetectionOccurrence(storage.DetectionOccurrence{
 		Identity:  identity,
-		Frequency: int64(frequency), Severity: severity, ReceivedAt: time.Now().UTC(), ClaimLease: claimLease,
+		Frequency: int64(frequency), Severity: severity, ReceivedAt: detectionNow().UTC(), ClaimLease: claimLease, QuietPeriod: quiet,
 	})
 	if err != nil {
 		if content["AlertKind"] == "kubernetes_issue" {
@@ -159,37 +177,46 @@ func emitDetection(content map[string]interface{}, identity storage.DetectionIde
 		result := createIncident("", &content, incidentCreateOptions{OrgID: org, Context: ctx}, &params)
 		if emission != nil {
 			emission.NotificationOutcome = detectionNotificationOutcome(result)
+			emission.OnCallTriggered = result.OnCallTriggered
 		}
 		return result.Err
 	}
 	setDetectionEmissionDecision(emission, decision)
 	content["Frequency"] = decision.OccurrenceCount
 	if !decision.NotificationClaimed {
+		notifyStatus, err := updateCoalescedDetectionIncident(decision, content)
 		if emission != nil {
 			emission.NotificationOutcome = "not_applicable"
+			emission.CoalescedNotifyStatus = notifyStatus
 		}
-		return updateCoalescedDetectionIncident(decision, content)
+		return err
 	}
 	heartbeat := startDetectionClaimHeartbeat(episodeStore, decision, claimLease)
 
+	// On-call pages once per incident. A claim on an incident that already
+	// exists leaves on-call alone when the incident records it as started:
+	// an escalation, or a retry of a notification whose channels failed
+	// after on-call was started. The flag is set only after the on-call
+	// provider accepted the page, so an attempt that died before then
+	// left it off and its retry pages. Only an escalation needs the
+	// answer; an initial claim whose incident cannot be read is sent as
+	// before.
 	skipOnCall := false
-	if decision.NotificationKind == storage.DetectionNotificationEscalation {
-		existing, getErr := store.GetIncident(decision.IncidentID)
-		switch {
-		case getErr == nil:
-			skipOnCall = existing.OnCallTriggered
-		case errors.Is(getErr, storage.ErrNotFound):
-		default:
-			if emission != nil {
-				emission.NotificationOutcome = "failed"
-			}
-			renewalErr := heartbeat.stop()
-			completionErr := episodeStore.CompleteDetectionNotification(storage.DetectionNotificationCompletion{
-				EpisodeID: decision.EpisodeID, ClaimToken: decision.ClaimToken,
-				Outcome: "failed", CompletedAt: time.Now().UTC(),
-			})
-			return errors.Join(fmt.Errorf("inspect escalation incident: %w", getErr), renewalErr, completionErr)
+	existing, getErr := store.GetIncident(decision.IncidentID)
+	switch {
+	case getErr == nil:
+		skipOnCall = existing.OnCallTriggered
+	case errors.Is(getErr, storage.ErrNotFound):
+	case decision.NotificationKind == storage.DetectionNotificationEscalation:
+		if emission != nil {
+			emission.NotificationOutcome = "failed"
 		}
+		renewalErr := heartbeat.stop()
+		completionErr := episodeStore.CompleteDetectionNotification(storage.DetectionNotificationCompletion{
+			EpisodeID: decision.EpisodeID, ClaimToken: decision.ClaimToken,
+			Outcome: "failed", CompletedAt: detectionNow().UTC(),
+		})
+		return errors.Join(fmt.Errorf("inspect escalation incident: %w", getErr), renewalErr, completionErr)
 	}
 	result := createIncident("", &content, incidentCreateOptions{
 		OrgID:      org,
@@ -201,6 +228,7 @@ func emitDetection(content map[string]interface{}, identity storage.DetectionIde
 	outcome := detectionNotificationOutcome(result)
 	if emission != nil {
 		emission.NotificationOutcome = outcome
+		emission.OnCallTriggered = result.OnCallTriggered
 	}
 	renewalErr := heartbeat.stop()
 	if renewalErr != nil {
@@ -208,7 +236,7 @@ func emitDetection(content map[string]interface{}, identity storage.DetectionIde
 	}
 	completionErr := episodeStore.CompleteDetectionNotification(storage.DetectionNotificationCompletion{
 		EpisodeID: decision.EpisodeID, ClaimToken: decision.ClaimToken,
-		Outcome: outcome, CompletedAt: time.Now().UTC(),
+		Outcome: outcome, CompletedAt: detectionNow().UTC(),
 	})
 	if completionErr != nil {
 		logBoundedEpisodeError("complete", completionErr)
@@ -317,18 +345,22 @@ func setDetectionEmissionError(emission *core.DetectionEmissionResult, err error
 	emission.EpisodeError = message
 }
 
-func updateCoalescedDetectionIncident(decision storage.DetectionEpisodeDecision, content map[string]interface{}) error {
+// updateCoalescedDetectionIncident merges a coalesced occurrence into the
+// episode's incident and returns the delivery status the incident held
+// before it: empty when the incident is not stored yet.
+func updateCoalescedDetectionIncident(decision storage.DetectionEpisodeDecision, content map[string]interface{}) (string, error) {
 	detectionStore, ok := store.(storage.DetectionIncidentStore)
 	if !ok {
-		return storage.ErrUnsupported
+		return "", storage.ErrUnsupported
 	}
 	rec, err := store.GetIncident(decision.IncidentID)
 	if errors.Is(err, storage.ErrNotFound) {
-		return nil
+		return "", nil
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
+	notifyStatus := rec.NotifyStatus
 	merged := make(map[string]interface{}, len(rec.Content)+len(content))
 	for key, value := range rec.Content {
 		merged[key] = value
@@ -341,7 +373,7 @@ func updateCoalescedDetectionIncident(decision storage.DetectionEpisodeDecision,
 	rec.Service = ExtractService(merged)
 	applyDetectionDecision(rec, decision)
 	rec.NotifyStatus = ""
-	return detectionStore.SaveDetectionIncident(rec)
+	return notifyStatus, detectionStore.SaveDetectionIncident(rec)
 }
 
 func detectionNotificationOutcome(result incidentCreateResult) string {

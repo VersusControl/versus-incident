@@ -90,6 +90,10 @@ step() {
 
 export CI_TEST_CPU=4 CI_COVER_DIR="$work/coverage"
 
+# The credential-literal scan runs on every change in CI, so it runs here too.
+if [ "${#only[@]}" -eq 0 ]; then
+  step "credential literals" go run ./tools/secretscan --root .
+fi
 if [ "$go_on" = true ] && [ "${#only[@]}" -eq 0 ]; then
   # shellcheck disable=SC2016 # the inner shell expands $out
   step gofmt bash -c 'out=$(gofmt -l .); [ -z "$out" ] || { echo "$out"; exit 1; }'

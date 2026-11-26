@@ -23,8 +23,9 @@ COPY . .
 # Drop in the freshly-built UI so //go:embed picks it up.
 COPY --from=ui-build /ui/dist ./ui/dist
 
-# Cross-compile for the target platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -installsuffix cgo -o /build/run cmd/main.go
+# Cross-compile for the target platform. Build the ./cmd package rather than
+# naming cmd/main.go, so every non-test file in the package is compiled.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -installsuffix cgo -o /build/run ./cmd
 
 # --- Final image ---
 FROM alpine:3.24

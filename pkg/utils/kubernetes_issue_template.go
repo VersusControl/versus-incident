@@ -9,8 +9,11 @@ const (
 	KubernetesIssueEmailTemplatePath    = "config/kubernetes_issue_email.tmpl"
 )
 
+// IsKubernetesIssueIncident reports whether the content is a Kubernetes
+// issue that Versus built itself. A webhook body that names the kind is
+// not one.
 func IsKubernetesIssueIncident(content map[string]interface{}) bool {
-	return content != nil && content["AlertKind"] == "kubernetes_issue"
+	return content != nil && content["AlertKind"] == "kubernetes_issue" && IsInternalAlert(content)
 }
 
 func KubernetesIssueTemplatePath(override, fallback string) string {

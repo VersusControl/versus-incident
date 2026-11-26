@@ -33,7 +33,7 @@ const (
 const unresolvedSettingsAuditCluster = "(unresolved)"
 
 func auditKubernetesSettings(ctx *fiber.Ctx) error {
-	path := strings.TrimSuffix(ctx.Path(), "/")
+	path := routingPath(ctx)
 	put := ctx.Method() == fiber.MethodPut && path == "/api/admin/kubernetes/agent-settings"
 	testLink := ctx.Method() == fiber.MethodPost && path == "/api/admin/kubernetes/agent-settings/test-link"
 	if !put && !testLink {
@@ -117,7 +117,7 @@ func auditSafeClusterID(id string) string {
 func (controller *KubernetesAdminController) requireSettingsWrite(ctx *fiber.Ctx) error {
 	allowed, explicit := middleware.RequestPermission(ctx, string(core.PermissionInfrastructureSettingsWrite))
 	if !explicit || !allowed {
-		return ctx.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "infrastructure:settings:write permission is required"})
+		return refusePermission(ctx, core.PermissionInfrastructureSettingsWrite)
 	}
 	return ctx.Next()
 }
