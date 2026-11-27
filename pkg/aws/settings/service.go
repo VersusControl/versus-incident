@@ -195,6 +195,9 @@ type Service struct {
 	snapshots  *snapshot.Store
 	// accountAdded runs after a wizard account is connected.
 	accountAdded func(accountID string)
+	// accountsChanged runs after a wizard account is removed or its
+	// Regions are changed.
+	accountsChanged func()
 	// payersMu guards payers, which boot may set after the service is built.
 	payersMu sync.RWMutex
 	payers   PayerRemover
@@ -216,7 +219,18 @@ type Service struct {
 	// an account's health record runs under it, so a check that probes for
 	// a while never overwrites a failure another check recorded meanwhile.
 	healthLocks sync.Map
-	rootCtx     context.Context
+
+	// connectedMu guards the connected-account set kept for readers and
+	// the revision and configured accounts it was read at.
+	connectedMu  sync.Mutex
+	connectedKey string
+	connectedSet map[string]bool
+	// storedRevision and storedAccounts keep the stored account listing
+	// the page reads share, until the account settings revision changes.
+	storedRevision uint64
+	storedAccounts []AccountRecord
+	storedKept     bool
+	rootCtx        context.Context
 }
 
 // NewService builds the connector service over a store.
@@ -1498,6 +1512,9 @@ func (conn *Service) UpdateAccount(org, accountID, displayName string, regions [
 	if err := conn.store.SaveAccount(org, account); err != nil {
 		return AccountView{}, err
 	}
+	if len(removed) > 0 {
+		conn.notifyAccountsChanged()
+	}
 	if conn.snapshots != nil {
 		for _, region := range removed {
 			if err := conn.snapshots.PurgeRegion(accountID, region); err != nil {
@@ -1567,6 +1584,9 @@ func (conn *Service) DeleteAccount(ctx context.Context, org, accountID string) (
 		}
 		return nil
 	})
+	if err == nil || errors.Is(err, ErrRevisionContended) {
+		conn.notifyAccountsChanged()
+	}
 	switch {
 	case errors.Is(err, ErrRevisionContended):
 		// The record is gone and the tombstone was stored at the revision

@@ -23,12 +23,16 @@ func (collect AWSCollectConfig) GenerationsFor(interval time.Duration) int {
 }
 
 // InventoryMaxGenerations is the generation cap of inventory units.
+// Between full reads the change feed re-reads a changed unit as often as
+// the change poll runs, so the cap is sized from the faster of the two and
+// a day of re-reads stays readable for compare and the alarm line.
 func (collect AWSCollectConfig) InventoryMaxGenerations() int {
-	return collect.GenerationsFor(collect.InventoryInterval())
+	return collect.GenerationsFor(min(collect.InventoryInterval(), collect.ChangesInterval()))
 }
 
 // HealthMaxGenerations is the generation cap of health units (alarms,
 // target health, rollouts): the alarm line's history depth.
 func (collect AWSCollectConfig) HealthMaxGenerations() int {
-	return collect.GenerationsFor(collect.HealthInterval())
+	// A unit that is unhealthy or changed runs at the fast cadence.
+	return collect.GenerationsFor(collect.HealthHotInterval())
 }

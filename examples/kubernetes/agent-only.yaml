@@ -223,6 +223,15 @@ data:
           value_allowlist: ["Name","app","service","team","env"]
         budgets:
           max_requests_per_second: 2
+          calls_per_day: 20000
+          per_cycle:
+            health: 200
+            inventory: 700
+            changes: 60
+            identity: 120
+            policies: 250
+            credential_report: 3
+            findings: 50
         optional_data:
           cost_explorer: false
           security_hub: false
@@ -232,9 +241,13 @@ data:
         collect:
           enable: true
           intervals:
-            inventory: "15m"
-            health: "2m"
+            inventory: "6h"
             changes: "5m"
+            identity: "1h"
+            credential_report: "4h"
+            findings: "1h"
+            trails: "24h"
+            regions_off: "24h"
           history:
             max_generations: 48
             max_age: "168h"
@@ -353,7 +366,7 @@ spec:
         app.kubernetes.io/name: versus-incident
         app.kubernetes.io/instance: versus-incident
       annotations:
-        checksum/config: 00855c27c13fb22e3efa363a7ce103ab3867107e9982df41feeccd9c0bf09338
+        checksum/config: f3ca8aaebeb203681f027ed54ffaae7efe05e9b682c1af14c0a675a623f45e05
         checksum/secret: 1bbae06c42104dcc2bf3571635413ba7a461f6639b9b95bae74639c9aa777863
     spec:
       serviceAccountName: versus-incident

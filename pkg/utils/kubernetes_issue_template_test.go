@@ -11,7 +11,9 @@ import (
 )
 
 func TestKubernetesIssueTemplatesFullAndMinimal(t *testing.T) {
-	if IsKubernetesIssueIncident(nil) || IsKubernetesIssueIncident(map[string]interface{}{"PatternID": "x"}) || !IsKubernetesIssueIncident(map[string]interface{}{"AlertKind": "kubernetes_issue"}) {
+	built := map[string]interface{}{"AlertKind": "kubernetes_issue"}
+	MarkInternalAlert(built)
+	if IsKubernetesIssueIncident(nil) || IsKubernetesIssueIncident(map[string]interface{}{"PatternID": "x"}) || !IsKubernetesIssueIncident(built) {
 		t.Fatal("discriminator")
 	}
 	if KubernetesIssueTemplatePath("custom", "default") != "custom" || KubernetesIssueTemplatePath("", "default") != "default" {

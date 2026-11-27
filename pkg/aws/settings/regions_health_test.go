@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
@@ -126,22 +125,15 @@ func TestFirstCheckSavesIdentityBeforeTheProbes(t *testing.T) {
 	}
 	done := make(chan bool)
 	go func() { done <- service.checkAll(context.Background()) }()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	eventually(t, "both accounts to connect while their probes are held", func() bool {
 		connected := 0
 		for _, id := range []string{"111122223333", "444455556666"} {
 			if record, err := service.store.GetHealth("default", id); err == nil && record.Status == StatusConnected {
 				connected++
 			}
 		}
-		if connected == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of 2 accounts connected while their probes were held", connected)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return connected == 2
+	})
 	gate.open()
 	if failed := <-done; failed {
 		t.Fatal("a check failed")

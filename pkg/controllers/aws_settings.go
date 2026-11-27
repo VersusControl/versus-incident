@@ -48,12 +48,17 @@ func (controller *AWSSettingsController) Register(router fiber.Router) {
 	group.Put("/settings/privacy", controller.requireSettingsWrite, controller.savePrivacy)
 }
 
-// auditAWSSettings records every write and the external-id reveal. Reads are
-// not audited; they carry no secret.
+// auditAWSSettings records every settings write and the external-id
+// reveal. Reads are not audited; they carry no secret. The FinOps, issue,
+// label, correction and Changes routes record their own writes; for them
+// it records only a write refused before their route ran.
 func auditAWSSettings(ctx *fiber.Ctx) error {
 	path := routingPath(ctx)
 	if strings.Contains(path, "/admin/aws/finops") {
 		return auditFinOpsRefusal(ctx)
+	}
+	if permission, ok := awsWriteRoutePermission(path); ok {
+		return auditAWSRefusalOf(ctx, permission)
 	}
 	reveal := ctx.Method() == fiber.MethodGet && strings.HasSuffix(path, "/external-id")
 	if ctx.Method() == fiber.MethodGet && !reveal {

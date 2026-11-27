@@ -1,0 +1,12 @@
+{{ if eq .IssueAlert "coverage" }}⚪ Not read{{ else if eq .Severity "critical" }}🔴 Critical{{ else }}🟠 High{{ end }} {{ or .AlertName "AWS issue" }}
+{{ if .Where }}{{ .Where }}
+{{ end }}{{ if .Reopened }}Why it reopened: {{ .Reopened }}
+{{ end }}{{ range .Evidence }}- {{ . }}
+{{ end }}{{ if .LikelyCause }}Likely cause: {{ .LikelyCause }}
+{{ end }}{{ if .Steps }}What to do
+{{ range .Steps }}- {{ .text }}{{ if .command }}
+{{ .command }}{{ end }}
+{{ end }}{{ end }}{{ range .Notes }}- {{ . }}
+{{ end }}{{ if .AckURL }}Acknowledge: {{ .AckURL }}
+{{ end }}{{ range .Links }}{{ .label }}: {{ .url }}
+{{ end }}

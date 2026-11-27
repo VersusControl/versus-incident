@@ -34,6 +34,7 @@ vi.mock("@/lib/api", async (importActual) => {
       deleteAwsAccount: vi.fn(),
       updateAwsOptions: vi.fn(),
       updateAwsPrivacy: vi.fn(),
+      awsCollectionCost: vi.fn(),
     },
   };
 });
@@ -85,6 +86,8 @@ beforeEach(() => {
   setViewport(true);
   role.value = ADMIN;
   vi.mocked(api.awsSettings).mockResolvedValue(awsSettings());
+  // The collection cost card has its own tests; here it stays off the page.
+  vi.mocked(api.awsCollectionCost).mockResolvedValue({ enabled: false } as Awaited<ReturnType<typeof api.awsCollectionCost>>);
   vi.mocked(api.createAwsDraft).mockResolvedValue(draft());
   vi.mocked(api.awsDraft).mockResolvedValue(draft());
   vi.mocked(api.verifyAwsDraft).mockResolvedValue({ probe_id: "probe-1" });
@@ -552,5 +555,21 @@ describe("AWS settings Region opt-in status", () => {
     expect(within(staging).getByText(`ap-southeast-1: opt-in status not read since ${since}`)).toBeTruthy();
     expect(within(staging).queryByText(/not enabled/)).toBeNull();
     expect(answerLine().textContent).not.toMatch(/not enabled/);
+  });
+});
+
+describe("AwsSettingsPage — Accounts card", () => {
+  it("links the Accounts card to Coverage", async () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <MemoryRouter>
+          <ToastProvider>
+            <AwsSettingsPage />
+          </ToastProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const link = await screen.findByRole("link", { name: "Coverage ›" });
+    expect(link.getAttribute("href")).toBe("/aws/coverage");
   });
 });

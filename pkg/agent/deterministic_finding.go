@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -271,4 +272,59 @@ func capitalize(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// maxEvidenceLines caps how many evidence items the templated summary lists.
+const maxEvidenceLines = 10
+
+// addSubjectAndEvidence copies a request's subject and already-scrubbed
+// evidence into a finding. The subject always replaces the finding's own, so
+// an empty request subject clears one a model reply may carry. For a
+// templated finding (inSummary) both are also added to the summary text.
+// With no subject and no evidence the text and evidence are unchanged.
+// total is how many evidence items the request held before any were left
+// out; the summary's closing count is taken from it.
+func addSubjectAndEvidence(f *core.AIFinding, subject core.FindingSubject, evidence []core.EvidenceItem, total int, inSummary bool) {
+	if f == nil {
+		return
+	}
+	f.Subject = subject
+	if subject.IsZero() && len(evidence) == 0 {
+		return
+	}
+	if len(evidence) > 0 {
+		// Clip first: never write into a backing array the cache or the
+		// model's result may share.
+		f.Evidence = append(slices.Clip(f.Evidence), evidence...)
+	}
+	if !inSummary {
+		return
+	}
+	var b strings.Builder
+	b.WriteString(f.Summary)
+	if !subject.IsZero() {
+		b.WriteString("\nSubject: ")
+		b.WriteString(strings.TrimSpace(subject.Kind + " " + subject.Name))
+	}
+	if len(evidence) > 0 {
+		b.WriteString("\nEvidence:")
+		for i, item := range evidence {
+			if i == maxEvidenceLines {
+				if rest := total - i; rest > 0 {
+					fmt.Fprintf(&b, "\n- … %d more", rest)
+				}
+				break
+			}
+			b.WriteString("\n- ")
+			line := item.Summary
+			if item.Source != "" {
+				line = item.Source + ": " + line
+			}
+			if item.Detail != "" {
+				line += " (" + item.Detail + ")"
+			}
+			b.WriteString(truncateString(line, 200))
+		}
+	}
+	f.Summary = b.String()
 }

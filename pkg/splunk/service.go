@@ -18,6 +18,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/providerhttp"
+	"github.com/VersusControl/versus-incident/pkg/redaction"
 )
 
 var ErrInvalidConfig = errors.New("splunk: invalid configuration")
@@ -271,7 +272,7 @@ func (service *Service) Read(ctx context.Context, request ReadRequest) (ReadResu
 				result.Truncation = appendUnique(result.Truncation, "field_collision")
 				continue
 			}
-			record.Fields[safeKey] = service.scrub(value, 512)
+			record.Fields[safeKey] = redaction.ScrubLabelIn(row, key, value, func(text string) string { return service.scrub(text, 512) })
 		}
 		record.Timestamp = service.scrub(stringValue(row["_time"]), 64)
 		record.Message = service.scrub(stringValue(row["_raw"]), 4096)

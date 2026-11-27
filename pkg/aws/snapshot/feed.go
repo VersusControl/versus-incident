@@ -102,6 +102,9 @@ type ChangeFeed struct {
 	suspect SuspectEngine
 	fields  FieldResolver
 	now     func() time.Time
+	// readScope lists the accounts by the coverage rule, for the
+	// answer's coverage block.
+	readScope ScopeFunc
 }
 
 // FeedOption adjusts a ChangeFeed.
@@ -110,6 +113,13 @@ type FeedOption func(*ChangeFeed)
 // WithScope wires the settings scope.
 func WithScope(scope ScopeFunc) FeedOption {
 	return func(feed *ChangeFeed) { feed.scope = scope }
+}
+
+// WithCoverageScope wires the accounts and Regions the coverage page
+// reads, so the answer's coverage block counts accounts read, Regions and
+// account states exactly as Overview, Topology and Coverage do.
+func WithCoverageScope(scope ScopeFunc) FeedOption {
+	return func(feed *ChangeFeed) { feed.readScope = scope }
 }
 
 // WithFeedOptions wires the live settings.
@@ -747,7 +757,17 @@ func (feed *ChangeFeed) coverage(pairs []pairScope, accounts []ScopeAccount, sto
 			if account.Outage != "" {
 				entry.AsOf = outageAsOf(account, pairs, index)
 			}
-			if account.Disconnected {
+			switch {
+			case account.Disconnected && account.LastReadAt.IsZero() && !everCovered(index, account.Account):
+				// Never read: it cannot have been disconnected. Its reason
+				// is why it cannot be read (the role failure), or not
+				// read yet.
+				reason := string(account.Outage)
+				if reason == "" {
+					reason = AccountNotReadYet
+				}
+				entry.Complete, entry.Reason = false, &reason
+			case account.Disconnected:
 				// Settings has recorded the account disconnected: that is
 				// its one reason, whatever role failure lies behind it.
 				reason := string(GapAccountDisconnected)
@@ -1053,4 +1073,15 @@ func bucketState(start, end time.Time, view coverageView) (string, []string) {
 		return BucketGap, gapAccounts
 	}
 	return BucketPartial, gapAccounts
+}
+
+// everCovered reports whether any of an account's pairs ever had changes
+// read: an account never read cannot have been disconnected.
+func everCovered(index map[string]*pairCoverage, account string) bool {
+	for key, entry := range index {
+		if entry != nil && len(entry.covered) > 0 && strings.HasPrefix(key, pairKey(account, "")) {
+			return true
+		}
+	}
+	return false
 }

@@ -38,18 +38,18 @@ func s3Client(c *call, bucketRegion string) (*s3.Client, error) {
 // reads behind the public-exposure and encryption flags. Object contents and
 // policy documents are never read.
 func collectS3(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := s3Client(c, "")
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
-	var out result
 	var token *string
 	type bucket struct{ name, region string }
 	var buckets []bucket
 	for {
 		page, err := api.ListBuckets(ctx, &s3.ListBucketsInput{MaxBuckets: aws.Int32(1000), ContinuationToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, item := range page.Buckets {
 			buckets = append(buckets, bucket{name: deref(item.Name), region: deref(item.BucketRegion)})
@@ -71,7 +71,7 @@ func collectS3(ctx context.Context, c *call) (result, error) {
 			out.resources = append(out.resources, resource)
 			continue
 		}
-		c.tried("GetPublicAccessBlock")
+		c.tried("GetPublicAccessBlock", resource.ARN)
 		detail, err := s3Client(c, item.region)
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("GetPublicAccessBlock", err))
@@ -99,7 +99,7 @@ func collectS3(ctx context.Context, c *call) (result, error) {
 		}
 
 		public := false
-		c.tried("GetBucketPolicyStatus")
+		c.tried("GetBucketPolicyStatus", resource.ARN)
 		status, err := detail.GetBucketPolicyStatus(ctx, &s3.GetBucketPolicyStatusInput{Bucket: aws.String(item.name)})
 		switch {
 		case err == nil && status.PolicyStatus != nil:
@@ -115,7 +115,7 @@ func collectS3(ctx context.Context, c *call) (result, error) {
 			flag(model.FlagPublicExposure, "Public access is not fully blocked")
 		}
 
-		c.tried("GetBucketEncryption")
+		c.tried("GetBucketEncryption", resource.ARN)
 		if _, err := detail.GetBucketEncryption(ctx, &s3.GetBucketEncryptionInput{Bucket: aws.String(item.name)}); err != nil {
 			if apiErrorCode(err) == "ServerSideEncryptionConfigurationNotFoundError" {
 				flag(model.FlagEncryptionOff, "Bucket has no default encryption")
@@ -129,9 +129,10 @@ func collectS3(ctx context.Context, c *call) (result, error) {
 }
 
 func collectCloudFront(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("cloudfront", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := cloudfront.NewFromConfig(c.env.config(c.endpointRegion), func(options *cloudfront.Options) {
 		options.BaseEndpoint = &endpoint
@@ -139,12 +140,11 @@ func collectCloudFront(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var marker *string
 	for {
 		page, err := api.ListDistributions(ctx, &cloudfront.ListDistributionsInput{MaxItems: aws.Int32(100), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		list := page.DistributionList
 		if list == nil {
@@ -177,16 +177,16 @@ func collectCloudFront(ctx context.Context, c *call) (result, error) {
 // collectRoute53 lists health checks, then hosted zones and the records
 // that point at a load balancer or a distribution.
 func collectRoute53(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := route53Client(c)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
-	var out result
 	var marker *string
 	for {
 		page, err := api.ListHealthChecks(ctx, &route53.ListHealthChecksInput{MaxItems: aws.Int32(100), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, check := range page.HealthChecks {
 			id := deref(check.Id)
@@ -209,7 +209,7 @@ func collectRoute53(ctx context.Context, c *call) (result, error) {
 	var zones []struct{ id, name string }
 	marker = nil
 	for {
-		c.tried("ListHostedZones")
+		c.listed("ListHostedZones")
 		page, err := api.ListHostedZones(ctx, &route53.ListHostedZonesInput{MaxItems: aws.Int32(100), Marker: marker})
 		if err != nil {
 			// The health checks are read; the zones are a gap of their own.
@@ -236,7 +236,7 @@ func collectRoute53(ctx context.Context, c *call) (result, error) {
 		input := &route53.ListResourceRecordSetsInput{HostedZoneId: aws.String(zone.id), MaxItems: aws.Int32(300)}
 		pages := 0
 		for {
-			c.tried("ListResourceRecordSets")
+			c.listed("ListResourceRecordSets")
 			page, err := api.ListResourceRecordSets(ctx, input)
 			if err != nil {
 				out.gaps = append(out.gaps, c.detailGap("ListResourceRecordSets", err))
@@ -288,9 +288,10 @@ func collectRoute53(ctx context.Context, c *call) (result, error) {
 // returns is reduced to who may assume each role and never stored; no
 // permission policy is read.
 func collectIAM(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("iam", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := iam.NewFromConfig(c.env.config(c.endpointRegion), func(options *iam.Options) {
 		options.BaseEndpoint = &endpoint
@@ -298,12 +299,11 @@ func collectIAM(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var marker *string
 	for {
 		page, err := api.ListRoles(ctx, &iam.ListRolesInput{MaxItems: aws.Int32(1000), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, role := range page.Roles {
 			name := deref(role.RoleName)

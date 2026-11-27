@@ -112,6 +112,8 @@ var localTableMigrations = []string{
 	"migrations/039_aws_change_pairs_not_changes.sql",
 	"migrations/041_aws_account_labels.sql",
 	"migrations/042_aws_group_corrections.sql",
+	"migrations/043_aws_call_counts.sql",
+	"migrations/044_aws_issues.sql",
 }
 
 // sqliteAddColumn matches one rendered ALTER TABLE … ADD COLUMN IF NOT

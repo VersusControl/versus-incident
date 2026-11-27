@@ -610,6 +610,25 @@ func (t *sqlTables) SweepAWSRetention(ctx context.Context, sweep AWSRetentionSwe
 				}
 			}
 		}
+		stage = "calls"
+	}
+
+	if stage == "calls" && !sweep.CallCountsBefore.IsZero() {
+		cutoff := t.at(sweep.CallCountsBefore)
+		for {
+			removed, err := t.sweepDelete(ctx, "aws_call_counts", `org_id = ? AND hour < ?`, []any{org, cutoff}, batch)
+			if err != nil {
+				return result, err
+			}
+			result.CallCounts += removed
+			if removed < int64(batch) {
+				break
+			}
+			if expired() {
+				result.More, result.Cursor.Stage = true, "calls"
+				return result, nil
+			}
+		}
 	}
 
 	result.Cursor = AWSRetentionCursor{}
@@ -1237,14 +1256,17 @@ func (t *sqlTables) AWSChangeCoverage(ctx context.Context, scope tenancy.OrgScop
 	if err != nil {
 		return nil, err
 	}
-	return t.awsChangeCoverage(ctx, db, scope, account, region)
+	return t.awsChangeCoverage(ctx, db, scope, account, region, nil)
 }
 
-func (t *sqlTables) awsChangeCoverage(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, account, region string) ([]AWSPairCoverage, error) {
+func (t *sqlTables) awsChangeCoverage(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, account, region string, limit *AWSInheritedLimit) ([]AWSPairCoverage, error) {
 	scope = inventoryScope(scope)
 	var where sqlWhere
 	condition, args := readOrgs(scope.Read, "c")
 	where.add(condition, args...)
+	if condition, args, ok := limit.inheritedCondition(scope.Write, "c", "account"); ok {
+		where.add(condition, args...)
+	}
 	where.equal("c.account", account)
 	where.equal("c.region", region)
 	rows, err := q.QueryContext(ctx, t.q(`SELECT c.org_id, c.account, c.region, c.covered_from, c.covered_until FROM aws_change_coverage c

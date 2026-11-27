@@ -2,6 +2,9 @@ package agent
 
 import (
 	"encoding/hex"
+	"fmt"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -213,4 +216,225 @@ func pad2(n int) string {
 		return "0" + s
 	}
 	return s
+}
+
+func TestMiner_RemoveThenRelearnGivesTheSameID(t *testing.T) {
+	m := NewMiner(0.4, 4, 100)
+	line := "payment gateway timeout after 30s for order 81723"
+	id, _, isNew := m.Cluster(line)
+	if !isNew {
+		t.Fatal("the first line did not create a template")
+	}
+	other, _, _ := m.Cluster("cache warmup finished in 12ms")
+	if !m.Remove(id) {
+		t.Fatalf("Remove(%q) = false for a learned template", id)
+	}
+	if m.Remove(id) {
+		t.Fatal("a second Remove of the same ID reported it known")
+	}
+	for _, cluster := range m.Snapshot() {
+		if cluster.ID == id {
+			t.Fatal("the removed template is still in the snapshot")
+		}
+	}
+	again, _, isNew := m.Cluster(line)
+	if !isNew || again != id {
+		t.Fatalf("re-learned ID = %q (new=%v), want %q as a new template", again, isNew, id)
+	}
+	if kept, _, isNew := m.Cluster("cache warmup finished in 40ms"); isNew || kept != other {
+		t.Fatalf("removing one template disturbed another: %q new=%v, want %q", kept, isNew, other)
+	}
+	if m.Remove("p-000000000000") {
+		t.Fatal("Remove of an unknown ID reported it known")
+	}
+}
+
+// A template whose tokens no longer lead to the leaf it was filed under is
+// still taken out of the tree, through the walk.
+func TestMiner_RemoveRestoredTemplate(t *testing.T) {
+	m := NewMiner(0.4, 4, 100)
+	m.AddCluster("p-aaaaaaaaaaaa", "disk usage high on node <*>", 3)
+	filed := m.descend(tokenize("disk usage high on node worker"), false)
+	// The leading tokens now point to another branch, so only the walk can
+	// find the template.
+	m.clusters["p-aaaaaaaaaaaa"].Tokens[1] = "space"
+	if m.descend(m.clusters["p-aaaaaaaaaaaa"].Tokens, false) == filed {
+		t.Fatal("the fixture did not move the template's path")
+	}
+	if !m.Remove("p-aaaaaaaaaaaa") {
+		t.Fatal("the restored template was not known")
+	}
+	if len(filed.clusters) != 0 {
+		t.Fatalf("the removed template is still filed: %+v", filed.clusters)
+	}
+	if _, _, isNew := m.Cluster("disk usage high on node worker"); !isNew {
+		t.Fatal("a line matched a removed template")
+	}
+}
+
+// filedIDs lists every template in the tree, with the leaf path it sits in.
+func filedIDs(m *Miner) []string {
+	var out []string
+	var walk func(path string, node *minerNode)
+	walk = func(path string, node *minerNode) {
+		for _, cluster := range node.clusters {
+			out = append(out, path+" "+cluster.ID)
+		}
+		for key, child := range node.children {
+			walk(path+"/"+key, child)
+		}
+	}
+	for length, root := range m.tree {
+		walk(strconv.Itoa(length), root)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func clusterIDs(m *Miner) []string {
+	out := []string{}
+	for _, cluster := range m.Snapshot() {
+		out = append(out, cluster.ID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// A full leaf evicts an older template, never the one being created, and the
+// evicted one leaves both the tree and the cluster set; a restored miner has
+// the same tree and set.
+func TestMiner_EvictionKeepsTheNewTemplateAndRestoresIdentically(t *testing.T) {
+	m := NewMiner(0.4, 4, 2)
+	ids := []string{}
+	for _, word := range []string{"xa", "ya", "za"} {
+		line := "audit a b c " + strings.TrimSpace(strings.Repeat(word+" ", 7))
+		id, _, isNew := m.Cluster(line)
+		if !isNew {
+			t.Fatalf("%q matched an existing template", line)
+		}
+		ids = append(ids, id)
+	}
+	filed := filedIDs(m)
+	set := clusterIDs(m)
+	if len(filed) != 2 || len(set) != 2 {
+		t.Fatalf("filed = %v, set = %v; want two templates", filed, set)
+	}
+	if !slices.Contains(set, ids[2]) {
+		t.Fatalf("the template just created was evicted: set %v, new %s", set, ids[2])
+	}
+	evicted := min(ids[0], ids[1])
+	if slices.Contains(set, evicted) {
+		t.Fatalf("the lower-ID tie %s was kept: %v", evicted, set)
+	}
+	for _, entry := range filed {
+		if strings.HasSuffix(entry, evicted) {
+			t.Fatalf("the evicted template is still filed: %v", filed)
+		}
+	}
+	restored := NewMiner(0.4, 4, 2)
+	for _, cluster := range m.Snapshot() {
+		restored.AddCluster(cluster.ID, strings.Join(cluster.Tokens, " "), cluster.Size)
+	}
+	if fmt.Sprint(filedIDs(restored)) != fmt.Sprint(filed) || fmt.Sprint(clusterIDs(restored)) != fmt.Sprint(set) {
+		t.Fatalf("restored tree %v set %v, original tree %v set %v", filedIDs(restored), clusterIDs(restored), filed, set)
+	}
+	// Restoring the same ID twice files it once.
+	restored.AddCluster(ids[2], "audit a b c za za za za za za za", 1)
+	if fmt.Sprint(filedIDs(restored)) != fmt.Sprint(filed) {
+		t.Fatalf("a second restore of one ID filed it twice: %v", filedIDs(restored))
+	}
+	// Learning goes on the same way in both.
+	for _, word := range []string{"qa", "xa", "ra", "ya"} {
+		line := "audit a b c " + strings.TrimSpace(strings.Repeat(word+" ", 7))
+		want, _, _ := m.Cluster(line)
+		if got, _, _ := restored.Cluster(line); got != want {
+			t.Fatalf("%q: restored %s, original %s", line, got, want)
+		}
+	}
+	if fmt.Sprint(filedIDs(restored)) != fmt.Sprint(filedIDs(m)) || fmt.Sprint(clusterIDs(restored)) != fmt.Sprint(clusterIDs(m)) {
+		t.Fatalf("trees diverged after more learning: %v vs %v", filedIDs(restored), filedIDs(m))
+	}
+}
+
+// generatedMinerLines builds count log lines from a few shapes whose literal
+// words vary, so templates merge, compete within one leaf and gain wildcards.
+func generatedMinerLines(seed uint64, count int) []string {
+	words := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"}
+	state := seed
+	next := func(n int) int {
+		state = state*6364136223846793005 + 1442695040888963407
+		return int((state >> 33) % uint64(n))
+	}
+	shapes := []func() string{
+		func() string {
+			return "user login failed for account " + words[next(len(words))] + " reason " + words[next(3)]
+		},
+		func() string {
+			return "GET /api/v1/items status " + strconv.Itoa(200+next(4)*100) + " took " + strconv.Itoa(next(900)) + " ms"
+		},
+		func() string {
+			return "worker pool scaling from " + strconv.Itoa(next(9)) + " to " + strconv.Itoa(next(9)) + " replicas " + words[next(len(words))]
+		},
+		func() string {
+			return "job " + words[next(4)] + " " + words[next(len(words))] + " finished " + words[next(2)] + " " + words[next(len(words))]
+		},
+		func() string {
+			return "job " + words[next(4)] + " " + words[next(len(words))] + " started " + words[next(len(words))] + " " + words[next(2)]
+		},
+	}
+	// A long shape whose fixed leading words are under the similarity
+	// threshold keeps several templates in one leaf, where a line can be
+	// equally close to two of them.
+	shapes = append(shapes, func() string {
+		parts := []string{"audit", "event", "recorded", "for"}
+		for range 9 {
+			parts = append(parts, words[next(3)])
+		}
+		return strings.Join(parts, " ")
+	})
+	lines := make([]string, count)
+	for index := range lines {
+		lines[index] = shapes[next(len(shapes))]()
+	}
+	return lines
+}
+
+func TestMiner_SnapshotRestoreGivesTheSameIDs(t *testing.T) {
+	original := NewMiner(0.4, 4, 100)
+	for _, line := range generatedMinerLines(1, 1000) {
+		original.Cluster(line)
+	}
+	restored := NewMiner(0.4, 4, 100)
+	for _, cluster := range original.Snapshot() {
+		restored.AddCluster(cluster.ID, strings.Join(cluster.Tokens, " "), cluster.Size)
+	}
+	for index, line := range generatedMinerLines(2, 1000) {
+		want, wantTemplate, wantNew := original.Cluster(line)
+		got, gotTemplate, gotNew := restored.Cluster(line)
+		if got != want || gotTemplate != wantTemplate || gotNew != wantNew {
+			t.Fatalf("line %d %q: restored miner gave %q %q new=%v, original %q %q new=%v", index, line, got, gotTemplate, gotNew, want, wantTemplate, wantNew)
+		}
+	}
+}
+
+// A line equally close to two templates of one leaf goes to the same one in a
+// restored miner as in the original, whatever order the snapshot lists them.
+func TestMiner_TieGoesToTheSameTemplateAfterRestore(t *testing.T) {
+	for attempt := range 20 {
+		original := NewMiner(0.4, 4, 100)
+		first, _, _ := original.Cluster("audit a b c xa xb xc xd xe xf xg")
+		second, _, isNew := original.Cluster("audit a b c ya yb yc yd ye yf yg")
+		if !isNew || first == second {
+			t.Fatal("the fixture needs two templates in one leaf")
+		}
+		restored := NewMiner(0.4, 4, 100)
+		for _, cluster := range original.Snapshot() {
+			restored.AddCluster(cluster.ID, strings.Join(cluster.Tokens, " "), cluster.Size)
+		}
+		line := "audit a b c xa xb yc yd za zb zc"
+		want, _, _ := original.Cluster(line)
+		if got, _, _ := restored.Cluster(line); got != want {
+			t.Fatalf("attempt %d: the tie went to %q after restore, %q before", attempt, got, want)
+		}
+	}
 }

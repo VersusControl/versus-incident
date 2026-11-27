@@ -48,8 +48,11 @@ func CallerAccounts(ctx context.Context) ([]string, bool) {
 }
 
 // OpenIncreaseServices are the provider service names with an open
-// increase: the daily refresh reads resource-level cost for them, so the
-// suspect change is narrowed to the resource that billed.
+// increase on a payer the deployment reads: the daily refresh reads
+// resource-level cost for them, a paid call, so the suspect change is
+// narrowed to the resource that billed. An increase of a payer that was
+// removed, or one only an inherited organization still lists, pays for
+// nothing and is left out.
 func (b *Backend) OpenIncreaseServices(ctx context.Context) []string {
 	if b == nil || b.store == nil {
 		return nil
@@ -58,9 +61,22 @@ func (b *Backend) OpenIncreaseServices(ctx context.Context) []string {
 	if err != nil {
 		return nil
 	}
+	configured := map[string]bool{}
+	var st *statusRecord
+	if b.adapter != nil {
+		for _, p := range b.adapter.Source().payers() {
+			configured[p.AccountID] = true
+		}
+		if st, err = b.adapter.cache.status(); err != nil {
+			return nil
+		}
+	}
 	seen := map[string]bool{}
 	var out []string
 	for _, r := range recs {
+		if b.adapter != nil && !configured[increasePayer(st, r.Key.Account)] {
+			continue
+		}
 		if r.Status == finops.StatusOpen && r.ServiceName != "" && !seen[r.ServiceName] {
 			seen[r.ServiceName] = true
 			out = append(out, r.ServiceName)
@@ -90,3 +106,14 @@ func (b *Backend) DrillDown(ctx context.Context, account, awsService string) err
 
 // SuggestedCap is the daily request count full detail needs.
 func (b *Backend) SuggestedCap(ctx context.Context) (int, error) { return b.adapter.SuggestedCap(ctx) }
+
+// increasePayer is the payer an increase's account bills through: the one
+// the refresh state names, else the account itself.
+func increasePayer(st *statusRecord, account string) string {
+	if st != nil {
+		if payer := payerOf(st, account); payer != "" {
+			return payer
+		}
+	}
+	return account
+}

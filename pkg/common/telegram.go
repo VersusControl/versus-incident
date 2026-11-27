@@ -96,10 +96,8 @@ func (t *TelegramProvider) SendAlert(i *m.Incident) error {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := t.templatePath
-	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
-		tplPath = utils.KubernetesIssueTemplatePath(t.kubernetesIssueTemplatePath, utils.KubernetesIssueTelegramTemplatePath)
-	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
-		tplPath = utils.AgentTelegramTemplatePath
+	if i.Content != nil {
+		tplPath = utils.AlertTemplatePath(*i.Content, utils.ChannelTelegram, tplPath, t.kubernetesIssueTemplatePath)
 	}
 
 	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
@@ -107,14 +105,15 @@ func (t *TelegramProvider) SendAlert(i *m.Incident) error {
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	var message bytes.Buffer
-	if err := tmpl.Execute(&message, i.Content); err != nil {
-		return fmt.Errorf("failed to execute template: %w", err)
+	// An AWS issue alert is fitted to the message limit.
+	message, err := utils.RenderAlert(tmpl, i.Content, utils.TelegramAlertBudget, utils.UTF16Length)
+	if err != nil {
+		return err
 	}
 
 	telegramMsg := TelegramMessage{
 		ChatID:    t.chatID,
-		Text:      message.String(),
+		Text:      message,
 		ParseMode: "HTML",
 	}
 

@@ -15,6 +15,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
 	"github.com/VersusControl/versus-incident/pkg/awsauth"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 // Defaults for the change poller and for one unit's run time.
@@ -61,6 +62,9 @@ type Options struct {
 	// FailureKeep is how many failed attempts per principal, error code,
 	// event and hour are kept as rows.
 	FailureKeep int
+	// CallBudgets caps the requests one unit run makes, by source (pages
+	// for the change poller). A missing or zero source has no cap.
+	CallBudgets map[string]int
 }
 
 // DefaultAppTagKeys is the tag application source when none is configured.
@@ -80,6 +84,18 @@ type Collector struct {
 	logf       func(format string, args ...any)
 	// accountHealth reads the account's identity check; unknown when nil.
 	accountHealth func(account string) AccountHealth
+	// ledger receives the unit runs' request counts; nil keeps none. held
+	// are the counts a failed write kept for the next one, and
+	// ledgerFailedAt when a write last failed.
+	ledger         func(context.Context, []storage.AWSCallCount) error
+	ledgerMu       sync.Mutex
+	held           map[storage.AWSCallCountKey]storage.AWSCallCount
+	ledgerFailedAt time.Time
+	// rotations are where each unit's per-item detail reads start on its
+	// next run, so a budget that cannot cover every item still reads each
+	// one within a few runs.
+	rotationMu sync.Mutex
+	rotations  map[string]map[string]rotation
 
 	mu      sync.Mutex
 	running map[string]bool
@@ -199,6 +215,12 @@ type UnitReport struct {
 	Outcome   Outcome    `json:"outcome"`
 	ErrorCode string     `json:"error_code,omitempty"`
 	Resources int        `json:"resources"`
+	// Unhealthy is set when the committed generation reports a problem
+	// in the unit's own data (unhealthy targets, a failed stack, an
+	// alarm firing).
+	Unhealthy bool `json:"unhealthy,omitempty"`
+	// Calls is how many AWS requests the run made.
+	Calls int `json:"calls"`
 }
 
 // Report lists every unit a sync attempted.
@@ -403,6 +425,7 @@ func (collector *Collector) sync(ctx context.Context, target Target, kinds []Kin
 			limiter:     collector.limiter,
 			retries:     collector.retries,
 			sleep:       collector.sleep,
+			meter:       newMeter(unitBudget(options, item.unit.Service), collector.rotationsOf(item.unit)),
 		}
 		c := &call{
 			env:            environment,
@@ -420,6 +443,9 @@ func (collector *Collector) sync(ctx context.Context, target Target, kinds []Kin
 		} else {
 			unitReport = collector.runUnit(ctx, c, item.spec)
 		}
+		unitReport.Calls, _, _, _ = c.env.meter.counts()
+		collector.keepRotations(item.unit, c.env.meter.nextRotations())
+		collector.recordCalls(ctx, c)
 		report.Units = append(report.Units, unitReport)
 	}
 	return report, nil
@@ -441,6 +467,13 @@ func (collector *Collector) runUnit(ctx context.Context, c *call, entry spec) Un
 		// Shutdown: whatever the unit read is incomplete and is not kept.
 		return report
 	}
+	// A unit whose own lists ran past the list ceiling is an extreme
+	// estate: it keeps its whole last good read and says it is capped.
+	if c.env.meter.overCeiling() {
+		report.ErrorCode = CodeCapped
+		collector.fail(ctx, c, report.ErrorCode, append(out.gaps, c.budgetGap()))
+		return report
+	}
 	if err != nil {
 		report.ErrorCode = c.env.resolve(errorCode(err))
 		if report.ErrorCode == CodeNotInRegion {
@@ -456,11 +489,25 @@ func (collector *Collector) runUnit(ctx context.Context, c *call, entry spec) Un
 		return report
 	}
 
-	// A detail call that failed for a passing reason (throttling, a timeout)
-	// would replace good detail with nothing. Keep the last good generation
-	// and name the gaps instead; only a unit that has never committed takes
-	// the partial candidate, because something is better than nothing there.
-	if c.transientCode != "" && collector.store.HasGeneration(c.unit) {
+	// A run whose budget skipped per-item detail calls commits: its lists
+	// ran to the end, so the resource set is exact, and the skipped items
+	// read "not read" with the calls named as capped. Nothing of the last
+	// read is carried over. The next run starts its detail where this one
+	// stopped.
+	_, _, capped, _ := c.env.meter.counts()
+	budgetOnly := capped && c.transientCode == ""
+	if budgetOnly {
+		report.ErrorCode = CodeCapped
+		out.health = append(out.health, c.notRead()...)
+		c.markNotRead(&out)
+		collector.keepLinks(ctx, c, &out)
+		collector.keepIdentity(ctx, c, &out)
+	} else if c.transientCode != "" && collector.store.HasGeneration(c.unit) {
+		// A detail call that failed for a passing reason (throttling, a
+		// timeout) would replace good detail with nothing. Keep the last
+		// good generation and name the gaps instead; only a unit that has
+		// never committed takes the partial candidate, because something
+		// is better than nothing there.
 		report.ErrorCode = c.transientCode
 		collector.fail(ctx, c, report.ErrorCode, out.gaps)
 		return report
@@ -491,8 +538,13 @@ func (collector *Collector) runUnit(ctx context.Context, c *call, entry spec) Un
 		return report
 	}
 	report.Outcome = OutcomeCommitted
+	for _, item := range generation.Health {
+		if item.Status == model.HealthWarning || item.Status == model.HealthCritical {
+			report.Unhealthy = true
+		}
+	}
 	for _, resource := range generation.Resources {
-		if resource.Type != model.ResourcePolicyType {
+		if resource.Type != model.ResourcePolicyType && resource.Type != model.TrailType && resource.Type != model.HealthEventType {
 			report.Resources++
 		}
 	}
@@ -524,7 +576,9 @@ func (collector *Collector) fail(ctx context.Context, c *call, code string, gaps
 		return
 	}
 	unit := c.unit
-	collector.logf("aws collect: account=%s region=%s service=%s failed code=%s", unit.Account, unit.Region, unit.Service, code)
+	if code != CodeCapped {
+		collector.logf("aws collect: account=%s region=%s service=%s failed code=%s", unit.Account, unit.Region, unit.Service, code)
+	}
 	if err := c.writer.RecordFailure(unit, code, gaps...); err != nil && !errors.Is(err, snapshot.ErrPurged) {
 		collector.logf("aws collect: account=%s region=%s service=%s state not saved", unit.Account, unit.Region, unit.Service)
 	}

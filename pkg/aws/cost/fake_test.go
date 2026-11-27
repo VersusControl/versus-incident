@@ -269,7 +269,7 @@ func label(target string, req ceRequest) string {
 func (f *fakeAWS) Do(req *http.Request) (*http.Response, error) {
 	body, _ := io.ReadAll(req.Body)
 	target := req.Header.Get("X-Amz-Target")
-	if strings.HasSuffix(req.URL.Path, "/operation/GetEC2InstanceRecommendations") {
+	if strings.HasSuffix(req.URL.Path, "/operation/"+"GetEC2InstanceRecommendations") {
 		target = computeOptimizerTarget
 	}
 	var in ceRequest

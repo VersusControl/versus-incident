@@ -35,6 +35,9 @@ type GroupLink struct {
 	Kind      model.RelationKind `json:"kind"`
 	Count     int                `json:"count"`
 	BothSides int                `json:"both_sides"`
+	// Sources breaks Count down by the read that found the links
+	// ("kms:GetKeyPolicy": 2); a link with no source is not in it.
+	Sources map[string]int `json:"sources,omitempty"`
 }
 
 // GroupsView is the Groups level of one account: its groups as cards and
@@ -115,6 +118,12 @@ func Groups(g Graph, account string, groups []grouping.Group) GroupsView {
 		link.Count += max(edge.Count, 1)
 		if edge.Sides == BothSides {
 			link.BothSides += max(edge.Count, 1)
+		}
+		if edge.Source != "" {
+			if link.Sources == nil {
+				link.Sources = map[string]int{}
+			}
+			link.Sources[edge.Source] += max(edge.Count, 1)
 		}
 	}
 	for _, link := range links {

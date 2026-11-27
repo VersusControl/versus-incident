@@ -163,11 +163,7 @@ func newAWSStack(t *testing.T, scenario string, options awsStackOptions) *awsSta
 		stack.service.Start(ctx)
 		t.Cleanup(func() {
 			cancel()
-			select {
-			case <-stack.service.Stopped():
-			case <-time.After(10 * time.Second):
-				t.Errorf("aws settings service did not stop")
-			}
+			waitFor(t, stack.service.Stopped(), "the aws settings service to stop")
 		})
 	}
 	return stack
@@ -267,8 +263,7 @@ func waitStackDraft(t *testing.T, client *awsClient, draftID string, deadline ti
 	var view awssettings.DraftView
 	previous := -1
 	partial := false
-	stop := time.Now().Add(deadline)
-	for {
+	for wait := pollingWithin(t, deadline, "draft "+draftID+" to verify"); ; wait.next() {
 		response, body := client.do(http.MethodGet, "/api/admin/aws/connect/drafts/"+draftID, "")
 		if response.StatusCode != fiber.StatusOK {
 			t.Fatalf("draft read = %d %s", response.StatusCode, body)
@@ -288,10 +283,9 @@ func waitStackDraft(t *testing.T, client *awsClient, draftID string, deadline ti
 			t.Logf("draft %s verified; progressive partial grid observed=%v", draftID, partial)
 			return view
 		}
-		if time.Now().After(stop) {
+		if wait.expired() {
 			t.Fatalf("draft %s did not verify: %+v", draftID, view)
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -522,14 +516,10 @@ func connectStackGroup(t *testing.T) {
 	}
 	if settingsView.Privacy.SelfTest.LastRunAt.IsZero() {
 		// Start() runs the self-test at boot; wait for the published record.
-		deadline := time.Now().Add(10 * time.Second)
-		for settingsView.Privacy.SelfTest.LastRunAt.IsZero() && time.Now().Before(deadline) {
-			time.Sleep(50 * time.Millisecond)
+		eventually(t, "the privacy self-test to publish a result", func() bool {
 			settingsView, settingsBody = readSettings(t, client)
-		}
-	}
-	if settingsView.Privacy.SelfTest.LastRunAt.IsZero() {
-		t.Fatal("privacy self-test never published a result")
+			return !settingsView.Privacy.SelfTest.LastRunAt.IsZero()
+		})
 	}
 	if !settingsView.Privacy.SelfTest.Passing || settingsView.Privacy.SelfTest.Leaks24h != 0 {
 		t.Fatalf("privacy self-test = %+v", settingsView.Privacy.SelfTest)

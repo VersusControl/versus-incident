@@ -336,7 +336,6 @@ func TestHistorySaveOutageIsReportedAlikeByEveryReplica(t *testing.T) {
 				t.Fatalf("%d replicas saved history, want exactly the owner", saving)
 			}
 
-			now := time.Now().UTC()
 			for i, service := range replicas {
 				// Live pages keep serving the cluster that was read.
 				if _, err := service.Overview(t.Context()); err != nil {
@@ -355,7 +354,14 @@ func TestHistorySaveOutageIsReportedAlikeByEveryReplica(t *testing.T) {
 				if credentialFailures != 0 || service.recovery.requestGate(service.scope.OrgID) {
 					t.Fatalf("replica %d: a save outage reached the credential recovery gate (failures=%d)", i, credentialFailures)
 				}
+			}
 
+			// historyPages reads every history page of one replica and says how
+			// it differs from the expected report, or "" when it matches. A
+			// history read that fails, or a response that carries a cause,
+			// fails the test at once.
+			historyPages := func(i int, service *Service) string {
+				now := time.Now().UTC()
 				crashes, crashErr := service.Crashes(t.Context(), kubechanges.CrashQuery{})
 				changes, changeErr := service.Changes(t.Context(), ChangeQuery{})
 				timeline, timelineErr := service.Timeline(t.Context(), TimelineQuery{})
@@ -365,27 +371,46 @@ func TestHistorySaveOutageIsReportedAlikeByEveryReplica(t *testing.T) {
 						t.Fatalf("replica %d %s history read failed during a save outage: %s", i, name, DiagnoseError(err).Code)
 					}
 				}
-				for name, capture := range map[string]*CaptureStatus{"crashes": &crashes.Capture, "changes": changes.Capture, "timeline": timeline.Capture, "issues": issues.Capture} {
-					if capture == nil || capture.HistorySave == nil {
-						t.Fatalf("replica %d %s history page did not report the failed save", i, name)
-					}
-					save := capture.HistorySave
-					if save.Code != test.code || save.Retryable != test.retryable || save.SavedThrough == nil || !save.SavedThrough.Equal(checkpoint.At) {
-						t.Fatalf("replica %d %s save status = %+v, want %s retryable=%t saved through %s", i, name, save, test.code, test.retryable, checkpoint.At)
-					}
-				}
 				encoded, err := json.Marshal([]any{crashes, changes, timeline, issues})
 				if err != nil {
 					t.Fatal(err)
-				}
-				if !strings.Contains(string(encoded), `"history_save":{"code":"`+test.code+`"`) || !strings.Contains(string(encoded), `"saved_through":"`+checkpoint.At.UTC().Format(time.RFC3339Nano)+`"`) {
-					t.Fatalf("replica %d history response shape: %s", i, encoded)
 				}
 				for _, leaked := range []string{"connector_credential_unresolved", "credential_unavailable", "deadline", "10.0.0.7", "journal statement", "evidence limit"} {
 					if strings.Contains(string(encoded), leaked) {
 						t.Fatalf("replica %d history response carried %q", i, leaked)
 					}
 				}
+				for name, capture := range map[string]*CaptureStatus{"crashes": &crashes.Capture, "changes": changes.Capture, "timeline": timeline.Capture, "issues": issues.Capture} {
+					if capture == nil || capture.HistorySave == nil {
+						return fmt.Sprintf("replica %d %s history page did not report the failed save", i, name)
+					}
+					save := capture.HistorySave
+					if save.Code != test.code || save.Retryable != test.retryable || save.SavedThrough == nil || !save.SavedThrough.Equal(checkpoint.At) {
+						return fmt.Sprintf("replica %d %s save status = %+v, want %s retryable=%t saved through %s", i, name, save, test.code, test.retryable, checkpoint.At)
+					}
+				}
+				if !strings.Contains(string(encoded), `"history_save":{"code":"`+test.code+`"`) || !strings.Contains(string(encoded), `"saved_through":"`+checkpoint.At.UTC().Format(time.RFC3339Nano)+`"`) {
+					return fmt.Sprintf("replica %d history response shape: %s", i, encoded)
+				}
+				return ""
+			}
+			// Captures keep arriving. A capture published after the wait above
+			// is not yet behind until its save grace passes, and reads as
+			// delayed until its own save is tried, so a single read can land in
+			// that window on a loaded run. Every page of both replicas must
+			// agree in one pass; a lasting difference still fails at the hang
+			// guard, with the last difference seen.
+			for wait := polling(t, "every history page of every replica reporting the failed save"); ; wait.next() {
+				mismatch := ""
+				for i, service := range replicas {
+					if mismatch = historyPages(i, service); mismatch != "" {
+						break
+					}
+				}
+				if mismatch == "" {
+					break
+				}
+				wait.what = "every history page of every replica reporting the failed save; last difference: " + mismatch
 			}
 
 			// A history read that itself fails is a store outage, never a credential one.

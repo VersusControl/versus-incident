@@ -98,17 +98,9 @@ func TestSchedulerStartStopsWithContext(t *testing.T) {
 		nil, WithTick(time.Millisecond))
 	ctx, cancel := context.WithCancel(context.Background())
 	scheduler.Start(ctx)
-	select {
-	case <-ran:
-	case <-time.After(5 * time.Second):
-		t.Fatal("scheduler did not run")
-	}
+	waitFor(t, ran, "the scheduler's first pass")
 	cancel()
-	select {
-	case <-scheduler.Stopped():
-	case <-time.After(5 * time.Second):
-		t.Fatal("scheduler did not stop")
-	}
+	waitFor(t, scheduler.Stopped(), "the scheduler to stop")
 }
 
 // Bucket and key policy reads are metered: they run on the first pass and

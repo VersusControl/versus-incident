@@ -91,16 +91,16 @@ func route53Client(c *call) (*route53.Client, error) {
 // on a spoke. An attachment is keyed by the account that owns the attached
 // network, so the owner's and the spoke's reads of it are one resource.
 func collectTransitGateways(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := ec2Client(c)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
-	var out result
 	var token *string
 	for {
 		page, err := api.DescribeTransitGateways(ctx, &ec2.DescribeTransitGatewaysInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, gateway := range page.TransitGateways {
 			id, owner := deref(gateway.TransitGatewayId), deref(gateway.OwnerId)
@@ -121,7 +121,7 @@ func collectTransitGateways(ctx context.Context, c *call) (result, error) {
 	}
 	token = nil
 	for {
-		c.tried("DescribeTransitGatewayAttachments")
+		c.listed("DescribeTransitGatewayAttachments")
 		page, err := api.DescribeTransitGatewayAttachments(ctx, &ec2.DescribeTransitGatewayAttachmentsInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("DescribeTransitGatewayAttachments", err))
@@ -198,9 +198,10 @@ func shareTarget(principal string) string {
 // shared with, and the shares it receives. Three calls, no share names: a
 // share is linked by its ARN, which names its owner.
 func collectRAM(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := ramClient(c)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	shares := map[string]*model.Resource{}
 	var order []string
@@ -225,7 +226,7 @@ func collectRAM(ctx context.Context, c *call) (result, error) {
 		for {
 			page, err := api.ListResources(ctx, &ram.ListResourcesInput{ResourceOwner: owner, MaxResults: aws.Int32(500), NextToken: token})
 			if err != nil {
-				return result{}, err
+				return out, err
 			}
 			for _, item := range page.Resources {
 				arn := deref(item.ResourceShareArn)
@@ -243,10 +244,9 @@ func collectRAM(ctx context.Context, c *call) (result, error) {
 			}
 		}
 	}
-	var out result
 	var token *string
 	for {
-		c.tried("GetResourceShareAssociations")
+		c.listed("GetResourceShareAssociations")
 		page, err := api.GetResourceShareAssociations(ctx, &ram.GetResourceShareAssociationsInput{
 			AssociationType: ramtypes.ResourceShareAssociationTypePrincipal, MaxResults: aws.Int32(500), NextToken: token})
 		if err != nil {
@@ -327,9 +327,10 @@ func collectOrganization(ctx context.Context, c *call) (result, error) {
 // never stored. Bucket policy reads are metered, so this unit runs on the
 // policy cadence, not with the inventory.
 func collectBucketPolicies(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := s3Client(c, "")
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	type bucket struct{ name, region string }
 	var buckets []bucket
@@ -337,7 +338,7 @@ func collectBucketPolicies(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.ListBuckets(ctx, &s3.ListBucketsInput{MaxBuckets: aws.Int32(1000), ContinuationToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, item := range page.Buckets {
 			buckets = append(buckets, bucket{name: deref(item.Name), region: deref(item.BucketRegion)})
@@ -346,13 +347,12 @@ func collectBucketPolicies(ctx context.Context, c *call) (result, error) {
 			break
 		}
 	}
-	var out result
 	for index, item := range buckets {
 		if index >= maxBucketDetails {
 			out.gaps = append(out.gaps, c.capGap("GetBucketPolicy", maxBucketDetails, len(buckets)))
 			break
 		}
-		c.tried("GetBucketPolicy")
+		c.tried("GetBucketPolicy", model.ARN(c.partition, "s3", "", "", item.name))
 		detail, err := s3Client(c, item.region)
 		if err != nil {
 			out.gaps = append(out.gaps, c.detailGap("GetBucketPolicy", err))
@@ -400,23 +400,23 @@ func kmsClient(c *call) (*kms.Client, error) {
 // its own account, so it reduces to no grant. Key requests are metered, so
 // this unit runs on the policy cadence.
 func collectKMS(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := kmsClient(c)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	var keys []kmstypes.KeyListEntry
 	var marker *string
 	for {
 		page, err := api.ListKeys(ctx, &kms.ListKeysInput{Limit: aws.Int32(1000), Marker: marker})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		keys = append(keys, page.Keys...)
 		if marker = page.NextMarker; !page.Truncated || deref(marker) == "" {
 			break
 		}
 	}
-	var out result
 	for index, key := range keys {
 		id := deref(key.KeyId)
 		arn := deref(key.KeyArn)
@@ -432,7 +432,7 @@ func collectKMS(ctx context.Context, c *call) (result, error) {
 			out.resources = append(out.resources, resource)
 			continue
 		}
-		c.tried("GetKeyPolicy")
+		c.tried("GetKeyPolicy", arn)
 		policy, err := api.GetKeyPolicy(ctx, &kms.GetKeyPolicyInput{KeyId: aws.String(id), PolicyName: aws.String("default")})
 		switch {
 		case notSetAnswer(err), apiErrorCode(err) == "NotFoundException":
@@ -462,9 +462,10 @@ func ecrClient(c *call) (*ecr.Client, error) {
 
 // collectECR lists repositories and reads each repository's policy.
 func collectECR(ctx context.Context, c *call) (result, error) {
+	var out result
 	api, err := ecrClient(c)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	type repository struct{ arn, name string }
 	var repositories []repository
@@ -472,7 +473,7 @@ func collectECR(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeRepositories(ctx, &ecr.DescribeRepositoriesInput{MaxResults: aws.Int32(1000), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, item := range page.Repositories {
 			repositories = append(repositories, repository{arn: deref(item.RepositoryArn), name: deref(item.RepositoryName)})
@@ -481,7 +482,6 @@ func collectECR(ctx context.Context, c *call) (result, error) {
 			break
 		}
 	}
-	var out result
 	for index, item := range repositories {
 		arn := item.arn
 		if arn == "" {
@@ -496,7 +496,7 @@ func collectECR(ctx context.Context, c *call) (result, error) {
 			out.resources = append(out.resources, resource)
 			continue
 		}
-		c.tried("GetRepositoryPolicy")
+		c.tried("GetRepositoryPolicy", arn)
 		policy, err := api.GetRepositoryPolicy(ctx, &ecr.GetRepositoryPolicyInput{RepositoryName: aws.String(item.name)})
 		switch {
 		case notSetAnswer(err):

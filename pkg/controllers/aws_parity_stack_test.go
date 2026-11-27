@@ -590,6 +590,12 @@ func awsConnectionParityGroup(t *testing.T) {
 	client := &awsClient{t: t, app: stack.app}
 	client.gatewaySession(awsStackSecret)
 	start := connectAccount(t, client)
+	// Region discovery first, as the wizard does: a draft with Regions
+	// commits without a background Region read, so no setup request lands
+	// in the turn's request count.
+	if response, body := client.do(http.MethodPost, "/api/admin/aws/connect/drafts/"+start.DraftID+"/regions", ""); response.StatusCode != fiber.StatusOK {
+		t.Fatalf("regions = %d %s", response.StatusCode, body)
+	}
 	commitStackAccount(t, client, start.DraftID, "Staging", []string{"us-east-1", "eu-west-1"})
 	view, _ := readSettings(t, client)
 	if len(view.Accounts) != 1 || !containsStringValue(view.Accounts[0].Services.DeniedServices, "elasticache") {

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { ToastProvider } from "@/components/Toast";
 import type { AwsAccountSync, AwsSettings } from "@/lib/api";
 import { accountStatusWords, firstSyncRunning, settingsPollMs, syncProgress } from "@/lib/awsSettings";
@@ -25,7 +26,10 @@ function card(settings: AwsSettings, canWrite = true) {
   return (
     <QueryClientProvider client={new QueryClient()}>
       <ToastProvider>
-        <AwsAccountsCard settings={settings} canWrite={canWrite} onConnect={vi.fn()} onReconnect={vi.fn()} />
+        {/* The card links to Coverage, so it renders inside a router. */}
+        <MemoryRouter>
+          <AwsAccountsCard settings={settings} canWrite={canWrite} onConnect={vi.fn()} onReconnect={vi.fn()} />
+        </MemoryRouter>
       </ToastProvider>
     </QueryClientProvider>
   );

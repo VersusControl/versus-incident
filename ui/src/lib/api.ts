@@ -16,6 +16,21 @@ import {
   type CompareQuery,
   type CompareView,
 } from "@/lib/awsChanges";
+import {
+  scopeQueryString,
+  topologyQueryString,
+  type AccountLabelEntry,
+  type AccountLabelsView,
+  type CollectionCostView,
+  type CoverageView,
+  type GroupCorrection,
+  type GroupCorrectionRequest,
+  type GroupCorrectionsView,
+  type OverviewView,
+  type SearchResult,
+  type TopologyQuery,
+  type TopologyView,
+} from "@/lib/awsEstate";
 
 // LearnExclusionsWire is the raw enterprise learn-exclusion policy shape ON THE
 // WIRE. It differs from the UI's LearnExclusions in ONE field name: the
@@ -4796,10 +4811,51 @@ const awsChangesApi = {
   },
 };
 
+// AWS estate reads (/api/admin/aws/overview, topology, coverage, the
+// collection cost) and the two Topology writes: group corrections and
+// account labels. Types and wording live in ./awsEstate.
+const awsEstateApi = {
+  awsOverview: (q: { account?: string; region?: string } = {}) =>
+    request<OverviewView>(`/api/admin/aws/overview${scopeQueryString(q)}`),
+  awsTopologySearch: (q: { q: string; account?: string; region?: string }) => {
+    const p = new URLSearchParams({ q: q.q });
+    if (q.account) p.set("account", q.account);
+    if (q.region) p.set("region", q.region);
+    return request<SearchResult>(`/api/admin/aws/topology/search?${p.toString()}`);
+  },
+  awsTopology: (q: TopologyQuery) =>
+    request<TopologyView>(`/api/admin/aws/topology${topologyQueryString(q)}`),
+  awsCoverage: (q: { account?: string; region?: string } = {}) =>
+    request<CoverageView>(`/api/admin/aws/coverage${scopeQueryString(q)}`),
+  awsCollectionCost: () => request<CollectionCostView>("/api/admin/aws/settings/cost"),
+  awsGroupCorrections: (accountId?: string) =>
+    request<GroupCorrectionsView>(
+      `/api/admin/aws/groups/corrections${accountId ? `?account_id=${encodeURIComponent(accountId)}` : ""}`,
+    ),
+  saveAwsGroupCorrection: (body: GroupCorrectionRequest) =>
+    request<{ correction: GroupCorrection }>("/api/admin/aws/groups/corrections", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteAwsGroupCorrection: (key: { account_id: string; kind: string; group_id?: string; member_arn?: string }) => {
+    const p = new URLSearchParams({ account_id: key.account_id, kind: key.kind });
+    if (key.group_id) p.set("group_id", key.group_id);
+    if (key.member_arn) p.set("member_arn", key.member_arn);
+    return request<void>(`/api/admin/aws/groups/corrections?${p.toString()}`, { method: "DELETE" });
+  },
+  awsAccountLabels: () => request<AccountLabelsView>("/api/admin/aws/accounts/labels"),
+  saveAwsAccountLabel: (accountId: string, body: { label: "known"; name: string }) =>
+    request<{ label: AccountLabelEntry }>(`/api/admin/aws/accounts/labels/${encodeURIComponent(accountId)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+};
+
 export const api = {
   ...agentCapabilitiesApi,
   ...awsSettingsApi,
   ...awsChangesApi,
+  ...awsEstateApi,
   ...finopsApi,
   ...createKubernetesApi(),
   kubernetesClusters: async () => normalizeKubernetesClusters(await request<Partial<KubernetesClusters> | null>("/api/admin/kubernetes/clusters")),

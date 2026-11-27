@@ -256,11 +256,7 @@ func (g *gatedClient) Do(req *http.Request) (*http.Response, error) {
 
 func (g *gatedClient) waitEntered(t *testing.T) {
 	t.Helper()
-	select {
-	case <-g.entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the refresh never sent a request")
-	}
+	waitFor(t, g.entered, "the refresh to send a request")
 }
 
 // assertPurged checks that the payer's lines and state are gone and that
@@ -377,7 +373,8 @@ func TestRemovalWhileAnotherReplicaRefreshesIsPurgedByThatRefresh(t *testing.T) 
 		purged, err := h.adapter.PurgePayer(ctx, payer, wait)
 		purging <- outcome{purged, err, time.Since(start)}
 	}()
-	time.Sleep(300 * time.Millisecond)
+	// The purge is between tries: it holds neither lock while it waits.
+	eventually(t, "the purge to wait for the other replica's refresh", func() bool { return blockedIn(".(*Adapter).lockForPurge") })
 	start := time.Now()
 	if _, err := h.adapter.Refresh(ctx, KindManual); !errors.Is(err, ErrBusy) {
 		t.Fatalf("a refresh here while the other replica refreshes = %v, want ErrBusy", err)

@@ -136,6 +136,18 @@ func GetTemplateFuncMaps() template.FuncMap {
 		"escapeHTML": func(v interface{}) string {
 			return html.EscapeString(fmt.Sprint(v))
 		},
+		// Per-channel escapers for text a user controls (a resource name,
+		// a tag, a reason): it shows as typed, never as markup.
+		"escapeMarkdown": func(v interface{}) string { return EscapeMarkdown(fmt.Sprint(v)) },
+		"escapeSlack":    func(v interface{}) string { return EscapeSlack(fmt.Sprint(v)) },
+		"escapeTelegram": func(v interface{}) string { return EscapeTelegramHTML(fmt.Sprint(v)) },
+		// Per-channel code forms for a command a user copies: it shows as
+		// code and copies exactly as it was written.
+		"slackCode":         func(v interface{}) string { return SlackCode(fmt.Sprint(v)) },
+		"markdownCodeBlock": func(v interface{}) string { return MarkdownCodeBlock(fmt.Sprint(v)) },
+		"telegramCode":      func(v interface{}) string { return TelegramCode(fmt.Sprint(v)) },
+		"escapeLark":        func(v interface{}) string { return EscapeLark(fmt.Sprint(v)) },
+		"larkCodeBlock":     func(v interface{}) string { return LarkCodeBlock(fmt.Sprint(v)) },
 		"truncate": func(s string, n int) string {
 			if len(s) <= n {
 				return s

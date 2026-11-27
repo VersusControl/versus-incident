@@ -90,10 +90,8 @@ func (e *EmailProvider) renderAlertTemplate(i *m.Incident) (string, error) {
 	funcMaps := utils.GetTemplateFuncMaps()
 
 	tplPath := e.templatePath
-	if i.Content != nil && utils.IsKubernetesIssueIncident(*i.Content) {
-		tplPath = utils.KubernetesIssueTemplatePath(e.kubernetesIssueTemplatePath, utils.KubernetesIssueEmailTemplatePath)
-	} else if i.Content != nil && utils.IsAgentIncident(*i.Content) {
-		tplPath = utils.AgentEmailTemplatePath
+	if i.Content != nil {
+		tplPath = utils.AlertTemplatePath(*i.Content, utils.ChannelEmail, tplPath, e.kubernetesIssueTemplatePath)
 	}
 
 	// Parse template
@@ -102,12 +100,8 @@ func (e *EmailProvider) renderAlertTemplate(i *m.Incident) (string, error) {
 		return "", fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	// Execute template
-	var body bytes.Buffer
-	if err := tmpl.Execute(&body, i.Content); err != nil {
-		return "", fmt.Errorf("failed to execute template: %w", err)
-	}
-	return body.String(), nil
+	// Execute template; an AWS issue alert is bounded too.
+	return utils.RenderAlert(tmpl, i.Content, utils.EmailAlertBudget, func(body string) int { return len(body) })
 }
 
 func (e *EmailProvider) SendAlert(i *m.Incident) error {

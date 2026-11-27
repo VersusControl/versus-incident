@@ -5,6 +5,8 @@ import (
 	"errors"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -125,6 +127,19 @@ func (conn *Service) payerRemover() PayerRemover {
 // sync can start at once.
 func WithAccountAdded(hook func(accountID string)) Option {
 	return func(conn *Service) { conn.accountAdded = hook }
+}
+
+// WithAccountsChanged runs hook after a wizard account is removed or reads
+// fewer Regions, so what it left behind is resolved without waiting for a
+// collector write. The hook must not block.
+func WithAccountsChanged(hook func()) Option {
+	return func(conn *Service) { conn.accountsChanged = hook }
+}
+
+func (conn *Service) notifyAccountsChanged() {
+	if conn.accountsChanged != nil {
+		conn.accountsChanged()
+	}
 }
 
 // Limiter is the shared limiter the probes use. The collectors must be
@@ -331,6 +346,81 @@ func (conn *Service) AccountIDs(context.Context) ([]string, error) {
 		ids = append(ids, account.AccountID)
 	}
 	return ids, nil
+}
+
+// ConnectedAccountSet is the connected accounts, wizard and config alike,
+// as a set, for readers that hide what an inherited organization keeps for
+// an account no longer connected. It reads the stored listing with its
+// removals whether or not the connector is on. ok is false only when the
+// listing cannot be read (a stored account is unreadable, or storage
+// fails); a reader then hides nothing. The set is shared and must not be
+// changed.
+//
+// The answer is kept until the account settings revision, which every
+// account save and removal raises, or the configured accounts change, so a
+// page read costs one revision read rather than a listing per account.
+func (conn *Service) ConnectedAccountSet(context.Context) (map[string]bool, bool) {
+	org := conn.storageOrg()
+	revision, err := conn.store.AccountsRevision(org)
+	if err != nil {
+		return nil, false
+	}
+	configured := conn.connector().Accounts
+	var key strings.Builder
+	key.WriteString(strconv.FormatUint(revision, 10))
+	for _, account := range configured {
+		key.WriteString("\x00" + account.AccountID)
+	}
+	conn.connectedMu.Lock()
+	if conn.connectedSet != nil && conn.connectedKey == key.String() {
+		set := conn.connectedSet
+		conn.connectedMu.Unlock()
+		return set, true
+	}
+	conn.connectedMu.Unlock()
+	stored, err := conn.store.ListAccountsStrict(org)
+	if err != nil {
+		return nil, false
+	}
+	merged := MergeAccounts(stored, configured)
+	set := make(map[string]bool, len(merged))
+	for _, account := range merged {
+		set[account.AccountID] = true
+	}
+	conn.connectedMu.Lock()
+	conn.connectedKey, conn.connectedSet = key.String(), set
+	conn.connectedMu.Unlock()
+	return set, true
+}
+
+// StoredAccounts is the stored account listing (ListAccounts) of the
+// write organization's read scope, kept until the account settings
+// revision changes, which every account save and removal raises. The
+// pages that read the connected accounts on every request (coverage,
+// issues, Overview, Topology, Changes) share it, so a request costs one
+// revision read rather than a listing. The records are shared and must
+// not be changed; merge them with the configured accounts per read.
+func (conn *Service) StoredAccounts(context.Context) ([]AccountRecord, error) {
+	org := conn.storageOrg()
+	revision, err := conn.store.AccountsRevision(org)
+	if err != nil {
+		return nil, err
+	}
+	conn.connectedMu.Lock()
+	if conn.storedKept && conn.storedRevision == revision {
+		accounts := conn.storedAccounts
+		conn.connectedMu.Unlock()
+		return accounts, nil
+	}
+	conn.connectedMu.Unlock()
+	accounts, err := conn.store.ListAccounts(org)
+	if err != nil {
+		return nil, err
+	}
+	conn.connectedMu.Lock()
+	conn.storedRevision, conn.storedAccounts, conn.storedKept = revision, accounts, true
+	conn.connectedMu.Unlock()
+	return accounts, nil
 }
 
 // syncView summarises the account's units in the snapshot store.

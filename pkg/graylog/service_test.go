@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -512,5 +513,33 @@ func TestMandatoryMessageIDDoesNotTruncateProjection(t *testing.T) {
 	}
 	if _, exposed := result.Records[0].Fields["_id"]; exposed {
 		t.Fatal("unrequested ID exposed")
+	}
+}
+
+// TestReadReplacesValuesUnderSecretFieldNames covers message fields named
+// like secrets: the value is replaced, the field name and the other fields
+// are kept.
+func TestReadReplacesValuesUnderSecretFieldNames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		payload := map[string]any{"total_results": 1, "messages": []any{map[string]any{"message": map[string]any{
+			"message": "login ok", "db_password": "hunter2", "pin_token": 1234, "token_count": 5, "service": "api",
+		}}}}
+		json.NewEncoder(writer).Encode(payload)
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentGraylogSourceConfig{Address: server.URL, Fields: []string{"db_password", "pin_token", "token_count", "service"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := service.Read(context.Background(), ReadRequest{})
+	if err != nil || read.Count != 1 {
+		t.Fatalf("read = %+v, %v", read, err)
+	}
+	want := map[string]string{"message": "login ok", "db_password": "<REDACTED:secret>", "pin_token": "<REDACTED:secret>", "token_count": "5", "service": "api"}
+	if got := read.Records[0].Fields; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fields = %#v, want %#v", got, want)
+	}
+	if read.Records[0].Message != "login ok" {
+		t.Fatalf("message = %q", read.Records[0].Message)
 	}
 }

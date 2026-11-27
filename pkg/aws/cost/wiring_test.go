@@ -111,11 +111,7 @@ func TestSchedulerRunsOnceADayAfterTheRefreshTime(t *testing.T) {
 	s.tick = time.Millisecond
 	s.Start(run)
 	cancel()
-	select {
-	case <-s.Stopped():
-	case <-time.After(2 * time.Second):
-		t.Fatal("scheduler did not stop")
-	}
+	waitFor(t, s.Stopped(), "the scheduler to stop")
 }
 
 type countingSyncer struct {

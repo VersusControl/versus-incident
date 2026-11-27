@@ -1,0 +1,12 @@
+{{ if eq .IssueAlert "coverage" }}⚪ *Not read*{{ else if eq .Severity "critical" }}🔴 *Critical*{{ else }}🟠 *High*{{ end }} {{ escapeSlack (or .AlertName "AWS issue") }}
+{{ if .Where }}{{ escapeSlack .Where }}
+{{ end }}{{ if .Reopened }}*Why it reopened:* {{ escapeSlack .Reopened }}
+{{ end }}{{ range .Evidence }}• {{ escapeSlack . }}
+{{ end }}{{ if .LikelyCause }}*Likely cause:* {{ escapeSlack .LikelyCause }}
+{{ end }}{{ if .Steps }}*What to do*
+{{ range .Steps }}• {{ escapeSlack .text }}{{ if .command }}
+{{ slackCode .command }}{{ end }}
+{{ end }}{{ end }}{{ range .Notes }}• {{ escapeSlack . }}
+{{ end }}{{ if .AckURL }}<{{ .AckURL }}|Acknowledge>
+{{ end }}{{ range .Links }}<{{ .url }}|{{ escapeSlack .label }}>
+{{ end }}

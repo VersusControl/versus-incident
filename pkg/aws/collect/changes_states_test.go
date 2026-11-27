@@ -207,12 +207,16 @@ func TestChangesStateAlarmWithNoSuspect(t *testing.T) {
 // differ in nothing.
 func TestChangesStateCompare(t *testing.T) {
 	h := newHarness(t, fakeaws.ScenarioChangesQuiet)
+	clock := &fakeClock{now: time.Now().UTC()}
+	h.store = snapshot.New(h.provider, h.store.Scope(), snapshot.WithClock(clock.Now))
+	h.collector.store = h.store
 	ctx := context.Background()
-	feed := snapshot.NewChangeFeed(h.store)
-	beforeAny := time.Now().Add(-2 * time.Hour)
+	feed := snapshot.NewChangeFeed(h.store, snapshot.WithFeedClock(clock.Now))
+	beforeAny := clock.Now().Add(-2 * time.Hour)
 	mustSync(t, h, target(productionAccount), KindHealth)
-	afterHealth := time.Now()
-	time.Sleep(10 * time.Millisecond)
+	clock.Advance(time.Second)
+	afterHealth := clock.Now()
+	clock.Advance(time.Second)
 	mustSync(t, h, target(productionAccount), KindInventory)
 
 	unavailable, err := feed.Compare(ctx, snapshot.CompareRequest{From: beforeAny, Account: productionAccount})
@@ -225,8 +229,9 @@ func TestChangesStateCompare(t *testing.T) {
 	}
 
 	mustSync(t, h, target(productionAccount), KindInventory, KindHealth)
-	settled := time.Now()
-	time.Sleep(10 * time.Millisecond)
+	clock.Advance(time.Second)
+	settled := clock.Now()
+	clock.Advance(time.Second)
 	mustSync(t, h, target(productionAccount), KindInventory, KindHealth)
 	same, err := feed.Compare(ctx, snapshot.CompareRequest{From: settled, Account: productionAccount})
 	if err != nil || same.Status != snapshot.CompareOK || len(same.Added)+len(same.Removed)+len(same.Changed) != 0 {

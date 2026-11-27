@@ -93,7 +93,7 @@ func (guard *RedactorGuard) scrubText(text string, count int) (string, int) {
 		}
 		return clean, count
 	}
-	clean, changed := guard.scrubValue(value)
+	clean, changed := redaction.ScrubJSON(value, guard.scrubber.Scrub)
 	if changed {
 		count++
 	}
@@ -102,37 +102,6 @@ func (guard *RedactorGuard) scrubText(text string, count int) (string, int) {
 		panic(fmt.Errorf("encode scrubbed egress payload: %w", err))
 	}
 	return string(encoded), count
-}
-
-func (guard *RedactorGuard) scrubValue(value any) (any, bool) {
-	changed := false
-	switch typed := value.(type) {
-	case string:
-		clean := guard.scrubber.Scrub(typed)
-		return clean, clean != typed
-	case []any:
-		out := make([]any, len(typed))
-		for index, item := range typed {
-			var itemChanged bool
-			out[index], itemChanged = guard.scrubValue(item)
-			changed = changed || itemChanged
-		}
-		return out, changed
-	case map[string]any:
-		out := make(map[string]any, len(typed))
-		for key, item := range typed {
-			cleanKey := guard.scrubber.Scrub(key)
-			if cleanKey != key {
-				changed = true
-			}
-			cleanValue, itemChanged := guard.scrubValue(item)
-			changed = changed || itemChanged
-			out[cleanKey] = cleanValue
-		}
-		return out, changed
-	default:
-		return value, false
-	}
 }
 
 func Apply(ctx context.Context, guard Guard, request Request) (result Result, err error) {

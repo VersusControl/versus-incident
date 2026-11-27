@@ -102,8 +102,13 @@ func pageBudget(options Options) int {
 	if interval <= 0 {
 		interval = 5 * time.Minute
 	}
-	pages := int(float64(limit.CloudTrailMaxRPS) * interval.Seconds() / 2)
-	return min(max(pages, minChangePageBudget), maxChangePageBudget)
+	pages := min(max(int(float64(limit.CloudTrailMaxRPS)*interval.Seconds()/2), minChangePageBudget), maxChangePageBudget)
+	// The per-cycle call budget of the change source bounds the automatic
+	// size; an explicit page budget is the user's choice and wins.
+	if cycle := callBudget(options, snapshot.ChangeService); cycle > 0 {
+		pages = min(pages, cycle)
+	}
+	return pages
 }
 
 // routineKey renders an event as service:Action, the form the routine list

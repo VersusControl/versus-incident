@@ -114,6 +114,12 @@ type Store struct {
 	bounded   bool
 	now       func() time.Time
 	options   func() Options
+	// afterWrite runs after a unit's read was committed or recorded as
+	// failed; nil when not wired.
+	afterWrite func(unit model.Unit)
+	// connected lists the accounts connected now; nil reads every
+	// inherited row.
+	connected ConnectedAccountsFunc
 
 	sweepMu     sync.Mutex
 	sweep       storage.AWSRetentionCursor
@@ -152,6 +158,20 @@ func WithOptions(read func() Options) Option {
 // serve what the collectors stored, already redacted at write.
 func WithTagAllowlist(read func() []string) Option {
 	return func(store *Store) { store.allowlist = read }
+}
+
+// WithAfterWrite runs fn after each commit of a unit's read and after each
+// failed read is recorded, outside the write. It must not block: the issue
+// evaluator only marks itself due here.
+func WithAfterWrite(fn func(unit model.Unit)) Option {
+	return func(store *Store) { store.afterWrite = fn }
+}
+
+// notifyWrite runs the after-write hook, if any.
+func (store *Store) notifyWrite(unit model.Unit) {
+	if store.afterWrite != nil {
+		store.afterWrite(unit)
+	}
 }
 
 // WithUnbounded turns retention off: every generation and change is kept.
@@ -237,7 +257,11 @@ func (store *Store) UnitHistory(ctx context.Context, query Query) ([]storage.AWS
 	if !ok {
 		return nil, ErrNoStorage
 	}
-	units, err := history.AWSUnitHistory(ctx, store.scope, storage.AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service})
+	unitQuery := storage.AWSUnitQuery{Account: query.Account, Region: query.Region, Service: query.Service}
+	units, err := history.AWSUnitHistory(ctx, store.scope, unitQuery)
+	if err == nil {
+		units, err = store.keepHistory(ctx, units)
+	}
 	if err != nil || !store.bounded {
 		return units, err
 	}
@@ -308,6 +332,7 @@ func (store *Store) commit(unit model.Unit, candidate Candidate, guard *uint64) 
 		store.retain(ctx, unit)
 	}
 	store.invalidateViews(unit.Account)
+	store.notifyWrite(unit)
 	return generation, nil
 }
 
@@ -341,13 +366,14 @@ func (store *Store) sweepOnce(ctx context.Context, unit model.Unit) (storage.AWS
 	now := store.clock()
 	if sweeper, ok := store.inventory.(storage.AWSRetentionSweeper); ok {
 		sweep := storage.AWSRetentionSweep{
-			Scope:           store.scope,
-			HistoryBefore:   now.Add(-options.MaxAge),
-			ChangeBefore:    now.Add(-options.ChangeRetention),
-			KeepGenerations: options.MaxGenerations,
-			KeepFor:         func(unit storage.AWSUnit) int { return options.keep(unit.Service) },
-			Batch:           store.sweepBatch,
-			Cursor:          store.sweep,
+			Scope:            store.scope,
+			HistoryBefore:    now.Add(-options.MaxAge),
+			ChangeBefore:     now.Add(-options.ChangeRetention),
+			CallCountsBefore: now.Add(-storage.DefaultAWSCallCountRetention),
+			KeepGenerations:  options.MaxGenerations,
+			KeepFor:          func(unit storage.AWSUnit) int { return options.keep(unit.Service) },
+			Batch:            store.sweepBatch,
+			Cursor:           store.sweep,
 		}
 		budget := store.sweepBudget
 		if budget >= 0 {
@@ -388,6 +414,13 @@ func (store *Store) sweepOnce(ctx context.Context, unit model.Unit) (storage.AWS
 			return result, err
 		}
 		result.Changes = removed
+		if ledger, ok := store.inventory.(storage.AWSCallCountStore); ok {
+			removed, err = ledger.PruneAWSCallCounts(ctx, store.scope, now.Add(-storage.DefaultAWSCallCountRetention))
+			if err != nil {
+				return result, err
+			}
+			result.CallCounts = removed
+		}
 	}
 	logRetention(result)
 	return result, nil
@@ -424,7 +457,11 @@ func (store *Store) updateSync(unit model.Unit, guard *uint64, change func(state
 // gaps name what is missing; without them the whole unit is one gap. Every
 // gap carries the time the unit last committed good data.
 func (store *Store) RecordFailure(unit model.Unit, code string, gaps ...model.Gap) error {
-	return store.recordFailure(unit, code, gaps, nil)
+	if err := store.recordFailure(unit, code, gaps, nil); err != nil {
+		return err
+	}
+	store.notifyWrite(unit)
+	return nil
 }
 
 func (store *Store) recordFailure(unit model.Unit, code string, gaps []model.Gap, guard *uint64) error {

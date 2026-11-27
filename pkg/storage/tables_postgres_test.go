@@ -539,15 +539,25 @@ func TestPostgresSweepWaitsForThePollOnTheSameAccount(t *testing.T) {
 			Cursor: AWSRetentionCursor{Stage: "changes"}})
 		done <- err
 	}()
+	// The sweep reaches Postgres and waits there on the poll's account
+	// lock: that wait, not a pause, is the event the test needs.
+	eventually(t, "the sweep to wait on the account lock the poll holds", func() bool {
+		var waiting int
+		if err := p.db.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity
+ WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%aws_account_epochs%'`).Scan(&waiting); err != nil {
+			t.Fatalf("read lock waiters: %v", err)
+		}
+		return waiting > 0
+	})
 	select {
 	case err := <-done:
 		t.Fatalf("sweep finished while the account was locked by a poll: %v", err)
-	case <-time.After(300 * time.Millisecond):
+	default:
 	}
 	if err := poll.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; err != nil {
+	if err := waitFor(t, done, "the sweep to finish once the poll committed"); err != nil {
 		t.Fatal(err)
 	}
 }

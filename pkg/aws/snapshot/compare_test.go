@@ -462,3 +462,50 @@ func TestCompareHidesClusterMarkers(t *testing.T) {
 		t.Fatalf("fields = %+v", fields)
 	}
 }
+
+// A side whose detail a call budget skipped is not a change: the fields it
+// could not read are left out, the not-read marker is never a field, and a
+// node group read through its cluster's skipped detail is neither removed
+// nor added.
+func TestCompareLeavesOutWhatANotReadSideCouldNotRead(t *testing.T) {
+	fixture := newFeedFixture(t, scopeOf(region))
+	eks := model.Unit{Account: account, Region: region, Service: "eks"}
+	cluster := model.Resource{ARN: model.ARN("aws", "eks", region, account, "cluster/prod"), Service: "eks", Type: "cluster", Account: account,
+		Region: region, Name: "prod", State: "active", Attributes: map[string]string{model.AttrID: "prod", model.AttrVPC: "vpc-1", model.AttrEngine: "kubernetes 1.31"}}
+	group := model.Resource{ARN: model.ARN("aws", "eks", region, account, "nodegroup/prod/web/1"), Service: "eks", Type: "node-group", Account: account,
+		Region: region, Name: "web", Attributes: map[string]string{model.AttrID: "web", model.AttrDesired: "3"},
+		Relations: []model.Relation{{Type: model.RelationMemberOf, Target: cluster.ARN}}}
+	if _, err := fixture.store.Commit(eks, Candidate{Resources: []model.Resource{cluster, group}}); err != nil {
+		t.Fatal(err)
+	}
+	from := fixture.clock.Now()
+	fixture.clock.Advance(time.Hour)
+	// The next read listed the cluster but the budget skipped its
+	// describe and its node groups.
+	listed := model.Resource{ARN: cluster.ARN, Service: "eks", Type: "cluster", Account: account, Region: region, Name: "prod",
+		Attributes: map[string]string{model.AttrID: "prod", model.AttrNotRead: "DescribeCluster,DescribeNodegroup,ListNodegroups"}}
+	if _, err := fixture.store.Commit(eks, Candidate{Resources: []model.Resource{listed}}); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := fixture.feed.Compare(context.Background(), CompareRequest{From: from.Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(answer.Changed) != 0 || len(answer.Removed) != 0 || len(answer.Added) != 0 {
+		t.Fatalf("a not-read read reads as changes: changed %+v, removed %+v, added %+v", answer.Changed, answer.Removed, answer.Added)
+	}
+	// A field both sides read still differs.
+	fixture.clock.Advance(time.Hour)
+	renamed := listed
+	renamed.Attributes = map[string]string{model.AttrID: "prod-2", model.AttrNotRead: listed.Attributes[model.AttrNotRead]}
+	if _, err := fixture.store.Commit(eks, Candidate{Resources: []model.Resource{renamed}}); err != nil {
+		t.Fatal(err)
+	}
+	answer, err = fixture.feed.Compare(context.Background(), CompareRequest{From: from.Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(answer.Changed) != 1 || len(answer.Changed[0].Fields) != 1 || answer.Changed[0].Fields[0].Field != model.AttrID {
+		t.Fatalf("a field both sides read = %+v", answer.Changed)
+	}
+}

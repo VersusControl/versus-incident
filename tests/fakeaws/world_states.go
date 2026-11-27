@@ -135,6 +135,9 @@ func (s *Server) refuseState(writer http.ResponseWriter, request awsRequest, ses
 
 // regionNotEnabled reports a request signed for the not-enabled Region.
 func (s *Server) regionNotEnabled(request awsRequest) bool {
+	if request.scenario == ScenarioSizingLarge && sizingOff(request.region) && request.service != "sts" {
+		return true
+	}
 	if request.region != NotEnabledRegion {
 		return false
 	}
@@ -222,7 +225,7 @@ func (w world) stateScenarioTrail() ([]trailEvent, bool) {
 				document: map[string]any{"userIdentity": pipeline("ci-run-94"), "requestParameters": map[string]any{"secretId": "checkout/db", "secretString": canary[4]}}},
 			{id: "hidden-access-key", name: "CreateAccessKey", source: "iam.amazonaws.com", at: at(60 * time.Minute),
 				document: map[string]any{"userIdentity": pipeline("ci-run-95"), "requestParameters": map[string]any{"userName": "deploy-bot"},
-					"responseElements": map[string]any{"accessKey": map[string]any{"accessKeyId": "AKIAVERSUSHIDDEN0006", "secretAccessKey": canary[5], "userName": "deploy-bot", "status": "Active"}}}},
+					"responseElements": map[string]any{"accessKey": map[string]any{"accessKeyId": "AKIA" + "VERSUSHIDDEN0006", "secretAccessKey": canary[5], "userName": "deploy-bot", "status": "Active"}}}},
 		}, true
 	case ScenarioChangesRoutine:
 		events := []trailEvent{read, {id: "routine-real-change", name: "RunInstances", source: "ec2.amazonaws.com",

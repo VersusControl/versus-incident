@@ -13,11 +13,21 @@ func TestGenerationCapIsSizedFromTheInterval(t *testing.T) {
 	if got := collect.HealthMaxGenerations(); got != 1440 {
 		t.Fatalf("health every 2 min keeps %d generations, want 1440", got)
 	}
+	// Inventory is read in full every 6 h, but the change feed re-reads a
+	// changed unit at the 5-minute change poll: the cap keeps two days of
+	// those re-reads.
+	if got := collect.InventoryMaxGenerations(); got != 576 {
+		t.Fatalf("inventory re-read every 5 min keeps %d generations, want 576", got)
+	}
+	collect.Intervals.Inventory, collect.Intervals.Changes = "15m", "30m"
 	if got := collect.InventoryMaxGenerations(); got != 192 {
 		t.Fatalf("inventory every 15 min keeps %d generations, want 192", got)
 	}
-	// 24 h of flapping on a 2-minute pass is 720 generations: all kept.
-	if passes := int(24 * time.Hour / DefaultAWSHealthInterval); collect.HealthMaxGenerations() < passes {
+	collect.Intervals.Changes = ""
+	collect.Intervals.Inventory = ""
+	// 24 h of flapping on the 2-minute fast cadence is 720 generations:
+	// all kept.
+	if passes := int(24 * time.Hour / DefaultAWSHealthHotInterval); collect.HealthMaxGenerations() < passes {
 		t.Fatalf("a day of health passes (%d) does not fit", passes)
 	}
 	collect.History.MaxGenerations = 5000

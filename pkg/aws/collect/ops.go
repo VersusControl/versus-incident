@@ -254,9 +254,10 @@ func (c *call) alarmSignals(targets []string, summary string, since time.Time, r
 // stacks, their member resources, which drive stack membership and the
 // CloudFormation application source.
 func collectCloudFormation(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("cloudformation", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := cloudformation.NewFromConfig(c.env.config(c.endpointRegion), func(options *cloudformation.Options) {
 		options.BaseEndpoint = &endpoint
@@ -269,14 +270,13 @@ func collectCloudFormation(ctx context.Context, c *call) (result, error) {
 	for {
 		page, err := api.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		stacks = append(stacks, page.Stacks...)
 		if token = page.NextToken; deref(token) == "" {
 			break
 		}
 	}
-	var out result
 	for index, item := range stacks {
 		arn := deref(item.StackId)
 		name := deref(item.StackName)
@@ -309,7 +309,7 @@ func collectCloudFormation(ctx context.Context, c *call) (result, error) {
 			continue
 		}
 		token = nil
-		c.tried("ListStackResources")
+		c.tried("ListStackResources", arn)
 		for {
 			page, err := api.ListStackResources(ctx, &cloudformation.ListStackResourcesInput{StackName: aws.String(arn), NextToken: token})
 			if err != nil {
@@ -348,9 +348,10 @@ func healthEventTotal(page *health.DescribeEventsOutput) int {
 // collectAWSHealth reads open and upcoming AWS Health events and the
 // resources they affect.
 func collectAWSHealth(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("health", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := health.NewFromConfig(c.env.config(c.endpointRegion), func(options *health.Options) {
 		options.BaseEndpoint = &endpoint
@@ -363,9 +364,8 @@ func collectAWSHealth(ctx context.Context, c *call) (result, error) {
 		MaxResults: aws.Int32(100),
 	})
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
-	var out result
 	for index, event := range page.Events {
 		arn := deref(event.Arn)
 		region := deref(event.Region)
@@ -376,13 +376,23 @@ func collectAWSHealth(ctx context.Context, c *call) (result, error) {
 		summary := "AWS Health: " + strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(deref(event.EventTypeCode), "AWS_"), "_", " "))
 		var affected []string
 		if index < maxHealthEvents {
-			c.tried("DescribeAffectedEntities")
+			c.tried("DescribeAffectedEntities", arn)
 			entities, err := api.DescribeAffectedEntities(ctx, &health.DescribeAffectedEntitiesInput{
 				Filter:     &healthtypes.EntityFilter{EventArns: []string{arn}},
 				MaxResults: aws.Int32(100),
 			})
 			if err != nil {
 				out.gaps = append(out.gaps, c.detailGap("DescribeAffectedEntities", err))
+				if errorCode(err) == CodeCapped {
+					// The budget skipped the read that names what the
+					// event affects: the signal says so, and the event is
+					// kept as a not-read record, so no resource it may
+					// affect reads clear.
+					summary += " (affected resources not read)"
+					record := c.newResource(arn, model.HealthEventType, deref(event.EventTypeCode), "")
+					record.Region = regionOr(region, c.unit.Region)
+					out.resources = append(out.resources, record)
+				}
 			} else {
 				for _, entity := range entities.Entities {
 					value := deref(entity.EntityValue)
@@ -423,9 +433,10 @@ func regionOr(region, fallback string) string {
 // services whose list calls omit tags still get them. Values are redacted
 // unless allowlisted.
 func collectTags(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("tagging", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := resourcegroupstaggingapi.NewFromConfig(c.env.config(c.endpointRegion), func(options *resourcegroupstaggingapi.Options) {
 		options.BaseEndpoint = &endpoint
@@ -433,12 +444,11 @@ func collectTags(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var token *string
 	for {
 		page, err := api.GetResources(ctx, &resourcegroupstaggingapi.GetResourcesInput{ResourcesPerPage: aws.Int32(100), PaginationToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, mapping := range page.ResourceTagMappingList {
 			arn := deref(mapping.ResourceARN)
@@ -465,9 +475,10 @@ func collectTags(ctx context.Context, c *call) (result, error) {
 // collectAppRegistry reads AppRegistry applications and the stacks and
 // resources associated with them: the first application source.
 func collectAppRegistry(ctx context.Context, c *call) (result, error) {
+	var out result
 	endpoint, client, stack, err := c.env.endpoint("appregistry", c.endpointRegion)
 	if err != nil {
-		return result{}, err
+		return out, err
 	}
 	api := servicecatalogappregistry.NewFromConfig(c.env.config(c.endpointRegion), func(options *servicecatalogappregistry.Options) {
 		options.BaseEndpoint = &endpoint
@@ -475,12 +486,11 @@ func collectAppRegistry(ctx context.Context, c *call) (result, error) {
 		options.RetryMaxAttempts = 1
 		options.APIOptions = append(options.APIOptions, stack...)
 	})
-	var out result
 	var token *string
 	for {
 		page, err := api.ListApplications(ctx, &servicecatalogappregistry.ListApplicationsInput{MaxResults: aws.Int32(25), NextToken: token})
 		if err != nil {
-			return result{}, err
+			return out, err
 		}
 		for _, application := range page.Applications {
 			resource := c.newResource(deref(application.Arn), "application", deref(application.Name), "")
@@ -497,7 +507,7 @@ func collectAppRegistry(ctx context.Context, c *call) (result, error) {
 			break
 		}
 		token = nil
-		c.tried("ListAssociatedResources")
+		c.tried("ListAssociatedResources", out.resources[index].ARN)
 		for {
 			page, err := api.ListAssociatedResources(ctx, &servicecatalogappregistry.ListAssociatedResourcesInput{
 				Application: aws.String(out.resources[index].Attributes[model.AttrApplicationID]),

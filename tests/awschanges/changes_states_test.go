@@ -57,8 +57,7 @@ func TestChangesFixtureStates(t *testing.T) {
 		}
 		var view map[string]any
 		var stage map[string]any
-		deadline := time.Now().Add(90 * time.Second)
-		for {
+		poll(90*time.Second, func() bool {
 			view = r.changes("?window=24h&limit=200")
 			stage = nil
 			for _, account := range list(view, "accounts") {
@@ -66,11 +65,8 @@ func TestChangesFixtureStates(t *testing.T) {
 					stage, _ = account.(map[string]any)
 				}
 			}
-			if (stage != nil && stage["as_of"] != nil) || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(3 * time.Second)
-		}
+			return stage != nil && stage["as_of"] != nil
+		})
 		stagedAfter := 0
 		for _, item := range list(view, "items") {
 			if text(item, "account") == stageAccount {
@@ -102,19 +98,24 @@ func TestChangesFixtureStates(t *testing.T) {
 		// home Region (where STS is signed) is the enabled us-east-1.
 		r, _ := e.boot(t, "notenabled", fakeaws.ScenarioRegionNotEnabled, options{changesInterval: "30s", accounts: configAccount(prodAccount, "us-east-1", fakeaws.NotEnabledRegion)}, nil)
 		var view map[string]any
-		deadline := time.Now().Add(150 * time.Second)
-		for {
-			view = r.changes("?window=24h")
-			if gapReasons(view)["region_not_enabled"] > 0 && text(view, "sync", "last_poll_at") != "" || time.Now().After(deadline) {
-				break
+		poll(150*time.Second, func() bool {
+			// The claim holds once Settings has recorded the Region off, so
+			// read the changes answer only after that.
+			if !settingsNotEnabled(r, prodAccount, fakeaws.NotEnabledRegion) {
+				return false
 			}
-			time.Sleep(3 * time.Second)
-		}
+			view = r.changes("?window=24h")
+			// Every pair has recorded a poll, not only the refused one.
+			return gapReasons(view)["region_not_enabled"] > 0 && pairsPolled(view)
+		})
 		// What the wizard's region discovery says about the same Region.
 		created := r.call(http.MethodPost, "/api/admin/aws/connect/drafts", `{"method":"cloudformation"}`)
 		draft, _ := created.json()["draft_id"].(string)
 		r.call(http.MethodPost, "/api/admin/aws/connect/drafts/"+draft+"/verify", `{"role_arn":"arn:aws:iam::777788889999:role/versus-reader"}`)
-		time.Sleep(3 * time.Second)
+		poll(60*time.Second, func() bool {
+			status, _ := r.call(http.MethodGet, "/api/admin/aws/connect/drafts/"+draft, "").json()["status"].(string)
+			return status == "verified"
+		})
 		discovered := r.call(http.MethodPost, "/api/admin/aws/connect/drafts/"+draft+"/regions", "")
 		settings := r.call(http.MethodGet, "/api/admin/aws/settings", "").json()
 		var prodRegions any
@@ -156,17 +157,12 @@ func TestChangesFixtureStates(t *testing.T) {
 		// before us-east-1 and becomes the home Region.
 		r, _ := e.boot(t, "notenabledfirst", fakeaws.ScenarioRegionNotEnabled, options{changesInterval: "30s"},
 			map[string][]string{prodAccount: {"us-east-1", fakeaws.NotEnabledRegion}})
-		var view map[string]any
-		deadline := time.Now().Add(120 * time.Second)
-		for {
-			view = r.changes("?window=24h")
-			if text(view, "sync", "last_poll_at") != "" || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(3 * time.Second)
-		}
-		time.Sleep(35 * time.Second)
-		view = r.changes("?window=24h")
+		poll(120*time.Second, func() bool {
+			return text(r.changes("?window=24h"), "sync", "last_poll_at") != ""
+		})
+		// One more poll cycle, so both Regions have been polled again.
+		r.waitPolls(1, 30*time.Second)
+		view := r.changes("?window=24h")
 		byRegion := map[string]map[string]int{}
 		for _, gap := range list(view, "gaps") {
 			region := text(gap, "region")
@@ -209,14 +205,11 @@ func TestChangesFixtureStates(t *testing.T) {
 		// real gap.
 		r, _ := e.boot(t, "unrecorded", fakeaws.ScenarioRegionOptInUnrecorded, options{changesInterval: "30s", accounts: configAccount(prodAccount, "us-east-1", fakeaws.NotEnabledRegion)}, nil)
 		var view map[string]any
-		deadline := time.Now().Add(150 * time.Second)
-		for {
+		poll(150*time.Second, func() bool {
 			view = r.changes("?window=24h")
-			if gapReasons(view)["region_not_enabled"] > 0 && text(view, "sync", "last_poll_at") != "" || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(3 * time.Second)
-		}
+			// Every pair has recorded a poll, not only the refused one.
+			return gapReasons(view)["region_not_enabled"] > 0 && pairsPolled(view)
+		})
 		settings := r.call(http.MethodGet, "/api/admin/aws/settings", "").json()
 		var settingsAccount any
 		for _, item := range list(settings, "accounts") {
@@ -306,14 +299,10 @@ func TestChangesFixtureStates(t *testing.T) {
 		first := r.waitPolled(150 * time.Second)
 		firstLate := number(first, "sync", "late_arrivals")
 		var view map[string]any
-		deadline := time.Now().Add(240 * time.Second)
-		for {
+		poll(240*time.Second, func() bool {
 			view = r.changes("?window=24h&limit=1")
-			if number(view, "sync", "late_arrivals") > 0 || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(5 * time.Second)
-		}
+			return number(view, "sync", "late_arrivals") > 0
+		})
 		samples, problems := s.finish()
 		e.out.put("late_arrival", map[string]any{"late_after_first_read": firstLate, "late_now": number(view, "sync", "late_arrivals"),
 			"sync": view["sync"], "complete": view["complete"], "total": number(view, "summary", "total"), "samples": samples, "violations": problems})
@@ -321,7 +310,7 @@ func TestChangesFixtureStates(t *testing.T) {
 			t.Errorf("first read counted %d late arrivals; there was no earlier coverage", firstLate)
 		}
 		if number(view, "sync", "late_arrivals") == 0 {
-			t.Errorf("no late arrival counted in 4 minutes of 30 s polls: %v", view["sync"])
+			t.Errorf("no late arrival counted within the %s hang guard of 30 s polls: %v", scaledTimeout(240*time.Second), view["sync"])
 		}
 		if len(problems) > 0 {
 			t.Errorf("invariant violations over %d samples: %v", samples, problems)
@@ -333,8 +322,7 @@ func TestChangesFixtureStates(t *testing.T) {
 		r, _ := e.boot(t, "malformed", fakeaws.ScenarioChangesMalformed, options{changesInterval: "30s"}, prodOnly)
 		first := r.waitPolled(150 * time.Second)
 		// Two more polls: nothing malformed is re-read, so the count holds.
-		time.Sleep(70 * time.Second)
-		view := r.changes("?window=24h&limit=200")
+		view := r.waitPolls(2, 30*time.Second)
 		names := []string{}
 		for _, item := range list(view, "items") {
 			names = append(names, text(item, "event_name")+"/"+text(item, "actor_class"))
@@ -396,7 +384,8 @@ func TestChangesFixtureStates(t *testing.T) {
 		r, _ := e.boot(t, "routine", fakeaws.ScenarioChangesRoutine, options{changesInterval: "30s"}, prodOnly)
 		firstView := r.waitPolled(150 * time.Second)
 		firstPoll, _ := time.Parse(time.RFC3339Nano, text(firstView, "sync", "last_poll_at"))
-		time.Sleep(65 * time.Second)
+		// Two more polls, each serving the routine events since the last.
+		r.waitPolls(2, 30*time.Second)
 		now := time.Now().UTC().Truncate(time.Second)
 		span := "since=" + now.Add(-24*time.Hour+time.Minute).Format(time.RFC3339) + "&until=" + now.Format(time.RFC3339)
 		view := r.changes("?" + span + "&limit=200")
@@ -467,14 +456,10 @@ func TestChangesFixtureStates(t *testing.T) {
 		r, _ := e.boot(t, "tied", fakeaws.ScenarioChangesTiedSuspects, options{}, prodOnly)
 		r.waitPolled(150 * time.Second)
 		var view map[string]any
-		deadline := time.Now().Add(90 * time.Second)
-		for {
+		poll(90*time.Second, func() bool {
 			view = r.changes("?window=24h")
-			if text(view, "suspect", "status") == "found" || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(3 * time.Second)
-		}
+			return text(view, "suspect", "status") == "found"
+		})
 		candidates := list(view, "suspect", "candidates")
 		tied, likely := 0, 0
 		for _, candidate := range candidates {
@@ -497,10 +482,14 @@ func TestChangesFixtureStates(t *testing.T) {
 	t.Run("compare_nothing_differs", func(t *testing.T) {
 		e := stateEnv(t)
 		r, _ := e.boot(t, "same", fakeaws.ScenarioChangesQuiet, options{inventoryInterval: "30s"}, prodOnly)
-		r.waitPolled(150 * time.Second)
-		time.Sleep(40 * time.Second)
+		first := r.waitPolled(150 * time.Second)
+		// One more inventory pass (every 30 s) after the first change read,
+		// then two after the mark, so the compare spans re-reads of a
+		// stable world on both sides.
+		synced := func() time.Time { return r.syncedAt(prodAccount) }
+		waitPasses(t, "inventory reads", lastPoll(first), 1, 30*time.Second, synced)
 		mark := time.Now().UTC().Truncate(time.Second)
-		time.Sleep(70 * time.Second)
+		waitPasses(t, "inventory reads", mark, 2, 30*time.Second, synced)
 		got := r.call(http.MethodGet, "/api/admin/aws/changes/compare?from="+mark.Format(time.RFC3339), "")
 		answer := got.json()
 		e.out.put("compare_nothing_differs", map[string]any{"from": mark, "status": answer["status"], "complete": answer["complete"],
@@ -522,6 +511,22 @@ func configAccount(account string, regions ...string) string {
 	return "      - account_id: \"" + account + "\"\n        display_name: qa-" + account + "\n        regions: [" + strings.Join(regions, ", ") + "]\n" +
 		"        auth:\n          mode: assume_role\n          role_arn: arn:aws:iam::" + account + ":role/versus-reader\n" +
 		"          external_id: ${VERSUS_AWS_EXTERNAL_ID}\n"
+}
+
+// settingsNotEnabled reports whether Settings lists region among the
+// account's Regions that are not enabled.
+func settingsNotEnabled(r *replica, account, region string) bool {
+	for _, item := range list(r.call(http.MethodGet, "/api/admin/aws/settings", "").json(), "accounts") {
+		if text(item, "account_id") != account {
+			continue
+		}
+		for _, off := range list(item, "regions", "not_enabled") {
+			if off == region {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // notEnabledRegionChecks: the not-enabled Region is listed as such, its

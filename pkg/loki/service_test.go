@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -302,5 +303,68 @@ func TestIndependentOutputBoundsAndRedirectRefusal(t *testing.T) {
 	}
 	if _, err := NewService(config.AgentLokiSourceConfig{Address: "http://example.com", Query: `{app="api"}`, BearerToken: "secret"}, nil); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("credentialed non-loopback HTTP accepted: %v", err)
+	}
+}
+
+// TestReadReplacesValuesUnderSecretLabelNames covers stream labels named
+// like secrets: the value is replaced, the label name and the other labels
+// are kept.
+func TestReadReplacesValuesUnderSecretLabelNames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		fmt.Fprint(writer, `{"status":"success","data":{"resultType":"streams","result":[{"stream":{"service":"api","db_password":"hunter2","token_count":"5","secret":"db-creds","db_secret":"hunter3"},"values":[["1000000000","login ok"]]}]}}`)
+	}))
+	defer server.Close()
+	service, err := NewService(config.AgentLokiSourceConfig{Address: server.URL, Query: `{service="api"}`}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return time.Unix(5, 0) }
+	result, err := service.Read(context.Background(), ReadRequest{Service: "api", Lookback: time.Hour, Limit: 1})
+	if err != nil || len(result.Records) != 1 {
+		t.Fatalf("read = %+v, %v", result, err)
+	}
+	// A label called exactly secret holds the name of a Secret object and
+	// is kept; any longer name ending in secret is not.
+	want := map[string]string{"service": "api", "db_password": "<REDACTED:secret>", "token_count": "5", "secret": "db-creds", "db_secret": "<REDACTED:secret>"}
+	if got := result.Records[0].Labels; !reflect.DeepEqual(got, want) {
+		t.Fatalf("labels = %#v, want %#v", got, want)
+	}
+}
+
+// TestDiscoverJudgesLabelValuesByTheLabelName covers the values of one
+// label: under a name like db_password they come back as one marker, as Read
+// returns them, and a search cannot tell which values there are. A label
+// called exactly secret, and any other label, keeps its values.
+func TestDiscoverJudgesLabelValuesByTheLabelName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/loki/api/v1/series":
+			fmt.Fprint(writer, `{"status":"success","data":[{"service":"api","db_password":"hunter2","secret":"db-creds","env":"prod"},{"service":"api","db_password":"other","secret":"tls-cert","env":"dev"}]}`)
+		default:
+			fmt.Fprint(writer, `{"status":"success","data":["hunter2","other"]}`)
+		}
+	}))
+	defer server.Close()
+	for name, query := range map[string]string{"unscoped": "{}", "scoped": `{service="api"}`} {
+		service, err := NewService(config.AgentLokiSourceConfig{Address: server.URL, Query: query}, nil)
+		if err != nil || !service.DiscoveryAvailable() {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, search := range []string{"", "hunter", "nothing-like-it"} {
+			result, err := service.Discover(context.Background(), DiscoveryRequest{Label: "db_password", Search: search})
+			if err != nil || !reflect.DeepEqual(result.Labels, []string{"<REDACTED:secret>"}) {
+				t.Errorf("%s: values of db_password (search %q) = %+v, %v", name, search, result.Labels, err)
+			}
+		}
+		if name == "scoped" {
+			result, err := service.Discover(context.Background(), DiscoveryRequest{Label: "secret"})
+			if err != nil || !reflect.DeepEqual(result.Labels, []string{"db-creds", "tls-cert"}) {
+				t.Errorf("values of secret = %+v, %v", result.Labels, err)
+			}
+			result, err = service.Discover(context.Background(), DiscoveryRequest{Label: "env", Search: "pro"})
+			if err != nil || !reflect.DeepEqual(result.Labels, []string{"prod"}) {
+				t.Errorf("values of env = %+v, %v", result.Labels, err)
+			}
+		}
 	}
 }

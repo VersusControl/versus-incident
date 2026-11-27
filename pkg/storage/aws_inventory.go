@@ -140,6 +140,9 @@ type AWSRetentionSweep struct {
 	// ChangeBefore deletes changes recorded before it. Zero skips the change
 	// stage.
 	ChangeBefore time.Time
+	// CallCountsBefore deletes call ledger hours before it. Zero skips the
+	// call ledger stage.
+	CallCountsBefore time.Time
 	// KeepGenerations is how many newest generations each unit keeps; it
 	// must be at least one.
 	KeepGenerations int
@@ -158,7 +161,7 @@ type AWSRetentionSweep struct {
 const DefaultAWSRetentionBatch = 2000
 
 // AWSRetentionCursor is where a pass stopped. Stage is one of "units",
-// "history" or "changes"; empty means the pass finished.
+// "history", "changes" or "calls"; empty means the pass finished.
 type AWSRetentionCursor struct {
 	Stage string
 	// After is the last unit fully swept in the units stage.
@@ -171,6 +174,8 @@ type AWSRetentionResult struct {
 	Generations int64
 	History     int64
 	Changes     int64
+	// CallCounts is how many call ledger hours were removed.
+	CallCounts int64
 	// More is true when the pass stopped before the backlog was empty.
 	More   bool
 	Cursor AWSRetentionCursor

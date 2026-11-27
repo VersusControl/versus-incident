@@ -4,8 +4,8 @@
 //
 // The binary is a harness_awsendpoint build, so every AWS call goes to a
 // fakeaws fixture served from this test process through a front that picks
-// the scenario, counts each replica's LookupEvents requests and can slow
-// them. Nothing reaches AWS. The chat checks point the server at a scripted
+// the scenario and counts each replica's LookupEvents requests. Nothing
+// reaches AWS. The chat checks point the server at a scripted
 // OpenAI-compatible model in this process, which calls the named tool and
 // keeps the tool result the server sent it, so the redaction of what the
 // model sees is checked on the real agent path.
@@ -35,7 +35,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -83,7 +82,6 @@ func (w *world) current() string {
 type front struct {
 	world  *world
 	server *httptest.Server
-	delay  atomic.Int64 // nanoseconds added to each LookupEvents answer
 
 	mu      sync.Mutex
 	lookups map[string]int64 // account|signing region
@@ -108,9 +106,6 @@ func (f *front) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		f.lookups[account+"|"+region]++
 		f.times = append(f.times, time.Now())
 		f.mu.Unlock()
-		if delay := time.Duration(f.delay.Load()); delay > 0 {
-			time.Sleep(delay)
-		}
 	}
 	f.world.fake.ServeHTTP(writer, request)
 }
@@ -410,33 +405,49 @@ func (r *replica) start(bin, dsn string, o options) {
 	if o.model != nil {
 		cmd.Env = append(cmd.Env, "CHANGES_MODEL_URL="+o.model.server.URL+"/v1", "CHANGES_MODEL_KEY=changes-model-placeholder")
 	}
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	if err := r.launch(cmd, logFile); err != nil {
 		t.Fatalf("%s: start: %v", r.name, err)
 	}
 	r.cmd, r.log, r.done = cmd, logFile, make(chan struct{})
 	go func(done chan struct{}) { _ = cmd.Wait(); close(done) }(r.done)
-	deadline := time.Now().Add(90 * time.Second)
-	for {
-		response, err := http.Get(r.url() + "/healthz")
-		if err == nil {
-			response.Body.Close()
-			if response.StatusCode == http.StatusOK {
-				return
-			}
-		}
+	eventually(t, r.name+" to answer /healthz; see "+filepath.Join(r.dir, "server.log"), 90*time.Second, func() bool {
 		select {
 		case <-r.done:
 			t.Fatalf("%s exited during boot; see %s", r.name, filepath.Join(r.dir, "server.log"))
 		default:
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s did not become healthy; see %s", r.name, filepath.Join(r.dir, "server.log"))
+		response, err := http.Get(r.url() + "/healthz")
+		if err != nil {
+			return false
 		}
-		time.Sleep(200 * time.Millisecond)
-	}
+		response.Body.Close()
+		return response.StatusCode == http.StatusOK
+	})
 }
+
+// launch starts the server in its own process group, with no input and its
+// output in logFile, so it never holds the output of whatever runs the test.
+// It records "<pid> <pgid>" in server.proc in the instance folder until stop
+// ends the group. A test binary that dies before its cleanups run (a -timeout
+// panic, a kill) leaves that file behind, so the runner of the test can still
+// stop the group.
+func (r *replica) launch(cmd *exec.Cmd, logFile *os.File) error {
+	cmd.Stdin = nil
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	record := fmt.Sprintf("%d %d\n", cmd.Process.Pid, cmd.Process.Pid)
+	if err := os.WriteFile(r.processRecord(), []byte(record), 0o600); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		return err
+	}
+	return nil
+}
+
+func (r *replica) processRecord() string { return filepath.Join(r.dir, "server.proc") }
 
 func (r *replica) stop() {
 	if r.cmd == nil {
@@ -445,10 +456,13 @@ func (r *replica) stop() {
 	_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGTERM)
 	select {
 	case <-r.done:
-	case <-time.After(15 * time.Second):
+	case <-time.After(stopGrace):
 		_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
 		<-r.done
 	}
+	// Anything else left in the server's group goes with it.
+	_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
+	_ = os.Remove(r.processRecord())
 	_ = r.log.Close()
 	r.cmd = nil
 }
@@ -505,22 +519,26 @@ func (r *replica) connect(account string, regions ...string) {
 	if verify.status != http.StatusAccepted {
 		t.Fatalf("%s: verify %s = %d %s", r.name, account, verify.status, verify.body)
 	}
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		view := r.call(http.MethodGet, "/api/admin/aws/connect/drafts/"+draft, "")
-		if status, _ := view.json()["status"].(string); status == "verified" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s: draft for %s did not verify: %s", r.name, account, view.body)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	r.waitVerified(draft, account)
 	encoded, _ := json.Marshal(regions)
 	commit := r.call(http.MethodPost, "/api/admin/aws/accounts",
 		`{"draft_id":"`+draft+`","display_name":"qa-`+account+`","regions":`+string(encoded)+`}`)
 	if commit.status != http.StatusCreated {
 		t.Fatalf("%s: commit %s = %d %s", r.name, account, commit.status, commit.body)
+	}
+}
+
+// waitVerified waits until the wizard draft has verified the account's
+// reader role.
+func (r *replica) waitVerified(draft, account string) {
+	r.t.Helper()
+	var view answer
+	if !poll(60*time.Second, func() bool {
+		view = r.call(http.MethodGet, "/api/admin/aws/connect/drafts/"+draft, "")
+		status, _ := view.json()["status"].(string)
+		return status == "verified"
+	}) {
+		r.t.Fatalf("%s: draft for %s did not verify: %s", r.name, account, view.body)
 	}
 }
 
@@ -617,6 +635,7 @@ type sampler struct {
 	stop    chan struct{}
 	done    chan struct{}
 	mu      sync.Mutex
+	reads   int
 	samples int
 	errors  []string
 }
@@ -638,6 +657,9 @@ func (r *replica) sample(every time.Duration) *sampler {
 			request.Header.Set("X-Gateway-Secret", gatewaySecret)
 			response, err := client.Do(request)
 			now := time.Now().UTC().Format(time.RFC3339)
+			s.mu.Lock()
+			s.reads++
+			s.mu.Unlock()
 			if err != nil {
 				s.add(now + " request failed: " + err.Error())
 				continue
@@ -774,20 +796,18 @@ func (e *env) boot(t *testing.T, name, scenario string, o options, accounts map[
 	return r, w
 }
 
-// waitPolled waits until the change list says every pair was read once.
+// waitPolled waits until the change list says every pair was read once;
+// timeout is the hang guard.
 func (r *replica) waitPolled(timeout time.Duration) map[string]any {
 	r.t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		view := r.changes("?window=24h&limit=200")
-		if pairsPolled(view) {
-			return view
-		}
-		if time.Now().After(deadline) {
-			r.t.Fatalf("%s: the first change read did not finish in %s: sync=%v accounts=%v", r.name, timeout, path(view, "sync"), path(view, "accounts"))
-		}
-		time.Sleep(time.Second)
+	var view map[string]any
+	if !poll(timeout, func() bool {
+		view = r.changes("?window=24h&limit=200")
+		return pairsPolled(view)
+	}) {
+		r.t.Fatalf("%s: the first change read did not finish within the %s hang guard: sync=%v accounts=%v", r.name, scaledTimeout(timeout), path(view, "sync"), path(view, "accounts"))
 	}
+	return view
 }
 
 func gapReasons(view map[string]any) map[string]int {
@@ -869,9 +889,13 @@ func TestChangesAPIOnFakeAWS(t *testing.T) {
 	t.Run("quiet_window_is_complete_and_says_no_changes", func(t *testing.T) {
 		r, _ := e.boot(t, "quiet", fakeaws.ScenarioChangesQuiet, options{}, prodOnly)
 		s := r.sample(2 * time.Second)
-		view := r.waitPolled(120 * time.Second)
-		time.Sleep(6 * time.Second)
-		view = r.changes("?window=24h")
+		r.waitPolled(120 * time.Second)
+		// Three more sampled answers after the first read.
+		s.mu.Lock()
+		polledAt := s.reads
+		s.mu.Unlock()
+		s.waitReads(t, polledAt+3)
+		view := r.changes("?window=24h")
 		samples, problems := s.finish()
 		e.out.put("quiet", map[string]any{"complete": view["complete"], "summary": view["summary"], "gaps": view["gaps"], "window": view["window"], "samples": samples, "violations": problems})
 		if len(problems) > 0 {
@@ -937,18 +961,12 @@ func TestChangesAPIOnFakeAWS(t *testing.T) {
 	t.Run("throttled_never_claims_complete", func(t *testing.T) {
 		r, _ := e.boot(t, "throttled", fakeaws.ScenarioChangesThrottled, options{changesInterval: "30s"}, prodOnly)
 		s := r.sample(2 * time.Second)
-		deadline := time.Now().Add(150 * time.Second)
-		var view map[string]any
-		for {
-			view = r.changes("?window=24h")
-			if gapReasons(view)["throttled"] > 0 || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
+		poll(150*time.Second, func() bool {
+			return gapReasons(r.changes("?window=24h"))["throttled"] > 0
+		})
 		// Keep sampling across two more poll cycles.
-		time.Sleep(65 * time.Second)
-		view = r.changes("?window=24h")
+		r.waitPolls(2, 30*time.Second)
+		view := r.changes("?window=24h")
 		samples, problems := s.finish()
 		e.out.put("throttled", map[string]any{"complete": view["complete"], "gaps": view["gaps"], "summary": view["summary"], "accounts": view["accounts"], "samples": samples, "violations": problems})
 		if len(problems) > 0 {
@@ -969,18 +987,15 @@ func TestChangesAPIOnFakeAWS(t *testing.T) {
 		r, _ := e.boot(t, "denied", fakeaws.ScenarioChangesCloudTrailDenied, options{changesInterval: "30s"},
 			map[string][]string{prodAccount: {"us-east-1"}, stageAccount: {"eu-west-1"}})
 		s := r.sample(2 * time.Second)
-		deadline := time.Now().Add(150 * time.Second)
 		var view map[string]any
-		for {
+		poll(150*time.Second, func() bool {
 			view = r.changes("?window=24h")
-			if gapReasons(view)["cloudtrail_denied"] > 0 && text(view, "sync", "last_poll_at") != "" || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
+			return gapReasons(view)["cloudtrail_denied"] > 0 && text(view, "sync", "last_poll_at") != ""
+		})
 		var accountStates []map[string]any
 		for range 3 {
-			time.Sleep(30 * time.Second)
+			// The state after each of the next three poll cycles.
+			r.waitPolls(1, 30*time.Second)
 			view = r.changes("?window=24h")
 			states := map[string]any{}
 			for _, account := range list(view, "accounts") {
@@ -1097,14 +1112,10 @@ func TestChangesAPIOnFakeAWS(t *testing.T) {
 		r, _ := e.boot(t, "alarm", fakeaws.ScenarioChangesAlarmNoSuspect, options{}, prodOnly)
 		r.waitPolled(120 * time.Second)
 		var view map[string]any
-		deadline := time.Now().Add(60 * time.Second)
-		for {
+		poll(60*time.Second, func() bool {
 			view = r.changes("?window=24h")
-			if len(list(view, "alarms")) > 0 || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(2 * time.Second)
-		}
+			return len(list(view, "alarms")) > 0
+		})
 		e.out.put("alarm_no_suspect", map[string]any{"alarms": view["alarms"], "suspect": view["suspect"]})
 		if len(list(view, "alarms")) == 0 {
 			t.Fatalf("no alarm on the line: %v", view["alarms"])
@@ -1190,24 +1201,22 @@ func TestChangesAPIOnFakeAWS(t *testing.T) {
 		if text(early, "status") != "unavailable" || text(early, "history_starts") == "" {
 			t.Errorf("compare before the oldest snapshot = status %q history_starts %q", text(early, "status"), text(early, "history_starts"))
 		}
-		mark := time.Now().UTC().Add(time.Second)
-		time.Sleep(3 * time.Second)
+		// The mark is a whole second after everything stored so far, and in
+		// the past before the services change.
+		mark := time.Now().UTC().Truncate(time.Second).Add(time.Second)
+		eventually(t, "the clock to pass the compare mark", time.Minute, func() bool { return time.Now().After(mark) })
 		// Denied services become readable: their groups get history only
 		// from now on, so a compare from mark leaves them out as partial.
 		w.set(fakeaws.ScenarioBadDeploy)
-		deadline := time.Now().Add(150 * time.Second)
 		var compare map[string]any
-		for {
+		poll(150*time.Second, func() bool {
 			got := r.call(http.MethodGet, "/api/admin/aws/changes/compare?from="+mark.Format(time.RFC3339), "")
 			if got.status != http.StatusOK {
 				t.Fatalf("compare = %d %.300s", got.status, got.body)
 			}
 			compare = got.json()
-			if len(list(compare, "partial")) > 0 || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(3 * time.Second)
-		}
+			return len(list(compare, "partial")) > 0
+		})
 		e.out.put("compare", map[string]any{"unavailable": map[string]any{"status": early["status"], "history_starts": early["history_starts"], "snapshots": early["snapshots"]},
 			"after_switch": map[string]any{"status": compare["status"], "complete": compare["complete"], "partial": compare["partial"], "added": len(list(compare, "added")),
 				"changed": len(list(compare, "changed")), "removed": len(list(compare, "removed"))}})
@@ -1320,17 +1329,24 @@ func TestChangesTwoReplicasOnePoller(t *testing.T) {
 	a.connect(prodAccount, "us-east-1")
 	a.waitPolled(120 * time.Second)
 
+	// The claim is a request rate: the same wall-clock window, about four
+	// 30 s poll intervals, with one replica and then with two.
 	const window = 125 * time.Second
 	sa := a.sample(2 * time.Second)
 	startA := a.front.lookupTotal()
-	time.Sleep(window)
+	time.Sleep(window) // testlint:allow the measured window of the one-replica request rate
 	single := a.front.lookupTotal() - startA
 
 	b.start(e.bin, dsn, o)
+	joined := time.Now().UTC()
 	sb := b.sample(2 * time.Second)
-	time.Sleep(10 * time.Second) // let the second replica's first pass settle
+	// Measure once a poll pass has run with both replicas up, as the one-
+	// replica window started right after one.
+	waitPasses(t, "change polls with both replicas up", joined, 1, 30*time.Second, func() time.Time {
+		return lastPoll(a.changes("?window=24h&limit=1"))
+	})
 	fromA, fromB := a.front.lookupTotal(), b.front.lookupTotal()
-	time.Sleep(window)
+	time.Sleep(window) // testlint:allow the measured window of the two-replica request rate
 	pairA, pairB := a.front.lookupTotal()-fromA, b.front.lookupTotal()-fromB
 	samplesA, problemsA := sa.finish()
 	samplesB, problemsB := sb.finish()

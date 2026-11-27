@@ -24,11 +24,27 @@ func changeListFor(current func() c.AWSConnectorConfig, feed *awssnapshot.Change
 	}
 }
 
+// accountSource is where the request-path scopes read the account list
+// and each account's health. stored, when set, is the settings service's
+// listing kept until the account revision changes, so a page request does
+// not list the stored accounts again; health is still read per account.
+type accountSource struct {
+	store  *awssettings.Store
+	stored func() ([]awssettings.AccountRecord, error)
+}
+
+func (source accountSource) listAccounts(org string) ([]awssettings.AccountRecord, error) {
+	if source.stored != nil {
+		return source.stored()
+	}
+	return source.store.ListAccounts(org)
+}
+
 // changeScope lists every connected account with its readable regions, the
 // selected regions AWS reports as not enabled, the services its last probe
 // found denied or not on its plan, and any account-level outage from its
 // saved health.
-func changeScope(store *awssettings.Store, org string, conn c.AWSConnectorConfig) ([]awssnapshot.ScopeAccount, bool, error) {
+func changeScope(store accountSource, org string, conn c.AWSConnectorConfig) ([]awssnapshot.ScopeAccount, bool, error) {
 	return scopeAccounts(store, org, conn, changeRegions)
 }
 
@@ -50,7 +66,7 @@ func changeRegions(account awssettings.AccountRecord, health awssettings.HealthR
 // coverageScope lists the accounts the coverage page expects, each with the
 // Regions the collectors really read (settings.CollectRegions), so a unit
 // read in a Region whose opt-in status went stale stays in scope.
-func coverageScope(store *awssettings.Store, org string, conn c.AWSConnectorConfig, now func() time.Time) ([]awssnapshot.ScopeAccount, bool, error) {
+func coverageScope(store accountSource, org string, conn c.AWSConnectorConfig, now func() time.Time) ([]awssnapshot.ScopeAccount, bool, error) {
 	return scopeAccounts(store, org, conn, func(account awssettings.AccountRecord, health awssettings.HealthRecord) ([]string, []string) {
 		regions, off := awssettings.CollectRegions(account, health, now().UTC())
 		return readableRegions(regions, off)
@@ -75,9 +91,10 @@ func readableRegions(regions, off []string) ([]string, []string) {
 // scopeAccounts lists every connected account with the Regions regionsFor
 // gives it, the services its last probe found denied or not on its plan,
 // and any account-level outage from its saved health.
-func scopeAccounts(store *awssettings.Store, org string, conn c.AWSConnectorConfig,
+func scopeAccounts(source accountSource, org string, conn c.AWSConnectorConfig,
 	regionsFor func(awssettings.AccountRecord, awssettings.HealthRecord) (regions, notEnabled []string)) ([]awssnapshot.ScopeAccount, bool, error) {
-	stored, err := store.ListAccounts(org)
+	store := source.store
+	stored, err := source.listAccounts(org)
 	if err != nil {
 		return nil, false, err
 	}

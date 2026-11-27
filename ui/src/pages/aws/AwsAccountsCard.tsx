@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
@@ -108,12 +109,17 @@ export function AwsAccountsCard({
         <h2 id="aws-accounts-title" className="card-title">
           Accounts
         </h2>
-        {canWrite && (
-          <button type="button" className="btn btn-primary-strong" onClick={onConnect}>
-            <Plus size={13} aria-hidden="true" />
-            Add account
-          </button>
-        )}
+        <div className="flex items-center gap-4">
+          <Link to="/aws/coverage" className="text-xs text-link hover:underline" data-coverage-link>
+            Coverage ›
+          </Link>
+          {canWrite && (
+            <button type="button" className="btn btn-primary-strong" onClick={onConnect}>
+              <Plus size={13} aria-hidden="true" />
+              Add account
+            </button>
+          )}
+        </div>
       </div>
 
       {rows.length === 0 ? (

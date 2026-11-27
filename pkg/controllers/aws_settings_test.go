@@ -368,8 +368,7 @@ func TestAWSSettingsEndpointContract(t *testing.T) {
 		t.Fatalf("verify = %d %s", response.StatusCode, body)
 	}
 	var verified awssettings.DraftView
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	eventually(t, "verify to finish", func() bool {
 		response, body = awsTestRequest(t, app, http.MethodGet, "/api/admin/aws/connect/drafts/"+start.DraftID, "")
 		if response.StatusCode != fiber.StatusOK {
 			t.Fatalf("draft = %d %s", response.StatusCode, body)
@@ -377,14 +376,8 @@ func TestAWSSettingsEndpointContract(t *testing.T) {
 		if err := json.Unmarshal(body, &verified); err != nil {
 			t.Fatal(err)
 		}
-		if verified.Status == awssettings.DraftVerified {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("verify did not finish")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return verified.Status == awssettings.DraftVerified
+	})
 	if bytes.Contains(body, []byte(revealed.ExternalID)) {
 		t.Fatal("draft body carried the full external id")
 	}

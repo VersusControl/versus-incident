@@ -29,12 +29,23 @@ type KubernetesConnectorConfig struct {
 	Multiple             bool `mapstructure:"multiple"`
 	KubernetesToolConfig `mapstructure:",squash"`
 	Clusters             []KubernetesClusterConfig `mapstructure:"clusters"`
+	// AnomalyDetection is an opaque settings block for an anomaly-detection
+	// extension. It applies to every cluster; a cluster's own block refines
+	// it. Versus stores and copies it and reads nothing inside it.
+	AnomalyDetection map[string]any `mapstructure:"anomaly_detection"`
 }
 
 type KubernetesClusterConfig struct {
 	DisplayName          string `mapstructure:"display_name"`
 	KubernetesToolConfig `mapstructure:",squash"`
+	// AnomalyDetection is this cluster's opaque anomaly-detection block,
+	// layered over the connector-level one by the extension that reads it.
+	AnomalyDetection map[string]any `mapstructure:"anomaly_detection"`
 }
+
+// DefaultKubernetesClusterID is the cluster ID of a single-cluster connector
+// configured without cluster_id.
+const DefaultKubernetesClusterID = "default"
 
 func (connector KubernetesConnectorConfig) Resolved() []KubernetesClusterConfig {
 	if connector.Multiple {
@@ -92,10 +103,32 @@ type AWSCollectChangesConfig struct {
 }
 
 // AWSCollectIntervalsConfig is how often each kind of unit is re-read.
+// Every AWS call is a CloudTrail event the account's GuardDuty, extra trail
+// copies and log pipeline price, so the defaults read health often and
+// inventory rarely, with the change feed re-reading what changed between
+// full reads. An interval set here wins over its default.
 type AWSCollectIntervalsConfig struct {
+	// Inventory is the full inventory read.
 	Inventory string `mapstructure:"inventory"`
-	Health    string `mapstructure:"health"`
-	Changes   string `mapstructure:"changes"`
+	// Health is the cadence of a healthy health unit.
+	Health  string `mapstructure:"health"`
+	Changes string `mapstructure:"changes"`
+	// HealthHot is the cadence of a health unit that is unhealthy or
+	// changed in the last hour; never slower than Health.
+	HealthHot string `mapstructure:"health_hot"`
+	// Identity is the IAM read.
+	Identity string `mapstructure:"identity"`
+	// Policies is the resource policy read; changes to a policy re-read it
+	// in between.
+	Policies string `mapstructure:"policies"`
+	// CredentialReport and Findings are the cadences of those sources.
+	CredentialReport string `mapstructure:"credential_report"`
+	Findings         string `mapstructure:"findings"`
+	// Trails is the trail read that counts the copies kept of each call.
+	Trails string `mapstructure:"trails"`
+	// RegionsOff is the cadence of a unit in a Region that is not turned
+	// on.
+	RegionsOff string `mapstructure:"regions_off"`
 }
 
 // AWSCollectHistoryConfig bounds the snapshot history the file store keeps.
@@ -115,9 +148,23 @@ type AWSApplicationsConfig struct {
 
 // Collector defaults, used when a value is not set.
 const (
-	DefaultAWSInventoryInterval  = 15 * time.Minute
-	DefaultAWSHealthInterval     = 2 * time.Minute
-	DefaultAWSChangesInterval    = 5 * time.Minute
+	DefaultAWSInventoryInterval = 6 * time.Hour
+	DefaultAWSHealthInterval    = 10 * time.Minute
+	DefaultAWSChangesInterval   = 5 * time.Minute
+	// DefaultAWSHealthHotInterval is the health cadence of a unit that is
+	// unhealthy or changed in the last hour.
+	DefaultAWSHealthHotInterval        = 2 * time.Minute
+	DefaultAWSIdentityInterval         = time.Hour
+	DefaultAWSPoliciesInterval         = 6 * time.Hour
+	DefaultAWSCredentialReportInterval = 4 * time.Hour
+	DefaultAWSFindingsInterval         = time.Hour
+	DefaultAWSTrailsInterval           = 24 * time.Hour
+	DefaultAWSRegionsOffInterval       = 24 * time.Hour
+	// DefaultAWSCallsPerDay is the daily call target per account. Over it,
+	// inventory and policy reads slow down first; health is protected.
+	DefaultAWSCallsPerDay        = 20000
+	maxAWSCallsPerDay            = 10000000
+	maxAWSCycleBudget            = 100000
 	DefaultAWSHistoryGenerations = 48
 	DefaultAWSHistoryMaxAge      = 7 * 24 * time.Hour
 	DefaultAWSChangeRetention    = 14 * 24 * time.Hour
@@ -257,6 +304,49 @@ func (collect AWSCollectConfig) HealthInterval() time.Duration {
 	return durationOr(collect.Intervals.Health, DefaultAWSHealthInterval)
 }
 
+// HealthHotInterval is how often a health unit that is unhealthy or
+// changed in the last hour is re-read; never slower than HealthInterval.
+// A user who set health and not health_hot gets no fast cadence: their
+// interval wins.
+func (collect AWSCollectConfig) HealthHotInterval() time.Duration {
+	if collect.Intervals.HealthHot == "" && collect.Intervals.Health != "" {
+		return collect.HealthInterval()
+	}
+	return min(durationOr(collect.Intervals.HealthHot, DefaultAWSHealthHotInterval), collect.HealthInterval())
+}
+
+// IdentityInterval is how often the IAM read runs.
+func (collect AWSCollectConfig) IdentityInterval() time.Duration {
+	return durationOr(collect.Intervals.Identity, DefaultAWSIdentityInterval)
+}
+
+// PoliciesInterval is how often the resource policy reads run. Unset, it
+// follows an inventory interval slower than its default.
+func (collect AWSCollectConfig) PoliciesInterval() time.Duration {
+	return durationOr(collect.Intervals.Policies, max(DefaultAWSPoliciesInterval, collect.InventoryInterval()))
+}
+
+// CredentialReportInterval is how often the credential report is read.
+func (collect AWSCollectConfig) CredentialReportInterval() time.Duration {
+	return durationOr(collect.Intervals.CredentialReport, DefaultAWSCredentialReportInterval)
+}
+
+// FindingsInterval is how often imported findings are read.
+func (collect AWSCollectConfig) FindingsInterval() time.Duration {
+	return durationOr(collect.Intervals.Findings, DefaultAWSFindingsInterval)
+}
+
+// TrailsInterval is how often the account's trails are read.
+func (collect AWSCollectConfig) TrailsInterval() time.Duration {
+	return durationOr(collect.Intervals.Trails, DefaultAWSTrailsInterval)
+}
+
+// RegionsOffInterval is how often a unit in a Region that is not turned on
+// is tried again.
+func (collect AWSCollectConfig) RegionsOffInterval() time.Duration {
+	return durationOr(collect.Intervals.RegionsOff, DefaultAWSRegionsOffInterval)
+}
+
 // ChangesInterval is how often CloudTrail is polled.
 func (collect AWSCollectConfig) ChangesInterval() time.Duration {
 	return durationOr(collect.Intervals.Changes, DefaultAWSChangesInterval)
@@ -330,6 +420,81 @@ type AWSTagsConfig struct {
 
 type AWSBudgetsConfig struct {
 	MaxRequestsPerSecond int `mapstructure:"max_requests_per_second"`
+	// PerCycle caps the AWS calls one run of a source makes, per account
+	// and Region (pages for findings): health, inventory, changes,
+	// identity, policies, credential_report, findings. A source left out
+	// takes its default. Over it, the run stops, keeps its last good data
+	// and shows the rest as capped.
+	PerCycle map[string]int `mapstructure:"per_cycle"`
+	// CallsPerDay is the daily call target per account. Over it, inventory
+	// and policy reads slow down first and the slowdown shows in Settings.
+	CallsPerDay int `mapstructure:"calls_per_day"`
+}
+
+// DefaultAWSCycleBudgets are the per-run call budgets of each source.
+func DefaultAWSCycleBudgets() map[string]int {
+	return map[string]int{
+		"health":            200,
+		"inventory":         700,
+		"changes":           60,
+		"identity":          120,
+		"policies":          250,
+		"credential_report": 3,
+		"findings":          50,
+	}
+}
+
+// CycleBudgets returns every source's per-run budget: the configured one,
+// else its default.
+func (budgets AWSBudgetsConfig) CycleBudgets() map[string]int {
+	out := DefaultAWSCycleBudgets()
+	for source, value := range budgets.PerCycle {
+		if _, known := out[source]; known && value > 0 {
+			out[source] = value
+		}
+	}
+	return out
+}
+
+// KubernetesAnomalyDetectionBlocks is the anomaly_detection settings that
+// apply to one cluster, as two separate layers.
+type KubernetesAnomalyDetectionBlocks struct {
+	// ClusterID is the cluster's ID; DefaultKubernetesClusterID for a
+	// single-cluster connector without cluster_id.
+	ClusterID string
+	// Connector is the connector-level block, nil when absent.
+	Connector map[string]any
+	// Cluster is the cluster's own block, nil when absent. Always nil for a
+	// single-cluster connector, whose only block is the connector-level one.
+	Cluster map[string]any
+}
+
+// AnomalyDetectionBlocks returns, for each resolved cluster in order, the
+// connector-level and cluster-level anomaly_detection blocks, unmerged. The
+// maps are deep copies, so a caller may change them freely.
+func (connector KubernetesConnectorConfig) AnomalyDetectionBlocks() []KubernetesAnomalyDetectionBlocks {
+	resolved := connector.Resolved()
+	out := make([]KubernetesAnomalyDetectionBlocks, len(resolved))
+	for index, entry := range resolved {
+		id := entry.ClusterID
+		if id == "" {
+			id = DefaultKubernetesClusterID
+		}
+		out[index] = KubernetesAnomalyDetectionBlocks{
+			ClusterID: id,
+			Connector: cloneAnyMap(connector.AnomalyDetection),
+			Cluster:   cloneAnyMap(entry.AnomalyDetection),
+		}
+	}
+	return out
+}
+
+// DailyCallTarget is the daily call target per account.
+func (budgets AWSBudgetsConfig) DailyCallTarget() int {
+	if budgets.CallsPerDay > 0 {
+		return budgets.CallsPerDay
+	}
+	return DefaultAWSCallsPerDay
 }
 
 type AWSOptionalDataConfig struct {
@@ -509,7 +674,7 @@ func validateMultipleShape(value any) error {
 			if strings.EqualFold(name, "clusters") && !multiple {
 				return errors.New("connectors.kubernetes.clusters requires multiple: true")
 			}
-			if multiple && !strings.EqualFold(name, "multiple") && !strings.EqualFold(name, "clusters") {
+			if multiple && !strings.EqualFold(name, "multiple") && !strings.EqualFold(name, "clusters") && !strings.EqualFold(name, "anomaly_detection") {
 				return errors.New("connectors.kubernetes: configure each cluster under clusters")
 			}
 		}
@@ -721,10 +886,19 @@ func normalizeAWSDefaults(connector *AWSConnectorConfig) {
 	if connector.Budgets.MaxRequestsPerSecond == 0 {
 		connector.Budgets.MaxRequestsPerSecond = 2
 	}
+	if connector.Budgets.CallsPerDay == 0 {
+		connector.Budgets.CallsPerDay = DefaultAWSCallsPerDay
+	}
 	if connector.HealthCheckInterval == "" {
 		connector.HealthCheckInterval = "5m"
 	}
 	collect := &connector.Collect
+	// The fast health cadence is set before health takes its default, so
+	// an explicit health interval with no health_hot keeps no fast
+	// cadence.
+	if collect.Intervals.HealthHot == "" {
+		collect.Intervals.HealthHot = collect.HealthHotInterval().String()
+	}
 	if collect.Intervals.Inventory == "" {
 		collect.Intervals.Inventory = DefaultAWSInventoryInterval.String()
 	}
@@ -776,11 +950,18 @@ func normalizeAWSDefaults(connector *AWSConnectorConfig) {
 // never the rejected value.
 func validateAWSCollect(collect AWSCollectConfig, applications AWSApplicationsConfig) error {
 	intervals := map[string]string{
-		"inventory": collect.Intervals.Inventory,
-		"health":    collect.Intervals.Health,
-		"changes":   collect.Intervals.Changes,
+		"inventory":         collect.Intervals.Inventory,
+		"health":            collect.Intervals.Health,
+		"changes":           collect.Intervals.Changes,
+		"health_hot":        collect.Intervals.HealthHot,
+		"identity":          collect.Intervals.Identity,
+		"policies":          collect.Intervals.Policies,
+		"credential_report": collect.Intervals.CredentialReport,
+		"findings":          collect.Intervals.Findings,
+		"trails":            collect.Intervals.Trails,
+		"regions_off":       collect.Intervals.RegionsOff,
 	}
-	for _, name := range []string{"inventory", "health", "changes"} {
+	for _, name := range []string{"inventory", "health", "changes", "health_hot", "identity", "policies", "credential_report", "findings", "trails", "regions_off"} {
 		value := intervals[name]
 		if value == "" {
 			continue
@@ -788,6 +969,12 @@ func validateAWSCollect(collect AWSCollectConfig, applications AWSApplicationsCo
 		parsed, err := time.ParseDuration(value)
 		if err != nil || parsed < minAWSCollectInterval || parsed > maxAWSCollectInterval {
 			return fmt.Errorf("connectors.aws.collect.intervals.%s must be between 30s and 24h", name)
+		}
+	}
+	if collect.Intervals.Policies != "" {
+		policies, policiesErr := time.ParseDuration(collect.Intervals.Policies)
+		if policiesErr == nil && policies < collect.InventoryInterval() {
+			return errors.New("connectors.aws.collect.intervals.policies must not be shorter than intervals.inventory: policy reads are metered and run no more often than the full inventory")
 		}
 	}
 	if collect.History.MaxGenerations < 0 || collect.History.MaxGenerations > maxAWSHistoryGenerations {
@@ -983,6 +1170,18 @@ func validateAWSConnector(connector AWSConnectorConfig) error {
 	if connector.Budgets.MaxRequestsPerSecond < 1 || connector.Budgets.MaxRequestsPerSecond > 1000 {
 		return errors.New("connectors.aws.budgets.max_requests_per_second must be between 1 and 1000")
 	}
+	if connector.Budgets.CallsPerDay < 0 || connector.Budgets.CallsPerDay > maxAWSCallsPerDay {
+		return errors.New("connectors.aws.budgets.calls_per_day must be between 1 and 10000000")
+	}
+	known := DefaultAWSCycleBudgets()
+	for source, value := range connector.Budgets.PerCycle {
+		if _, ok := known[source]; !ok {
+			return errors.New("connectors.aws.budgets.per_cycle names an unknown source; use health, inventory, changes, identity, policies, credential_report or findings")
+		}
+		if value < 1 || value > maxAWSCycleBudget {
+			return fmt.Errorf("connectors.aws.budgets.per_cycle.%s must be between 1 and 100000", source)
+		}
+	}
 	interval, err := time.ParseDuration(connector.HealthCheckInterval)
 	if err != nil || interval < 30*time.Second || interval > 24*time.Hour {
 		return errors.New("connectors.aws.health_check_interval must be between 30s and 24h")
@@ -1100,6 +1299,9 @@ func connectorShapeError(value any, target reflect.Type, path string) error {
 	if value == nil {
 		return fmt.Errorf("%s: invalid value", path)
 	}
+	if target == reflect.TypeOf(map[string]any(nil)) {
+		return opaqueBlockKeyError(value, path)
+	}
 	if target.Kind() != reflect.Struct {
 		if reflect.TypeOf(value).AssignableTo(target) {
 			return nil
@@ -1119,6 +1321,9 @@ func connectorShapeError(value any, target reflect.Type, path string) error {
 		if target.Kind() == reflect.Slice {
 			return connectorSliceError(value, target, path)
 		}
+		if target.Kind() == reflect.Map && target.Key().Kind() == reflect.String {
+			return connectorMapError(value, target, path)
+		}
 		return fmt.Errorf("%s: invalid value", path)
 	}
 	fields, ok := value.(map[string]any)
@@ -1137,6 +1342,53 @@ func connectorShapeError(value any, target reflect.Type, path string) error {
 		}
 		if err := connectorShapeError(fields[key], fieldType, path+"."+connectorKeyForError(key)); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// opaqueBlockKeyError checks a free-form settings block: it must be a
+// mapping, and every mapping inside it, at any depth, must have text keys, so
+// the block decodes the same way wherever it is read. The first offending key
+// is named by path; values are never echoed.
+func opaqueBlockKeyError(value any, path string) error {
+	if _, ok := value.(map[string]any); !ok {
+		if _, mixed := value.(map[any]any); !mixed {
+			return fmt.Errorf("%s: invalid value", path)
+		}
+	}
+	return opaqueValueKeyError(value, path)
+}
+
+func opaqueValueKeyError(value any, path string) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if err := opaqueValueKeyError(typed[key], path+"."+connectorKeyForError(key)); err != nil {
+				return err
+			}
+		}
+	case map[any]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			if _, text := key.(string); !text {
+				keys = append(keys, connectorKeyForError(fmt.Sprint(key)))
+			}
+		}
+		sort.Strings(keys)
+		if len(keys) > 0 {
+			return fmt.Errorf("%s: key %s must be text; quote it", path, keys[0])
+		}
+	case []any:
+		for index, item := range typed {
+			if err := opaqueValueKeyError(item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -1163,6 +1415,26 @@ func connectorFieldType(target reflect.Type, key string) (reflect.Type, bool) {
 		}
 	}
 	return nil, false
+}
+
+// connectorMapError checks every value of a map keyed by name, such as
+// the per-source budgets.
+func connectorMapError(value any, target reflect.Type, path string) error {
+	entries, ok := value.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%s: invalid value", path)
+	}
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := connectorShapeError(entries[key], target.Elem(), path+"."+connectorKeyForError(key)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func connectorSliceError(value any, target reflect.Type, path string) error {

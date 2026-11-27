@@ -11,8 +11,14 @@ import (
 	"github.com/VersusControl/versus-incident/tests/fakeaws"
 )
 
+// budgetSample is how many requests the budget run lets reach AWS before it
+// stops the sync. Past the burst, the default budget spaces them half a
+// second apart, so the sample spans a few seconds of paced calls.
+const budgetSample = 10
+
 // TestCollectorsStayWithinTwoRequestsPerSecond runs a large account against
-// the default budget for a few seconds and counts what reached AWS. Global
+// the default budget until a sample of requests reached AWS, then compares
+// the count with what the budget allows over the time they took. Global
 // services share the us-east-1 limiter, so one region bounds every call.
 func TestCollectorsStayWithinTwoRequestsPerSecond(t *testing.T) {
 	if testing.Short() {
@@ -21,10 +27,17 @@ func TestCollectorsStayWithinTwoRequestsPerSecond(t *testing.T) {
 	h := newHarness(t, fakeaws.ScenarioLoad5k)
 	budget := limit.NewManager(2)
 	collector := New(h.store, budget, WithHTTPClient(h.fake.HTTPClient()), WithSleep(noSleep))
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := time.Now()
-	_, _ = collector.Sync(ctx, target(productionAccount))
+	synced := make(chan struct{})
+	go func() {
+		defer close(synced)
+		_, _ = collector.Sync(ctx, target(productionAccount))
+	}()
+	eventually(t, "the budget sample reaching AWS", func() bool { return h.fake.TotalRequests() >= budgetSample })
+	cancel()
+	waitFor(t, synced, "the stopped sync to return")
 	elapsed := time.Since(started)
 	requests := h.fake.TotalRequests()
 	allowed := int64(2*elapsed.Seconds()) + limit.Burst + 1

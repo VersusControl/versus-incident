@@ -94,7 +94,7 @@ func TestEveryGapCodeMapsToOneOutcome(t *testing.T) {
 		"role_not_found": OutcomeNotRead, "not_on_plan": OutcomeNotRead, "throttled": OutcomeNotRead,
 		"timeout": OutcomeNotRead, "network": OutcomeNotRead, "no_server_identity": OutcomeNotRead,
 		"storage": OutcomeNotRead, "invalid_snapshot": OutcomeNotRead, "": OutcomeNotRead, "anything": OutcomeNotRead,
-		"capped": OutcomeNotRead, "region_disabled": OutcomeOffInAWS, "not_enabled": OutcomeOffInAWS,
+		"capped": OutcomeCapped, "region_disabled": OutcomeOffInAWS, "not_enabled": OutcomeOffInAWS,
 		"not_available_in_region": OutcomeNotOffered,
 	}
 	outcomes := map[ReadOutcome]bool{OutcomeNotRead: true, OutcomeCapped: true, OutcomeOffInAWS: true, OutcomeNotOffered: true}

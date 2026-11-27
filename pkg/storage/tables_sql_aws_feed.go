@@ -300,19 +300,27 @@ func (t *sqlTables) firstChangeCopy(orgs []string, alias string, recordedBefore 
 // organization that counted the most events; a tie goes to the first in
 // read order. A minute both organizations read counts once, never twice.
 // The guard probe uses the count table's primary key.
-func largestCount(orgs []string, alias string) (string, []any) {
+//
+// A limit on the inherited organizations applies to the guard too, so a
+// count the limit hides never hides the write organization's own count.
+func largestCount(orgs []string, alias, write string, limit *AWSInheritedLimit) (string, []any) {
 	if len(orgs) == 1 {
 		return alias + ".org_id = ?", []any{orgs[0]}
 	}
 	guardRank, guardArgs := orgRank(orgs, "d.org_id")
 	rowRank, rowArgs := orgRank(orgs, alias+".org_id")
 	args := append(stringArgs(orgs), stringArgs(orgs)...)
+	guardLimit := ""
+	if condition, limitArgs, ok := limit.inheritedCondition(write, "d", "account"); ok {
+		guardLimit = " AND " + condition
+		args = append(args, limitArgs...)
+	}
 	args = append(append(args, guardArgs...), rowArgs...)
 	match := make([]string, 0, 8)
 	for _, column := range []string{"account", "region", "kind", "event_name", "actor", "session_class", "error_code", "minute"} {
 		match = append(match, "d."+column+" = "+alias+"."+column)
 	}
-	return alias + ".org_id IN (" + placeholders(len(orgs)) + ") AND NOT EXISTS (SELECT 1 FROM aws_change_counts d WHERE d.org_id IN (" + placeholders(len(orgs)) + ")" +
+	return alias + ".org_id IN (" + placeholders(len(orgs)) + ") AND NOT EXISTS (SELECT 1 FROM aws_change_counts d WHERE d.org_id IN (" + placeholders(len(orgs)) + ")" + guardLimit +
 		" AND " + strings.Join(match, " AND ") + " AND (d.events > " + alias + ".events OR d.events = " + alias + ".events AND " + guardRank + " < " + rowRank + "))", args
 }
 
@@ -352,6 +360,9 @@ func (t *sqlTables) feedWhere(condition string, args []any, alias, timeColumn st
 func (t *sqlTables) rowWhere(scope tenancy.OrgScope, query AWSChangeFeedQuery) sqlWhere {
 	condition, args := t.firstChangeCopy(scope.Read, "c", query.RecordedBefore)
 	where := t.feedWhere(condition, args, "c", "event_time", query)
+	if condition, args, ok := query.Inherited.inheritedCondition(scope.Write, "c", "account"); ok {
+		where.add(condition, args...)
+	}
 	if query.ResourceARN != "" {
 		key := query.ResourceKey
 		if key == "" {
@@ -388,7 +399,7 @@ func (t *sqlTables) AWSChangeFeed(ctx context.Context, scope tenancy.OrgScope, q
 	defer func() { _ = tx.Rollback() }()
 	scope = inventoryScope(scope)
 	var feed AWSChangeFeed
-	if feed.Coverage, err = t.awsChangeCoverage(ctx, tx, scope, query.Account, query.Region); err != nil {
+	if feed.Coverage, err = t.awsChangeCoverage(ctx, tx, scope, query.Account, query.Region, query.Inherited); err != nil {
 		return AWSChangeFeed{}, err
 	}
 	if feed.Gaps, err = t.feedGapReasons(ctx, tx, scope, query); err != nil {
@@ -492,6 +503,9 @@ func (t *sqlTables) feedGapReasons(ctx context.Context, q tablesQuerier, scope t
 	var where sqlWhere
 	condition, args := readOrgs(scope.Read, "g2")
 	where.add(condition, args...)
+	if condition, args, ok := query.Inherited.inheritedCondition(scope.Write, "g2", "account"); ok {
+		where.add(condition, args...)
+	}
 	where.equal("g2.account", query.Account)
 	where.equal("g2.region", query.Region)
 	if !query.Since.IsZero() {
@@ -524,6 +538,9 @@ func (t *sqlTables) feedPairs(ctx context.Context, q tablesQuerier, scope tenanc
 	var where sqlWhere
 	condition, args := readOrgs(scope.Read, "p")
 	where.add(condition, args...)
+	if condition, args, ok := query.Inherited.inheritedCondition(scope.Write, "p", "account"); ok {
+		where.add(condition, args...)
+	}
 	where.equal("p.account", query.Account)
 	where.equal("p.region", query.Region)
 	rank, rankArgs := orgRank(scope.Read, "p.org_id")
@@ -577,8 +594,11 @@ func (t *sqlTables) feedMinutes(ctx context.Context, q tablesQuerier, scope tena
 }
 
 func (t *sqlTables) feedCounts(ctx context.Context, q tablesQuerier, scope tenancy.OrgScope, query AWSChangeFeedQuery) ([]AWSChangeCount, error) {
-	condition, args := largestCount(scope.Read, "n")
+	condition, args := largestCount(scope.Read, "n", scope.Write, query.Inherited)
 	where := t.feedWhere(condition, args, "n", "minute", query)
+	if condition, args, ok := query.Inherited.inheritedCondition(scope.Write, "n", "account"); ok {
+		where.add(condition, args...)
+	}
 	if query.Text != "" {
 		pattern := likePattern(asciiLower(query.Text))
 		where.add(`(lower(n.event_name) LIKE ? ESCAPE '\' OR lower(`+t.apiNameColumn("n.event_source", "n.event_name")+`) LIKE ? ESCAPE '\')`, pattern, pattern)

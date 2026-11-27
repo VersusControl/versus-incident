@@ -79,12 +79,17 @@ type postgresProvider struct {
 	writeMu              sync.Mutex
 	amplifiedWrites      int
 	evidenceRetention    time.Duration
+	// thinning tracks observation thinning passes that ran out of time.
+	thinning observationThinning
 	// evidenceSaveChunk and evidenceSaveTimeout bound each save transaction.
 	evidenceSaveChunk   int
 	evidenceSaveTimeout time.Duration
 	// evidenceChunkFault lets in-package tests act inside one save
 	// transaction, before it writes, for example to fail or delay it.
 	evidenceChunkFault func(ctx context.Context, tx *sql.Tx, part, size int) error
+	// fullIssueReads counts saves that read every open issue in full after
+	// the narrow read; guarded by writeMu.
+	fullIssueReads int
 	// sessionLocks counts the connections pinned by held session locks.
 	sessionLocks sessionLockPool
 }
@@ -624,23 +629,8 @@ const ossMigrationLedger = "versus_schema_migrations"
 // re-run would drop the typed tables on every boot).
 func (p *postgresProvider) migrate() error {
 	return WithMigrationLock(p.db, func() error {
-		if err := RunSQLMigrations(p.db, migrationFiles, "migrations", ossMigrationLedger); err != nil {
-			return err
-		}
-		return seedRequiredRows(p.db)
+		return RunSQLMigrations(p.db, migrationFiles, "migrations", ossMigrationLedger)
 	})
-}
-
-// seedRequiredRows inserts the rows the code expects to exist from the first
-// start. Migrations hold schema only, so these rows are written here, on
-// every open, and an existing row is left as it is.
-func seedRequiredRows(db *sql.DB) error {
-	// The evidence partition switch keeps its progress in a single row that
-	// the copy and retention passes lock and update; neither creates it.
-	if _, err := db.Exec(`INSERT INTO kubernetes_evidence_partition_migration(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING`); err != nil {
-		return fmt.Errorf("storage: seed evidence partition progress: %w", err)
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------

@@ -181,11 +181,7 @@ func TestRecordPendingRegistersTheWholePlan(t *testing.T) {
 		}
 		done := make(chan error, 1)
 		go func() { done <- store.RecordPending(units) }()
-		select {
-		case <-provider.started:
-		case <-time.After(5 * time.Second):
-			t.Fatal("RecordPending did not register the plan in one store call")
-		}
+		waitFor(t, provider.started, "RecordPending to register the plan in one store call")
 		during, err := store.Sync(ctx, Query{Account: account})
 		if err != nil {
 			t.Fatal(err)

@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
+	"github.com/VersusControl/versus-incident/pkg/logging"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -43,9 +43,9 @@ var errEvidenceSaveSplit = errors.New("storage: capture is saved in parts")
 // part: the save chunk in records and the part byte bound in payload.
 //
 // A capture whose journal records fit one part is saved in one transaction.
-// A larger one writes its journal records part by part, each in its own
-// transaction, and then a final transaction that holds only the read models
-// and the checkpoint. Readers pin to the checkpoint's sequence, so they never
+// A larger one writes the producer's journal records part by part, each in its
+// own transaction, and then a final transaction that holds the issue records
+// it derives, the read models and the checkpoint. Readers pin to the checkpoint's sequence, so they never
 // see a partly saved capture. Each record write is idempotent by event and
 // content: a failed part is retried alone, a later retry of the capture
 // appends nothing twice, and a part that times out is retried at half the
@@ -70,12 +70,32 @@ func (p *postgresProvider) saveEvidence(parent context.Context, key string, scop
 	if records == nil || !errors.Is(err, errEvidenceSaveSplit) && !evidenceSaveTimedOut(err) {
 		return err
 	}
+	// A final transaction that timed out is not run again for this capture:
+	// its journal records are saved in parts, which is lasting progress the
+	// next capture's final transaction adopts, and the timeout is returned so
+	// the caller backs off before that capture.
+	//
+	// The parts hold only the producer's records whose identities stay the
+	// same in the next capture. Records named after this capture are written
+	// only by the final transaction that commits it, so a final that fails
+	// leaves none behind for the next capture to write again under its own
+	// name: the issue records a save derives (openings, observations and
+	// resolutions), and the producer's coverage gaps, which the next capture
+	// reports again over the longer stretch.
+	records = make([]EvidenceRecord, 0, len(batch.Records))
+	for _, record := range batch.Records {
+		if record.Type != "coverage_gap" {
+			records = append(records, record)
+		}
+	}
+	finalTimeout := error(nil)
 	if evidenceSaveTimedOut(err) {
 		if parent.Err() != nil || size <= minEvidenceSaveChunk {
 			return err
 		}
+		finalTimeout = err
 		size = max(minEvidenceSaveChunk, size/2)
-		log.Printf("storage: evidence save timed out in one transaction; saving it in parts of %d records", size)
+		logging.Debugf("storage: evidence save timed out in one transaction; saving its journal records in parts of %d records and the rest with a later capture", size)
 	}
 	saved := map[string]bool{}
 	for start := 0; start < len(records); {
@@ -89,7 +109,7 @@ func (p *postgresProvider) saveEvidence(parent context.Context, key string, scop
 				return err
 			}
 			size = max(minEvidenceSaveChunk, size/2)
-			log.Printf("storage: evidence save part timed out; retrying it alone at %d records", size)
+			logging.Debugf("storage: evidence save part timed out; retrying it alone at %d records", size)
 			continue
 		}
 		if err != nil {
@@ -105,6 +125,9 @@ func (p *postgresProvider) saveEvidence(parent context.Context, key string, scop
 			saved[record.ID+"\x00"+evidenceVersion(record)] = true
 		}
 		start = end
+	}
+	if finalTimeout != nil {
+		return finalTimeout
 	}
 	written, _, err = p.commitEvidenceFinal(parent, key, scope, batch, saved, stats.High, size, part+1, cutoff)
 	if errors.Is(err, errEvidenceAlreadySaved) {
@@ -279,11 +302,11 @@ func evidenceSaveGuard(ctx context.Context, tx *sql.Tx, batch EvidenceBatch) err
 // commitEvidenceFinal is the transaction that advances the checkpoint. With
 // saved nil it also writes the capture's journal records, but only when they
 // fit one part: otherwise it writes nothing and answers errEvidenceSaveSplit
-// with the records to save in parts. With saved set, the records were written
-// by earlier parts, and only a record that is not among them (the saved state
-// cannot change while the checkpoint is held, so normally none) is written
-// here beside the read models and the checkpoint, which then covers savedHigh,
-// the highest sequence the parts wrote.
+// with the records to save in parts. With saved set, the producer's records
+// were written by earlier parts, and the records not among them, which are the
+// issue records this transaction derives, are written here beside the read
+// models and the checkpoint, which then covers savedHigh, the highest
+// sequence the parts wrote.
 func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key string, scope EvidenceScope, batch EvidenceBatch, saved map[string]bool, savedHigh uint64, size, part int, cutoff time.Time) (evidenceWriteStats, []EvidenceRecord, error) {
 	var written evidenceWriteStats
 	var derived []EvidenceRecord
@@ -304,11 +327,26 @@ func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key strin
 		if err = prepareEvidencePartitions(ctx, tx, partitions); err != nil {
 			return err
 		}
-		state, err := loadEvidenceSaveState(ctx, tx, key, scope, batch)
+		state, err := loadEvidenceSaveState(ctx, tx, key, scope, batch, false)
 		if err != nil {
 			return err
 		}
 		records, err := applyEvidence(&state, batch)
+		if err == nil && payloadlessIssuesTouched(state, batch.ObservationHeartbeat) {
+			// The capture changed an issue read without its payload. That
+			// would write the issue from its columns alone, so the save
+			// applies the capture again to every open issue read in full.
+			// The checkpoint row stays locked, so both reads see one state.
+			p.noteFullIssueRead()
+			if state, err = loadEvidenceSaveState(ctx, tx, key, scope, batch, true); err != nil {
+				return err
+			}
+			records, err = applyEvidence(&state, batch)
+		}
+		if err != nil {
+			return err
+		}
+		records, observed, err := catchUpWithoutMonth(ctx, tx, state, records)
 		if err != nil {
 			return err
 		}
@@ -345,7 +383,8 @@ func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key strin
 		// they become history here, each once, rather than being fenced out.
 		state.Checkpoint.HighSequence = max(state.Checkpoint.HighSequence, state.Checkpoint.SavingHigh, savedHigh, written.High)
 		state.Checkpoint.Saving, state.Checkpoint.SavingHigh = "", 0
-		if err = writeOccurrenceVersions(ctx, tx, key, state); err != nil {
+		observed.Checkpoint = state.Checkpoint
+		if err = writeOccurrenceVersions(ctx, tx, key, observed); err != nil {
 			return err
 		}
 		if err = writeOccurrenceReadModels(ctx, tx, key, state, batch.ObservationHeartbeat); err != nil {
@@ -368,8 +407,10 @@ func (p *postgresProvider) commitEvidenceFinal(parent context.Context, key strin
 
 // loadEvidenceSaveState locks the scope's checkpoint and loads the issue state
 // a save applies the capture to. It answers errEvidenceAlreadySaved when the
-// capture was saved by an earlier attempt.
-func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope EvidenceScope, batch EvidenceBatch) (evidenceState, error) {
+// capture was saved by an earlier attempt. Unless full is set, the open issues
+// the capture leaves alone are read without their payloads; see
+// readEvidenceIssues.
+func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope EvidenceScope, batch EvidenceBatch, full bool) (evidenceState, error) {
 	if err := evidenceSaveGuard(ctx, tx, batch); err != nil {
 		return evidenceState{}, err
 	}
@@ -402,59 +443,9 @@ func loadEvidenceSaveState(ctx context.Context, tx *sql.Tx, key string, scope Ev
 	if state.Checkpoint.ID != batch.Expected || batch.At.Before(state.Checkpoint.At) {
 		return evidenceState{}, ErrEvidenceConflict
 	}
-	historicalIDs := []string{}
-	if batch.HistoricalOnly {
-		for _, issue := range batch.Issues {
-			at := issue.FirstSeen
-			if at.IsZero() {
-				at = issue.LastSeen
-			}
-			if at.IsZero() {
-				at = batch.At
-			}
-			historicalIDs = append(historicalIDs, evidenceDigest(issue.Key, "observation", at.UTC().Format("2006-01-02")))
-		}
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT payload,last_seen,payload_version,last_observed_at,model_ready FROM kubernetes_evidence_issues WHERE scope_key=$1 AND ((closed_at IS NULL AND NOT observation_only) OR occurrence_id=ANY($2::text[]))`, key, historicalIDs)
-	if err != nil {
+	if err = readEvidenceIssues(ctx, tx, key, batch, &state, full); err != nil {
 		return evidenceState{}, err
 	}
-	for rows.Next() {
-		var data []byte
-		var lastSeen time.Time
-		var version string
-		var lastObserved sql.NullTime
-		var modelReady bool
-		if err = rows.Scan(&data, &lastSeen, &version, &lastObserved, &modelReady); err != nil {
-			rows.Close()
-			return evidenceState{}, err
-		}
-		var issue EvidenceIssue
-		if err = json.Unmarshal(data, &issue); err != nil {
-			rows.Close()
-			return evidenceState{}, err
-		}
-		payloadSeen := issue.LastSeen
-		issue.LastSeen = lastSeen
-		state.storedIssues[issue.OccurrenceID] = storedIssue{issue: issue, payloadSeen: payloadSeen, version: version, lastObserved: lastObserved.Time, modelReady: modelReady}
-		if !issue.ObservationOnly {
-			state.Active[issue.Key] = issue
-		}
-		state.Occurrences[issue.OccurrenceID] = issue
-		state.OccurrenceHeads[issue.OccurrenceID] = version
-		if state.LastObservations == nil {
-			state.LastObservations = map[string]time.Time{}
-		}
-		state.LastObservations[issue.OccurrenceID] = lastObserved.Time
-		if version == "" {
-			addOccurrenceObservation(&state, issue, state.Checkpoint.OccurrenceRevision, true)
-		}
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return evidenceState{}, err
-	}
-	rows.Close()
 	return state, nil
 }
 

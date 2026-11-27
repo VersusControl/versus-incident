@@ -27,6 +27,20 @@ const ResourcePolicyType = "resource-policy"
 // policies.
 const PolicyEntryService = "s3-policy"
 
+// TrailType is the type of one CloudTrail trail the trails read keeps: how
+// many copies of every call the account's trails keep, for the cost
+// estimate. It is not inventory: listings, counts, compares, grouping and
+// the graph leave it out, and only a reader that asks for trails sees it.
+const TrailType = "trail"
+
+// HealthEventType is the record of an AWS Health event whose affected
+// resources a call budget did not read: it carries the not-read marker so
+// the event reads as incomplete. Like a trail, it is not inventory.
+const HealthEventType = "health-event"
+
+// TrailService is the unit that holds only trails.
+const TrailService = "trails"
+
 // RedactedValue replaces a tag value whose key is not on the allowlist. The
 // key stays visible so a reader can still see which tags exist.
 const RedactedValue = "[redacted]"
@@ -254,6 +268,16 @@ const (
 	// Collectors read it from the tag values before they are redacted, so
 	// a hidden "shared" is never taken for ownership.
 	AttrClusterTags = "cluster_tags"
+	// AttrReadEvents says whether a CloudTrail trail records read
+	// management events: "yes", "no" or "unknown" when its event
+	// selectors could not be read (an organization trail another account
+	// owns). Each trail that does keeps one more copy of every call.
+	AttrReadEvents = "read_events"
+	// AttrNotRead lists, comma-separated, the detail reads of a resource a
+	// run's call budget skipped: what they would say (its flags, its
+	// policy's grants, its target health) is not read for this run, never
+	// clear. A resource read in full has no such attribute.
+	AttrNotRead = "not_read"
 )
 
 var allowedAttributes = map[string]bool{
@@ -262,7 +286,7 @@ var allowedAttributes = map[string]bool{
 	AttrRunning: true, AttrDNSName: true, AttrRollout: true, AttrPublicIP: true,
 	AttrStackName: true, AttrBucketRegion: true, AttrApplicationID: true,
 	AttrResourceID: true, AttrOrganizationID: true, AttrManagementAccount: true,
-	AttrOwnerAccount: true, AttrSubject: true, AttrClusterTags: true,
+	AttrOwnerAccount: true, AttrSubject: true, AttrClusterTags: true, AttrReadEvents: true, AttrNotRead: true,
 }
 
 // AllowedAttribute reports whether key is part of the closed attribute set.
@@ -277,6 +301,16 @@ const (
 	HealthCritical HealthStatus = "critical"
 	HealthUnknown  HealthStatus = "unknown"
 )
+
+// NotReadOperations returns the detail reads a resource's AttrNotRead
+// names; nil when it was read in full.
+func NotReadOperations(resource Resource) []string {
+	value := resource.Attributes[AttrNotRead]
+	if value == "" {
+		return nil
+	}
+	return strings.Split(value, ",")
+}
 
 // Health sources.
 const (
@@ -487,6 +521,8 @@ func GapReasonForCode(code string) GapReason {
 		return GapNotEnabled
 	case "throttled":
 		return GapThrottled
+	case string(GapCapped):
+		return GapCapped
 	case string(GapNotInRegion):
 		return GapNotInRegion
 	default:

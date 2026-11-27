@@ -290,14 +290,7 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 		return nil, ErrInvalidArguments
 	}
 	request.Header.Set("Accept", "*/*")
-	authGeneration := client.authGeneration.Load()
-	var requestService *Service
-	var requestGeneration uint64
 	var certificate *tls.Certificate
-	if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
-		requestService = service
-		requestGeneration = service.identity.requestGeneration.Load()
-	}
 	if client.credentials != nil {
 		if err := client.requireCredentialEpoch(ctx); err != nil {
 			return nil, err
@@ -309,12 +302,11 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 			return nil, ErrCredentialUnavailable
 		}
 		if service, ok := ctx.Value(credentialEpochContextKey{}).(*Service); ok {
-			admitted, accepted, pinned, err := service.acceptCredentialForRequest(ctx, authorization)
+			admitted, _, pinned, err := service.acceptCredentialForRequest(ctx, authorization)
 			if err != nil {
 				return nil, err
 			}
-			authorization = admitted
-			requestService, requestGeneration, certificate = service, accepted, pinned
+			authorization, certificate = admitted, pinned
 		} else {
 			certificate, err = client.credentials.ClientCertificate(&tls.CertificateRequestInfo{})
 			if err != nil {
@@ -344,13 +336,13 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 	}
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
-		if response.StatusCode == http.StatusUnauthorized && requestService != nil {
-			requestService.noteRejectedCredential(request.Header.Get("Authorization"))
-		}
-		if response.StatusCode == http.StatusUnauthorized && (requestService == nil || requestService.identity.requestGeneration.Load() == requestGeneration) {
-			if client.rejectRequestCredential(request.Header.Get("Authorization"), authGeneration, recoveryFromContext(ctx)) && requestService != nil {
-				requestService.denyHistoryAuthority(ctx, apiPath, true)
-			}
+		if response.StatusCode == http.StatusUnauthorized {
+			// For a Pod log the API server relays the kubelet's answer: a 401
+			// can be one node's kubelet refusing the API server while this
+			// credential is good everywhere else. It fails this read only;
+			// the list reads and the credential check still find a
+			// credential that is really rejected.
+			return nil, ErrUnauthorized
 		}
 		if previous && response.StatusCode == http.StatusBadRequest {
 			body, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
@@ -375,6 +367,12 @@ func (client *Client) openPodLogStream(ctx context.Context, apiPath string, prev
 				}
 			}
 			return nil, ErrForbidden
+		}
+		if _, system := systemReadFrom(ctx); system && response.StatusCode == http.StatusTooManyRequests {
+			// A system read keeps its own throttle, apart from the viewer's.
+			delay := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+			client.extendBackoff(ctx, time.Now().Add(delay))
+			return nil, &ErrThrottled{RetryAfter: delay}
 		}
 		return nil, classifyStatus(response.StatusCode)
 	}

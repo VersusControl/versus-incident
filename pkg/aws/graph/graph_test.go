@@ -2,6 +2,7 @@ package graph
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -330,5 +331,43 @@ func TestConnectedAccountAloneJoinsOnlyPolicyGrants(t *testing.T) {
 	}
 	if edge := edgeBetween(t, g, bucket.ARN, "account:"+spoke, model.RelationMayAccess); edge.Sides != BothSides {
 		t.Errorf("grant to a connected account: sides = %q", edge.Sides)
+	}
+}
+
+// A trail the cost read keeps is not part of the topology: no node, even
+// when the trail is another account's organization trail.
+func TestTrailsAreNotNodes(t *testing.T) {
+	trail := model.Resource{ARN: "arn:aws:cloudtrail:us-east-1:123400000090:trail/org-trail", Service: model.TrailService, Type: model.TrailType,
+		Account: "123400000002", Region: "eu-south-2", Name: "org-trail", Attributes: map[string]string{model.AttrOwnerAccount: "123400000090"}}
+	function := model.Resource{ARN: "arn:aws:lambda:eu-south-2:123400000002:function:api", Service: "lambda", Type: "function",
+		Account: "123400000002", Region: "eu-south-2", Name: "api"}
+	g := Build([]model.Resource{trail, function}, []Account{{ID: "123400000002", Connected: true}}, nil)
+	for _, node := range g.Nodes {
+		if node.ID == trail.ARN || node.Type == model.TrailType {
+			t.Fatalf("a trail is a node: %+v", node)
+		}
+	}
+	if len(g.Nodes) == 0 {
+		t.Fatal("the function is missing too: the graph is empty")
+	}
+}
+
+// A resource whose policy a call budget did not read shows "policy not
+// read" on its node, never a resource with no grants.
+func TestUnreadPolicyShowsOnTheNode(t *testing.T) {
+	bucket := "arn:aws:s3:::logs"
+	entry := model.Resource{ARN: bucket + "#policy", Service: model.PolicyEntryService, Type: model.ResourcePolicyType, Account: "123400000002",
+		Region: "global", Name: "logs", Attributes: map[string]string{model.AttrSubject: bucket, model.AttrNotRead: "GetBucketPolicy"}}
+	key := model.Resource{ARN: "arn:aws:kms:eu-south-2:123400000002:key/1", Service: "kms", Type: "key", Account: "123400000002",
+		Region: "eu-south-2", Name: "1", Attributes: map[string]string{model.AttrNotRead: "GetKeyPolicy"}}
+	read := model.Resource{ARN: "arn:aws:kms:eu-south-2:123400000002:key/2", Service: "kms", Type: "key", Account: "123400000002",
+		Region: "eu-south-2", Name: "2"}
+	g := Build([]model.Resource{entry, key, read}, []Account{{ID: "123400000002", Connected: true}}, nil)
+	notRead := map[string][]string{}
+	for _, node := range g.Nodes {
+		notRead[node.ID] = node.NotRead
+	}
+	if !slices.Contains(notRead[bucket], "policy") || !slices.Contains(notRead[key.ARN], "policy") || len(notRead[read.ARN]) != 0 {
+		t.Fatalf("not read = %v", notRead)
 	}
 }

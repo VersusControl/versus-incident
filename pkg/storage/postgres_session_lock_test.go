@@ -41,17 +41,10 @@ func TestPostgresSessionLockIsHeldByOneReplica(t *testing.T) {
 		t.Fatalf("first lock acquired=%v err=%v", acquired, err)
 	}
 	blob := "session-lock/" + time.Now().Format(time.RFC3339Nano)
-	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	written := make(chan error, 1)
 	go func() { written <- first.(storage.Provider).WriteBlob(blob, []byte("held")) }()
-	select {
-	case err := <-written:
-		if err != nil {
-			t.Fatalf("the holder's own write failed: %v", err)
-		}
-	case <-writeCtx.Done():
-		t.Fatal("the holder's own write waited for the connection the lock pinned")
+	if err := storage.WaitFor(t, written, "the holder's own write (it must not wait for the connection the lock pinned)"); err != nil {
+		t.Fatalf("the holder's own write failed: %v", err)
 	}
 
 	if other, acquired, err := second.TryLockSession(ctx, key); err != nil || acquired {
@@ -98,39 +91,29 @@ func TestPostgresSessionLockCancelledDuringAcquireLeavesTheKeyFree(t *testing.T)
 	key := time.Now().UnixNano()
 
 	acquireCtx, cancel := context.WithCancel(context.Background())
-	restore := storage.SetSessionLockQueried(func() {
-		cancel()
-		// database/sql closes the open answer once it sees the
-		// cancellation; give it the moment it needs.
-		time.Sleep(200 * time.Millisecond)
-	})
+	restore := storage.SetSessionLockQueried(cancel)
 	unlock, acquired, err := first.TryLockSession(acquireCtx, key)
 	restore()
 	if err == nil {
 		if unlock != nil {
 			unlock()
 		}
-		t.Skipf("the answer was read before the cancellation landed (acquired=%v); nothing to check", acquired)
+		t.Fatalf("the acquire read its answer after the caller cancelled (acquired=%v)", acquired)
 	}
 	if acquired || unlock != nil {
 		t.Fatalf("a failed acquire reported acquired=%v unlock=%v", acquired, unlock != nil)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	storage.Eventually(t, "the key to be free after the acquire was cancelled (a pooled session that took it keeps it)", func() bool {
 		other, acquired, err := second.TryLockSession(context.Background(), key)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if acquired {
 			other()
-			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the key stayed held after the acquire was cancelled: the session that took it went back to the pool")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return acquired
+	})
 	// The first replica's pool must not keep a session that holds the key
 	// either: it can take the key itself once the other let it go.
 	again, acquired, err := first.TryLockSession(context.Background(), key)
@@ -182,19 +165,14 @@ func TestPostgresSessionLockHeldSeesALostSession(t *testing.T) {
 	if held, _ := verifier.SessionLockHeld(ctx, key); held {
 		t.Fatal("the holder still reads the key held after its session ended")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	storage.Eventually(t, "the key to be free after the holding session ended", func() bool {
 		other, acquired, err := second.(storage.SessionLocker).TryLockSession(ctx, key)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if acquired {
 			other()
-			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("the key stayed held after the holding session ended")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return acquired
+	})
 }

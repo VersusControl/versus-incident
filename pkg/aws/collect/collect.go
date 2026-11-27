@@ -104,6 +104,7 @@ var specs = []spec{
 	{service: serviceTransitGateway, kind: KindInventory, run: collectTransitGateways},
 	{service: serviceRAM, kind: KindInventory, run: collectRAM},
 	{service: serviceOrganizations, global: true, kind: KindInventory, run: collectOrganization},
+	{service: serviceTrails, kind: KindInventory, run: collectTrails},
 	{service: serviceECR, kind: KindPolicy, run: collectECR},
 	{service: serviceKMS, kind: KindPolicy, run: collectKMS},
 	{service: serviceS3Policy, global: true, kind: KindPolicy, run: collectBucketPolicies},
@@ -153,12 +154,32 @@ type call struct {
 	tries map[string]int
 }
 
-// tried counts one call of a per-item detail operation.
-func (c *call) tried(operation string) {
+// listed counts one call of a list that is read per item but always runs
+// to the end (hosted zones and their record pages, attachments, share
+// associations): its failures are named "N of M", and the budget never
+// cuts it.
+func (c *call) listed(operation string) {
 	if c.tries == nil {
 		c.tries = make(map[string]int)
 	}
 	c.tries[operation]++
+}
+
+// tried counts one call of a per-item detail operation.
+//
+// It also marks the next request as a per-item detail call, the calls the
+// run's budget limits; resource, when given, names the item, so one the
+// budget skips is shown as not read.
+func (c *call) tried(operation string, resource ...string) {
+	if c.tries == nil {
+		c.tries = make(map[string]int)
+	}
+	c.tries[operation]++
+	arn := ""
+	if len(resource) > 0 {
+		arn = resource[0]
+	}
+	c.env.meter.mark(operation, arn)
 }
 
 func (c *call) arn(service, resource string) string {
@@ -253,7 +274,9 @@ func (c *call) detailGap(operation string, err error) model.Gap {
 // a missing subscription stays until someone changes the account.
 func transientCode(code string) bool {
 	switch code {
-	case "", CodeDenied, CodeNotOnPlan, CodeNotInRegion:
+	case "", CodeDenied, CodeNotOnPlan, CodeNotInRegion, CodeCapped:
+		// A call the budget skipped is not a failure: the run commits
+		// with it named, unless a real failure keeps the last read.
 		return false
 	}
 	return true
@@ -283,9 +306,15 @@ func (c *call) mergeDetailGaps(gaps []model.Gap) []model.Gap {
 		operation string
 		reason    model.GapReason
 	}
+	// A capped gap with no counts is a call the run's budget refused: it
+	// counts against its operation like a failed call. A fan-out cap keeps
+	// its own counts.
+	counted := func(gap model.Gap) bool {
+		return gap.Reason != model.GapCapped || gap.Seen == 0 && gap.Total == 0
+	}
 	failed := make(map[string]int)
 	for _, gap := range gaps {
-		if gap.Reason != model.GapCapped {
+		if counted(gap) {
 			failed[gap.Operation]++
 		}
 	}
@@ -301,7 +330,7 @@ func (c *call) mergeDetailGaps(gaps []model.Gap) []model.Gap {
 			}
 			continue
 		}
-		if tries := c.tries[gap.Operation]; gap.Reason != model.GapCapped && gap.Operation != "" && tries > 0 {
+		if tries := c.tries[gap.Operation]; counted(gap) && gap.Operation != "" && tries > 0 {
 			gap.Total = tries
 			gap.Seen = max(tries-failed[gap.Operation], 0)
 		}

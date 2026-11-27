@@ -127,11 +127,7 @@ func TestSessionUnlockGivesUpWhenTheDatabaseDoesNotAnswer(t *testing.T) {
 		unlock()
 		close(done)
 	}()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the unlock hung on a database that does not answer")
-	}
+	waitFor(t, done, "the unlock on a database that does not answer (it must give up at its deadline)")
 	if took := time.Since(began); took < sessionUnlockTimeout {
 		t.Fatalf("the unlock returned after %s, before its deadline: it did not wait for the answer", took)
 	}

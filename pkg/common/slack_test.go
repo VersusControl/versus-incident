@@ -11,6 +11,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/config"
 	m "github.com/VersusControl/versus-incident/pkg/models"
+	"github.com/VersusControl/versus-incident/pkg/utils"
 	"github.com/slack-go/slack"
 )
 
@@ -61,6 +62,7 @@ func TestSlackIssueButtonsWithAndWithoutAcknowledgement(t *testing.T) {
 				p.client = slack.New("test", slack.OptionAPIURL(server.URL+"/"))
 				c := map[string]interface{}{"AlertKind": "kubernetes_issue", "PatternID": "kubernetes:pod.failed", "Severity": "critical", "Links": []map[string]string{{"id": "timeline", "label": "Open timeline", "url": "https://good.invalid/agent"}, {"id": "agent", "label": "Investigate with DevOps Agent", "url": "https://good.invalid/agent/chat"}}}
 				c["Links"] = append(c["Links"].([]map[string]string), map[string]string{"id": "bad", "label": "bad", "url": "https://evil.invalid/steal"})
+				utils.MarkInternalAlert(c)
 				if ack {
 					c["AckURL"] = "https://good.invalid/ack"
 				}

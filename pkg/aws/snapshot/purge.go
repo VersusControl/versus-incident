@@ -63,7 +63,11 @@ func (writer *Writer) RecordFailure(unit model.Unit, code string, gaps ...model.
 	if err := writer.check(unit.Account); err != nil {
 		return err
 	}
-	return writer.store.recordFailure(unit, code, gaps, &writer.epoch)
+	if err := writer.store.recordFailure(unit, code, gaps, &writer.epoch); err != nil {
+		return err
+	}
+	writer.store.notifyWrite(unit)
+	return nil
 }
 
 // RecordSuccess is Store.RecordSuccess, refused after a purge.

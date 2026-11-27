@@ -323,11 +323,16 @@ func TestRemovalHoldsTheRevisionUntilTheRecordIsGone(t *testing.T) {
 	saved := make(chan error, 1)
 	err := store.RemoveAccount(org, "111122223333", func(uint64) error {
 		go func() { saved <- store.SaveAccount(org, AccountRecord{AccountID: "444455556666"}) }()
-		select {
-		case err := <-saved:
-			t.Fatalf("a save ran during the removal: %v", err)
-		case <-time.After(50 * time.Millisecond):
-		}
+		// The save must park on the removal's lock; one that ran through
+		// would answer on saved instead and never be seen waiting.
+		eventually(t, "the save to wait for the removal", func() bool {
+			select {
+			case err := <-saved:
+				t.Fatalf("a save ran during the removal: %v", err)
+			default:
+			}
+			return blockedIn(".(*Store).SaveAccount")
+		})
 		if got, err := store.AccountsRevision(org); err != nil || got != 1 {
 			t.Fatalf("the revision moved during the removal: %d %v", got, err)
 		}
@@ -447,23 +452,16 @@ func TestDeleteAccountHoldsNoAccountLockWhileTheCostPurgeWaits(t *testing.T) {
 		removal, err := service.DeleteAccount(context.Background(), "default", "111122223333")
 		removed <- outcome{removal, err}
 	}()
-	select {
-	case <-remover.entered:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the cost purge never started")
-	}
+	waitFor(t, remover.entered, "the cost purge to start")
 	if accounts, err := store.ListAccounts("default"); err != nil || len(accounts) != 1 || accounts[0].AccountID != "444455556666" {
 		t.Fatalf("while the purge waits the record must already be gone: %+v %v", accounts, err)
 	}
 	saved := make(chan error, 1)
 	go func() { saved <- store.SaveAccount("default", AccountRecord{AccountID: "777788889999"}) }()
-	select {
-	case err := <-saved:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("an account write waited for the cost purge: the account lock is held while it waits")
+	// The purge is held until remover.free, so a write that waited for it
+	// would never answer: the account lock must be free while it waits.
+	if err := waitFor(t, saved, "an account write while the cost purge waits (it must not need the account lock)"); err != nil {
+		t.Fatal(err)
 	}
 	remover.free()
 	got := <-removed

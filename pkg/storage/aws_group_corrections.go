@@ -56,6 +56,11 @@ type AWSGroupCorrection struct {
 	// deployment reads but does not write. It cannot be deleted from here;
 	// a correction with the same key overrides it.
 	Inherited bool `json:"inherited,omitempty"`
+	// ExpectedCreatedAt, on a put, is the creation time of the correction
+	// with the same key the writer read: the put replaces it only while it
+	// is still that correction, and answers ErrAWSGroupCorrectionConflict
+	// otherwise (it changed, or it is gone). Nil writes unconditionally.
+	ExpectedCreatedAt *time.Time `json:"-"`
 }
 
 // AWSGroupCorrectionKey identifies one correction: one rename or merge per
@@ -79,6 +84,23 @@ var ErrInvalidAWSGroupCorrection = errors.New("storage: invalid aws group correc
 // ErrAWSGroupCorrectionInherited is a delete of a correction the deployment
 // only inherits from an organization it reads but does not write.
 var ErrAWSGroupCorrectionInherited = errors.New("storage: aws group correction is inherited")
+
+// ErrAWSGroupCorrectionConflict is a put whose ExpectedCreatedAt no longer
+// matches the stored correction with its key: someone else changed or
+// removed it since the writer read it.
+var ErrAWSGroupCorrectionConflict = errors.New("storage: aws group correction changed since it was read")
+
+// expectedCorrection checks a put's ExpectedCreatedAt against the stored
+// correction with its key, found or not.
+func expectedCorrection(expected *time.Time, found bool, created time.Time) error {
+	if expected == nil {
+		return nil
+	}
+	if !found || !tableTime(*expected).Equal(tableTime(created)) {
+		return ErrAWSGroupCorrectionConflict
+	}
+	return nil
+}
 
 // ErrAWSGroupCorrectionLimit is a new correction for an account that already
 // holds MaxAWSGroupCorrectionsPerAccount.
@@ -310,6 +332,26 @@ func (t *sqlTables) PutAWSGroupCorrection(ctx context.Context, scope tenancy.Org
 				return err
 			}
 		}
+		if correction.ExpectedCreatedAt != nil {
+			found, created := false, time.Time{}
+			for _, org := range scope.Read {
+				var value tableTimeValue
+				err := tx.QueryRowContext(ctx, t.q(`SELECT created_at FROM aws_group_corrections
+ WHERE org_id = ? AND account_id = ? AND kind = ? AND group_id = ? AND member_arn = ?`),
+					org, correction.AccountID, correction.Kind, correction.GroupID, correction.MemberARN).Scan(&value)
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				found, created = true, value.Time
+				break
+			}
+			if err := expectedCorrection(correction.ExpectedCreatedAt, found, created); err != nil {
+				return err
+			}
+		}
 		var existing, held int
 		if err := tx.QueryRowContext(ctx, t.q(`SELECT COUNT(*) FROM aws_group_corrections
  WHERE org_id = ? AND account_id = ? AND kind = ? AND group_id = ? AND member_arn = ?`),
@@ -337,6 +379,7 @@ func (t *sqlTables) PutAWSGroupCorrection(ctx context.Context, scope tenancy.Org
 	if err != nil {
 		return AWSGroupCorrection{}, err
 	}
+	correction.ExpectedCreatedAt = nil
 	return correction, nil
 }
 
@@ -404,6 +447,18 @@ func (t *memoryTables) PutAWSGroupCorrection(_ context.Context, scope tenancy.Or
 	if t.groupCorrections == nil {
 		t.groupCorrections = map[string]map[AWSGroupCorrectionKey]AWSGroupCorrection{}
 	}
+	if correction.ExpectedCreatedAt != nil {
+		found, created := false, time.Time{}
+		for _, org := range scope.Read {
+			if stored, ok := t.groupCorrections[org][correction.Key()]; ok {
+				found, created = true, stored.CreatedAt
+				break
+			}
+		}
+		if err := expectedCorrection(correction.ExpectedCreatedAt, found, created); err != nil {
+			return AWSGroupCorrection{}, err
+		}
+	}
 	own := t.groupCorrections[scope.Write]
 	if own == nil {
 		own = map[AWSGroupCorrectionKey]AWSGroupCorrection{}
@@ -420,6 +475,7 @@ func (t *memoryTables) PutAWSGroupCorrection(_ context.Context, scope tenancy.Or
 			return AWSGroupCorrection{}, ErrAWSGroupCorrectionLimit
 		}
 	}
+	correction.ExpectedCreatedAt = nil
 	own[correction.Key()] = correction
 	return correction, nil
 }

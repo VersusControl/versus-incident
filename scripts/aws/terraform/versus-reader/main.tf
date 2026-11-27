@@ -58,8 +58,10 @@ data "aws_iam_policy_document" "metadata_reads" {
       "cloudformation:ListStackResources",
       # CloudFront
       "cloudfront:List*",
-      # CloudTrail
+      # CloudTrail: event history, and the trails that copy it
       "cloudtrail:LookupEvents",
+      "cloudtrail:DescribeTrails",
+      "cloudtrail:GetEventSelectors",
       # CloudWatch
       "cloudwatch:DescribeAlarms*",
       # AWS Config recorders

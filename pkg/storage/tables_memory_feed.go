@@ -200,13 +200,13 @@ func (op *memoryChangePoll) upsertPair(poll AWSChangePoll, late, dropped int64) 
 // read organizations: the copy of the first organization, in read order,
 // that stored it. recordedBefore, when set, counts only copies stored by
 // then. It is the memory form of the SQL firstChangeCopy.
-func (m *memoryTables) firstChangeCopiesLocked(scope tenancy.OrgScope, recordedBefore time.Time) []AWSChange {
+func (m *memoryTables) firstChangeCopiesLocked(scope tenancy.OrgScope, recordedBefore time.Time, limit *AWSInheritedLimit) []AWSChange {
 	pin := tableTime(recordedBefore)
 	seen := map[string]bool{}
 	var out []AWSChange
 	for _, org := range scope.Read {
 		for id, change := range m.changes[org] {
-			if seen[id] || !pin.IsZero() && !change.RecordedAt.IsZero() && change.RecordedAt.After(pin) {
+			if seen[id] || !pin.IsZero() && !change.RecordedAt.IsZero() && change.RecordedAt.After(pin) || !limit.keeps(scope.Write, org, change.Account) {
 				continue
 			}
 			seen[id] = true
@@ -219,10 +219,13 @@ func (m *memoryTables) firstChangeCopiesLocked(scope tenancy.OrgScope, recordedB
 // largestCountsLocked keeps, for each minute and count key, the count of
 // the organization that counted the most events, the first in read order
 // on a tie. It is the memory form of the SQL largestCount.
-func (m *memoryTables) largestCountsLocked(scope tenancy.OrgScope) []AWSChangeCount {
+func (m *memoryTables) largestCountsLocked(scope tenancy.OrgScope, limit *AWSInheritedLimit) []AWSChangeCount {
 	best := map[string]AWSChangeCount{}
 	for _, org := range scope.Read {
 		for key, count := range m.counts[org] {
+			if !limit.keeps(scope.Write, org, count.Account) {
+				continue
+			}
 			if existing, ok := best[key]; ok && existing.Events >= count.Events {
 				continue
 			}
@@ -268,11 +271,12 @@ func (m *memoryTables) AWSChangeFeed(_ context.Context, scope tenancy.OrgScope, 
 	scope = inventoryScope(scope)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	feed := AWSChangeFeed{Coverage: m.changeCoverageLocked(scope, query.Account, query.Region), Gaps: []AWSChangeGapReason{}, Pairs: []AWSChangePairState{}, Minutes: []AWSChangeMinute{}, Counts: []AWSChangeCount{}, Rows: []AWSChange{}}
+	feed := AWSChangeFeed{Coverage: m.changeCoverageLocked(scope, query.Account, query.Region, query.Inherited), Gaps: []AWSChangeGapReason{}, Pairs: []AWSChangePairState{}, Minutes: []AWSChangeMinute{}, Counts: []AWSChangeCount{}, Rows: []AWSChange{}}
 	since, until := tableTime(query.Since), tableTime(query.Until)
 	var ranks []int
 	for key, labels := range m.gapLabels {
-		if !scope.Contains(key.org) || !feedMatches(AWSChangeFeedQuery{Account: query.Account, Region: query.Region}, key.account, key.region, "", "") {
+		if !scope.Contains(key.org) || !query.Inherited.keeps(scope.Write, key.org, key.account) ||
+			!feedMatches(AWSChangeFeedQuery{Account: query.Account, Region: query.Region}, key.account, key.region, "", "") {
 			continue
 		}
 		for _, label := range labels {
@@ -308,7 +312,7 @@ func (m *memoryTables) AWSChangeFeed(_ context.Context, scope tenancy.OrgScope, 
 		gaps = append(gaps, feed.Gaps[index])
 	}
 	feed.Gaps = gaps
-	feed.Pairs = m.pairStatesLocked(scope, query.Account, query.Region)
+	feed.Pairs = m.pairStatesLocked(scope, query.Account, query.Region, query.Inherited)
 
 	minutes := map[AWSChangeMinute]int64{}
 	people := map[string]bool{}
@@ -318,7 +322,7 @@ func (m *memoryTables) AWSChangeFeed(_ context.Context, scope tenancy.OrgScope, 
 	var rows []AWSChange
 	before := query
 	before.Since, before.Until = time.Time{}, query.Since
-	for _, change := range m.firstChangeCopiesLocked(scope, query.RecordedBefore) {
+	for _, change := range m.firstChangeCopiesLocked(scope, query.RecordedBefore, query.Inherited) {
 		if !query.Since.IsZero() && change.ErrorCode == "" && m.rowMatches(before, change) && change.EventTime.After(feed.LastBefore) {
 			feed.LastBefore = change.EventTime
 		}
@@ -344,7 +348,7 @@ func (m *memoryTables) AWSChangeFeed(_ context.Context, scope tenancy.OrgScope, 
 		rows = append(rows, change)
 	}
 	if query.ResourceARN == "" {
-		for _, count := range m.largestCountsLocked(scope) {
+		for _, count := range m.largestCountsLocked(scope, query.Inherited) {
 			if !feedMatches(query, count.Account, count.Region, count.Service, count.ActorClass) ||
 				!since.IsZero() && count.Minute.Before(since) || !until.IsZero() && !count.Minute.Before(until) ||
 				query.Text != "" && !strings.Contains(asciiLower(count.EventName), asciiLower(query.Text)) &&
@@ -457,7 +461,7 @@ func (m *memoryTables) AWSChangePairState(_ context.Context, scope tenancy.OrgSc
 	scope = inventoryScope(scope)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	pairs := m.pairStatesLocked(scope, account, region)
+	pairs := m.pairStatesLocked(scope, account, region, nil)
 	if len(pairs) == 0 {
 		return AWSChangePairState{}, false, nil
 	}
@@ -466,11 +470,11 @@ func (m *memoryTables) AWSChangePairState(_ context.Context, scope tenancy.OrgSc
 
 // pairStatesLocked is every read organization's pair state matching the
 // account and Region (empty matches all), merged per pair and sorted.
-func (m *memoryTables) pairStatesLocked(scope tenancy.OrgScope, account, region string) []AWSChangePairState {
+func (m *memoryTables) pairStatesLocked(scope tenancy.OrgScope, account, region string, limit *AWSInheritedLimit) []AWSChangePairState {
 	var states []AWSChangePairState
 	for _, org := range scope.Read {
 		for key, state := range m.pairState {
-			if key.org == org && feedMatches(AWSChangeFeedQuery{Account: account, Region: region}, key.account, key.region, "", "") {
+			if key.org == org && limit.keeps(scope.Write, org, key.account) && feedMatches(AWSChangeFeedQuery{Account: account, Region: region}, key.account, key.region, "", "") {
 				states = append(states, state)
 			}
 		}

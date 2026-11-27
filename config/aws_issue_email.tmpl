@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>AWS issue</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:720px;margin:auto;padding:16px">
+<h2>{{ if eq .IssueAlert "coverage" }}⚪ Not read{{ else if eq .Severity "critical" }}🔴 Critical{{ else }}🟠 High{{ end }} {{ or .AlertName "AWS issue" }}</h2>
+{{ if .Where }}<p>{{ .Where }}</p>{{ end }}
+{{ if .Reopened }}<p><b>Why it reopened:</b> {{ .Reopened }}</p>{{ end }}
+{{ if .Evidence }}<ul>{{ range .Evidence }}<li>{{ . }}</li>{{ end }}</ul>{{ end }}
+{{ if .LikelyCause }}<p><b>Likely cause:</b> {{ .LikelyCause }}</p>{{ end }}
+{{ if .Steps }}<h3>What to do</h3><ul>{{ range .Steps }}<li>{{ .text }}{{ if .command }}<br><code>{{ .command }}</code>{{ end }}</li>{{ end }}</ul>{{ end }}
+{{ if .Notes }}<ul>{{ range .Notes }}<li>{{ . }}</li>{{ end }}</ul>{{ end }}
+{{ if .AckURL }}<a href="{{ .AckURL }}">Acknowledge</a>{{ end }}
+{{ range .Links }}<a style="display:inline-block;padding:10px;margin:4px;background:#eef2ff;border-radius:6px" href="{{ .url }}">{{ .label }}</a>
+{{ end }}
+</body></html>

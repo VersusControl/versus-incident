@@ -17,6 +17,15 @@ const quickstartPolicyFile = "versus-quickstart-policy.json"
 // put-user-policy, counted without whitespace.
 const inlineUserPolicyLimit = 2048
 
+// quickstartLeftOut are reads the role templates grant that the quickstart
+// policy leaves out because it is at the size limit. Each is optional where
+// it is used: without the trail reads, the cost estimate shows the extra
+// trail copies as not known.
+var quickstartLeftOut = map[string]bool{
+	"cloudtrail:DescribeTrails":    true,
+	"cloudtrail:GetEventSelectors": true,
+}
+
 func readQuickstartPolicy(t *testing.T) (cliPolicyDocument, string) {
 	t.Helper()
 
@@ -43,7 +52,9 @@ func TestQuickstartPolicyMatchesReaderTemplates(t *testing.T) {
 	wantDeny := map[string]bool{}
 	for _, set := range []map[string]bool{reader.allow, costReader.allow} {
 		for action := range set {
-			wantAllow[action] = true
+			if !quickstartLeftOut[action] {
+				wantAllow[action] = true
+			}
 		}
 	}
 	for _, set := range []map[string]bool{reader.deny, costReader.deny} {

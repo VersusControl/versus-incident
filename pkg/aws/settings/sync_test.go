@@ -3,6 +3,7 @@ package settings
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -436,5 +437,50 @@ func TestHealthCheckConfirmsIdentityForReads(t *testing.T) {
 	}
 	if got := fake.OperationCount("sts:GetCallerIdentity"); got != after {
 		t.Fatalf("identity calls = %d after the health check's %d", got, after)
+	}
+}
+
+// listCountingProvider counts the listings of one prefix.
+type listCountingProvider struct {
+	storage.Provider
+	prefix string
+	lists  int
+}
+
+func (provider *listCountingProvider) ListBlobs(prefix string) ([]storage.Blob, error) {
+	if prefix == provider.prefix {
+		provider.lists++
+	}
+	return provider.Provider.ListBlobs(prefix)
+}
+
+// The stored account listing the page reads share is read once per account
+// revision: with ten accounts, a second read at the same revision lists
+// nothing, and a saved account raises the revision and is listed.
+func TestStoredAccountsListOncePerRevision(t *testing.T) {
+	scope := tenancy.DefaultOrgScope()
+	provider := &listCountingProvider{Provider: storage.NewMemory(), prefix: AccountPrefix(scope.Write)}
+	store := NewStore(provider, scope)
+	for index := range 10 {
+		if err := store.SaveAccount(scope.Write, AccountRecord{AccountID: fmt.Sprintf("1234000000%02d", index)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := NewService(store)
+	first, err := service.StoredAccounts(context.Background())
+	if err != nil || len(first) != 10 {
+		t.Fatalf("first read = %d accounts, %v", len(first), err)
+	}
+	before := provider.lists
+	again, err := service.StoredAccounts(context.Background())
+	if err != nil || len(again) != 10 || provider.lists != before {
+		t.Fatalf("same revision: %d accounts, %d more listings; want 10 and none", len(again), provider.lists-before)
+	}
+	if err := store.SaveAccount(scope.Write, AccountRecord{AccountID: "123400000099"}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := service.StoredAccounts(context.Background())
+	if err != nil || len(after) != 11 || provider.lists != before+1 {
+		t.Fatalf("after a save: %d accounts, %d more listings; want 11 and one", len(after), provider.lists-before)
 	}
 }

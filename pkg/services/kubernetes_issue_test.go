@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/VersusControl/versus-incident/pkg/agent"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -306,5 +308,38 @@ func TestKubernetesIssueOneBreakIsOneEpisodeAcrossTicksAndSenders(t *testing.T) 
 				t.Fatalf("one break notified %d times over %d incidents, want once over one", notified.Load(), count)
 			}
 		})
+	}
+}
+
+// TestScrubIssueContentReplacesValuesUnderSecretFieldNames covers the
+// scrubbing of an issue's template content: a value under a field named like
+// a secret is replaced, in strings and in lists, and the other fields are
+// scrubbed and bounded as before.
+func TestScrubIssueContentReplacesValuesUnderSecretFieldNames(t *testing.T) {
+	scrubber, errs := agent.NewRedactor(false, nil)
+	if len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	content := map[string]interface{}{
+		"Cluster":       "prod",
+		"Password":      "hunter2",
+		"Credentials":   []string{"a", "b"},
+		"TokenCount":    "5",
+		"Evidence":      []string{"login  db_passwd=hunter2\nfailed", "two", "three", "four", "five", "six"},
+		"RollupCount":   3,
+		"HistoryIsDone": true,
+	}
+	scrubIssueContent(content, scrubber)
+	want := map[string]interface{}{
+		"Cluster":       "prod",
+		"Password":      "<REDACTED:secret>",
+		"Credentials":   []string{"<REDACTED:secret>", "<REDACTED:secret>"},
+		"TokenCount":    "5",
+		"Evidence":      []string{"login db_passwd=<REDACTED:secret> failed", "two", "three", "four", "five"},
+		"RollupCount":   3,
+		"HistoryIsDone": true,
+	}
+	if !reflect.DeepEqual(content, want) {
+		t.Fatalf("content = %#v, want %#v", content, want)
 	}
 }

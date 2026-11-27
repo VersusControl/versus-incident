@@ -479,3 +479,13 @@ func TestKeyWordsAndKeysThatStayLearnable(t *testing.T) {
 		}
 	}
 }
+
+// A trail the cost read keeps is never placed in a group, not even
+// Ungrouped.
+func TestTrailsAreNotGrouped(t *testing.T) {
+	trail := model.Resource{ARN: "arn:aws:cloudtrail:eu-south-2:123400000002:trail/audit", Service: model.TrailService, Type: model.TrailType,
+		Account: "123400000002", Region: "eu-south-2", Name: "audit", Tags: map[string]string{"app": "checkout"}}
+	if groupable(trail) {
+		t.Fatal("a trail is groupable")
+	}
+}

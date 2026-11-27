@@ -296,7 +296,9 @@ func headsSeed(t *testing.T, p *postgresProvider, key string, at time.Time, stor
 	})
 	depth := max(1, stored/(10*batch))
 	origin := at.Add(-180 * 24 * time.Hour)
-	for month := origin; !month.After(at.AddDate(0, 1, 0)); month = month.AddDate(0, 1, 0) {
+	// Months are walked from the first day of origin's month: adding a month
+	// to a day past the 28th can skip the next month (May 31 becomes July 1).
+	for month := time.Date(origin.UTC().Year(), origin.UTC().Month(), 1, 0, 0, 0, 0, time.UTC); !month.After(at.AddDate(0, 1, 0)); month = month.AddDate(0, 1, 0) {
 		if _, err := p.db.ExecContext(t.Context(), `SELECT versus_ensure_evidence_partition('kubernetes_evidence_events',$1)`, month); err != nil {
 			t.Fatal(err)
 		}

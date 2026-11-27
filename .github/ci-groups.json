@@ -139,6 +139,7 @@
         "tools/cichanges/**",
         "tools/docscheck/**",
         "tools/testlint/**",
+        "tools/secretscan/**",
         "scripts/ci-*.sh"
       ],
       "all": true

@@ -19,6 +19,7 @@ import { awsSettingsAnswer, settingsPollMs, type AwsAnswerTone } from "@/lib/aws
 import { AwsAccountsCard } from "./AwsAccountsCard";
 import { AwsPrivacyCard } from "./AwsPrivacyCard";
 import { AwsAdvanced } from "./AwsAdvanced";
+import { CollectionCostCard } from "./CollectionCostCard";
 import { AwsConnectPanel } from "./AwsConnectPanel";
 
 const ANSWER_TONE: Record<AwsAnswerTone, string> = {
@@ -166,7 +167,7 @@ export function AwsSettingsPage() {
   return (
     <main className="flex min-h-0 flex-1 flex-col overflow-auto">
       <TopBar title="Settings" subtitle="AWS" actions={headerActions} />
-      <div className="mx-auto w-full max-w-2xl p-4 lg:p-6">
+      <div className="mx-auto w-full max-w-[75rem] p-4 lg:p-6">
         <Breadcrumb
           items={[{ label: "AWS", to: "/aws" }, { label: "Settings" }]}
           className="mb-3"
@@ -218,6 +219,7 @@ export function AwsSettingsPage() {
                   onConnect={openConnect}
                   onReconnect={reconnect}
                 />
+                <CollectionCostCard accounts={data.accounts} />
                 <AwsPrivacyCard privacy={data.privacy} />
                 <AwsAdvanced settings={data} canWrite={canWrite} />
               </div>

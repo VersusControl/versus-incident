@@ -53,6 +53,9 @@ type Query struct {
 	// PolicyEntries includes the policy entries (model.ResourcePolicyType)
 	// a topology reader joins; every other reader leaves them out.
 	PolicyEntries bool
+	// Trails includes the trails (model.TrailType) the cost estimate
+	// reads; every other reader leaves them out.
+	Trails bool
 }
 
 // UnitStatus is one unit's answer to a query: its sync state and the
@@ -87,8 +90,19 @@ type HealthResult struct {
 type FlagsResult struct {
 	AsOf  time.Time            `json:"as_of,omitzero"`
 	Flags []model.SecurityFlag `json:"flags"`
-	Units []UnitStatus         `json:"units"`
-	Gaps  []model.Gap          `json:"gaps"`
+	// NotRead are the resources whose flags are not read: a call budget
+	// skipped the detail that sets them. No flag on one of them is
+	// unknown, never clear.
+	NotRead []NotReadResource `json:"not_read"`
+	Units   []UnitStatus      `json:"units"`
+	Gaps    []model.Gap       `json:"gaps"`
+}
+
+// NotReadResource is one resource whose detail reads a call budget
+// skipped, and which reads they were.
+type NotReadResource struct {
+	ARN        string   `json:"arn"`
+	Operations []string `json:"operations"`
 }
 
 type accountView struct {
@@ -106,11 +120,18 @@ type cachedView struct {
 
 // units returns the visible units for an account and region as of asOf,
 // each answered by the organization the account view takes it from.
-func (store *Store) units(account, region, service string, asOf time.Time) ([]storage.AWSUnitStatus, error) {
+// filter is the read's view of the connected accounts.
+func (store *Store) units(filter inheritedFilter, account, region, service string, asOf time.Time) ([]storage.AWSUnitStatus, error) {
 	if !store.ready() {
 		return nil, ErrNoStorage
 	}
-	return store.inventory.AWSUnits(context.Background(), store.scope, storage.AWSUnitQuery{Account: account, Region: region, Service: service, AsOf: asOf})
+	ctx := context.Background()
+	query := storage.AWSUnitQuery{Account: account, Region: region, Service: service, AsOf: asOf}
+	units, err := store.inventory.AWSUnits(ctx, store.scope, query)
+	if err != nil {
+		return nil, err
+	}
+	return store.keepUnits(filter, units), nil
 }
 
 // statusAt describes a unit as the query sees it. A historical query reports
@@ -123,8 +144,8 @@ func statusAt(unit storage.AWSUnitStatus, asOf time.Time) (UnitStatus, []model.G
 		status.CommittedAt = generation.CommittedAt
 		status.VerifiedAt = generation.VerifiedAt
 		status.Count = generation.Count
-		if status.Unit.Service == model.PolicyEntryService {
-			// A policy entry is not a resource.
+		if status.Unit.Service == model.PolicyEntryService || status.Unit.Service == model.TrailService {
+			// A policy entry or a trail is not a resource.
 			status.Count = 0
 		}
 		status.HasData = true
@@ -182,16 +203,20 @@ const viewCacheSize = 8
 // tags, stack membership and resolved applications; health; collector and
 // derived security flags; unit statuses and gaps. The answer is always a
 // copy the caller may change freely.
-func (store *Store) buildAccount(account string, asOf time.Time) (accountView, error) {
+func (store *Store) buildAccount(filter inheritedFilter, account string, asOf time.Time) (accountView, error) {
 	if !store.ready() {
 		return accountView{}, ErrNoStorage
 	}
 	// Units and rows come from one consistent read, so a concurrent commit
 	// or purge can never pair one generation's status with another's rows.
-	snapshot, err := store.inventory.AWSAccountView(context.Background(), store.scope, account, asOf)
+	ctx := context.Background()
+	snapshot, err := store.inventory.AWSAccountView(ctx, store.scope, account, asOf)
 	if err != nil {
 		return accountView{}, err
 	}
+	// Rows belong to the units that answer for them; a hidden unit's rows
+	// are never served, because only held units' rows are assembled.
+	snapshot.Units = store.keepUnits(filter, snapshot.Units)
 	units := snapshot.Units
 	statuses := make([]UnitStatus, 0, len(units))
 	gaps := make([]model.Gap, 0)
@@ -315,8 +340,8 @@ func copyView(view accountView) accountView {
 }
 
 // accounts lists every account visible to the store.
-func (store *Store) accounts() ([]string, error) {
-	units, err := store.units("", "", "", time.Time{})
+func (store *Store) accounts(filter inheritedFilter) ([]string, error) {
+	units, err := store.units(filter, "", "", "", time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -332,17 +357,17 @@ func (store *Store) accounts() ([]string, error) {
 	return accounts, nil
 }
 
-func (store *Store) accountViews(query Query) ([]accountView, error) {
-	return store.accountViewsWith(query, false)
+func (store *Store) accountViews(filter inheritedFilter, query Query) ([]accountView, error) {
+	return store.accountViewsWith(filter, query, false)
 }
 
 // accountViewsWith is accountViews; keepTags leaves stored tag values in
 // place (names and applications are still redacted) for a caller that only
 // compares them and hides the values itself.
-func (store *Store) accountViewsWith(query Query, keepTags bool) ([]accountView, error) {
+func (store *Store) accountViewsWith(filter inheritedFilter, query Query, keepTags bool) ([]accountView, error) {
 	accounts := []string{query.Account}
 	if query.Account == "" {
-		listed, err := store.accounts()
+		listed, err := store.accounts(filter)
 		if err != nil {
 			return nil, err
 		}
@@ -351,7 +376,7 @@ func (store *Store) accountViewsWith(query Query, keepTags bool) ([]accountView,
 	views := make([]accountView, 0, len(accounts))
 	allowlist := store.readAllowlist()
 	for _, account := range accounts {
-		view, err := store.buildAccount(account, query.AsOf)
+		view, err := store.buildAccount(filter, account, query.AsOf)
 		if err != nil {
 			return nil, err
 		}
@@ -396,6 +421,14 @@ func matchUnit(query Query, unit model.Unit) bool {
 
 func matchResource(query Query, resource model.Resource) bool {
 	if resource.Type == model.ResourcePolicyType && !query.PolicyEntries {
+		return false
+	}
+	if resource.Type == model.TrailType && !query.Trails {
+		return false
+	}
+	// A health event record only carries a not-read marker: readers that
+	// join records beside the inventory (coverage, topology) see it.
+	if resource.Type == model.HealthEventType && !query.PolicyEntries {
 		return false
 	}
 	if query.Region != "" && resource.Region != query.Region {
@@ -445,12 +478,12 @@ func filterUnits(query Query, statuses []UnitStatus, gaps []model.Gap) ([]UnitSt
 
 // Resources lists resources matching the query as of query.AsOf, with the
 // status and gaps of every unit behind them.
-func (store *Store) Resources(_ context.Context, query Query) (ResourcesResult, error) {
-	return store.resources(query, false)
+func (store *Store) Resources(ctx context.Context, query Query) (ResourcesResult, error) {
+	return store.resources(store.inherited(ctx), query, false)
 }
 
-func (store *Store) resources(query Query, keepTags bool) (ResourcesResult, error) {
-	views, err := store.accountViewsWith(query, keepTags)
+func (store *Store) resources(filter inheritedFilter, query Query, keepTags bool) (ResourcesResult, error) {
+	views, err := store.accountViewsWith(filter, query, keepTags)
 	if err != nil {
 		return ResourcesResult{}, err
 	}
@@ -494,8 +527,8 @@ func (store *Store) Resource(ctx context.Context, arn string, asOf time.Time) (m
 // Health lists health signals matching the query. Service filters on the
 // unit that produced the signal; ARN matches the affected resource or the
 // alarm or event itself; App matches the affected resource's application.
-func (store *Store) Health(_ context.Context, query Query) (HealthResult, error) {
-	views, err := store.accountViews(query)
+func (store *Store) Health(ctx context.Context, query Query) (HealthResult, error) {
+	views, err := store.accountViews(store.inherited(ctx), query)
 	if err != nil {
 		return HealthResult{}, err
 	}
@@ -534,16 +567,23 @@ func (store *Store) Health(_ context.Context, query Query) (HealthResult, error)
 }
 
 // SecurityFlags lists collector and derived flags matching the query.
-func (store *Store) SecurityFlags(_ context.Context, query Query) (FlagsResult, error) {
-	views, err := store.accountViews(query)
+func (store *Store) SecurityFlags(ctx context.Context, query Query) (FlagsResult, error) {
+	views, err := store.accountViews(store.inherited(ctx), query)
 	if err != nil {
 		return FlagsResult{}, err
 	}
-	result := FlagsResult{AsOf: query.AsOf, Flags: []model.SecurityFlag{}}
+	result := FlagsResult{AsOf: query.AsOf, Flags: []model.SecurityFlag{}, NotRead: []NotReadResource{}}
 	for _, view := range views {
 		byARN := make(map[string]model.Resource, len(view.resources))
 		for _, resource := range view.resources {
 			byARN[resource.ARN] = resource
+			operations := model.NotReadOperations(resource)
+			if len(operations) == 0 || query.Region != "" && resource.Region != query.Region ||
+				query.Service != "" && resource.Service != query.Service || query.ARN != "" && resource.ARN != query.ARN ||
+				query.App != "" && resource.App != query.App {
+				continue
+			}
+			result.NotRead = append(result.NotRead, NotReadResource{ARN: resource.ARN, Operations: operations})
 		}
 		for _, flag := range view.flags {
 			resource := byARN[flag.Resource]
@@ -576,8 +616,8 @@ func (store *Store) SecurityFlags(_ context.Context, query Query) (FlagsResult, 
 
 // Sync returns the status of every unit matching the query, including the
 // change poller.
-func (store *Store) Sync(_ context.Context, query Query) ([]UnitStatus, error) {
-	units, err := store.units(query.Account, query.Region, query.Service, query.AsOf)
+func (store *Store) Sync(ctx context.Context, query Query) ([]UnitStatus, error) {
+	units, err := store.units(store.inherited(ctx), query.Account, query.Region, query.Service, query.AsOf)
 	if err != nil {
 		return nil, err
 	}

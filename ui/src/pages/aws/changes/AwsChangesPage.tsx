@@ -30,10 +30,11 @@ import {
   type ChangesLimits,
   type ChangesWindow,
 } from "@/lib/awsChanges";
+import { notReadBadge } from "@/lib/awsEstate";
 import { ActivityGrid } from "./ActivityGrid";
 import { ChangeList } from "./ChangeList";
 import { ComparePanel } from "./ComparePanel";
-import { SummaryCard } from "./SummaryCard";
+import { ChangesSummaryCard } from "./SummaryCard";
 import { ServiceFilterChips, ServiceFilterPanel } from "./ServiceFilter";
 import { useServiceFilter } from "./useServiceFilter";
 
@@ -164,7 +165,11 @@ function ScopeBar({
     { value: "", label: `All ${accounts.length}` },
     ...accounts.map((a) => {
       const gaps = scope.gaps.filter((g) => g.account === a.account && g.reason !== "arriving");
-      const state = a.complete
+      // An account the shared coverage read could not read names its own reason.
+      const covered = scope.coverage?.accounts.find((c) => c.account === a.account);
+      const state = covered?.read === "not_read"
+        ? notReadBadge(covered.reason)
+        : a.complete
         ? "complete"
         : a.as_of
           ? `as of ${fmtClockOrDay(a.as_of, scope.window.until)}`
@@ -187,6 +192,8 @@ function ScopeBar({
   const order = (r: ChangesView["regions"][number]) => (r.state === "not_enabled" ? 2 : r.state === "global" || r.region === "global" ? 1 : 0);
   const regions = [...all].sort((a, b) => order(a) - order(b) || a.region.localeCompare(b.region));
   const readable = regions.filter((r) => r.state !== "not_enabled");
+  // The Regions count comes from the shared coverage read when there is one.
+  const regionCount = scope.coverage ? scope.coverage.regions.length : readable.length;
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-ink-500/40 pb-3 text-xs text-ink-300">
       {/* Below `sm` the control is held to the screen width and its options
@@ -209,7 +216,7 @@ function ScopeBar({
         <Dropdown
           value={region}
           options={[
-            { value: "", label: `${readable.length} ${readable.length === 1 ? "region" : "regions"}` },
+            { value: "", label: `${regionCount} ${regionCount === 1 ? "region" : "regions"}` },
             ...regions.map((r) => ({
               value: r.region,
               label: `${r.region === "global" ? "Global (IAM, …)" : r.region} — ${regionState(r)}`,
@@ -385,7 +392,7 @@ export function AwsChangesPage() {
           )}
         </ScopeBar>
         <ServiceFilterChips services={serviceList} selected={services.selected} onChange={services.choose} />
-        <SummaryCard
+        <ChangesSummaryCard
           view={view}
           window={window}
           custom={custom}

@@ -156,11 +156,9 @@ func TestHealthLoopStartsOnlyWhenEnabledAndStopsOnCancel(t *testing.T) {
 		return config.AWSConnectorConfig{Enable: false}
 	}))
 	disabled.Start(context.Background())
-	select {
-	case <-disabled.Stopped():
-	case <-time.After(time.Second):
-		t.Fatal("disabled connector started a loop")
-	}
+	// A disabled connector starts no loop, so Stopped is closed at once; a
+	// loop would keep it open until the hang guard.
+	waitFor(t, disabled.Stopped(), "the disabled connector to report stopped without a loop")
 
 	fake := fakeaws.New(t, "new-account-connect")
 	enabled := NewService(NewStore(storage.NewMemory(), tenancy.DefaultOrgScope()),
@@ -172,11 +170,7 @@ func TestHealthLoopStartsOnlyWhenEnabledAndStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	enabled.Start(ctx)
 	cancel()
-	select {
-	case <-enabled.Stopped():
-	case <-time.After(5 * time.Second):
-		t.Fatal("health loop did not stop on cancellation")
-	}
+	waitFor(t, enabled.Stopped(), "the health loop to stop on cancellation")
 }
 
 // toggledDenial answers AccessDenied for one service host while enabled and

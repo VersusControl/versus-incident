@@ -197,6 +197,9 @@ func (s *SlackProvider) sendUnresolvedAlert(i *m.Incident) error {
 	if utils.IsKubernetesIssueIncident(contentToUse) && contentToUse["Severity"] != "critical" {
 		color = "#D99A00"
 	}
+	if utils.IsAWSIssueIncident(contentToUse) {
+		color = utils.AWSIssueSlackColor(contentToUse)
+	}
 
 	// Determine whether to use button or standard message format
 	if !s.msgProps.DisableButton && len(actions) > 0 {
@@ -253,24 +256,15 @@ func (s *SlackProvider) processAckURL(i *m.Incident) (map[string]interface{}, st
 func (s *SlackProvider) renderTemplateWithContent(content map[string]interface{}) (string, error) {
 	funcMaps := utils.GetTemplateFuncMaps()
 
-	tplPath := s.templatePath
-	if utils.IsKubernetesIssueIncident(content) {
-		tplPath = utils.KubernetesIssueTemplatePath(s.kubernetesIssueTemplatePath, utils.KubernetesIssueSlackTemplatePath)
-	} else if utils.IsAgentIncident(content) {
-		tplPath = utils.AgentSlackTemplatePath
-	}
+	tplPath := utils.AlertTemplatePath(content, utils.ChannelSlack, s.templatePath, s.kubernetesIssueTemplatePath)
 
 	tmpl, err := template.New(filepath.Base(tplPath)).Funcs(funcMaps).ParseFiles(tplPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	var message strings.Builder
-	if err := tmpl.Execute(&message, content); err != nil {
-		return "", fmt.Errorf("failed to execute template: %w", err)
-	}
-
-	return message.String(), nil
+	// An AWS issue alert is fitted to the section text limit.
+	return utils.RenderAlert(tmpl, content, utils.SlackAlertBudget, utils.UTF16Length)
 }
 
 // sendMessageWithButton sends a message with an interactive button for acknowledgment

@@ -10,6 +10,7 @@ import (
 
 	"github.com/VersusControl/versus-incident/pkg/aws/grouping"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
+	"github.com/VersusControl/versus-incident/pkg/core"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
@@ -43,10 +44,11 @@ func NewAWSGroupCorrectionsController(store storage.AWSGroupCorrectionStore, sco
 // on writes. GET filters by the account_id query parameter; DELETE names
 // the correction with account_id, kind, and group_id or member_arn.
 func (c *AWSGroupCorrectionsController) Register(router fiber.Router) {
-	g := router.Group("/admin/aws/groups/corrections", adminGatewayGuard, requireChangesView)
+	write := core.PermissionInfrastructureSettingsWrite
+	g := router.Group("/admin/aws/groups/corrections", auditAWSRefusal(write), adminGatewayGuard, requireChangesView)
 	g.Get("/", c.list)
-	g.Post("/", requireAWSSettingsWrite, c.create)
-	g.Delete("/", requireAWSSettingsWrite, c.delete)
+	g.Post("/", auditAWSWrite("aws.group.correction.saved", write, auditFixed("group correction")), requireAWSSettingsWrite, c.create)
+	g.Delete("/", auditAWSWrite("aws.group.correction.deleted", write, correctionAuditQuery), requireAWSSettingsWrite, c.delete)
 }
 
 // awsGroupCorrectionView is one stored correction and what became of it on
@@ -70,6 +72,10 @@ type awsGroupCorrectionRequest struct {
 	MemberARN     string `json:"member_arn"`
 	TargetGroupID string `json:"target_group_id"`
 	Name          string `json:"name"`
+	// ExpectedCreatedAt is the created_at of the correction with this key
+	// the caller read; when set, the save fails with correction_conflict
+	// if that correction changed or is gone.
+	ExpectedCreatedAt *time.Time `json:"expected_created_at"`
 }
 
 func groupCorrectionStoreNotReady(ctx *fiber.Ctx) error {
@@ -164,19 +170,23 @@ func (c *AWSGroupCorrectionsController) create(ctx *fiber.Ctx) error {
 	}
 	request = awsGroupCorrectionRequest{AccountID: strings.Clone(request.AccountID), Kind: strings.Clone(request.Kind),
 		GroupID: strings.Clone(request.GroupID), MemberARN: strings.Clone(request.MemberARN),
-		TargetGroupID: strings.Clone(request.TargetGroupID), Name: strings.Clone(request.Name)}
+		TargetGroupID: strings.Clone(request.TargetGroupID), Name: strings.Clone(request.Name), ExpectedCreatedAt: request.ExpectedCreatedAt}
+	setAWSAuditTarget(ctx, correctionAuditTarget(request.AccountID, request.Kind, request.GroupID, request.MemberARN))
 	if message := validGroupCorrectionRequest(request); message != "" {
 		return badGroupCorrection(ctx, message)
 	}
 	correction, err := c.store.PutAWSGroupCorrection(ctx.UserContext(), c.scope, storage.AWSGroupCorrection{
 		AccountID: request.AccountID, Kind: request.Kind, GroupID: request.GroupID, MemberARN: request.MemberARN,
 		TargetGroupID: request.TargetGroupID, Name: request.Name,
-		CreatedBy: strings.Clone(middleware.RequestActor(ctx)), CreatedAt: c.now(),
+		CreatedBy: strings.Clone(middleware.RequestActor(ctx)), CreatedAt: c.now(), ExpectedCreatedAt: request.ExpectedCreatedAt,
 	})
 	switch {
 	case errors.Is(err, storage.ErrInvalidAWSGroupCorrection):
 		return badGroupCorrection(ctx, "a rename takes group_id and a name of at most 128 printable characters; a merge takes group_id and "+
 			"target_group_id; a move takes the member_arn of a resource in the account and target_group_id")
+	case errors.Is(err, storage.ErrAWSGroupCorrectionConflict):
+		return ctx.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "correction_conflict",
+			"error": "changed by someone else; reload"})
 	case errors.Is(err, storage.ErrAWSGroupCorrectionLimit):
 		return ctx.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "correction_limit",
 			"error": "this account holds the most corrections allowed; delete one first"})
@@ -209,4 +219,18 @@ func (c *AWSGroupCorrectionsController) delete(ctx *fiber.Ctx) error {
 		return ctx.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "no such correction"})
 	}
 	return ctx.SendStatus(fiber.StatusNoContent)
+}
+
+// correctionAuditTarget names a correction in the audit trail by its key.
+func correctionAuditTarget(account, kind, group, member string) string {
+	target := "account=" + account + " kind=" + kind
+	if member != "" {
+		return target + " member=" + member
+	}
+	return target + " group=" + group
+}
+
+// correctionAuditQuery names the correction a delete asks for.
+func correctionAuditQuery(ctx *fiber.Ctx) string {
+	return correctionAuditTarget(ctx.Query("account_id"), ctx.Query("kind"), ctx.Query("group_id"), ctx.Query("member_arn"))
 }

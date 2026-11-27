@@ -38,6 +38,11 @@ const AccountSource = "account"
 // assume_role_failed, account_mismatch) from settings.
 const AccountNotReadYet = "not_read_yet"
 
+// AccountFirstReadInProgress is the detail of an account row while the
+// account's first read runs: some units committed, others never attempted
+// yet. Its counts are lower bounds until every unit has read once.
+const AccountFirstReadInProgress = "first_read_in_progress"
+
 // CoverageRow is one source and operation that did not read in full,
 // across every account it affects.
 type CoverageRow struct {
@@ -77,24 +82,60 @@ type CoverageSummary struct {
 	NotRead       int `json:"not_read"`
 	Capped        int `json:"capped"`
 	OffInAWS      int `json:"off_in_aws"`
+	// ResourcesNotRead counts the resources whose detail a call budget
+	// skipped on their last read: their flags, grants and target health
+	// are not read, never clear.
+	ResourcesNotRead int `json:"resources_not_read"`
 }
 
 // CoverageNotGaps counts answers that leave nothing missing: services AWS
 // does not offer in a Region (each service and Region once) and Regions
 // the accounts have not turned on (each Region once).
+//
+// NotSet counts the settings AWS answered as not set (no bucket policy, no
+// public access block, no tag set). The collectors do not record those
+// answers yet, so it is null: not counted, never zero.
 type CoverageNotGaps struct {
-	ServicesNotOffered int `json:"services_not_offered"`
-	RegionsNotEnabled  int `json:"regions_not_enabled"`
+	ServicesNotOffered int  `json:"services_not_offered"`
+	RegionsNotEnabled  int  `json:"regions_not_enabled"`
+	NotSet             *int `json:"not_set"`
+}
+
+// Account read states: every page that shows an account says one of
+// these, from the coverage read.
+const (
+	// AccountRead: every source of the account read.
+	AccountRead = "read"
+	// AccountPartial: the account read, but some sources did not, were
+	// capped, or have not had their first read yet; its counts are lower
+	// bounds.
+	AccountPartial = "partial"
+	// AccountNotRead: nothing was read from the account.
+	AccountNotRead = "not_read"
+)
+
+// CoverageAccount is one account's read state. Reason says why it is not
+// read (an outage detail, not_read_yet, or the cause class of its first
+// source that failed), and why a partial account is partial while its
+// first read runs.
+type CoverageAccount struct {
+	Account string `json:"account"`
+	Read    string `json:"read"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 // CoverageView is what the stored reads cover: the gaps grouped by outcome
-// and the answers that are not gaps.
+// and the answers that are not gaps. Accounts are the read states of the
+// accounts in scope and Regions the Regions the scope reads, so every page
+// counts accounts and Regions alike.
 type CoverageView struct {
-	Summary  CoverageSummary `json:"summary"`
-	NotRead  []CoverageRow   `json:"not_read"`
-	Capped   []CoverageRow   `json:"capped"`
-	OffInAWS []CoverageRow   `json:"off_in_aws"`
-	NotGaps  CoverageNotGaps `json:"not_gaps"`
+	Accounts []CoverageAccount `json:"accounts"`
+	Regions  []string          `json:"regions"`
+	Summary  CoverageSummary   `json:"summary"`
+	NotRead  []CoverageRow     `json:"not_read"`
+	Capped   []CoverageRow     `json:"capped"`
+	OffInAWS []CoverageRow     `json:"off_in_aws"`
+	NotGaps  CoverageNotGaps   `json:"not_gaps"`
 }
 
 // WarningLine is the one line a summary card adds when data is incomplete:
@@ -108,9 +149,10 @@ type WarningLine struct {
 // accounts is one row naming four accounts. A unit that has never been
 // attempted is still on its first read and is not listed on its own; an
 // account with nothing attempted yet is one account row.
-func (store *Store) Coverage(_ context.Context, scope CoverageScope) (CoverageView, error) {
-	view := CoverageView{NotRead: []CoverageRow{}, Capped: []CoverageRow{}, OffInAWS: []CoverageRow{}}
-	units, err := store.units(scope.Account, "", "", time.Time{})
+func (store *Store) Coverage(ctx context.Context, scope CoverageScope) (CoverageView, error) {
+	view := CoverageView{NotRead: []CoverageRow{}, Capped: []CoverageRow{}, OffInAWS: []CoverageRow{}, Accounts: []CoverageAccount{}, Regions: []string{}}
+	filter := store.inherited(ctx)
+	units, err := store.units(filter, scope.Account, "", "", time.Time{})
 	if err != nil {
 		return view, err
 	}
@@ -145,6 +187,11 @@ func (store *Store) Coverage(_ context.Context, scope CoverageScope) (CoverageVi
 	accounts := make(map[string]bool)
 	readAccounts := make(map[string]bool)
 	attempted := make(map[string]bool)
+	// everRead holds the accounts with a unit that read, whatever their
+	// account rows say.
+	everRead := make(map[string]bool)
+	// pending holds the accounts with a unit never attempted yet.
+	pending := make(map[string]bool)
 	notOffered := make(map[string]bool)
 	regionsOff := make(map[string]bool)
 	expected := make(map[string]ScopeAccount)
@@ -191,8 +238,10 @@ func (store *Store) Coverage(_ context.Context, scope CoverageScope) (CoverageVi
 		unitRead := !status.Sync.LastGoodAt.IsZero() || status.HasData
 		if unitRead {
 			readAccounts[account] = true
+			everRead[account] = true
 		}
 		if status.Sync.State == model.SyncPending || status.Sync.State == "" {
+			pending[account] = true
 			continue
 		}
 		attempted[account] = true
@@ -248,6 +297,15 @@ func (store *Store) Coverage(_ context.Context, scope CoverageScope) (CoverageVi
 				continue
 			case !attempted[account]:
 				detail = AccountNotReadYet
+			case pending[account]:
+				// The first read runs: what it committed is read, the
+				// rest is not yet, so the account still counts as read
+				// and the row raises the warning.
+				group := add(rowKey{source: AccountSource, detail: AccountFirstReadInProgress, reason: model.GapNotChecked}, model.OutcomeNotRead)
+				group.accounts[account] = true
+				group.uncounted++
+				group.undated++
+				continue
 			default:
 				continue
 			}
@@ -310,10 +368,21 @@ func (store *Store) Coverage(_ context.Context, scope CoverageScope) (CoverageVi
 			view.Summary.AccountsRead++
 		}
 	}
+	view.Accounts = accountStates(accounts, everRead, view)
+	view.Regions = scopeRegions(scope)
 	view.Summary.AccountsTotal = len(accounts)
 	view.Summary.NotRead = len(view.NotRead)
 	view.Summary.Capped = len(view.Capped)
 	view.Summary.OffInAWS = len(view.OffInAWS)
+	resources, err := store.resources(filter, Query{Account: scope.Account, Region: scope.Region, PolicyEntries: true}, false)
+	if err != nil {
+		return view, err
+	}
+	for _, resource := range resources.Resources {
+		if len(model.NotReadOperations(resource)) > 0 {
+			view.Summary.ResourcesNotRead++
+		}
+	}
 	view.NotGaps.ServicesNotOffered = len(notOffered)
 	view.NotGaps.RegionsNotEnabled = len(regionsOff)
 	return view, nil
@@ -352,4 +421,73 @@ func sortCoverageRows(rows []CoverageRow) {
 		}
 		return a.Reason < b.Reason
 	})
+}
+
+// accountStates is each account's read state from one coverage read.
+func accountStates(accounts, everRead map[string]bool, view CoverageView) []CoverageAccount {
+	detail := map[string]string{}
+	failedAs := map[string]string{}
+	partial := map[string]bool{}
+	for _, rows := range [][]CoverageRow{view.NotRead, view.Capped} {
+		for _, row := range rows {
+			for _, account := range row.Accounts {
+				partial[account] = true
+				if row.Source == AccountSource {
+					detail[account] = row.Detail
+				} else if _, ok := failedAs[account]; !ok && row.Reason != "" {
+					failedAs[account] = string(row.Reason)
+				}
+			}
+		}
+	}
+	ids := make([]string, 0, len(accounts))
+	for account := range accounts {
+		ids = append(ids, account)
+	}
+	sort.Strings(ids)
+	out := make([]CoverageAccount, 0, len(ids))
+	for _, account := range ids {
+		state := CoverageAccount{Account: account, Read: AccountRead}
+		switch {
+		case !everRead[account]:
+			state.Read, state.Reason = AccountNotRead, AccountNotReadYet
+			switch {
+			case detail[account] != "" && detail[account] != AccountNotReadYet:
+				state.Reason = detail[account]
+			case failedAs[account] != "":
+				state.Reason = failedAs[account]
+			}
+		case partial[account]:
+			state.Read = AccountPartial
+			if detail[account] == AccountFirstReadInProgress {
+				state.Reason = AccountFirstReadInProgress
+			}
+		}
+		out = append(out, state)
+	}
+	return out
+}
+
+// scopeRegions lists the Regions the scope reads: each expected account's
+// selected Regions, those AWS reports as not enabled included, within the
+// Region filter. The global Region is not one.
+func scopeRegions(scope CoverageScope) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, entry := range scope.Expected {
+		if scope.Account != "" && entry.Account != scope.Account {
+			continue
+		}
+		for _, list := range [][]string{entry.Regions, entry.NotEnabled} {
+			for _, region := range list {
+				if region == model.GlobalRegion || seen[region] || scope.Region != "" && region != scope.Region {
+					continue
+				}
+				seen[region] = true
+				out = append(out, region)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

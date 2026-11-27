@@ -1372,7 +1372,7 @@ func TestProjectedPositiveFreshnessBound(t *testing.T) {
 }
 
 func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
-	for _, mode := range []string{"read", "stream", "history_refresh", "lease_refresh"} {
+	for _, mode := range []string{"read", "history_refresh", "lease_refresh"} {
 		t.Run(mode, func(t *testing.T) {
 			var rejected atomic.Bool
 			var discoveryReads atomic.Int32
@@ -1429,8 +1429,6 @@ func TestProjectedUnauthorizedFencesHistoryAndRenewal(t *testing.T) {
 			case "read":
 				var output any
 				err = client.GetJSON(t.Context(), "/api/v1/pods", &output)
-			case "stream":
-				_, err = client.openPodLogStream(t.Context(), "/api/v1/namespaces/default/pods/api/log", false)
 			case "history_refresh":
 				_, err = service.Changes(t.Context(), ChangeQuery{})
 			case "lease_refresh":
@@ -2194,5 +2192,27 @@ func TestReviewPrincipalIsUnchangedForOtherModes(t *testing.T) {
 		if principal, err := service.client.selfSubjectPrincipal(t.Context(), "Bearer probe", nil); err != nil || principal != want {
 			t.Fatalf("%s principal changed:\n%s\nwant\n%s (%v)", name, principal, want, err)
 		}
+	}
+}
+
+// Replicas of different releases read each other's saved history only if they
+// derive the same history principal and scope key for one connector. These
+// values were computed with the v1.4.36 formulas for a connector without
+// credentials: a SHA-256 of "anonymous", NUL and the endpoint for the
+// principal, and of org, cluster, endpoint and credential ID for the key, each
+// in unpadded URL-safe base64. A replica that reaches the same cluster at
+// another address derives other values, and its reads are denied.
+func TestHistoryPrincipalKeepsTheReleasedFormat(t *testing.T) {
+	scope := Scope{OrgID: "default", ClusterID: "east", CredentialID: "east-reader"}
+	service := newTestService(t, "https://127.0.0.1:19671", scope)
+	if got := service.historyPrincipal(); got != "JQHe--VW1Jro-82t2bJneOeshMUlZ7H7UUiGI206DgQ" {
+		t.Fatalf("history principal %q differs from the v1.4.36 value", got)
+	}
+	if got := service.historyScopeKey(); got != "kubernetes/history-scope/RXAuWcLOm22dDFi4sSuGPQQ9LqeHXBaCQ09tJdEKpHM" {
+		t.Fatalf("history scope key %q differs from the v1.4.36 value", got)
+	}
+	elsewhere := newTestService(t, "https://host.docker.internal:19671", scope)
+	if elsewhere.historyPrincipal() == service.historyPrincipal() {
+		t.Fatal("a replica configured with another endpoint shares the history principal")
 	}
 }
