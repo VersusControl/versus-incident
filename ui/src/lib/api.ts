@@ -776,8 +776,16 @@ export interface IncidentStatusCounts {
 // IncidentCountBreakdown is the numeric counts object nested in list/search
 // responses: the back-compat top-level unresolved per-origin tally plus the
 // authoritative per-origin × per-status breakdown.
+// The server serves counts from a short-lived cache, so the object also says
+// how trustworthy its numbers are. When count_unknown is true there is no
+// count at all: the number fields are omitted or null and must not be read
+// (read them through countsUnavailable in lib/incidentCounts). stale marks a
+// count older than two minutes; counted_at is when it was taken.
 export interface IncidentCountBreakdown extends OriginCounts {
   by_status?: IncidentStatusCounts;
+  counted_at?: string;
+  count_unknown?: boolean;
+  stale?: boolean;
 }
 
 // IncidentCounts is the standalone /counts response. Its count_window is the
@@ -797,7 +805,8 @@ export interface IncidentIndex {
   incidents: IncidentSummary[];
   counts: IncidentCountBreakdown;
   count_window: CountWindow;
-  total: number;
+  // null when the server has no count (counts.count_unknown).
+  total: number | null;
   offset?: number;
   next_offset?: number | null;
   page?: number;

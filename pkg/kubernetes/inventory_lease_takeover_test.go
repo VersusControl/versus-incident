@@ -90,26 +90,35 @@ func (fixture *leaseFixture) record() inventoryLeaseRecord {
 }
 
 // crash leaves the lease as a process killed right after renewing it would:
-// held by an owner that never releases it, for a whole lease.
-func (fixture *leaseFixture) crash() time.Time {
+// held by an owner that never releases it, for a whole lease. It returns when
+// the crash happened and the record it wrote. The owner keeps running until
+// the test stops it and may publish while crash reads the lease, so callers
+// compare later records with the returned one, not with one read earlier.
+func (fixture *leaseFixture) crash() (time.Time, inventoryLeaseRecord) {
 	t := fixture.t
 	t.Helper()
 	key := inventoryKey(fixture.scope)
-	raw, err := fixture.provider.ReadBlob(key)
-	if err != nil {
-		t.Fatal(err)
+	for wait := polling(t, "the crashed lease written over a live owner"); ; wait.next() {
+		raw, err := fixture.provider.ReadBlob(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record inventoryLeaseRecord
+		if json.Unmarshal(raw, &record) != nil {
+			t.Fatal("unreadable lease record")
+		}
+		crashed := time.Now()
+		record.Owner, record.Expires = "crashed-process", crashed.Add(fixture.ttl)
+		replacement, _ := json.Marshal(record)
+		won, err := fixture.provider.(storage.BlobCAS).CompareAndSwapBlob(key, raw, replacement)
+		if err != nil {
+			t.Fatalf("could not leave the crashed lease: %v", err)
+		}
+		if won {
+			return crashed, record
+		}
+		// The owner renewed or published between the read and the swap.
 	}
-	var record inventoryLeaseRecord
-	if json.Unmarshal(raw, &record) != nil {
-		t.Fatal("unreadable lease record")
-	}
-	crashed := time.Now()
-	record.Owner, record.Expires = "crashed-process", crashed.Add(fixture.ttl)
-	replacement, _ := json.Marshal(record)
-	if won, err := fixture.provider.(storage.BlobCAS).CompareAndSwapBlob(key, raw, replacement); err != nil || !won {
-		t.Fatalf("could not leave the crashed lease: won=%t %v", won, err)
-	}
-	return crashed
 }
 
 // published waits for the first publication and reports the worker's state
@@ -144,8 +153,8 @@ func TestCrashedOwnerLeaseIsTakenOverWhenItRunsOut(t *testing.T) {
 			if replicas == "restarted and running replica" {
 				running = fixture.start()
 			}
-			before := fixture.record().Revision
-			crashed := fixture.crash()
+			crashed, left := fixture.crash()
+			before := left.Revision
 			crashedOwner.StopCapture()
 			if owner := fixture.record().Owner; owner != "crashed-process" {
 				t.Fatalf("stopping the crashed process changed its lease owner to %q", owner)
@@ -351,8 +360,8 @@ func TestRestartGraceSurvivesAFailedFirstRestore(t *testing.T) {
 	fixture := newLeaseFixture(t, time.Minute)
 	crashedOwner := fixture.start()
 	fixture.published(crashedOwner)
-	saved := fixture.record().Revision
-	fixture.crash()
+	_, left := fixture.crash()
+	saved := left.Revision
 	crashedOwner.StopCapture()
 	view := &failingFirstReads{Provider: fixture.provider, key: inventoryKey(fixture.scope)}
 	view.fails.Store(2)

@@ -104,6 +104,10 @@ if [ "$go_on" = true ] && [ "${#only[@]}" -eq 0 ]; then
     step "plain tests" ${capped[@]+"${capped[@]}"} bash scripts/ci-tests.sh plain $plain
   fi
 fi
+# CI checks the Kubernetes shard lists once, before the shards; so does this.
+case " ${shards[*]+"${shards[*]}"} " in
+  *" kubernetes"*) step "kubernetes shard lists" bash scripts/ci-tests.sh check-lists ;;
+esac
 for s in ${shards[@]+"${shards[@]}"}; do
   step "race $s" ${capped[@]+"${capped[@]}"} bash scripts/ci-tests.sh run "$s"
 done

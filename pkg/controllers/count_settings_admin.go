@@ -59,6 +59,9 @@ func (cc *CountSettingsController) putSettings(c *fiber.Ctx) error {
 		}
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 	}
+	// Counts on this process use the new window from the next request; other
+	// replicas pick it up within services.CountSettingsTTL.
+	services.RememberCountSettings(s)
 	// Return the effective (sanitized) settings after the write.
 	return c.JSON(agent.LoadCountSettings(services.Storage()))
 }

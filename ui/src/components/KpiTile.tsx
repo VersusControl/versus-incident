@@ -22,9 +22,12 @@ export function KpiTile({
   sparkLabel,
   className,
   chart,
+  valueTitle,
 }: {
   label: string;
   value: React.ReactNode;
+  /** Hover hint on the value, e.g. "Counted at 14:02" for a stale count. */
+  valueTitle?: string;
   loading?: boolean;
   /** Deep link WITH its filter (e.g. /incidents?status=open). */
   to?: string;
@@ -76,6 +79,7 @@ export function KpiTile({
       ) : (
         <div className="flex items-end justify-between gap-2">
           <span
+            title={valueTitle}
             className={clsx(
               "stat-value",
               tone === "critical" && "text-sev-critical",

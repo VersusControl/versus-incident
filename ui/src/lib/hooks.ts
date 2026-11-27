@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
+import { countsUnavailable, staleCountHint } from "./incidentCounts";
 
 // ---------------------------------------------------------------------------
 // useTableKeys — j/k row navigation + Enter to open, for dense tables.
@@ -161,11 +162,16 @@ export function useOpenIncidentCount() {
     refetchInterval: () => (document.hidden ? false : 30_000),
     staleTime: 15_000,
   });
-  const open = q.data?.by_status?.open;
+  // unavailable: the server has no count or the request failed. Callers show
+  // "—" then, never 0. open stays undefined while unavailable or loading.
+  const unavailable = countsUnavailable(q.data, q.isError);
+  const open = unavailable ? undefined : q.data?.by_status?.open;
   return {
-    open: open?.total ?? 0,
+    open: unavailable ? undefined : open?.total ?? 0,
+    unavailable,
     originCounts: open,
     countWindow: q.data?.count_window,
+    countedAtHint: unavailable ? undefined : staleCountHint(q.data, q.isError),
     query: q,
   };
 }

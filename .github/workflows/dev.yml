@@ -5,9 +5,15 @@ name: DEV - Code CI
 # its group. `ci-ok` sums the results and is the one check branch protection
 # requires, so a skipped job never leaves a required check pending.
 #
-# Full runs (every group on): the nightly schedule, a manual run, a pull
-# request labelled `ci:full`, a force-push, a push to `main` that changed
-# code, a change to CI itself, and any change the group map cannot place.
+# Full runs (every group on): a manual run, a pull request labelled
+# `ci:full`, a force-push, a push to `main` that changed code, a change to CI
+# itself, and any change the group map cannot place. Nothing runs on a timer.
+#
+# Go caches: setup-go caches nothing. The module cache is keyed by go.sum.
+# The build cache is kept per kind of build (`plain`, and `race-<group>` for
+# the race shards), keyed by the Go version and every Go file, and restored by
+# prefix when nothing matches exactly. Only pushes to `main` and `dev` save a
+# cache, so a pull request never changes what other runs restore.
 
 on:
   push:
@@ -16,10 +22,6 @@ on:
     branches: [dev, main]
     # `labeled` lets the `ci:full` label start a full run on its own.
     types: [opened, synchronize, reopened, labeled]
-  # Scheduled runs use the default branch (`main`); the nightly-dev job starts
-  # the matching run on `dev` with that branch's own workflow.
-  schedule:
-    - cron: '23 2 * * *'
   workflow_dispatch:
 
 permissions:
@@ -66,12 +68,20 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
-          cache: true
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
 
       # go list reads the ui package, whose `go:embed all:dist` needs the
       # folder to exist.
@@ -105,7 +115,7 @@ jobs:
               if [ "$FORCED" = true ]; then force=true; fi
               ;;
             *)
-              # schedule and workflow_dispatch
+              # workflow_dispatch
               base=""
               head="$GITHUB_SHA"
               force=true
@@ -162,6 +172,12 @@ jobs:
           echo "code=$code aws_emulator=$aws_emulator"
           cat "$plan"
 
+      # Every name in .github/race-shards must be a top-level test of
+      # pkg/kubernetes, in one list only. Reads the test source, compiles
+      # nothing; a failure here fails ci-ok.
+      - name: Kubernetes race shard lists
+        run: bash scripts/ci-tests.sh check-lists
+
   test:
     name: Test
     needs: changes
@@ -174,14 +190,33 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Go
+        id: go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
-          cache: true
+          cache: false
+
+      - name: Restore Go modules
+        id: mod-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Restore Go build cache
+        id: build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-${{ hashFiles('go.mod', 'go.sum', '**/*.go') }}
+          restore-keys: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-
 
       - name: Verify go.mod is tidy
+        id: verify-modules
         run: |
           go mod download
           go mod verify
@@ -250,12 +285,36 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # Only pushes to main and dev save, so a pull request never changes
+      # what other runs restore. The module cache is saved only from this job,
+      # and only after `go mod verify` passed on it.
+      - name: Save Go modules
+        if: >-
+          !cancelled() && github.event_name == 'push'
+          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+          && steps.verify-modules.outcome == 'success'
+          && steps.mod-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ steps.mod-cache.outputs.cache-primary-key }}
+
+      - name: Save Go build cache
+        if: >-
+          !cancelled() && github.event_name == 'push'
+          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+          && steps.build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
+
   # Race detector run, split into shards that run in parallel so each one
   # finishes inside its timeout on a default hosted runner. Only the shards
   # whose groups changed run. scripts/ci-tests.sh holds the shard map, the
   # flags and the Kubernetes test lists' guard; scripts/ci-local.sh runs the
-  # same script on a laptop. Each shard writes its coverage profile; the
-  # coverage job merges them.
+  # same script on a laptop. Each shard prints its compile and run times and
+  # writes its coverage profile; the coverage job merges them.
   race:
     name: Race (${{ matrix.shard }})
     needs: changes
@@ -266,15 +325,37 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.changes.outputs.race_shards) }}
+    env:
+      # The three Kubernetes shards build the same packages, so they share
+      # one build cache.
+      BUILD_CACHE: race-${{ startsWith(matrix.shard, 'kubernetes') && 'kubernetes' || matrix.shard }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
+        id: go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
-          cache: true
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      - name: Restore Go build cache
+        id: build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-${{ env.BUILD_CACHE }}-${{ hashFiles('go.mod', 'go.sum', '**/*.go') }}
+          restore-keys: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-${{ env.BUILD_CACHE }}-
 
       - name: Download modules
         run: go mod download
@@ -298,6 +379,20 @@ jobs:
           path: ${{ runner.temp }}/coverage/race-${{ matrix.shard }}.out
           if-no-files-found: ignore
           retention-days: 7
+
+      # Only pushes to main and dev save, so a pull request never changes
+      # what other runs restore. The kubernetes shard builds every package
+      # the other two Kubernetes shards build, so it alone saves their cache.
+      - name: Save Go build cache
+        if: >-
+          !cancelled() && github.event_name == 'push'
+          && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+          && steps.build-cache.outputs.cache-hit != 'true'
+          && matrix.shard != 'kubernetes-rbac' && matrix.shard != 'kubernetes-slow'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
 
   # One coverage profile for the change: the race shards' profiles plus the
   # plain run's, with the counts of a block that several shards ran added up.
@@ -352,6 +447,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Same Helm version the committed manifest is rendered with, so the
       # freshness check compares like with like.
@@ -364,10 +461,26 @@ jobs:
       # chart config through the application's config loader and key set, and
       # the reader role against what the Kubernetes connector reads.
       - name: Set up Go
+        id: go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
-          cache: true
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      # Restore only: the Test job saves this cache.
+      - name: Restore Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-${{ hashFiles('go.mod', 'go.sum', '**/*.go') }}
+          restore-keys: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-
 
       - name: Ensure ui/dist placeholder exists
         run: |
@@ -428,6 +541,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Same Node major as the image's UI build stage.
       - name: Set up Node
@@ -462,6 +577,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -483,6 +600,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
@@ -496,27 +615,45 @@ jobs:
   # Tests behind the `integration` build tag. They run the Kubernetes code
   # against the in-process fake API server in tests/fakekube and need nothing
   # beyond Go; the ones that need PostgreSQL skip without TEST_POSTGRES_DSN.
-  # Only the tagged test functions run, on the nightly and manual full runs.
-  # The job reports as its own check and stays out of ci-ok: a nightly run on
-  # main's tip shares that commit with the open main-to-dev pull request, and
-  # a red ci-ok there would block it.
+  # Only the tagged test functions run. The tagged tests live in
+  # pkg/kubernetes and tests/fakekube and keep their history through
+  # pkg/storage, so the job runs when the go-kubernetes or go-storage group is
+  # on: a change to pkg/kubernetes or pkg/storage, to the shared Go code or
+  # tests/ (go-shared turns every Go group on), and every full run, which
+  # includes a manual run. ci-ok counts it.
   integration:
     name: Integration (fakekube)
     needs: changes
-    if: >-
-      needs.changes.outputs.full == 'true'
-      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: needs.changes.outputs.go-kubernetes == 'true' || needs.changes.outputs.go-storage == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
+        id: go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
-          cache: true
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      # Restore only: the Test job saves this cache.
+      - name: Restore Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-${{ hashFiles('go.mod', 'go.sum', '**/*.go') }}
+          restore-keys: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-
 
       - name: Ensure ui/dist placeholder exists
         run: |
@@ -566,12 +703,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
+        id: go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.26.11'
-          cache: true
+          cache: false
+
+      - name: Restore Go modules
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: go-mod-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-mod-${{ runner.os }}-
+
+      # Restore only: the Test job saves this cache.
+      - name: Restore Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-${{ hashFiles('go.mod', 'go.sum', '**/*.go') }}
+          restore-keys: go-build-${{ runner.os }}-go${{ steps.go.outputs.go-version }}-plain-
 
       - name: Ensure ui/dist placeholder exists
         run: |
@@ -698,7 +853,7 @@ jobs:
             echo "::notice::AWS emulator contract tests: skipped, tests/awsemulator has no Go test files"
             exit 0
           fi
-          go test -tags 'awsemulator harness_awsendpoint' -timeout 8m ./tests/awsemulator/...
+          go test -tags 'awsemulator harness_awsendpoint' -count=1 -timeout 8m ./tests/awsemulator/...
 
       - name: Stop emulator
         if: always()
@@ -722,7 +877,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, test, race, coverage, chart, ui, docs-check, credential-literals, aws-emulator]
+    needs: [changes, test, race, coverage, chart, ui, docs-check, credential-literals, integration, aws-emulator]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -758,6 +913,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -810,6 +967,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -846,25 +1005,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # The nightly run above covers main. This starts the same full run on dev,
-  # using dev's own copy of this workflow.
-  nightly-dev:
-    name: Start nightly dev run
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Dispatch this workflow on dev
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          if ! gh api "repos/$GH_REPO/branches/dev" --silent 2>/dev/null; then
-            echo "::notice::Nightly dev run: skipped, the repository has no dev branch yet"
-            exit 0
-          fi
-          gh workflow run dev.yml --ref dev

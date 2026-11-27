@@ -274,6 +274,8 @@ func TestCountsEndpointHonoursWindow(t *testing.T) {
 		if err := agent.SaveCountSettings(st, agent.CountSettings{Window: tc.window}); err != nil {
 			t.Fatalf("SaveCountSettings(%q): %v", tc.window, err)
 		}
+		// The settings API remembers what it saved; this test saves directly.
+		services.RememberCountSettings(agent.CountSettings{Window: tc.window})
 		got, countWindow := openCount(t, app)
 		if got != tc.want || countWindow != tc.window {
 			t.Fatalf("window %q: open = %d count_window = %q, want %d and %q", tc.window, got, countWindow, tc.want, tc.window)

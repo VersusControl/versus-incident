@@ -3,11 +3,13 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act, render, screen, cleanup, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { format } from "date-fns";
 import { ToastProvider } from "@/components/Toast";
 import { NowPage } from "./NowPage";
 import {
   api,
   ApiError,
+  type IncidentCounts,
   type IncidentStatusCounts,
   type IncidentSummary,
   type OriginCounts,
@@ -378,5 +380,184 @@ describe("NowPage without the agent", () => {
     vi.mocked(api.getAgentConfig).mockResolvedValue({ enable: true } as Awaited<ReturnType<typeof api.getAgentConfig>>);
     renderPageAt();
     await vi.waitFor(() => expect(api.status).toHaveBeenCalled());
+  });
+});
+
+// The server serves counts from a cache. When it has no count it says so
+// (count_unknown) instead of sending zeros, and the page must never turn that,
+// or a failed request, into "0 open". A stale count still shows its number,
+// with the time it was taken on hover.
+describe("NowPage count availability", () => {
+  const countedAt = "2026-11-27T09:41:00Z";
+  const countedHint = `Counted at ${format(new Date(countedAt), "HH:mm")}`;
+
+  function knownCounts(extra: Partial<IncidentCounts> = {}): IncidentCounts {
+    return {
+      count_window: "30d",
+      ...oc(5, 10),
+      by_status: byStatus,
+      ...extra,
+    };
+  }
+
+  async function openTile(): Promise<HTMLElement> {
+    return screen.findByRole("link", { name: /^Open .*created · 24h$/ });
+  }
+
+  function expectNoZeroCount() {
+    // No tile, tab badge or header badge may read 0.
+    expect(screen.queryByText("0")).toBeNull();
+    expect(screen.queryByText("All clear — nothing open")).toBeNull();
+    expect(screen.queryByText(/AI: 0/)).toBeNull();
+  }
+
+  it("shows a dash, never 0, when the server has no count", async () => {
+    vi.mocked(api.listIncidents).mockResolvedValue([]);
+    // The wire shape: number fields omitted, only the unknown flag.
+    vi.mocked(api.incidentCounts).mockResolvedValue({
+      count_window: "30d",
+      count_unknown: true,
+    } as unknown as IncidentCounts);
+    renderPageAt();
+
+    const header = await screen.findByRole("link", {
+      name: "Open incidents: Count unavailable",
+    });
+    expect(within(header).getByText("—")).toBeTruthy();
+    const tile = await openTile();
+    expect(within(tile).getByText("—")).toBeTruthy();
+    expect(within(tile).getByText("Count unavailable")).toBeTruthy();
+    for (const name of [/^Acked /, /^Resolved /]) {
+      const t = screen.getByRole("link", { name });
+      expect(within(t).getByText("Count unavailable")).toBeTruthy();
+    }
+    const aiTab = screen.getByRole("tab", { name: /^AI Detected/ });
+    expect(within(aiTab).getByText("Count unavailable")).toBeTruthy();
+    expectNoZeroCount();
+  });
+
+  it("shows a dash when the first counts request fails", async () => {
+    vi.mocked(api.listIncidents).mockResolvedValue([]);
+    vi.mocked(api.incidentCounts).mockRejectedValue(
+      new ApiError(503, "counts unavailable"),
+    );
+    renderPageAt();
+
+    await screen.findByRole("link", {
+      name: "Open incidents: Count unavailable",
+    });
+    const tile = await openTile();
+    expect(within(tile).getByText("Count unavailable")).toBeTruthy();
+    expectNoZeroCount();
+  });
+
+  it("keeps the last good count with a counted-at hint when a refetch fails", async () => {
+    vi.mocked(api.listIncidents).mockResolvedValue([]);
+    vi.mocked(api.incidentCounts).mockResolvedValue(
+      knownCounts({ counted_at: countedAt, stale: false }),
+    );
+    const { queryClient } = renderPageAt();
+
+    const tile = await openTile();
+    await within(tile).findByText("1");
+    expect(screen.queryByTitle(/Counted at/)).toBeNull();
+
+    vi.mocked(api.incidentCounts).mockRejectedValue(
+      new ApiError(503, "counts unavailable"),
+    );
+    await act(() =>
+      queryClient.refetchQueries({ queryKey: ["incidents", "counts"] }),
+    );
+
+    // The number stays, dated in the browser from counted_at even though the
+    // server never said stale.
+    const value = await within(await openTile()).findByText("1");
+    expect(value.closest("[title]")?.getAttribute("title")).toBe(countedHint);
+    const header = screen.getByTitle(new RegExp(`3 open in .* · ${countedHint}$`));
+    expect(within(header).getByText("AI: 1 · Webhook: 2")).toBeTruthy();
+    expect(screen.queryByText("Count unavailable")).toBeNull();
+    expectNoZeroCount();
+  });
+
+  it("keeps the page and flags only the refresh button when a refetch fails", async () => {
+    vi.mocked(api.listIncidents).mockResolvedValue([
+      incident({ id: "kept-row", title: "Kept feed row" }),
+    ]);
+    vi.mocked(api.incidentCounts).mockResolvedValue(
+      knownCounts({ counted_at: countedAt }),
+    );
+    const { queryClient } = renderPageAt();
+    const feed = await screen.findByRole("region", { name: /^Incident feed/ });
+    await within(feed).findByText("Kept feed row");
+    expect(screen.getByRole("button", { name: "Refresh now" })).toBeTruthy();
+
+    const fail = new ApiError(503, "timed out");
+    vi.mocked(api.listIncidents).mockRejectedValue(fail);
+    vi.mocked(api.incidentCounts).mockRejectedValue(fail);
+    await act(() => queryClient.refetchQueries({ queryKey: ["incidents"] }));
+
+    // The compact notice replaces the refresh button in place...
+    await screen.findByRole("button", { name: "Couldn't refresh. Retry" });
+    expect(screen.getByRole("status").textContent).toMatch(/Couldn't refresh/);
+    // ...and nothing else changes: no error card, the feed and banner stay.
+    expect(screen.queryByText("Couldn't load incidents")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(within(feed).getByText("Kept feed row")).toBeTruthy();
+    expect(screen.queryByText(/Incident list unavailable/)).toBeNull();
+    expect(screen.getByRole("region", { name: "Open incidents" })).toBeTruthy();
+
+    // The next good poll clears the notice.
+    vi.mocked(api.listIncidents).mockResolvedValue([
+      incident({ id: "kept-row", title: "Kept feed row" }),
+    ]);
+    vi.mocked(api.incidentCounts).mockResolvedValue(knownCounts());
+    await act(() => queryClient.refetchQueries({ queryKey: ["incidents"] }));
+    await screen.findByRole("button", { name: "Refresh now" });
+  });
+
+  it("shows the number for a known, fresh count with no counted-at hint", async () => {
+    vi.mocked(api.listIncidents).mockResolvedValue([]);
+    vi.mocked(api.incidentCounts).mockResolvedValue(
+      knownCounts({ counted_at: countedAt, stale: false }),
+    );
+    renderPageAt();
+
+    const tile = await openTile();
+    await within(tile).findByText("1");
+    expect(within(tile).queryByText("Count unavailable")).toBeNull();
+    expect(screen.queryByTitle(/Counted at/)).toBeNull();
+    expect(
+      screen.queryByRole("link", { name: "Open incidents: Count unavailable" }),
+    ).toBeNull();
+  });
+
+  it("shows the number plus a counted-at hint for a stale count", async () => {
+    vi.mocked(api.listIncidents).mockResolvedValue([]);
+    vi.mocked(api.incidentCounts).mockResolvedValue(
+      knownCounts({ counted_at: countedAt, stale: true }),
+    );
+    renderPageAt();
+
+    const tile = await openTile();
+    const value = await within(tile).findByText("1");
+    expect(value.closest("[title]")?.getAttribute("title")).toBe(countedHint);
+    // The header badge keeps its number and carries the same hint.
+    const header = screen.getByTitle(new RegExp(`3 open in .* · ${countedHint}$`));
+    expect(within(header).getByText("AI: 1 · Webhook: 2")).toBeTruthy();
+    // The origin tab badges carry it too.
+    const aiTab = screen.getByRole("tab", { name: /^AI Detected 1$/ });
+    expect(within(aiTab).getByTitle(countedHint)).toBeTruthy();
+  });
+
+  it("treats a response without the new fields as a known count, as before", async () => {
+    vi.mocked(api.listIncidents).mockResolvedValue([]);
+    vi.mocked(api.incidentCounts).mockResolvedValue(knownCounts());
+    renderPageAt();
+
+    const tile = await openTile();
+    await within(tile).findByText("1");
+    expect(screen.getByText("AI: 1 · Webhook: 2")).toBeTruthy();
+    expect(screen.queryByText("Count unavailable")).toBeNull();
+    expect(screen.queryByTitle(/Counted at/)).toBeNull();
   });
 });

@@ -97,19 +97,31 @@ func (s CountSettings) Since(now time.Time) time.Time {
 // yields the default — never an error, mirroring the ReadBlob "fresh start"
 // contract.
 func LoadCountSettings(st storage.Provider) CountSettings {
+	settings, _ := ReadCountSettings(st)
+	return settings
+}
+
+// ReadCountSettings is LoadCountSettings that also reports a failed storage
+// read, so a caller keeping the setting in memory can keep its last value
+// instead of falling back to the default. An absent, empty or corrupt blob is
+// not an error: it means the default.
+func ReadCountSettings(st storage.Provider) (CountSettings, error) {
 	def := DefaultCountSettings()
 	if st == nil {
-		return def
+		return def, nil
 	}
 	data, err := st.ReadBlob(CountSettingsBlobName)
-	if err != nil || len(data) == 0 {
-		return def
+	if err != nil {
+		return def, err
+	}
+	if len(data) == 0 {
+		return def, nil
 	}
 	got := def
 	if err := json.Unmarshal(data, &got); err != nil {
-		return def
+		return def, nil
 	}
-	return got.sanitize()
+	return got.sanitize(), nil
 }
 
 // SaveCountSettings persists the settings blob after sanitizing it. It returns

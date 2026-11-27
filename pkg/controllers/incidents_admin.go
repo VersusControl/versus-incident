@@ -14,6 +14,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/agent"
 	"github.com/VersusControl/versus-incident/pkg/config"
 	"github.com/VersusControl/versus-incident/pkg/core"
+	"github.com/VersusControl/versus-incident/pkg/incidentcounts"
 	"github.com/VersusControl/versus-incident/pkg/middleware"
 	"github.com/VersusControl/versus-incident/pkg/services"
 	"github.com/VersusControl/versus-incident/pkg/storage"
@@ -39,6 +40,21 @@ const internalServerErrorMessage = "internal server error"
 func incidentStorageError(c *fiber.Ctx, operation string, err error) error {
 	log.Printf("incident admin storage failure: operation=%q error=%v", operation, err)
 	return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": internalServerErrorMessage})
+}
+
+// incidentListRetryAfter is the Retry-After a timed-out list page answers
+// with: about one list limit, after which a passing stall has likely ended.
+const incidentListRetryAfter = "5"
+
+// incidentListTimedOut answers a list or search page read that ran out of
+// time with a retryable 503. No page is served: a partial or empty page would
+// read as the complete list.
+func incidentListTimedOut(c *fiber.Ctx) error {
+	c.Set(fiber.HeaderRetryAfter, incidentListRetryAfter)
+	return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+		"error":     "the incident list is taking too long to load; try again shortly",
+		"retryable": true,
+	})
 }
 
 // Register attaches the admin endpoints under /api/admin/incidents.
@@ -92,13 +108,13 @@ func (i *IncidentAdminController) list(c *fiber.Ctx) error {
 	// never load the whole table. Postgres (unbounded history) and the
 	// file/memory backends (already capped) all implement it.
 	if pager, ok := store.(storage.IncidentPager); ok {
-		counts, err := windowedStatusCounts(store, countWindow)
-		if err != nil {
-			return incidentStorageError(c, "list incident counts", err)
-		}
+		counts := cachedStatusCounts(c, store, countWindow)
 		size := parsePageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
-		recs, err := pager.ListIncidentsPage(origin, offset, size)
+		recs, err := storage.ListIncidentsPageContext(c.UserContext(), pager, origin, offset, size)
+		if errors.Is(err, storage.ErrListTimeout) {
+			return incidentListTimedOut(c)
+		}
 		if err != nil {
 			return incidentStorageError(c, "list incidents page", err)
 		}
@@ -229,13 +245,16 @@ func (i *IncidentAdminController) search(c *fiber.Ctx) error {
 	// query plus one count query — never the whole match set. Postgres
 	// implements it; it is the only unbounded Searcher.
 	if sp, ok := store.(storage.IncidentSearchPager); ok {
-		counts, err := sp.CountIncidentsMatchingByStatus(query)
+		counts, err := searchStatusCounts(sp, query)
 		if err != nil {
 			return incidentStorageError(c, "count incident search results", err)
 		}
 		size := parsePageSize(c.Query("page_size"))
 		offset, page := pageOffset(c.Query("page"), c.Query("offset"), size)
-		recs, err := sp.SearchIncidentsPage(query, origin, offset, size)
+		recs, err := storage.SearchIncidentsPageContext(c.UserContext(), sp, query, origin, offset, size)
+		if errors.Is(err, storage.ErrListTimeout) {
+			return incidentListTimedOut(c)
+		}
 		if err != nil {
 			return incidentStorageError(c, "search incidents page", err)
 		}
@@ -263,27 +282,40 @@ type countWindow struct {
 }
 
 func resolveCountWindow(store storage.Provider) countWindow {
-	settings := agent.LoadCountSettings(store)
+	settings := services.CountSettings(store)
 	return countWindow{
 		window: settings.Window,
 		since:  settings.Since(time.Now().UTC()),
 	}
 }
 
-// windowedStatusCounts is the ONE count path every surface goes through, so the
+// cachedStatusCounts is the ONE count path every surface goes through, so the
 // header badge, the Now tiles and the Incidents tabs can never disagree about
-// either the numbers or the window they cover. Backends without the windowed
-// capability materialize their provider-bounded history and apply the cutoff
-// locally so the response metadata never labels an unbounded tally as bounded.
-func windowedStatusCounts(store storage.Provider, countWindow countWindow) (storage.IncidentStatusCounts, error) {
-	if wc, ok := store.(storage.IncidentWindowCounter); ok {
-		return wc.CountIncidentsByStatusSince(countWindow.since)
+// either the numbers or the window they cover. Every open tab polls it, so it
+// reads the process's count cache, keyed by the request's organization and
+// the window's name: a poll never runs a count of its own, and at most one
+// count per key runs at a time. Backends without the windowed capability
+// tally their provider-bounded history with the same cutoff, so the response
+// never labels an unbounded tally as bounded.
+func cachedStatusCounts(c *fiber.Ctx, store storage.Provider, countWindow countWindow) incidentcounts.Result {
+	key := incidentcounts.Key{Scope: middleware.OrgFromContext(c), Window: countWindow.window}
+	return services.IncidentCounts().Get(c.UserContext(), key, func(ctx context.Context) (storage.IncidentStatusCounts, error) {
+		return storage.CountIncidentsByStatusSinceContext(ctx, store, countWindow.since)
+	})
+}
+
+// searchStatusCounts counts a user-typed search. It is not cached: the query
+// changes with every keystroke. A count that runs out of time is served as
+// unknown with the page, so a slow search still shows its rows.
+func searchStatusCounts(sp storage.IncidentSearchPager, query string) (incidentcounts.Result, error) {
+	counts, err := sp.CountIncidentsMatchingByStatus(query)
+	if errors.Is(err, storage.ErrCountTimeout) {
+		return incidentcounts.Result{Unknown: true}, nil
 	}
-	recs, err := store.ListIncidents(0)
 	if err != nil {
-		return storage.IncidentStatusCounts{}, err
+		return incidentcounts.Result{}, err
 	}
-	return storage.StatusCountsSince(recs, countWindow.since), nil
+	return incidentcounts.Result{Counts: counts, CountedAt: time.Now().UTC()}, nil
 }
 
 // counts returns the per-origin × per-status incident tally for the active
@@ -295,13 +327,9 @@ func (i *IncidentAdminController) counts(c *fiber.Ctx) error {
 	store := services.Storage()
 	countWindow := resolveCountWindow(store)
 	if store == nil {
-		return c.JSON(countsResponse(storage.IncidentStatusCounts{}, countWindow.window))
+		return c.JSON(countsResponse(incidentcounts.Result{}, countWindow.window))
 	}
-	sc, err := windowedStatusCounts(store, countWindow)
-	if err != nil {
-		return incidentStorageError(c, "count incidents", err)
-	}
-	return c.JSON(countsResponse(sc, countWindow.window))
+	return c.JSON(countsResponse(cachedStatusCounts(c, store, countWindow), countWindow.window))
 }
 
 func (i *IncidentAdminController) get(c *fiber.Ctx) error {
@@ -550,8 +578,27 @@ func countsMap(c storage.IncidentStatusCounts) fiber.Map {
 	return m
 }
 
-func countsResponse(c storage.IncidentStatusCounts, countWindow string) fiber.Map {
-	m := countsMap(c)
+// servedCountsMap renders a served count. It adds counted_at (RFC 3339) when
+// the count's time is known, and stale: true when it is older than
+// incidentcounts.StaleAfter. With no good count it keeps every number field
+// but sets it to null and adds count_unknown: true, so no page can read an
+// unknown count as zero incidents.
+func servedCountsMap(r incidentcounts.Result) fiber.Map {
+	if r.Unknown {
+		return fiber.Map{"ai_detect": nil, "webhook": nil, "total": nil, "by_status": nil, "count_unknown": true}
+	}
+	m := countsMap(r.Counts)
+	if !r.CountedAt.IsZero() {
+		m["counted_at"] = r.CountedAt.UTC().Format(time.RFC3339)
+	}
+	if r.Stale {
+		m["stale"] = true
+	}
+	return m
+}
+
+func countsResponse(r incidentcounts.Result, countWindow string) fiber.Map {
+	m := servedCountsMap(r)
 	m["count_window"] = countWindow
 	return m
 }
@@ -586,14 +633,17 @@ func filteredTotal(c storage.IncidentCounts, origin string) int {
 // driven off PAGE-FULLNESS: a full page (len == size) implies at least one
 // more page, an underfull page is the last one. This lets the operator page
 // past the unresolved count — and past row 1000 — through the entire history.
-func pagedIncidentResponse(recs []*storage.IncidentRecord, counts storage.IncidentStatusCounts, origin string, offset, size, page int, countWindow string) fiber.Map {
-	total := filteredTotal(unresolvedCounts(counts), origin)
+func pagedIncidentResponse(recs []*storage.IncidentRecord, counts incidentcounts.Result, origin string, offset, size, page int, countWindow string) fiber.Map {
+	var total any
+	if !counts.Unknown {
+		total = filteredTotal(unresolvedCounts(counts.Counts), origin)
+	}
 	out := make([]fiber.Map, 0, len(recs))
 	for _, r := range recs {
 		out = append(out, summarize(r))
 	}
 	resp := fiber.Map{
-		"counts":       countsMap(counts),
+		"counts":       servedCountsMap(counts),
 		"count_window": countWindow,
 		"total":        total,
 		"incidents":    out,
@@ -726,6 +776,7 @@ func (i *IncidentAdminController) resolve(c *fiber.Ctx) error {
 			}
 			return incidentStorageError(c, "save resolved incident", err)
 		}
+		services.MarkIncidentCountsStale()
 	}
 	closedAt := now
 	if rec.ResolvedAt != nil {

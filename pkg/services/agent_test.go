@@ -42,15 +42,6 @@ type blockingDetectionSaveStore struct {
 	releaseSave chan struct{}
 }
 
-type transientRenewDetectionStore struct {
-	storage.Provider
-	episodes     storage.DetectionEpisodeStore
-	detection    storage.DetectionIncidentStore
-	failNext     atomic.Bool
-	renewalCalls atomic.Int64
-	renewErr     error
-}
-
 type renewalSequenceStore struct {
 	storage.DetectionEpisodeStore
 	renewErrors []error
@@ -140,33 +131,6 @@ func (s *transientGetDetectionStore) CloseDetectionEpisodeByIncident(incidentID 
 }
 
 func (s *transientGetDetectionStore) SaveDetectionIncident(rec *storage.IncidentRecord) error {
-	return s.detection.SaveDetectionIncident(rec)
-}
-
-func (s *transientRenewDetectionStore) RecordDetectionOccurrence(occurrence storage.DetectionOccurrence) (storage.DetectionEpisodeDecision, error) {
-	return s.episodes.RecordDetectionOccurrence(occurrence)
-}
-
-func (s *transientRenewDetectionStore) RenewDetectionNotificationClaim(renewal storage.DetectionNotificationRenewal) error {
-	s.renewalCalls.Add(1)
-	if s.failNext.CompareAndSwap(true, false) {
-		if s.renewErr != nil {
-			return s.renewErr
-		}
-		return errors.New("temporary renewal failure")
-	}
-	return s.episodes.RenewDetectionNotificationClaim(renewal)
-}
-
-func (s *transientRenewDetectionStore) CompleteDetectionNotification(completion storage.DetectionNotificationCompletion) error {
-	return s.episodes.CompleteDetectionNotification(completion)
-}
-
-func (s *transientRenewDetectionStore) CloseDetectionEpisodeByIncident(incidentID string, closedAt time.Time) error {
-	return s.episodes.CloseDetectionEpisodeByIncident(incidentID, closedAt)
-}
-
-func (s *transientRenewDetectionStore) SaveDetectionIncident(rec *storage.IncidentRecord) error {
 	return s.detection.SaveDetectionIncident(rec)
 }
 
@@ -539,12 +503,106 @@ func TestCreateIncidentFromFinding_RenewsLiveClaimDuringFanout(t *testing.T) {
 	}
 }
 
+// detectionHangGuard is how long a detection test waits for an event before
+// calling it a hang. A passing test never comes near it.
+const detectionHangGuard = 60 * time.Second
+
+// awaitDetectionEvent waits for ch to deliver or close, failing only at the
+// hang guard.
+func awaitDetectionEvent[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	guard := time.NewTimer(detectionHangGuard)
+	defer guard.Stop()
+	select {
+	case v := <-ch:
+		return v
+	case <-guard.C:
+		t.Fatalf("hang guard reached waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+// scriptedRenewalStore renews claims on the clocked store, whose time moves
+// only on observed heartbeats, so a slow scheduler cannot expire a lease. It
+// can fail the next renewal with renewErr (a temporary error when nil), and it
+// reports every renewal attempt by claim token.
+type scriptedRenewalStore struct {
+	*clockedDetectionStore
+	failNext atomic.Bool
+	renewErr error
+	failed   chan struct{} // closed on the scripted failure
+	attempts chan string   // claim token of each attempt; dropped when full
+	mu       sync.Mutex
+	calls    map[string]int // renewal attempts by claim token
+}
+
+func newScriptedRenewalStore(start time.Time, renewErr error) (*scriptedRenewalStore, storage.Provider) {
+	base := storage.NewMemory()
+	return &scriptedRenewalStore{
+		clockedDetectionStore: &clockedDetectionStore{
+			Provider: base, DetectionEpisodeStore: base.(storage.DetectionEpisodeStore),
+			DetectionIncidentStore: base.(storage.DetectionIncidentStore),
+			now:                    start, renewed: make(chan time.Time, 8),
+		},
+		renewErr: renewErr,
+		failed:   make(chan struct{}),
+		attempts: make(chan string, 64),
+		calls:    make(map[string]int),
+	}, base
+}
+
+func (s *scriptedRenewalStore) RenewDetectionNotificationClaim(renewal storage.DetectionNotificationRenewal) error {
+	s.mu.Lock()
+	s.calls[renewal.ClaimToken]++
+	s.mu.Unlock()
+	err := s.renew(renewal)
+	select {
+	case s.attempts <- renewal.ClaimToken:
+	default:
+	}
+	return err
+}
+
+func (s *scriptedRenewalStore) renew(renewal storage.DetectionNotificationRenewal) error {
+	if s.failNext.CompareAndSwap(true, false) {
+		close(s.failed)
+		if s.renewErr != nil {
+			return s.renewErr
+		}
+		return errors.New("temporary renewal failure")
+	}
+	return s.clockedDetectionStore.RenewDetectionNotificationClaim(renewal)
+}
+
+func (s *scriptedRenewalStore) renewalsOf(token string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls[token]
+}
+
+// awaitRenewalsOf waits until the heartbeat holding token has tried to renew
+// n times in all, under one hang guard for the whole wait. It fails at once
+// if the heartbeat holding silent (when not empty) tries to renew meanwhile.
+func (s *scriptedRenewalStore) awaitRenewalsOf(t *testing.T, token string, n int, silent string) {
+	t.Helper()
+	guard := time.NewTimer(detectionHangGuard)
+	defer guard.Stop()
+	for s.renewalsOf(token) < n {
+		select {
+		case got := <-s.attempts:
+			if silent != "" && got == silent {
+				t.Fatalf("stopped heartbeat renewed its claim again (%d attempts)", s.renewalsOf(silent))
+			}
+		case <-guard.C:
+			t.Fatalf("hang guard reached waiting for renewal %d of %d", s.renewalsOf(token)+1, n)
+		}
+	}
+}
+
 func TestCreateIncidentFromFinding_RenewalErrorStillCompletesClaim(t *testing.T) {
 	loadAgentTestConfig(t)
-	base := storage.NewMemory()
-	provider := &transientRenewDetectionStore{
-		Provider: base, episodes: base.(storage.DetectionEpisodeStore), detection: base.(storage.DetectionIncidentStore),
-	}
+	claimStarted := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider, base := newScriptedRenewalStore(claimStarted, nil)
 	provider.failNext.Store(true)
 	previousStore := Storage()
 	SetStorage(provider)
@@ -562,17 +620,25 @@ func TestCreateIncidentFromFinding_RenewalErrorStillCompletesClaim(t *testing.T)
 	})
 	t.Cleanup(func() { SetEmitInterceptor(nil) })
 
+	const lease = 30 * time.Millisecond
 	emission := &core.DetectionEmissionResult{}
 	result := core.AgentResult{PatternID: "renewal-error", Frequency: 1, AgentKind: "detect", SignalKind: "logs", DetectionEmission: emission}
 	finding := &core.AIFinding{Title: "Renewal error", Severity: "low"}
 	done := make(chan error, 1)
 	go func() {
-		done <- createIncidentFromFindingWithLease(finding, result, "loki", "checkout", 30*time.Millisecond)
+		done <- createIncidentFromFindingWithLease(finding, result, "loki", "checkout", lease)
 	}()
-	<-started
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	if err := <-done; err != nil {
+	released := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(released)
+	awaitDetectionEvent(t, started, "the notification owner to reach fanout")
+	awaitDetectionEvent(t, provider.failed, "the failing renewal")
+	// Successful renewals after the error carry the claim past its original
+	// expiry, so the owner completes a claim that outlived its first lease.
+	for renewed := claimStarted; !renewed.After(claimStarted.Add(lease)); {
+		renewed = awaitDetectionEvent(t, provider.renewed, "a renewal past the original claim expiry")
+	}
+	released()
+	if err := awaitDetectionEvent(t, done, "the notification owner to finish"); err != nil {
 		t.Fatalf("recovered renewal error = %v", err)
 	}
 	if emission.NotificationOutcome != "none" {
@@ -592,11 +658,7 @@ func TestCreateIncidentFromFinding_RenewalErrorStillCompletesClaim(t *testing.T)
 
 func TestCreateIncidentFromFinding_ClaimLostRenewalRemainsError(t *testing.T) {
 	loadAgentTestConfig(t)
-	base := storage.NewMemory()
-	provider := &transientRenewDetectionStore{
-		Provider: base, episodes: base.(storage.DetectionEpisodeStore), detection: base.(storage.DetectionIncidentStore),
-		renewErr: storage.ErrDetectionClaimLost,
-	}
+	provider, _ := newScriptedRenewalStore(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), storage.ErrDetectionClaimLost)
 	provider.failNext.Store(true)
 	previousStore := Storage()
 	SetStorage(provider)
@@ -619,43 +681,58 @@ func TestCreateIncidentFromFinding_ClaimLostRenewalRemainsError(t *testing.T) {
 			result, "loki", "checkout", 30*time.Millisecond,
 		)
 	}()
-	<-started
-	time.Sleep(50 * time.Millisecond)
-	close(release)
-	if err := <-done; !errors.Is(err, storage.ErrDetectionClaimLost) {
+	released := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(released)
+	awaitDetectionEvent(t, started, "the notification owner to reach fanout")
+	awaitDetectionEvent(t, provider.failed, "the claim-lost renewal")
+	released()
+	if err := awaitDetectionEvent(t, done, "the notification owner to finish"); !errors.Is(err, storage.ErrDetectionClaimLost) {
 		t.Fatalf("claim-lost renewal error = %v, want ErrDetectionClaimLost", err)
 	}
 }
 
+// A stopped heartbeat never renews again. "Never" is measured in heartbeats,
+// not wall-clock time: a second heartbeat with the same interval, started
+// after the stop, must renew three times while the stopped one stays silent.
 func TestDetectionClaimHeartbeatStopsRenewing(t *testing.T) {
-	base := storage.NewMemory()
-	provider := &transientRenewDetectionStore{
-		Provider: base, episodes: base.(storage.DetectionEpisodeStore), detection: base.(storage.DetectionIncidentStore),
-	}
+	provider, _ := newScriptedRenewalStore(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), nil)
 	lease := 30 * time.Millisecond
-	decision, err := provider.RecordDetectionOccurrence(storage.DetectionOccurrence{
-		Identity: storage.DetectionIdentity{
-			AgentKind: "detect", Source: "loki", Service: "checkout", SignalKind: "logs", ConditionKey: "heartbeat-stop",
-		},
-		Frequency: 1, Severity: "low", ReceivedAt: time.Now().UTC(), ClaimLease: lease,
-	})
-	if err != nil {
-		t.Fatalf("RecordDetectionOccurrence: %v", err)
+	claim := func(condition string) storage.DetectionEpisodeDecision {
+		t.Helper()
+		decision, err := provider.RecordDetectionOccurrence(storage.DetectionOccurrence{
+			Identity: storage.DetectionIdentity{
+				AgentKind: "detect", Source: "loki", Service: "checkout", SignalKind: "logs", ConditionKey: condition,
+			},
+			Frequency: 1, Severity: "low", ClaimLease: lease,
+		})
+		if err != nil || decision.ClaimToken == "" {
+			t.Fatalf("RecordDetectionOccurrence(%s) = %+v, %v; want a claim", condition, decision, err)
+		}
+		return decision
 	}
+	decision := claim("heartbeat-stop")
 	heartbeat := startDetectionClaimHeartbeat(provider, decision, lease)
-	deadline := time.Now().Add(time.Second)
-	for provider.renewalCalls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if provider.renewalCalls.Load() == 0 {
-		t.Fatal("heartbeat did not renew before deadline")
-	}
+	provider.awaitRenewalsOf(t, decision.ClaimToken, 1, "")
 	if err := heartbeat.stop(); err != nil {
 		t.Fatalf("stop heartbeat: %v", err)
 	}
-	callsAfterStop := provider.renewalCalls.Load()
-	time.Sleep(3 * lease)
-	if calls := provider.renewalCalls.Load(); calls != callsAfterStop {
+	callsAfterStop := provider.renewalsOf(decision.ClaimToken)
+	// Attempts reported before the stop returned are not "after the stop".
+	for drained := false; !drained; {
+		select {
+		case <-provider.attempts:
+		default:
+			drained = true
+		}
+	}
+
+	witness := claim("heartbeat-witness")
+	witnessBeat := startDetectionClaimHeartbeat(provider, witness, lease)
+	provider.awaitRenewalsOf(t, witness.ClaimToken, 3, decision.ClaimToken)
+	if err := witnessBeat.stop(); err != nil {
+		t.Fatalf("stop witness heartbeat: %v", err)
+	}
+	if calls := provider.renewalsOf(decision.ClaimToken); calls != callsAfterStop {
 		t.Fatalf("renewal calls after stop = %d, want %d", calls, callsAfterStop)
 	}
 	if err := heartbeat.stop(); err != nil {

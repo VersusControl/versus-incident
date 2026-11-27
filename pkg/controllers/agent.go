@@ -695,7 +695,7 @@ func graceStatus(firstSeen time.Time, grace time.Duration) (bool, int) {
 // retains the bounded whole-table scan for backends without that capability.
 func (a *AgentController) serviceIncidentSummary(name, org string) fiber.Map {
 	store := services.Storage()
-	settings := agent.LoadCountSettings(store)
+	settings := services.CountSettings(store)
 	summary := fiber.Map{
 		"count_window": settings.Window,
 		"count":        0,

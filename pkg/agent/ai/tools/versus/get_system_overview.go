@@ -32,7 +32,7 @@ func (GetSystemOverview) ArgsSchema() map[string]any {
 
 type overviewArgs struct{ aitools.TimeRangeArgs }
 
-func (tool GetSystemOverview) Invoke(_ context.Context, args json.RawMessage) (*core.ToolResult, error) {
+func (tool GetSystemOverview) Invoke(ctx context.Context, args json.RawMessage) (*core.ToolResult, error) {
 	if tool.Store == nil && tool.Catalog == nil && tool.Health == nil {
 		return core.UnavailableToolResult(tool.Name(), "incident storage, Versus catalog, and detection health are not configured"), nil
 	}
@@ -52,7 +52,10 @@ func (tool GetSystemOverview) Invoke(_ context.Context, args json.RawMessage) (*
 	var windowRecords []*storage.IncidentRecord
 	windowTruncated := false
 	windowReadAttempted := false
-	if counter, ok := tool.Store.(storage.ScopedIncidentWindowCounter); ok && parsed.End == "" {
+	if counter, ok := tool.Store.(storage.ScopedContextIncidentWindowCounter); ok && parsed.End == "" {
+		counts, err = counter.CountIncidentsByStatusSinceForScopeContext(ctx, scope, timeRange.Start)
+		countsExact = true
+	} else if counter, ok := tool.Store.(storage.ScopedIncidentWindowCounter); ok && parsed.End == "" {
 		counts, err = counter.CountIncidentsByStatusSinceForScope(scope, timeRange.Start)
 		countsExact = true
 	} else if lister, ok := tool.Store.(storage.ScopedRangeLister); ok {

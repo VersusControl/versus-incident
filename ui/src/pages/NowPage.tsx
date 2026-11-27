@@ -12,7 +12,6 @@ import {
   EyeOff,
   LineChart,
   Lock,
-  RefreshCw,
   ScrollText,
   Sparkles,
   Waypoints,
@@ -37,6 +36,7 @@ import { TopBar } from "@/components/TopBar";
 import { Pill } from "@/components/Pill";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { KpiTile } from "@/components/KpiTile";
+import { CountUnavailable } from "@/components/CountUnavailable";
 import { ChannelIcon } from "@/components/ChannelIcon";
 import { ClickableRow } from "@/components/DataTable";
 import { SegmentedControl } from "@/components/SegmentedControl";
@@ -49,8 +49,10 @@ import {
 } from "@/lib/incidentList";
 import { SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
+import { RefreshButton, REFRESH_FAILED_TEXT } from "@/components/RefreshButton";
 import { EmptyState } from "@/components/feedback";
 import { countWindowLabel } from "@/lib/countWindow";
+import { countsUnavailable, staleCountHint } from "@/lib/incidentCounts";
 import { notifyStatusDisplay } from "@/lib/incidentPresentation";
 import { incidentSeverity } from "@/lib/severity";
 
@@ -90,7 +92,13 @@ export function NowPage() {
     refetchInterval: () => (document.hidden ? false : 15_000),
     staleTime: 15_000,
   });
-  const byStatus = countsQ.data?.by_status;
+  // The server has no count, or the first request failed with no data yet:
+  // the tiles and tab badges show "—", and neither the all-clear nor the open
+  // banner renders. A failed refetch keeps the last number, with "Counted at".
+  const countsUnknown = countsUnavailable(countsQ.data, countsQ.isError);
+  const byStatus = countsUnknown ? undefined : countsQ.data?.by_status;
+  const countHint = countsUnknown ? undefined : staleCountHint(countsQ.data, countsQ.isError);
+  const unknownValue = countsUnknown ? <CountUnavailable /> : undefined;
   const countWindow = countsQ.data
     ? countWindowLabel(countsQ.data.count_window, "short")
     : undefined;
@@ -202,6 +210,15 @@ export function NowPage() {
     countsQ.isFetching ||
     status.isFetching ||
     config.isFetching;
+  // A failed request with nothing loaded yet gets the full error card. A failed
+  // background refresh keeps what is on screen and only turns the header's
+  // refresh button into a "Couldn't refresh · Retry" notice, so one bad poll
+  // never moves the page.
+  const incidentsFailedEmpty = incidents.isError && !incidents.data;
+  const countsFailedEmpty = countsQ.isError && !countsQ.data;
+  const refreshFailed =
+    (incidents.isError && !!incidents.data) ||
+    (countsQ.isError && !!countsQ.data);
   const refreshAll = () => {
     incidents.refetch();
     countsQ.refetch();
@@ -239,20 +256,18 @@ export function NowPage() {
     <>
       <TopBar
         title="Now"
-        subtitle={`auto-refresh 15s${countWindow ? ` · counts over ${countWindow}` : ""}`}
+        subtitle={
+          refreshFailed
+            ? REFRESH_FAILED_TEXT
+            : `auto-refresh 15s${countWindow ? ` · counts over ${countWindow}` : ""}`
+        }
         showCountWindow={false}
         actions={
-          <button
-            aria-label="Refresh now"
-            title="Refresh"
-            className="rounded-control p-1.5 text-ink-300 hover:bg-ink-700 hover:text-ink-100"
-            onClick={refreshAll}
-          >
-            <RefreshCw
-              size={15}
-              className={refreshing ? "animate-spin" : undefined}
-            />
-          </button>
+          <RefreshButton
+            onRefresh={refreshAll}
+            refreshing={refreshing}
+            failed={refreshFailed}
+          />
         }
       />
 
@@ -272,12 +287,14 @@ export function NowPage() {
                 {
                   value: "ai_detect",
                   label: originLabel("ai_detect"),
-                  badge: openOriginCounts?.ai_detect,
+                  badge: countsUnknown ? null : openOriginCounts?.ai_detect,
+                  badgeTitle: countHint,
                 },
                 {
                   value: "webhook",
                   label: originLabel("webhook"),
-                  badge: openOriginCounts?.webhook,
+                  badge: countsUnknown ? null : openOriginCounts?.webhook,
+                  badgeTitle: countHint,
                 },
               ]}
             />
@@ -289,10 +306,10 @@ export function NowPage() {
         {(incidents.isPending || countsQ.isPending) && (
           <div aria-hidden className="sk h-14 rounded-card" />
         )}
-        {(incidents.isError || countsQ.isError) && (
+        {(incidentsFailedEmpty || countsFailedEmpty) && (
           <RetryableError
             context="Couldn't load incidents"
-            error={incidents.error ?? countsQ.error}
+            error={incidentsFailedEmpty ? incidents.error : countsQ.error}
             onRetry={() => {
               incidents.refetch();
               countsQ.refetch();
@@ -375,7 +392,8 @@ export function NowPage() {
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <KpiTile
             label="Open"
-            value={byStatus ? counts.open : undefined}
+            value={byStatus ? counts.open : unknownValue}
+            valueTitle={countHint}
             loading={countsQ.isPending}
             to={withOrigin("/incidents")}
             icon={AlertTriangle}
@@ -394,7 +412,8 @@ export function NowPage() {
           />
           <KpiTile
             label="Acked"
-            value={byStatus ? counts.acked : undefined}
+            value={byStatus ? counts.acked : unknownValue}
+            valueTitle={countHint}
             loading={countsQ.isPending}
             to={withOrigin("/incidents?status=acked")}
             icon={BellRing}
@@ -405,7 +424,8 @@ export function NowPage() {
           />
           <KpiTile
             label="Resolved"
-            value={byStatus ? counts.resolved : undefined}
+            value={byStatus ? counts.resolved : unknownValue}
+            valueTitle={countHint}
             loading={countsQ.isPending}
             to={withOrigin("/incidents?status=resolved")}
             icon={CheckCircle2}
@@ -459,7 +479,7 @@ export function NowPage() {
                 </thead>
                 <tbody>
                   {incidents.isPending && <SkRows rows={6} cols={6} />}
-                  {incidents.isSuccess &&
+                  {incidents.data &&
                     feed.map((i, idx) => (
                       <ClickableRow
                         key={i.id}
@@ -506,12 +526,12 @@ export function NowPage() {
                     ))}
                 </tbody>
               </table>
-              {incidents.isError && (
+              {incidentsFailedEmpty && (
                 <div className="p-4 text-xs text-ink-300">
                   Incident list unavailable — use Retry above.
                 </div>
               )}
-              {incidents.isSuccess && feed.length === 0 && (
+              {incidents.data && feed.length === 0 && (
                 <EmptyState
                   title="No incidents yet"
                   hint="Once an alert fires it will appear here."
