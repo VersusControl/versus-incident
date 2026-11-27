@@ -58,7 +58,7 @@ jobs:
       - name: Set up Go
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         timeout-minutes: 5
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.26.11'
           cache: false
@@ -169,7 +169,7 @@ jobs:
 
       - name: Set up Go
         timeout-minutes: 5
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: '1.26.11'
           cache: false
