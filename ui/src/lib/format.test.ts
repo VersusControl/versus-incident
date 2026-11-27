@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  compactCount,
   formatNormalValue,
   formatWiggle,
   humanSignal,
@@ -91,5 +92,20 @@ describe("humanSignal", () => {
 
   it("renders an empty signal as an em dash", () => {
     expect(humanSignal("")).toBe("—");
+  });
+});
+
+describe("compactCount", () => {
+  it("keeps counts under 1,000 and shortens from 1,000 up, rounding down", () => {
+    expect(compactCount(0)).toBe("0");
+    expect(compactCount(999)).toBe("999");
+    expect(compactCount(1000)).toBe("1k");
+    expect(compactCount(1234)).toBe("1.2k");
+    expect(compactCount(9999)).toBe("9.9k");
+    expect(compactCount(10000)).toBe("10k");
+    expect(compactCount(12345)).toBe("12k");
+    expect(compactCount(999999)).toBe("999k");
+    expect(compactCount(1_000_000)).toBe("1M");
+    expect(compactCount(1_234_567)).toBe("1.2M");
   });
 });

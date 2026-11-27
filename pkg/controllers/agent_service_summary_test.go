@@ -144,6 +144,8 @@ func TestServiceIncidentSummary_UsesConfiguredCountWindow(t *testing.T) {
 		if err := agent.SaveCountSettings(store, agent.CountSettings{Window: tc.window}); err != nil {
 			t.Fatalf("SaveCountSettings(%s): %v", tc.window, err)
 		}
+		// The settings API remembers what it saved; this test saves directly.
+		services.RememberCountSettings(agent.CountSettings{Window: tc.window})
 		summary := (&AgentController{}).serviceIncidentSummary("checkout", storage.DefaultOrgID)
 		if got := summary["count_window"]; got != tc.window {
 			t.Errorf("window %s: count_window = %v", tc.window, got)

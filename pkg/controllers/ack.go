@@ -50,6 +50,8 @@ func HandleAck(c *fiber.Ctx) error {
 	if store != nil {
 		if err := store.UpdateIncidentAck(incidentID, time.Now().UTC()); err != nil {
 			log.Printf("ack persistence warning: incident_id=%q error=%v", incidentID, err)
+		} else {
+			services.MarkIncidentCountsStale()
 		}
 	}
 

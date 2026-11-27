@@ -15,6 +15,7 @@ import { isLocalAdminSession } from "@/lib/localAdmin";
 import { useOpenIncidentCount } from "@/lib/hooks";
 import { formatOriginCounts } from "@/lib/incidentList";
 import { countWindowLabel } from "@/lib/countWindow";
+import { COUNT_UNAVAILABLE_LABEL } from "@/lib/incidentCounts";
 import { useTheme } from "@/lib/theme";
 import { roleLabel, isAdminRole } from "@/lib/role";
 import { useEffectiveRole } from "@/lib/useEffectiveRole";
@@ -33,6 +34,10 @@ interface Props {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
+  /** A compact control (e.g. RefreshButton) placed in the right-hand group
+      beside the theme toggle. Unlike `actions` it never wraps the bar onto a
+      second row on narrow screens. */
+  control?: React.ReactNode;
   showCountWindow?: boolean;
 }
 
@@ -40,10 +45,12 @@ export function TopBar({
   title,
   subtitle,
   actions,
+  control,
   showCountWindow = true,
 }: Props) {
   const shell = useContext(ShellContext);
-  const { open, originCounts, countWindow } = useOpenIncidentCount();
+  const { open, unavailable, originCounts, countWindow, countedAtHint } =
+    useOpenIncidentCount();
   const { theme, toggle } = useTheme();
 
   const config = useQuery({
@@ -107,6 +114,7 @@ export function TopBar({
         )}
       >
         {actions}
+        {control}
         <TopBarIdentity />
         <SignOutButton />
         <button
@@ -121,10 +129,20 @@ export function TopBar({
         >
           {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
         </button>
-        {open > 0 && (
+        {unavailable && (
           <Link
             to="/incidents?status=open"
-            title={`${open} open in the ${windowLabel} window — AI-detected vs webhook/alerts`}
+            aria-label={`Open incidents: ${COUNT_UNAVAILABLE_LABEL}`}
+            title={COUNT_UNAVAILABLE_LABEL}
+            className="flex items-center rounded-full bg-ink-600 px-2 py-0.5 text-2xs font-semibold tabular-nums text-ink-200 hover:bg-ink-500"
+          >
+            <span aria-hidden="true">—</span>
+          </Link>
+        )}
+        {open !== undefined && open > 0 && (
+          <Link
+            to="/incidents?status=open"
+            title={`${open} open in the ${windowLabel} window — AI-detected vs webhook/alerts${countedAtHint ? ` · ${countedAtHint}` : ""}`}
             className="flex items-center gap-1.5 rounded-full bg-sev-critical/15 px-2 py-0.5 text-2xs font-semibold tabular-nums text-sev-critical hover:bg-sev-critical/25"
           >
             {formatOriginCounts(originCounts)}

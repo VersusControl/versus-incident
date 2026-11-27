@@ -1,8 +1,9 @@
 # Migration to v1.4.37
 
 v1.4.37 puts less load on the database when it saves Kubernetes history. On
-PostgreSQL, the upgrade needs the `btree_gist` extension and changes some
-history indexes on first start. After the upgrade, Kubernetes issues that
+PostgreSQL, the upgrade needs the `btree_gist` extension, changes some
+history indexes and adds one incident index on first start. Incident counts are
+now cached on the server, so pages that show them load the database less. After the upgrade, Kubernetes issues that
 stayed open after their resource recovered are closed.
 
 There is also one optional step: remove unused indexes from the Kubernetes
@@ -90,8 +91,8 @@ storage: migration 048_kubernetes_occurrence_scoped_spans.sql applied in …s
 ### New indexes
 
 Versus builds these indexes with `CREATE INDEX CONCURRENTLY`. A build does not
-block history saves or reads, but it reads the whole table, so it takes longer
-on a large history.
+block saves or reads of its table, but it reads the whole table, so it takes
+longer on a large table.
 
 | Index | Table |
 |---|---|
@@ -100,6 +101,10 @@ on a large history.
 | `kubernetes_occurrence_open_span_namespace` | `kubernetes_evidence_occurrence_read_versions` |
 | `kubernetes_occurrence_open_span_scope` | `kubernetes_evidence_occurrence_read_versions` |
 | `kubernetes_occurrence_visible_span_scope` | `kubernetes_evidence_occurrence_read_versions` |
+| `idx_incidents_org_created_status` | `vs_incidents` |
+
+`idx_incidents_org_created_status` serves the incident counts. It covers the
+columns the counts read, so a count reads the index instead of the table.
 
 A concurrent build also waits for transactions that were already running when
 it started. A long-running query or a session left idle in a transaction holds
@@ -120,8 +125,18 @@ on a 2 vCPU / 2 GiB PostgreSQL instance:
 | The four `kubernetes_occurrence_*_span_*` indexes | 5.47 s, 4.28 s, 2.81 s and 2.01 s |
 | Index removals | under 0.01 s each |
 
-That is about 15 s in all; `/healthz` answered 18 s after start. Larger
-tables take longer, so keep the startup probe from
+That is about 15 s in all; `/healthz` answered 18 s after start.
+
+The incident index is timed on its own table:
+
+| Change | Incidents | Table size | Time |
+|---|---|---|---|
+| `idx_incidents_org_created_status` | about 600,000 | about 780 MB | about 0.8 s |
+
+That time is with the table already in memory. On a large production table
+read from disk it can take longer.
+
+Larger tables take longer, so keep the startup probe from
 [Before you upgrade](#before-you-upgrade) in place for the upgrade.
 
 ### Removed indexes
@@ -203,6 +218,41 @@ After that, a pause between saves does not cause catch-up closures, for
 example after a restart or a save backoff. An issue whose resource recovered
 during the pause closes in the normal way, at the time the next save covers.
 
+### Incident counts are cached
+
+The header badge, the Now page and the Incidents tabs show incident counts.
+The server now keeps each count for up to 30 seconds and gives it to every
+page that asks. Many open tabs share one count, so the database counts at most
+once every 30 seconds per server. With several replicas, each one counts on
+its own.
+
+| What | What you see |
+|---|---|
+| Your ack or resolve | Shows on the next refresh. |
+| New incidents from webhooks | Appear within 30 seconds. |
+| The server can't count within 5 seconds, and has no earlier count | The badge, tiles and tabs show "—" instead of a number. |
+| A refresh fails after an earlier count | The last number stays. Hover it to see "Counted at HH:MM". |
+| A count older than 2 minutes | Hover it to see "Counted at HH:MM". |
+| A tab count of 1,000 or more | Reads in short form, for example "1.2k". Hover it for the full number. |
+
+The incident list and search work the same way for slow pages. A page that
+can't load within 5 seconds asks you to retry, instead of waiting.
+
+#### For API integrators
+
+These changes apply to `GET /api/admin/incidents/counts` and to the `counts`
+object in the list and search responses:
+
+| Field | Meaning |
+|---|---|
+| `counted_at` | When the served count was taken, in RFC 3339 (UTC). |
+| `stale` | `true` when the count is older than 2 minutes. Left out otherwise. |
+| `count_unknown` | `true` when there is no count yet. The number fields are then `null`, never `0`. |
+
+The list and search response's `total` can be `null` when the count is
+unknown. A list or search page that runs out of time answers
+`503 Service Unavailable` with `Retry-After: 5`; try again after that delay.
+
 ### Incomplete evidence no longer holds every issue open
 
 When Versus has incomplete evidence for one resource, it keeps only that
@@ -237,7 +287,8 @@ number, instead of a guess.
 ## Rolling back
 
 v1.4.36 runs on the upgraded database. To roll back, deploy v1.4.36; the new
-indexes and the `btree_gist` extension don't affect it. Its history pages read
+indexes and the `btree_gist` extension don't affect it. v1.4.36 does not use
+`idx_incidents_org_created_status`; you can leave it in place. Its history pages read
 the closures described in [Long-open issues close](#long-open-issues-close)
 without error, and leave them out of the timeline.
 

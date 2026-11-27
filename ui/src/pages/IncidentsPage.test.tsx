@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import {
+  act,
   render,
   screen,
   cleanup,
@@ -10,6 +11,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
+import { format } from "date-fns";
 import { ToastProvider } from "@/components/Toast";
 import { IncidentsPage } from "./IncidentsPage";
 import {
@@ -588,5 +590,102 @@ describe("IncidentsPage — per-row Run analysis", () => {
     );
     // The streaming path succeeded, so the non-streaming fallback stays unused.
     expect(api.runAnalysis).not.toHaveBeenCalled();
+  });
+});
+
+// The list response's counts object carries the same availability flags as
+// /counts. With no server count, the tabs must show "—", not a tally of the
+// loaded page (which undercounts) and never 0.
+describe("IncidentsPage — tab badges follow count availability", () => {
+  it("shows a dash on every tab badge when the server has no count", async () => {
+    const page = index([incident({ id: "loaded-open" })]);
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue({
+      ...page,
+      // The wire shape: number fields omitted, only the unknown flag.
+      counts: { count_unknown: true } as unknown as IncidentIndex["counts"],
+    });
+    renderPage();
+
+    await screen.findByLabelText(/View incident/);
+    for (const name of [/^AI Detected/, /^Webhook/, /^Open/, /^Acked/, /^Resolved/, /^All/]) {
+      const tab = screen.getByRole("tab", { name });
+      expect(within(tab).getByText("Count unavailable")).toBeTruthy();
+      expect(within(tab).queryByText(/^\d+$/)).toBeNull();
+    }
+  });
+
+  it("shows a dash on every tab badge when the first list request fails", async () => {
+    vi.mocked(api.listIncidentsIndex).mockRejectedValue(new Error("timed out"));
+    renderPage();
+
+    await screen.findByText("Couldn't load incidents");
+    for (const name of [/^AI Detected/, /^Webhook/, /^Open/, /^Acked/, /^Resolved/, /^All/]) {
+      const tab = screen.getByRole("tab", { name });
+      expect(within(tab).getByText("Count unavailable")).toBeTruthy();
+    }
+  });
+
+  it("keeps the loaded list when a refresh fails and flags only the refresh button", async () => {
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue(
+      index([incident({ id: "kept-row", title: "Kept list row" })]),
+    );
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ToastProvider>
+          <MemoryRouter
+            initialEntries={["/incidents"]}
+            future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+          >
+            <Routes>
+              <Route path="/incidents" element={<IncidentsPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByText("Kept list row");
+
+    vi.mocked(api.listIncidentsIndex).mockRejectedValue(new Error("timed out"));
+    await act(() => qc.refetchQueries({ queryKey: ["incident-index"] }));
+
+    await screen.findByRole("button", { name: "Couldn't refresh. Retry" });
+    expect(screen.queryByText("Couldn't load incidents")).toBeNull();
+    expect(screen.getByText("Kept list row")).toBeTruthy();
+    // The tabs keep their numbers, dated by the kept count.
+    expect(screen.getByRole("tab", { name: /^Open 1$/ })).toBeTruthy();
+  });
+
+  it("labels Load more without empty brackets when the total is unknown", async () => {
+    // More rows than one client page, so the button waits for a click
+    // instead of loading the next chunk on its own.
+    const rows = Array.from({ length: 101 }, (_, n) =>
+      incident({ id: `row-${n}` }),
+    );
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue({
+      ...index(rows),
+      counts: { count_unknown: true } as unknown as IncidentIndex["counts"],
+      total: null,
+      next_offset: 101,
+    });
+    renderPage();
+
+    const more = await screen.findByTestId("incident-load-more");
+    expect(within(more).getByRole("button").textContent).toBe("Load more");
+  });
+
+  it("keeps the numbers and adds a counted-at hint for a stale count", async () => {
+    const countedAt = "2026-11-27T09:41:00Z";
+    const hint = `Counted at ${format(new Date(countedAt), "HH:mm")}`;
+    const page = index([incident({ id: "loaded-open" })]);
+    vi.mocked(api.listIncidentsIndex).mockResolvedValue({
+      ...page,
+      counts: { ...page.counts, stale: true, counted_at: countedAt },
+    });
+    renderPage();
+
+    const open = await screen.findByRole("tab", { name: /^Open 1$/ });
+    expect(within(open).getByTitle(hint)).toBeTruthy();
+    expect(screen.queryByText("Count unavailable")).toBeNull();
   });
 });

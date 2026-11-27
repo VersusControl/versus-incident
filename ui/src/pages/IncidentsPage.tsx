@@ -18,6 +18,7 @@ import {
 import { api, type IncidentIndex, type IncidentSummary, type IntakeSettings, type OriginCounts } from "@/lib/api";
 import { deliveryErrorLabel, hasDeliveryError, notifyStatusDisplay } from "@/lib/incidentPresentation";
 import { countWindowLabel } from "@/lib/countWindow";
+import { countsUnavailable, staleCountHint } from "@/lib/incidentCounts";
 import { fmtAbs, fmtRel, incidentTitle, truncate } from "@/lib/format";
 import { incidentSeverity } from "@/lib/severity";
 import { useTableKeys } from "@/lib/hooks";
@@ -52,6 +53,7 @@ import { SearchInput } from "@/components/SearchInput";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import { SkLine, SkRows } from "@/components/Skeleton";
 import { RetryableError } from "@/components/RetryableError";
+import { RefreshButton, REFRESH_FAILED_TEXT } from "@/components/RefreshButton";
 import { ReportsButton } from "@/components/ReportsDialog";
 import { RunAnalysisButton } from "@/components/RunAnalysisButton";
 import { useToast } from "@/components/toastContext";
@@ -241,7 +243,17 @@ export function IncidentsPage() {
   // badge, which already read the open bucket, so no two surfaces disagree.
   // by_status is the authoritative per-origin × per-status breakdown the
   // status-tab counts read.
-  const byStatus = data?.counts?.by_status;
+  // countsUnknown: the server has no count right now, so every count badge
+  // shows "—" and no number is read from the response. A client-side text
+  // filter still counts its own loaded rows, so it keeps its status badges.
+  const countsUnknown = countsUnavailable(data?.counts, isError);
+  // A failed request with nothing loaded shows the full error in place of the
+  // table. A failed refresh (a refocus refetch or a later chunk) keeps the
+  // loaded list and only flags the header's refresh button.
+  const loadFailed = isError && !data;
+  const refreshFailed = isError && !!data;
+  const countHint = staleCountHint(data?.counts, isError);
+  const byStatus = countsUnknown ? undefined : data?.counts?.by_status;
   const originCounts = byStatus?.open;
 
   const windowLabel = data
@@ -300,6 +312,21 @@ export function IncidentsPage() {
       all: textFiltered.length,
     };
   }, [byStatus, clientFiltering, textFiltered, origin]);
+
+  // Status badges: hidden while loading; "—" when the server has no count
+  // (a tally of the loaded page would undercount); otherwise the number, with
+  // the "Counted at" hint when it came from a stale server count.
+  // A failed first load has no counts at all, so it shows "—" too; that also
+  // keeps the tab bar the same width as when it holds numbers.
+  const statusBadge = (key: keyof typeof counts) => ({
+    badge:
+      countsUnknown && (!data || !clientFiltering)
+        ? null
+        : !data
+          ? undefined
+          : counts[key],
+    badgeTitle: clientFiltering ? undefined : countHint,
+  });
 
   const filtered = useMemo(
     () => textFiltered.filter((i) => matchesStatus(i, status)),
@@ -502,8 +529,21 @@ export function IncidentsPage() {
     <>
       <TopBar
         title="Incidents"
-        subtitle={windowLabel ? `counts over ${windowLabel}` : undefined}
+        subtitle={
+          refreshFailed
+            ? REFRESH_FAILED_TEXT
+            : windowLabel
+              ? `counts over ${windowLabel}`
+              : undefined
+        }
         showCountWindow={false}
+        control={
+          <RefreshButton
+            onRefresh={() => void refetch()}
+            refreshing={isRefetching}
+            failed={refreshFailed}
+          />
+        }
       />
 
       <main className="flex-1 overflow-auto p-4 lg:p-6">
@@ -522,12 +562,14 @@ export function IncidentsPage() {
                   {
                     value: "ai_detect",
                     label: originLabel("ai_detect"),
-                    badge: originCounts?.ai_detect,
+                    badge: countsUnknown ? null : originCounts?.ai_detect,
+                    badgeTitle: countHint,
                   },
                   {
                     value: "webhook",
                     label: originLabel("webhook"),
-                    badge: originCounts?.webhook,
+                    badge: countsUnknown ? null : originCounts?.webhook,
+                    badgeTitle: countHint,
                   },
                 ]}
               />
@@ -539,14 +581,10 @@ export function IncidentsPage() {
                   // Badges stay undefined until the query settles — counts
                   // computed from [] mid-load would render a false "0 = all
                   // quiet" row of badges next to skeleton rows.
-                  { value: "open", label: "Open", badge: data ? counts.open : undefined },
-                  { value: "acked", label: "Acked", badge: data ? counts.acked : undefined },
-                  {
-                    value: "resolved",
-                    label: "Resolved",
-                    badge: data ? counts.resolved : undefined,
-                  },
-                  { value: "all", label: "All", badge: data ? counts.all : undefined },
+                  { value: "open", label: "Open", ...statusBadge("open") },
+                  { value: "acked", label: "Acked", ...statusBadge("acked") },
+                  { value: "resolved", label: "Resolved", ...statusBadge("resolved") },
+                  { value: "all", label: "All", ...statusBadge("all") },
                 ]}
               />
             </>
@@ -575,7 +613,7 @@ export function IncidentsPage() {
           }
         />
 
-        {isError ? (
+        {loadFailed ? (
           <RetryableError
             context="Couldn't load incidents"
             error={error}
@@ -684,7 +722,9 @@ export function IncidentsPage() {
                     className="text-brand-300 hover:underline"
                     onClick={() => fetchNextPage()}
                   >
-                    Load more ({data?.total?.toLocaleString() ?? ""} in {windowLabel})
+                    {typeof data?.total === "number"
+                      ? `Load more (${data.total.toLocaleString()} in ${windowLabel})`
+                      : "Load more"}
                   </button>
                 )}
               </div>

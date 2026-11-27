@@ -198,6 +198,15 @@ body {
   }
 }
 
+/* Scrolls without a visible scrollbar, so an overflowing row keeps its
+   height (tab bars on narrow screens; touch and focus still scroll it). */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 /* Custom scrollbar — slim, dark. */
 ::-webkit-scrollbar {
   width: 10px;

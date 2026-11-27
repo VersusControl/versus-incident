@@ -149,3 +149,15 @@ export function jsonString(v: unknown): string {
     return String(v);
   }
 }
+
+// compactCount shortens a count of 1,000 or more for a narrow badge: 1234 →
+// "1.2k", 12345 → "12k", 1234567 → "1.2M". It rounds down, so a badge never
+// claims more than the real count (9999 → "9.9k", 999999 → "999k"). Counts
+// under 1,000 are shown as is.
+export function compactCount(n: number): string {
+  if (!Number.isFinite(n) || Math.abs(n) < 1000) return String(n);
+  const [scale, unit] = Math.abs(n) >= 1_000_000 ? [1_000_000, "M"] : [1000, "k"];
+  const v = Math.abs(n) / scale;
+  const shown = v < 10 ? Math.floor(v * 10) / 10 : Math.floor(v);
+  return `${n < 0 ? "-" : ""}${shown}${unit}`;
+}

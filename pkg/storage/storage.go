@@ -444,6 +444,109 @@ type ScopedIncidentWindowCounter interface {
 	CountIncidentsByStatusSinceForScope(scope tenancy.OrgScope, since time.Time) (IncidentStatusCounts, error)
 }
 
+// IncidentCountTimeout is the longest one incident count may run in the
+// database. A count that reaches it is cancelled there, not only abandoned by
+// the caller, so counts cannot pile up behind a slow table.
+const IncidentCountTimeout = 5 * time.Second
+
+// ErrCountTimeout marks a count that ran out of time. The returned error also
+// wraps the driver's own error.
+var ErrCountTimeout = errors.New("storage: incident count timed out")
+
+// IncidentListTimeout is the longest one incident list or search page read
+// may run in the database. Like a count, a read that reaches it is cancelled
+// there, so a stalled incident table cannot hold pool connections that other
+// work, such as Kubernetes history saves, needs.
+const IncidentListTimeout = 5 * time.Second
+
+// ErrListTimeout marks an incident page read that ran out of time. The page is
+// not served: a partial or empty page must never read as the complete list.
+var ErrListTimeout = errors.New("storage: incident list timed out")
+
+// ContextIncidentPager is IncidentPager's page read with a caller context: it
+// stops when ctx ends and never runs past IncidentListTimeout.
+type ContextIncidentPager interface {
+	ListIncidentsPageContext(ctx context.Context, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// ScopedContextIncidentPager is the organization-aware ContextIncidentPager.
+type ScopedContextIncidentPager interface {
+	ListIncidentsPageForScopeContext(ctx context.Context, scope tenancy.OrgScope, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// ContextIncidentSearchPager is IncidentSearchPager's page read with a caller
+// context: it stops when ctx ends and never runs past IncidentListTimeout.
+type ContextIncidentSearchPager interface {
+	SearchIncidentsPageContext(ctx context.Context, query, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// ScopedContextIncidentSearchPager is the organization-aware
+// ContextIncidentSearchPager.
+type ScopedContextIncidentSearchPager interface {
+	SearchIncidentsPageForScopeContext(ctx context.Context, scope tenancy.OrgScope, query, origin string, offset, limit int) ([]*IncidentRecord, error)
+}
+
+// ListIncidentsPageContext reads one incident page with the context-aware
+// read when pager has it, and the plain one otherwise.
+func ListIncidentsPageContext(ctx context.Context, pager IncidentPager, origin string, offset, limit int) ([]*IncidentRecord, error) {
+	if cp, ok := pager.(ContextIncidentPager); ok {
+		return cp.ListIncidentsPageContext(ctx, origin, offset, limit)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return pager.ListIncidentsPage(origin, offset, limit)
+}
+
+// SearchIncidentsPageContext reads one search page with the context-aware
+// read when pager has it, and the plain one otherwise.
+func SearchIncidentsPageContext(ctx context.Context, pager IncidentSearchPager, query, origin string, offset, limit int) ([]*IncidentRecord, error) {
+	if cp, ok := pager.(ContextIncidentSearchPager); ok {
+		return cp.SearchIncidentsPageContext(ctx, query, origin, offset, limit)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return pager.SearchIncidentsPage(query, origin, offset, limit)
+}
+
+// ContextIncidentWindowCounter is IncidentWindowCounter with a caller context:
+// the count stops when ctx ends, and never runs past IncidentCountTimeout.
+type ContextIncidentWindowCounter interface {
+	CountIncidentsByStatusSinceContext(ctx context.Context, since time.Time) (IncidentStatusCounts, error)
+}
+
+// ScopedContextIncidentWindowCounter is the organization-aware form of
+// ContextIncidentWindowCounter.
+type ScopedContextIncidentWindowCounter interface {
+	CountIncidentsByStatusSinceForScopeContext(ctx context.Context, scope tenancy.OrgScope, since time.Time) (IncidentStatusCounts, error)
+}
+
+// CountIncidentsByStatusSinceContext counts incidents created at or after
+// since (zero since is unbounded) with the best capability store has: the
+// context-aware count, the plain window count, or a tally over the
+// provider-bounded history. Every backend therefore gives the same numbers
+// through one call.
+func CountIncidentsByStatusSinceContext(ctx context.Context, store Provider, since time.Time) (IncidentStatusCounts, error) {
+	if store == nil {
+		return IncidentStatusCounts{}, nil
+	}
+	if wc, ok := store.(ContextIncidentWindowCounter); ok {
+		return wc.CountIncidentsByStatusSinceContext(ctx, since)
+	}
+	if err := ctx.Err(); err != nil {
+		return IncidentStatusCounts{}, err
+	}
+	if wc, ok := store.(IncidentWindowCounter); ok {
+		return wc.CountIncidentsByStatusSince(since)
+	}
+	recs, err := store.ListIncidents(0)
+	if err != nil {
+		return IncidentStatusCounts{}, err
+	}
+	return StatusCountsSince(recs, since), nil
+}
+
 // IncidentServiceCounter is an optional capability for service-scoped incident
 // summaries. Backends can push org, service, and time predicates into storage
 // instead of filtering a bounded whole-table page in the controller.

@@ -162,12 +162,19 @@ func TestNativeReadAdmissionHoldsTwoHundredHTTPBodies(t *testing.T) {
 	defer cancel()
 	var workers sync.WaitGroup
 	errs := make(chan error, MaxProcessLogReads)
+	// Each reader starts once the one before it holds its body open. Dialing
+	// all 200 at once overflows the test listener's accept queue, which the
+	// operating system caps (128 on macOS), and the extra connections are
+	// reset before the server sees them; that measures the host, not the
+	// admission limit. Opening them one after another still ends with 200
+	// bodies held at the same time.
 	for i := 0; i < MaxProcessLogReads; i++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			errs <- service.streamPodLogs(ctx, PodLogStreamOptions{Namespace: "shop", Pod: "api", Container: "app"}, func(PodLogStreamEvent) error { return nil }, time.Minute, time.Minute, time.Minute, MaxLogStreamBytes)
 		}()
+		waitNativeCount(t, &backend.active, int32(i+1))
 	}
 	waitNativeCount(t, &backend.active, 200)
 	before := backend.opened.Load()
