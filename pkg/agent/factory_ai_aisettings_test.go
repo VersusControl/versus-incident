@@ -169,10 +169,10 @@ func TestAIConstructionFailureLogExplainsTrustedConfigurationErrors(t *testing.T
 	got := output.String()
 	for _, want := range []string{
 		`configuration error: eino: unsupported ai provider "unknown"`,
-		`supported: claude, deepseek, gemini, ollama, openai, qwen`,
+		`supported: claude, deepseek, gemini, litellm, ollama, openai, qwen`,
 		`configuration error: eino: model is empty`,
 		`unsupported ai provider "claude" for embeddings`,
-		`supported: gemini, ollama, openai`,
+		`supported: gemini, litellm, ollama, openai`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("construction diagnostics %q missing %q", got, want)

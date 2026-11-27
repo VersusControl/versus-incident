@@ -37,14 +37,17 @@ type embedderBuilder func(ctx context.Context, req embedderRequest) (embedding.E
 // subset of the chat registry: only providers that actually expose an eino-ext
 // embedding component are wired. Providers without embeddings (e.g. deepseek,
 // claude) deliberately have no entry and fail fast when RAG asks for an
-// embedder — there is NO silent fallback to openai. Gemini IS wired here because
+// embedder - there is NO silent fallback to openai. LiteLLM IS wired because it
+// proxies the OpenAI-compatible /v1/embeddings API (see buildLiteLLMEmbedder).
+// Gemini IS wired here because
 // eino-ext ships a Gemini embedding component (gemini-embedding-001 /
 // text-embedding-004); it authenticates with the api key via x-goog-api-key, not
 // a Bearer token; its runtime key uses x-goog-api-key.
 var embedderBuilders = map[string]embedderBuilder{
-	"openai": buildOpenAIEmbedder,
-	"ollama": buildOllamaEmbedder,
-	"gemini": buildGeminiEmbedder,
+	"openai":  buildOpenAIEmbedder,
+	"ollama":  buildOllamaEmbedder,
+	"gemini":  buildGeminiEmbedder,
+	"litellm": buildLiteLLMEmbedder,
 }
 
 func supportedEmbedderProviders() []string {
@@ -124,6 +127,18 @@ func buildOpenAIEmbedder(ctx context.Context, req embedderRequest) (embedding.Em
 		HTTPClient: httpClient,
 		Timeout:    req.timeout,
 	})
+}
+
+// buildLiteLLMEmbedder wires embeddings through a LiteLLM gateway. LiteLLM
+// proxies the OpenAI-compatible /v1/embeddings API, so it reuses the OpenAI
+// embedding client and only supplies the LiteLLM default endpoint (the local
+// proxy) when no base URL is configured, matching buildLiteLLMChatModel so an
+// operator who standardises on "litellm" can run RAG without switching provider.
+func buildLiteLLMEmbedder(ctx context.Context, req embedderRequest) (embedding.Embedder, error) {
+	if req.baseURL == "" {
+		req.baseURL = "http://localhost:4000/v1"
+	}
+	return buildOpenAIEmbedder(ctx, req)
 }
 
 // buildOllamaEmbedder wires a local Ollama embedding model. Ollama is keyless;

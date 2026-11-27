@@ -19,9 +19,9 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/core"
 )
 
-// This file is the per-provider proving suite for the four chat backends that
-// ship in the registry alongside openai/gemini — deepseek, qwen, ollama and
-// claude. It mirrors the egress-capture pattern of
+// This file is the per-provider proving suite for the five chat backends that
+// ship in the registry alongside openai/gemini — deepseek, qwen, ollama,
+// claude and litellm. It mirrors the egress-capture pattern of
 // chatmodel_test.go / gemini_test.go: each provider either round-trips a
 // finding through an httptest server (asserting the outbound auth header and
 // JSON-mode knob) or, where the SDK cannot be hit via httptest, asserts the
@@ -46,6 +46,9 @@ func TestChatModel_RegistryBuildsAllProviders(t *testing.T) {
 		{"Ollama", "llama3"},
 		{"claude", "claude-3-5-sonnet-20241022"},
 		{"CLAUDE", "claude-3-5-sonnet-20241022"},
+		{"litellm", "gpt-5"},
+		{"LiteLLM", "gpt-5"},
+		{" litellm ", "gpt-5"},
 	}
 	for _, tc := range cases {
 		t.Run(strings.TrimSpace(tc.provider), func(t *testing.T) {
@@ -75,7 +78,7 @@ func TestChatModel_RegistryBuildsAllProviders(t *testing.T) {
 // (case-insensitive, empty ⇒ the openai default; unknown ⇒ false).
 func TestSupportedProvidersExported(t *testing.T) {
 	got := einowrap.SupportedProviders()
-	want := map[string]bool{"openai": true, "deepseek": true, "qwen": true, "ollama": true, "claude": true, "gemini": true}
+	want := map[string]bool{"openai": true, "deepseek": true, "qwen": true, "ollama": true, "claude": true, "gemini": true, "litellm": true}
 	if len(got) != len(want) {
 		t.Fatalf("SupportedProviders() = %v, want the %d registered providers", got, len(want))
 	}
@@ -270,6 +273,111 @@ func TestChatModel_Qwen_EgressBearerAndJSONMode(t *testing.T) {
 	}
 	if got.Title != expected.Title {
 		t.Errorf("Title = %q, want %q", got.Title, expected.Title)
+	}
+}
+
+// TestChatModel_LiteLLM_EgressBearerAndJSONMode proves the LiteLLM path end to
+// end: a LiteLLM proxy is OpenAI-compatible, so the runtime virtual key rides the
+// Bearer Authorization header, the JSON-mode request carries
+// response_format:{type:json_object}, and the reply round-trips through
+// detect.ParseFinding. It also proves opts.BaseURL overrides the built-in local
+// proxy default (http://localhost:4000/v1) so the test can point at httptest.
+func TestChatModel_LiteLLM_EgressBearerAndJSONMode(t *testing.T) {
+	expected := core.AIFinding{
+		Title:    "Connection pool exhausted",
+		Summary:  "the api service ran out of upstream DB connections.",
+		Severity: "high",
+		Category: "database",
+	}
+	var (
+		mu       sync.Mutex
+		seenAuth string
+		seenBody map[string]any
+	)
+	srv := newOpenAICompatServer(t, expected, &seenAuth, &seenBody, &mu)
+	defer srv.Close()
+
+	cfg := config.AgentAIConfig{
+		Provider:    "litellm",
+		APIKey:      "sk-litellm-virtual-key",
+		Model:       "gpt-5",
+		Temperature: 0.2,
+		MaxTokens:   256,
+	}
+	ctx := context.Background()
+	cm, err := einowrap.NewChatModel(ctx, cfg, einowrap.Options{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewChatModel(litellm): %v", err)
+	}
+	msg, err := cm.Generate(ctx, []*schema.Message{schema.SystemMessage("system"), schema.UserMessage("user")})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seenAuth != "Bearer sk-litellm-virtual-key" {
+		t.Errorf("Authorization = %q, want Bearer sk-litellm-virtual-key", seenAuth)
+	}
+	if got := responseFormatType(seenBody); got != "json_object" {
+		t.Errorf("response_format.type = %q, want json_object (litellm OpenAI-compatible JSON-mode)", got)
+	}
+	// The "gpt-5" alias is a beta-limited family: the shared OpenAI SDK rejects an
+	// explicit temperature client-side, so the litellm builder must omit it (same
+	// as buildOpenAIChatModel). Prove it never reached the wire.
+	if _, hasTemp := seenBody["temperature"]; hasTemp {
+		t.Errorf("temperature was sent for a gpt-5 alias: %v; want it omitted (beta-limitation)", seenBody["temperature"])
+	}
+	got, err := detect.ParseFinding(msg.Content)
+	if err != nil {
+		t.Fatalf("ParseFinding: %v\nraw: %s", err, msg.Content)
+	}
+	if got.Title != expected.Title || got.Severity != expected.Severity {
+		t.Errorf("finding = %+v, want title=%q severity=%q", got, expected.Title, expected.Severity)
+	}
+}
+
+// TestChatModel_LiteLLM_ConfigBaseURLRoutesEgress proves B1: the operator-facing
+// cfg.BaseURL (agent.ai.base_url / AGENT_AI_BASE_URL) actually points the LiteLLM
+// provider at a remote gateway. Here opts.BaseURL (the test seam) is left empty
+// and the endpoint is supplied ONLY through cfg.BaseURL, so a request that lands
+// on the httptest server proves the config knob is wired end-to-end rather than
+// being locked to the localhost:4000 default.
+func TestChatModel_LiteLLM_ConfigBaseURLRoutesEgress(t *testing.T) {
+	expected := core.AIFinding{
+		Title:    "Disk pressure",
+		Summary:  "node approaching disk capacity.",
+		Severity: "medium",
+		Category: "infrastructure",
+	}
+	var (
+		mu       sync.Mutex
+		seenAuth string
+		seenBody map[string]any
+	)
+	srv := newOpenAICompatServer(t, expected, &seenAuth, &seenBody, &mu)
+	defer srv.Close()
+
+	cfg := config.AgentAIConfig{
+		Provider:  "litellm",
+		APIKey:    "sk-litellm-virtual-key",
+		BaseURL:   srv.URL, // operator knob; NOT the test-only Options.BaseURL
+		Model:     "gpt-4o-mini",
+		MaxTokens: 256,
+	}
+	ctx := context.Background()
+	cm, err := einowrap.NewChatModel(ctx, cfg, einowrap.Options{}) // no test seam
+	if err != nil {
+		t.Fatalf("NewChatModel(litellm, cfg.BaseURL): %v", err)
+	}
+	if _, err := cm.Generate(ctx, []*schema.Message{schema.SystemMessage("system"), schema.UserMessage("user")}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seenAuth != "Bearer sk-litellm-virtual-key" {
+		t.Errorf("Authorization = %q, want Bearer sk-litellm-virtual-key (request must reach the cfg.BaseURL endpoint)", seenAuth)
 	}
 }
 

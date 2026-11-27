@@ -341,7 +341,7 @@ func TestRunbookBootLogsActionableUnsupportedEmbedderProvider(t *testing.T) {
 	for _, want := range []string{
 		"find_runbook disabled: embedder configuration error",
 		`unsupported ai provider "claude" for embeddings`,
-		"supported: gemini, ollama, openai",
+		"supported: gemini, litellm, ollama, openai",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("runbook boot log %q missing %q", got, want)
