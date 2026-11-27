@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -93,4 +94,46 @@ func (p *postgresProvider) evidenceCutoff() time.Time {
 		return time.Time{}
 	}
 	return time.Now().UTC().Add(-p.evidenceRetention)
+}
+
+// catchUpWithoutMonth keeps catch-up resolutions out of months whose
+// partition is gone: retention dropped it, or it was never made. A catch-up
+// resolution is dated just after the issue's last sighting, which can be in
+// such a month. The issue still resolves, but its journal record is left out
+// and its closing observation is not written, so the save never recreates
+// the month. It answers the records to write and the state whose
+// observations are written; the full state still links the issue's versions.
+func catchUpWithoutMonth(ctx context.Context, tx *sql.Tx, state evidenceState, records []EvidenceRecord) ([]EvidenceRecord, evidenceState, error) {
+	if len(state.caughtUp) == 0 {
+		return records, state, nil
+	}
+	dropped := map[string]bool{}
+	for _, closed := range state.caughtUp {
+		month := closed.UTC().Format("200601")
+		if _, checked := dropped[month]; checked {
+			continue
+		}
+		var present bool
+		if err := tx.QueryRowContext(ctx, `SELECT bool_and(COALESCE((SELECT relkind<>'p' FROM pg_class WHERE oid=to_regclass(parent)),TRUE) OR to_regclass(child) IS NOT NULL)
+ FROM (VALUES ('kubernetes_evidence_events','evidence_event_month_'||$1::text),('kubernetes_evidence_occurrence_observations','evidence_observation_month_'||$1::text)) AS months(parent,child)`, month).Scan(&present); err != nil {
+			return nil, state, err
+		}
+		dropped[month] = !present
+	}
+	kept := records[:0:0]
+	for _, record := range records {
+		if record.Type == EvidenceIssueCaughtUp && dropped[record.At.UTC().Format("200601")] {
+			continue
+		}
+		kept = append(kept, record)
+	}
+	written := state
+	written.Observations = make([]occurrenceObservation, 0, len(state.Observations))
+	for _, observation := range state.Observations {
+		if closed, caught := state.caughtUp[observation.OccurrenceID]; caught && observation.At.Equal(closed) && dropped[closed.UTC().Format("200601")] {
+			continue
+		}
+		written.Observations = append(written.Observations, observation)
+	}
+	return kept, written, nil
 }

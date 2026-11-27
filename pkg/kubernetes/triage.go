@@ -14,6 +14,8 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/kubernetes/breaklogs"
 	kubebreaks "github.com/VersusControl/versus-incident/pkg/kubernetes/breaks"
 	kubechanges "github.com/VersusControl/versus-incident/pkg/kubernetes/changes"
+	"github.com/VersusControl/versus-incident/pkg/logging"
+	"github.com/VersusControl/versus-incident/pkg/storage"
 )
 
 type SyncStatus struct {
@@ -246,7 +248,33 @@ func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage)
 			live.Partial = true
 		}
 	}
-	for rootUID, positions := range need {
+	// Every root is looked up in one history read, each as its own read of
+	// the last window would answer it.
+	roots := make([]string, 0, len(need))
+	for rootUID := range need {
+		roots = append(roots, rootUID)
+	}
+	sort.Strings(roots)
+	subjects := make([]storage.EvidenceSubject, len(roots))
+	for i, rootUID := range roots {
+		subjects[i] = storage.EvidenceSubject{RootUID: rootUID, Namespace: page.Items[need[rootUID][0]].Root.Namespace}
+	}
+	var pages []IssuePage
+	var failures []error
+	var readErr error
+	// outOfTime is set when the lookup's own bound ran out before the read
+	// finished. That says nothing about the store: the time may have gone to
+	// waiting for a connection in this process.
+	outOfTime := false
+	if len(roots) > 0 {
+		lookup, stop := context.WithTimeout(ctx, openOccurrenceLookupTimeout)
+		now := time.Now().UTC()
+		pages, failures, readErr = service.historicalOpenIssues(lookup, subjects, now.Add(-breaklogs.Retention), now, 100)
+		outOfTime = errors.Is(lookup.Err(), context.DeadlineExceeded)
+		stop()
+	}
+	for index, rootUID := range roots {
+		positions := need[rootUID]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -254,18 +282,27 @@ func (service *Service) pinOpenOccurrences(ctx context.Context, page *IssuePage)
 			unpin(positions)
 			continue
 		}
-		lookup, stop := context.WithTimeout(ctx, openOccurrenceLookupTimeout)
-		stored, err := service.historicalIssues(lookup, IssueOptions{RootUID: rootUID, Namespace: page.Items[positions[0]].Root.Namespace, Since: time.Now().UTC().Add(-breaklogs.Retention), Until: time.Now().UTC(), Limit: 100, itemsOnly: true})
-		stop()
+		err := readErr
+		var stored IssuePage
+		if err == nil {
+			stored, err = pages[index], failures[index]
+		}
 		if err != nil {
 			if callerErr := ctx.Err(); callerErr != nil {
 				return callerErr
 			}
-			if !occurrenceLookupUnavailable(err) {
+			ranOut := outOfTime && (errors.Is(err, context.DeadlineExceeded) || occurrenceLookupUnavailable(err))
+			if !ranOut && !occurrenceLookupUnavailable(err) {
 				return err
 			}
 			storeDown = true
-			service.logOccurrenceLookupUnavailable()
+			if ranOut {
+				// The live issues stand without their saved occurrences for
+				// this page; only a fault the store reported is a warning.
+				logging.Debugf("kubernetes: cluster %q occurrence lookup ran out of time after %s; live issues listed without their saved occurrences", service.scope.ClusterID, openOccurrenceLookupTimeout)
+			} else {
+				service.logOccurrenceLookupUnavailable()
+			}
 			markPartial()
 			unpin(positions)
 			continue

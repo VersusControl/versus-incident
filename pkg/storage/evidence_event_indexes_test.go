@@ -16,23 +16,21 @@ import (
 // after "USING btree ".
 var keptEventIndexes = []string{
 	"(scope_key, event_id, event_version, event_at)",
-	"(scope_key, event_id, sequence DESC)",
 	"(scope_key, event_type, event_at DESC, event_id DESC)",
 	"(scope_key, event_type, observed_at DESC, event_id DESC)",
 	"(scope_key, gap_to DESC, event_id DESC) WHERE (event_type = 'coverage_gap'::text)",
 	"(scope_key, namespace, event_at DESC, event_id DESC)",
 	"(scope_key, namespace, kind, resource_name, event_at DESC, event_id DESC)",
-	"(scope_key, namespace, kind, root_uid, rule, event_at DESC, event_id DESC) WHERE (event_type = ANY (ARRAY['issue_opened'::text, 'issue_observed'::text, 'issue_resolved'::text]))",
 	"(scope_key, root_uid, event_at DESC, event_id DESC)",
 	"(scope_key, sequence DESC)",
 	"(sequence, event_at)",
 }
 
 // guideDroppedIndexes are the journal indexes a fresh installation has that
-// the migration guide removes.
+// the migration guide removes. The schema itself drops the unread ones the
+// guide also names, so a fresh installation no longer has those.
 var guideDroppedIndexes = []string{
 	"evidence_partition_current_break",
-	"evidence_partition_current_namespace",
 	"evidence_partition_current_root",
 	"evidence_partition_current_type",
 	"evidence_partition_event_pod",
@@ -375,8 +373,10 @@ func auditJournalReads(t *testing.T, p *postgresProvider, key string, month time
 
 // movesOffRetiredIndex are the reads that used an index the guide removes: changes of
 // one type read the type index instead of the rule index, at a slightly higher
-// estimate, ordered the same way.
-var movesOffRetiredIndex = map[string]bool{"changes of a type": true}
+// estimate, ordered the same way; and the reads of one event's versions move
+// from the priority index to the event's unique key, which leads with the
+// same columns.
+var movesOffRetiredIndex = map[string]bool{"changes of a type": true, "newest version before heads": true, "shadowed versions": true}
 
 // Every way the history pages and saves read the journal is planned over a
 // seeded month before and after the migration guide's index step. After it

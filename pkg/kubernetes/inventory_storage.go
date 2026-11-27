@@ -621,6 +621,8 @@ func (lease *inventoryLease) publish(ctx context.Context, service *Service, gene
 		if evidenceErr := service.prepareEvidence(ctx, generation, previous); evidenceErr != nil {
 			generation.EvidenceFailure = errorClass(evidenceErr)
 			refusal = "reason=" + captureRefusalReason(evidenceErr) + " class=" + generation.EvidenceFailure
+		} else if generation.EvidenceBatch != nil {
+			generation.EvidenceBatch.ChangeLimit = historySaveChangeLimit(cache)
 		}
 		noteCaptureRefusal(service.scope, cache, refusal)
 	}
@@ -1059,6 +1061,23 @@ func (service *Service) finishHistorySave(cache *inventoryCache, generation inve
 	cache.mu.Unlock()
 	problems().Fail(slog.LevelWarn, problemKey(service.scope.OrgID, service.scope.ClusterID, "history_save"), "storage_unavailable",
 		"kubernetes: cluster %q history is not saving (storage unavailable); live views stay current and the next capture is saved after a backoff, %d captures dropped; check the history database is reachable and answering quickly", service.scope.ClusterID, dropped)
+}
+
+// minHistorySaveChanges is the fewest issue changes a save is limited to
+// after failed saves.
+const minHistorySaveChanges = 100
+
+// historySaveChangeLimit is how many issue changes the next save may apply:
+// the store's default, halved for each save the store failed in a row, so a
+// slow store is offered smaller saves and never a larger one.
+func historySaveChangeLimit(cache *inventoryCache) int {
+	failures := 0
+	if cache != nil {
+		cache.mu.RLock()
+		failures = cache.historySave.failures
+		cache.mu.RUnlock()
+	}
+	return max(storage.DefaultEvidenceChangeLimit>>min(failures, 10), minHistorySaveChanges)
 }
 
 // previousCapture is the generation a new capture is diffed from: the one

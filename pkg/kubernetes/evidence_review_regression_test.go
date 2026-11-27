@@ -1848,3 +1848,138 @@ func TestTimelineCountNeverIncludesRowsTheListCannotShow(t *testing.T) {
 		})
 	}
 }
+
+// subjectCountingStore reads several roots' occurrences together, counting
+// those reads apart from single occurrence reads.
+type subjectCountingStore struct {
+	countingOccurrenceStore
+	together *atomic.Int32
+}
+
+func (store subjectCountingStore) QueryEvidenceSubjects(ctx context.Context, scope storage.EvidenceScope, query storage.EvidenceQuery, subjects []storage.EvidenceSubject) ([]storage.EvidencePage, error) {
+	store.together.Add(1)
+	return storage.QueryEvidenceSubjects(ctx, store.countingOccurrenceStore.EvidenceStore, scope, query, subjects)
+}
+
+// The live issue list pins the open occurrence of each broken root from one
+// history read for all its roots, and each root keeps its own occurrence.
+func TestLiveIssuesPinEveryRootFromOneRead(t *testing.T) {
+	service, store, scope := reviewHistoryService(t)
+	now := time.Now().UTC()
+	type broken struct {
+		root   ObjectRef
+		opened time.Time
+	}
+	roots := []broken{
+		{ObjectRef{Kind: "Deployment", Namespace: "shop", Name: "api", UID: "api-root"}, now.Add(-10 * time.Minute).Truncate(time.Second)},
+		{ObjectRef{Kind: "Deployment", Namespace: "store", Name: "web", UID: "web-root"}, now.Add(-20 * time.Minute).Truncate(time.Second)},
+	}
+	records := []kubeindex.Record{{Kind: "Namespace", Name: "kube-system", UID: "physical"}}
+	batch := storage.EvidenceBatch{ID: "capture:open", At: roots[0].opened, Epoch: "synthetic"}
+	for _, item := range roots {
+		raw, _ := json.Marshal(Issue{Root: item.root, Rule: "pod.crash_loop", Severity: "warning", Broken: true, BrokeAt: &item.opened})
+		batch.Issues = append(batch.Issues, storage.EvidenceIssue{AuthorizationKind: "Pod", Key: item.root.Name, Namespace: item.root.Namespace, Kind: item.root.Kind, UID: item.root.UID, Rule: "pod.crash_loop", LastSeen: roots[0].opened, Broken: true, Payload: raw})
+		records = append(records, kubeindex.Record{Kind: item.root.Kind, Namespace: item.root.Namespace, Name: item.root.Name, UID: item.root.UID},
+			kubeindex.Record{Kind: "Pod", Namespace: item.root.Namespace, Name: item.root.Name + "-0", UID: item.root.UID + "-pod", Phase: "Running", ReadyStatus: "False", CreatedAt: item.opened.Add(-time.Hour), ReadyTransitionAt: item.opened,
+				Owners: []kubeindex.OwnerRef{{Kind: item.root.Kind, UID: item.root.UID, Controller: true}}, Containers: []kubeindex.ContainerState{{Name: "app", WaitingReason: "CrashLoopBackOff", RestartCount: 2, TerminatedAt: now.Add(-time.Minute), TerminatedReason: "Error"}}})
+	}
+	if err := store.CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatal(err)
+	}
+	provider := service.usageProvider()
+	counting := subjectCountingStore{countingOccurrenceStore{Provider: provider, EvidenceStore: provider.(storage.EvidenceStore), BlobCAS: provider.(storage.BlobCAS), reads: &atomic.Int32{}, itemsOnly: &atomic.Int32{}}, &atomic.Int32{}}
+	service.SetChangeStorage(counting)
+	kinds := map[string]kubeindex.KindStatus{}
+	for kind := range indexedResourceIDs {
+		kinds[kind] = kubeindex.KindStatus{State: "ready", ObservedAt: now, CompletedAt: now}
+	}
+	live, err := service.Issues(pinInventory(t.Context(), inventoryGeneration{View: kubeindex.Snapshot{Kinds: kinds, Records: records}}), IssueOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := 0
+	for _, item := range roots {
+		for _, issue := range live.Items {
+			if issue.Root.UID != item.root.UID || issue.Rule != "pod.crash_loop" {
+				continue
+			}
+			if issue.OccurrenceID == "" || issue.BrokeAt == nil || !issue.BrokeAt.Equal(item.opened) {
+				t.Fatalf("%s pinned id=%q at=%v, want its own occurrence opened at %v", item.root.UID, issue.OccurrenceID, issue.BrokeAt, item.opened)
+			}
+			pinned++
+		}
+	}
+	if pinned != len(roots) {
+		t.Fatalf("pinned %d of %d broken roots: %+v", pinned, len(roots), live.Items)
+	}
+	if counting.together.Load() != 1 || counting.reads.Load() != 0 {
+		t.Fatalf("pins made %d reads together and %d single reads, want one read for every root", counting.together.Load(), counting.reads.Load())
+	}
+}
+
+// waitingOccurrenceStore holds every occurrence read until the read's own
+// context ends, as a read queued for a history connection does, and then
+// returns that context's error without the store having answered.
+type waitingOccurrenceStore struct {
+	storage.Provider
+	storage.EvidenceStore
+	reads *atomic.Int32
+}
+
+func (store waitingOccurrenceStore) QueryEvidence(ctx context.Context, scope storage.EvidenceScope, query storage.EvidenceQuery) (storage.EvidencePage, error) {
+	if query.Type != "occurrence" {
+		return store.EvidenceStore.QueryEvidence(ctx, scope, query)
+	}
+	store.reads.Add(1)
+	<-ctx.Done()
+	return storage.EvidencePage{}, ctx.Err()
+}
+
+// When the occurrence lookup's own time runs out before the store answers,
+// the live issues are listed without their saved occurrences and nothing is
+// reported as a storage fault: no warning and no raised problem. A store that
+// reports its own fault still warns.
+func TestLiveIssuesLookupOutOfTimeIsNotAStoreFault(t *testing.T) {
+	previous := openOccurrenceLookupTimeout
+	openOccurrenceLookupTimeout = 50 * time.Millisecond // testlint:allow the lookup's own bound is the behaviour under test; the store waits for it
+	t.Cleanup(func() { openOccurrenceLookupTimeout = previous })
+	logs := captureLogLines(t, "info")
+	throttle := isolateProblems(t, 10*time.Minute, newFakeClock().Now)
+	service, store, _ := reviewHistoryService(t)
+	reviewHistoryCycle(t, service)
+	healthy := service.usageProvider()
+	reads := &atomic.Int32{}
+	service.SetChangeStorage(waitingOccurrenceStore{Provider: healthy, EvidenceStore: store, reads: reads})
+	ctx := liveBrokenPodsContext(t.Context(), "api-0", "api-1")
+	logs.reset()
+	page, err := service.Issues(ctx, IssueOptions{})
+	if err != nil {
+		t.Fatalf("a lookup out of time failed the live page: %v", err)
+	}
+	if reads.Load() == 0 {
+		t.Fatal("the lookup never reached the store")
+	}
+	broken := 0
+	for _, item := range page.Items {
+		if item.Broken {
+			broken++
+			if !item.Partial || item.OccurrenceID != "" || item.BrokeAt != nil {
+				t.Fatalf("an unpinned live item kept an occurrence selector: %+v", item)
+			}
+		}
+	}
+	if broken == 0 || !page.Sync.Partial {
+		t.Fatalf("want the live broken items listed without pins, got %+v", page)
+	}
+	if shown := visible(logs.all()); len(shown) != 0 || throttle.Len() != 0 {
+		t.Fatalf("a lookup out of time was reported as a store fault: lines=%q problems=%d", shown, throttle.Len())
+	}
+	service.SetChangeStorage(slowOccurrenceStore{Provider: healthy, EvidenceStore: store, cause: storage.ErrEvidenceNotReady, reads: &atomic.Int32{}})
+	if _, err = service.Issues(ctx, IssueOptions{}); err != nil {
+		t.Fatalf("a store fault failed the live page: %v", err)
+	}
+	warnings := visible(logs.all())
+	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "WARN ") || !strings.Contains(warnings[0], "storage unavailable") || throttle.Len() != 1 {
+		t.Fatalf("a store fault did not warn once: lines=%q problems=%d", warnings, throttle.Len())
+	}
+}

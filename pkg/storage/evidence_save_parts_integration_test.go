@@ -142,9 +142,10 @@ func TestPostgresLargeCaptureSavesInBoundedParts(t *testing.T) {
 	worstJournalConsistent(t, p, scope)
 }
 
-// Every part is bounded by records and by payload bytes, the final one too:
-// lifecycle records derived from issues are saved in parts like any other
-// record, and heavy payloads end a part early.
+// Every part is bounded by records and by payload bytes and holds only the
+// producer's records; heavy payloads end a part early. The issue records a
+// save derives are named after the capture, so only the final transaction
+// that commits it writes them, never more than the batch's change limit.
 func TestPostgresEveryPartIsBoundedByRecordsAndBytes(t *testing.T) {
 	p := worstCaseProvider(t, worstCaseDatabase(t), PostgresOptions{})
 	p.evidenceSaveChunk = 100
@@ -152,7 +153,9 @@ func TestPostgresEveryPartIsBoundedByRecordsAndBytes(t *testing.T) {
 
 	t.Run("issues", func(t *testing.T) {
 		scope := EvidenceScope{OrgID: "default", ClusterID: "parts-issues", ClusterUID: "physical"}
-		batch := savePartsBatch(t, p, scope, "issues", at, 50)
+		const producer, limit = 50, 120
+		batch := savePartsBatch(t, p, scope, "issues", at, producer)
+		batch.ChangeLimit = limit
 		for i := 0; i < 300; i++ {
 			raw, _ := json.Marshal(map[string]any{"rule": "pod.crash_loop", "severity": "warning", "index": i})
 			batch.Issues = append(batch.Issues, EvidenceIssue{Key: fmt.Sprintf("issue-%03d", i), Namespace: "shop", Kind: "Pod", UID: fmt.Sprintf("pod-%03d", i), Rule: "pod.crash_loop", AuthorizationKind: "Pod", LastSeen: at, Payload: raw})
@@ -167,16 +170,28 @@ func TestPostgresEveryPartIsBoundedByRecordsAndBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("transaction sizes %v", log.sizes)
-		if len(log.sizes) < 4 || log.sizes[len(log.sizes)-1] != 0 {
-			t.Fatalf("transaction sizes %v: want the issue lifecycle records saved in parts and a final transaction without journal records", log.sizes)
+		if len(log.sizes) < 2 {
+			t.Fatalf("transaction sizes %v: want parts and a final transaction", log.sizes)
 		}
-		for _, size := range log.sizes {
+		parts, final := log.sizes[:len(log.sizes)-1], log.sizes[len(log.sizes)-1]
+		inParts := 0
+		for _, size := range parts {
 			if size > 100 {
 				t.Fatalf("transaction sizes %v: a part exceeded the chunk", log.sizes)
 			}
+			inParts += size
+		}
+		if inParts != producer {
+			t.Fatalf("transaction sizes %v: the parts wrote %d records, want only the producer's %d", log.sizes, inParts, producer)
+		}
+		if final != limit {
+			t.Fatalf("transaction sizes %v: the final wrote %d issue records, want the change limit %d of the 300 openings", log.sizes, final, limit)
 		}
 		if latest, _ := p.EvidenceCheckpoint(t.Context(), scope); latest.ID != batch.ID {
 			t.Fatalf("checkpoint %q after the save", latest.ID)
+		}
+		if counts := worstCounts(t, p, scope); counts.rows != producer+limit {
+			t.Fatalf("journal after the save: %+v, want the %d producer records and %d openings", counts, producer, limit)
 		}
 		worstJournalConsistent(t, p, scope)
 	})
@@ -210,9 +225,11 @@ func TestPostgresEveryPartIsBoundedByRecordsAndBytes(t *testing.T) {
 }
 
 // A capture that fits one transaction and times out there, by a real server
-// statement timeout, is saved again in parts of half the size; parts after it
-// stay small, and every row lands once.
-func TestPostgresTimedOutSingleTransactionSaveIsSplit(t *testing.T) {
+// statement timeout, saves its journal records in parts of half the size and
+// answers the timeout without running its final transaction again, so the
+// caller backs off. The next attempt's final transaction adopts the parts,
+// and every row lands once.
+func TestPostgresTimedOutSingleTransactionSaveKeepsItsPartsAndAnswersTheTimeout(t *testing.T) {
 	p := worstCaseProvider(t, worstCaseDatabase(t), PostgresOptions{})
 	scope := EvidenceScope{OrgID: "default", ClusterID: "single-timeout", ClusterUID: "physical"}
 	at := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
@@ -229,19 +246,26 @@ func TestPostgresTimedOutSingleTransactionSaveIsSplit(t *testing.T) {
 		}
 		return nil
 	}
-	if err := p.CommitEvidence(t.Context(), scope, batch); err != nil {
-		t.Fatal(err)
-	}
+	err := p.CommitEvidence(t.Context(), scope, batch)
 	var pgErr *pgconn.PgError
 	if !errors.As(answer, &pgErr) || pgErr.Code != "57014" {
 		t.Fatalf("the injected timeout answered %v, want SQLSTATE 57014", answer)
 	}
+	if !evidenceSaveTimedOut(err) {
+		t.Fatalf("the save answered %v, want the final transaction's timeout", err)
+	}
 	t.Logf("transaction sizes %v", log.sizes)
-	if len(log.sizes) < 3 || log.sizes[0] != 400 || log.sizes[1] != defaultEvidenceSaveChunk/2 || log.sizes[len(log.sizes)-1] != 0 {
-		t.Fatalf("transaction sizes %v: the timed-out transaction was not saved again in parts of half the size", log.sizes)
+	if len(log.sizes) != 3 || log.sizes[0] != 400 || log.sizes[1] != defaultEvidenceSaveChunk/2 || log.sizes[2] != 400-defaultEvidenceSaveChunk/2 {
+		t.Fatalf("transaction sizes %v: want the timed-out final, then the journal in parts of half the save chunk, and no second final", log.sizes)
 	}
 	if counts := worstCounts(t, p, scope); counts.rows != 400 || counts.distinct != 400 {
-		t.Fatalf("journal after the split save: %+v", counts)
+		t.Fatalf("journal after the timed-out save: %+v", counts)
+	}
+	if err = p.CommitEvidence(t.Context(), scope, batch); err != nil {
+		t.Fatal(err)
+	}
+	if counts := worstCounts(t, p, scope); counts.rows != 400 || counts.distinct != 400 {
+		t.Fatalf("journal after the next attempt: %+v", counts)
 	}
 	worstJournalConsistent(t, p, scope)
 }
