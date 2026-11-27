@@ -1,0 +1,5 @@
+-- versus:nontransactional
+CREATE INDEX CONCURRENTLY IF NOT EXISTS kubernetes_occurrence_open_span_root ON kubernetes_evidence_occurrence_read_versions USING gist(scope_key,root_uid,tstzrange(first_seen,GREATEST(first_seen,COALESCE(closed_at,'infinity'::timestamptz)),'[]')) WHERE superseded_revision IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS kubernetes_occurrence_open_span_namespace ON kubernetes_evidence_occurrence_read_versions USING gist(scope_key,namespace,tstzrange(first_seen,GREATEST(first_seen,COALESCE(closed_at,'infinity'::timestamptz)),'[]')) WHERE superseded_revision IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS kubernetes_occurrence_open_span_scope ON kubernetes_evidence_occurrence_read_versions USING gist(scope_key,tstzrange(first_seen,GREATEST(first_seen,COALESCE(closed_at,'infinity'::timestamptz)),'[]')) WHERE superseded_revision IS NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS kubernetes_occurrence_visible_span_scope ON kubernetes_evidence_occurrence_read_versions USING gist(scope_key,tstzrange(LEAST(observed_at,superseded_at),superseded_at,'[)')) WHERE superseded_revision IS NOT NULL;

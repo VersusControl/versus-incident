@@ -199,9 +199,46 @@ type EvidenceBatch struct {
 	// Only sufficient successful observations may advance CoveredThrough.
 	// A partial batch can add findings but cannot close absent issues.
 	CoveredThrough time.Time
-	Records        []EvidenceRecord
-	Issues         []EvidenceIssue
+	// HoldOpen names roots, by UID, whose open issues this capture may not
+	// resolve: their evidence was incomplete, so their absence proves
+	// nothing. Other issues still resolve by CoveredThrough.
+	HoldOpen []string `json:",omitempty"`
+	// ChangeLimit bounds the issue changes one save applies; zero is
+	// DefaultEvidenceChangeLimit. Within it come, in order, the openings and
+	// changes of issues the capture reports, then the observations due on the
+	// heartbeat (oldest first), then resolutions (oldest last sighting
+	// first), of which at most MaxCatchUpResolutionsPerSave are catch-up
+	// resolutions; a catch-up over that cap waits while recent resolutions
+	// still apply. The rest wait for a later capture, and CoveredThrough is
+	// not recorded while a resolution waits.
+	ChangeLimit int `json:",omitempty"`
+	// CaptureInterval is how often the producer captures. When set, an issue
+	// the previous saved capture already missed by more than three intervals
+	// is resolved one interval after its last sighting (never after
+	// CoveredThrough), and its record is a catch-up resolution that history
+	// counts leave out.
+	CaptureInterval time.Duration `json:",omitempty"`
+	Records         []EvidenceRecord
+	Issues          []EvidenceIssue
 }
+
+// DefaultEvidenceChangeLimit is the most issue changes one save applies when
+// the batch sets no limit: as many as a capture at the record limit can
+// carry, so a healthy save is never spread over captures. A producer lowers
+// it after failed saves, and a backlog of resolutions larger than it is
+// spread over captures.
+const DefaultEvidenceChangeLimit = MaxEvidenceBatchRecords
+
+// MaxCatchUpResolutionsPerSave is the most catch-up resolutions one save
+// applies, so a backlog of long-gone issues drains over several saves rather
+// than in one large one.
+const MaxCatchUpResolutionsPerSave = 2000
+
+// EvidenceIssueCaughtUp is the type of the record of an issue resolved long
+// after it was last seen, when the resolution catches up with a backlog.
+// It is kept apart from issue_resolved so that history counts and readers of
+// recent changes do not take a backlog for a burst of recoveries.
+const EvidenceIssueCaughtUp = "issue_resolved_catch_up"
 
 type EvidenceQuery struct {
 	Authorities map[string]EvidenceAuthority
@@ -264,7 +301,10 @@ type evidenceState struct {
 	updatedOccurrences map[string]struct{}
 	// storedIssues are the issue rows a database save read before applying
 	// the capture, by occurrence; nil elsewhere.
-	storedIssues       map[string]storedIssue
+	storedIssues map[string]storedIssue
+	// caughtUp holds the occurrences the last applied capture resolved with
+	// a catch-up resolution, and when.
+	caughtUp           map[string]time.Time
 	RootLatest         map[string]string
 	RootCenters        map[string][]string
 	Occurrences        map[string]EvidenceIssue
@@ -485,6 +525,7 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 		return nil, ErrInvalidEvidence
 	}
 	state.updatedOccurrences = map[string]struct{}{}
+	state.caughtUp = nil
 	if state.Checkpoint.Generation != batch.Generation {
 		return nil, ErrEvidenceConflict
 	}
@@ -566,6 +607,16 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 	sort.Strings(state.Checkpoint.Kinds)
 	added := append([]EvidenceRecord(nil), batch.Records...)
 	present := map[string]bool{}
+	budget := batch.ChangeLimit
+	if budget <= 0 {
+		budget = DefaultEvidenceChangeLimit
+	}
+	type seenIssue struct {
+		observed, active          EvidenceIssue
+		exists, changed, advanced bool
+		apply, observe            bool
+	}
+	seen := []seenIssue{}
 	for _, observed := range batch.Issues {
 		if batch.HistoricalOnly {
 			observed.ObservationOnly = true
@@ -605,8 +656,49 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 		}
 		advanced := !exists || observed.LastSeen.Sub(state.LastObservations[active.OccurrenceID]) >= heartbeat
 		changed := !exists || active.Broken != observed.Broken || active.AuthorizationKind != observed.AuthorizationKind || !sameIssueEvidence(active.Payload, observed.Payload)
+		seen = append(seen, seenIssue{observed: observed, active: active, exists: exists, changed: changed, advanced: advanced})
+	}
+	// The limit is spent in order: openings and changes the capture reports,
+	// then due observations, oldest first, then resolutions.
+	used := 0
+	for i := range seen {
+		if seen[i].changed && used < budget {
+			seen[i].apply = true
+			used++
+		}
+	}
+	due := []int{}
+	for i := range seen {
+		if !seen[i].changed && seen[i].advanced {
+			due = append(due, i)
+		}
+	}
+	sort.SliceStable(due, func(a, b int) bool {
+		left, right := seen[due[a]], seen[due[b]]
+		leftAt, rightAt := state.LastObservations[left.active.OccurrenceID], state.LastObservations[right.active.OccurrenceID]
+		if !leftAt.Equal(rightAt) {
+			return leftAt.Before(rightAt)
+		}
+		return left.observed.Key < right.observed.Key
+	})
+	for _, i := range due {
+		if used < budget {
+			seen[i].observe = true
+			used++
+		}
+	}
+	for _, item := range seen {
+		observed, active := item.observed, item.active
+		if !item.exists && !item.apply {
+			// An opening over the limit waits for a later capture, which
+			// reports the issue again. Unless the capture gives the issue's
+			// first sighting, the occurrence then starts at that later
+			// capture. This happens only when more openings arrive than a
+			// lowered limit allows, after failed saves.
+			continue
+		}
 		eventType := "issue_observed"
-		if !exists {
+		if !item.exists {
 			active = observed
 			active.OccurrenceID = evidenceDigest(batch.ID, observed.Key)
 			active.FirstSeen = observed.FirstSeen
@@ -615,30 +707,74 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 			}
 			eventType = "issue_opened"
 		}
-		active.AuthorizationKind = observed.AuthorizationKind
-		active.Broken = observed.Broken
-		active.LastSeen, active.Epoch, active.Payload = observed.LastSeen, batch.Epoch, append(json.RawMessage(nil), observed.Payload...)
+		if item.changed && !item.apply {
+			// A change over the limit waits for a later capture; the issue
+			// is still seen now.
+			active.LastSeen = observed.LastSeen
+		} else {
+			active.AuthorizationKind = observed.AuthorizationKind
+			active.Broken = observed.Broken
+			active.LastSeen, active.Epoch, active.Payload = observed.LastSeen, batch.Epoch, append(json.RawMessage(nil), observed.Payload...)
+		}
 		state.Active[observed.Key] = active
 		state.Occurrences[active.OccurrenceID] = active
 		state.updatedOccurrences[active.OccurrenceID] = struct{}{}
-		if changed || advanced {
-			addOccurrenceObservation(state, active, state.Checkpoint.OccurrenceRevision, changed)
+		if item.apply || item.observe {
+			addOccurrenceObservation(state, active, state.Checkpoint.OccurrenceRevision, item.apply)
 		}
-		if changed {
+		if item.apply {
 			added = append(added, issueEvidence(active, batch, eventType))
 		}
 	}
+	resolutionWaits := false
 	if !batch.CoveredThrough.IsZero() {
+		held := map[string]bool{}
+		for _, uid := range batch.HoldOpen {
+			held[uid] = true
+		}
+		resolving := []string{}
 		for key, active := range state.Active {
-			if present[key] || !active.LastSeen.Before(batch.CoveredThrough) {
+			if present[key] || !active.LastSeen.Before(batch.CoveredThrough) || held[active.UID] {
 				continue
 			}
-			closed := batch.CoveredThrough
+			resolving = append(resolving, key)
+		}
+		sort.Slice(resolving, func(a, b int) bool {
+			left, right := state.Active[resolving[a]], state.Active[resolving[b]]
+			if !left.LastSeen.Equal(right.LastSeen) {
+				return left.LastSeen.Before(right.LastSeen)
+			}
+			return resolving[a] < resolving[b]
+		})
+		caughtUp := 0
+		for _, key := range resolving {
+			if used >= budget {
+				resolutionWaits = true
+				break
+			}
+			active := state.Active[key]
+			closed, eventType := evidenceResolution(active.LastSeen, state.Checkpoint.At, batch)
+			if eventType == EvidenceIssueCaughtUp {
+				if caughtUp >= MaxCatchUpResolutionsPerSave {
+					// A later save catches it up; the recent resolutions
+					// after it in this order still apply now.
+					resolutionWaits = true
+					continue
+				}
+				caughtUp++
+			}
+			used++
+			if eventType == EvidenceIssueCaughtUp {
+				if state.caughtUp == nil {
+					state.caughtUp = map[string]time.Time{}
+				}
+				state.caughtUp[active.OccurrenceID] = closed
+			}
 			active.ClosedAt = &closed
 			state.Occurrences[active.OccurrenceID] = active
 			state.updatedOccurrences[active.OccurrenceID] = struct{}{}
 			addOccurrenceObservation(state, active, state.Checkpoint.OccurrenceRevision, true)
-			added = append(added, issueEvidence(active, batch, "issue_resolved"))
+			added = append(added, issueEvidence(active, batch, eventType))
 			delete(state.Active, key)
 		}
 	}
@@ -658,11 +794,31 @@ func applyEvidence(state *evidenceState, batch EvidenceBatch) ([]EvidenceRecord,
 		state.Checkpoint.StartedAt = batch.At
 	}
 	state.Checkpoint.ID, state.Checkpoint.At = batch.ID, batch.At
-	if batch.CoveredThrough.After(state.Checkpoint.CoveredThrough) {
+	if batch.CoveredThrough.After(state.Checkpoint.CoveredThrough) && !resolutionWaits {
 		state.Checkpoint.CoveredThrough = batch.CoveredThrough
 	}
 	updateOccurrenceLookups(state)
 	return added, nil
+}
+
+// evidenceResolution is when an issue last seen at lastSeen resolves under
+// the batch's coverage, and the type of its record. previous is when the last
+// saved capture was taken. An issue that capture already missed by more than
+// three capture intervals was gone well before this one, so it resolves one
+// interval after its last sighting (never after the coverage), with a
+// catch-up record. Any other issue resolves at the coverage, however long
+// the gap between saved captures (a save backoff, a restart or a lease
+// handover); with no earlier capture, none is a catch-up.
+func evidenceResolution(lastSeen, previous time.Time, batch EvidenceBatch) (time.Time, string) {
+	interval := batch.CaptureInterval
+	if interval <= 0 || previous.IsZero() || previous.Sub(lastSeen) <= 3*interval {
+		return batch.CoveredThrough, "issue_resolved"
+	}
+	closed := lastSeen.Add(interval)
+	if closed.After(batch.CoveredThrough) {
+		closed = batch.CoveredThrough
+	}
+	return closed, EvidenceIssueCaughtUp
 }
 
 // Poll timestamps describe occurrence freshness, not a new evidence payload.

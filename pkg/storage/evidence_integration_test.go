@@ -1003,6 +1003,8 @@ func TestPostgresDefaultRetentionKeepsPageLinksOfASteadyCluster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A short walk spreads thinning of these samples over several passes.
+	p.thinning.walk = 256
 	thinned := 0
 	for pass := 0; pass < 4; pass++ {
 		more, err := p.compactEvidenceBatch(t.Context())

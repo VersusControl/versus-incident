@@ -63,8 +63,9 @@ type occurrenceSample struct {
 
 // occurrenceSamples finds the newest samples in two statements, each bounded
 // to whole time values so it is planned for the months it reads: first the
-// last two days before until, then, for the keys that found nothing there,
-// from the earliest opening among them. A version open for years is not
+// last two days before until, then, for the keys that found nothing there and
+// opened before that window, from the earliest opening among them. When every
+// version opened inside the window the first statement is the only one. A version open for years is not
 // looked up in every month since it opened unless it went unsampled.
 func occurrenceSamples(ctx context.Context, tx *sql.Tx, keys []occurrenceSampleKey, until time.Time) ([]occurrenceSample, error) {
 	samples := make([]occurrenceSample, len(keys))
@@ -107,9 +108,12 @@ func occurrenceSamples(ctx context.Context, tx *sql.Tx, keys []occurrenceSampleK
 			return nil, err
 		}
 		rows.Close()
+		// A key whose version opened inside the recent window had its whole
+		// range searched already; only an older opening is looked up again.
+		recent := until.Add(-occurrenceRecentSamples)
 		next := pending[:0]
 		for _, i := range pending {
-			if !samples[i].found {
+			if !samples[i].found && keys[i].opened.Add(-occurrenceSampleSkewDuration).Before(recent) {
 				next = append(next, i)
 			}
 		}
@@ -118,7 +122,27 @@ func occurrenceSamples(ctx context.Context, tx *sql.Tx, keys []occurrenceSampleK
 	return samples, nil
 }
 
+// occurrenceSubjectRoot is the root a read filters by, if any. The root
+// filters must agree for a row to match, so any one of them bounds the lookup.
+func occurrenceSubjectRoot(q EvidenceQuery) string {
+	for _, root := range []string{q.RootUID, q.UID, q.ResourceUID} {
+		if root != "" {
+			return root
+		}
+	}
+	return ""
+}
+
+// occurrenceSubjectColumns names, as SQL expressions, the root and namespace a
+// read is narrowed to when they come from a list of subjects instead of the
+// query; an empty namespace means the subject has none to match.
+type occurrenceSubjectColumns struct{ root, namespace string }
+
 func occurrenceCandidates(keys []string, q EvidenceQuery, c evidenceCursor, cap int, next bool, args *historySQLArgs) string {
+	return occurrenceCandidatesFor(keys, q, c, cap, next, args, nil)
+}
+
+func occurrenceCandidatesFor(keys []string, q EvidenceQuery, c evidenceCursor, cap int, next bool, args *historySQLArgs, columns *occurrenceSubjectColumns) string {
 	branches := []string{}
 	for i, key := range keys {
 		scope, pin := args.add(key), args.add(c.OccurrenceHighs[i])
@@ -133,6 +157,9 @@ func occurrenceCandidates(keys []string, q EvidenceQuery, c evidenceCursor, cap 
 			if f.value != "" {
 				where += " AND i." + f.col + "=" + args.add(f.value)
 			}
+		}
+		if columns != nil {
+			where += " AND i.root_uid=" + columns.root + " AND(" + columns.namespace + "='' OR i.namespace=" + columns.namespace + ")"
 		}
 		if !q.Center.IsZero() {
 			where += " AND i.broke_at=" + args.add(q.Center)
@@ -157,15 +184,27 @@ func occurrenceCandidates(keys []string, q EvidenceQuery, c evidenceCursor, cap 
 		// was open, a version replaced after the range by the span it was the
 		// visible one, and a version replaced since this read was pinned by
 		// the revision that replaced it.
-		// The three earlier sets are each read through their own index alone
-		// (OFFSET 0 keeps the filters out of the index choice) and filtered
-		// afterwards: they are small, while an index on a filter, such as
-		// severity or broken, holds every version ever recorded.
+		// The three earlier sets are each read through their own index, led
+		// by the scope (and the root or namespace for the open spans), alone
+		// (OFFSET 0 keeps the other filters out of the index choice) and
+		// filtered afterwards: they are small, while an index on a filter,
+		// such as severity or broken, holds every version ever recorded.
 		branches = append(branches, "(SELECT "+occurrenceMetadata+" FROM kubernetes_evidence_occurrence_read_versions i WHERE "+where+" AND i.first_seen>="+since+
 			" ORDER BY first_seen DESC,occurrence_id DESC LIMIT "+strconv.Itoa(cap)+")")
+		// The open span is looked up inside the scope and, when the read names
+		// one, inside its root or namespace, so the range index walks only the
+		// spans of that subject instead of every scope's open spans.
+		subject := "i.scope_key=" + scope
+		if columns != nil {
+			subject += " AND i.root_uid=" + columns.root
+		} else if root := occurrenceSubjectRoot(q); root != "" {
+			subject += " AND i.root_uid=" + args.add(root)
+		} else if q.Namespace != "" {
+			subject += " AND i.namespace=" + args.add(q.Namespace)
+		}
 		for _, earlier := range []string{
-			"i.superseded_revision IS NULL AND " + occurrenceOpenSpan + "@>" + since + "::timestamptz",
-			"i.superseded_revision IS NOT NULL AND " + occurrenceVisibleSpan + "@>" + until + "::timestamptz",
+			subject + " AND i.superseded_revision IS NULL AND " + occurrenceOpenSpan + "@>" + since + "::timestamptz",
+			"i.scope_key=" + scope + " AND i.superseded_revision IS NOT NULL AND " + occurrenceVisibleSpan + "@>" + until + "::timestamptz",
 			"i.scope_key=" + scope + " AND i.superseded_revision BETWEEN " + pin + "::bigint+1 AND 9223372036854775807 AND i.superseded_at<=" + until,
 		} {
 			branches = append(branches, "(SELECT "+occurrenceMetadata+" FROM(SELECT * FROM kubernetes_evidence_occurrence_read_versions i WHERE "+earlier+" OFFSET 0) i WHERE "+where+
@@ -227,8 +266,90 @@ func (p *postgresProvider) queryOccurrenceReadPage(ctx context.Context, tx *sql.
 		rows.Close()
 		page.CountCapped = page.Total > 1000
 	}
+	groups, err := occurrenceItemGroups(ctx, tx, keys, q, c, nil)
+	if err != nil {
+		return page, err
+	}
+	page.Items = groups[0]
+	if err = tx.Commit(); err != nil {
+		return page, err
+	}
+	for i, record := range page.Items {
+		if q.Projection != nil {
+			page.Items[i] = q.Projection(record)
+		}
+	}
+	return finishEvidencePage(page, q, c), nil
+}
+
+// queryOccurrenceSubjectPages answers the first page, without totals, of one
+// read for each subject in one statement: the candidates of every subject
+// are found side by side, each bounded like its own read, and split back
+// into one page per subject.
+func (p *postgresProvider) queryOccurrenceSubjectPages(ctx context.Context, tx *sql.Tx, keys []string, scope EvidenceScope, q EvidenceQuery, c evidenceCursor, page EvidencePage, subjects []EvidenceSubject) ([]EvidencePage, error) {
+	for _, high := range c.OccurrenceHighs {
+		if high > uint64(1<<63-1) {
+			return nil, ErrInvalidEvidence
+		}
+	}
+	cursors := make([]evidenceCursor, len(subjects))
+	queries := make([]EvidenceQuery, len(subjects))
+	for i, subject := range subjects {
+		narrowed := q
+		narrowed.RootUID, narrowed.Namespace = subject.RootUID, subject.Namespace
+		prepared, own, err := prepareEvidenceQuery(scope, narrowed)
+		if err != nil {
+			return nil, err
+		}
+		// The subject's own link binding; the pins are this read's.
+		own.OccurrenceHighs, own.Generations, own.PruneRevisions, own.ThinRevisions = c.OccurrenceHighs, c.Generations, c.PruneRevisions, c.ThinRevisions
+		own.Ordering = c.Ordering
+		cursors[i], queries[i] = own, prepared
+	}
+	groups, err := occurrenceItemGroups(ctx, tx, keys, q, c, subjects)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	pages := make([]EvidencePage, len(subjects))
+	for i := range subjects {
+		own := page
+		own.Counts = map[string]int{}
+		own.Items = groups[i]
+		for j, record := range own.Items {
+			if q.Projection != nil {
+				own.Items[j] = q.Projection(record)
+			}
+		}
+		pages[i] = finishEvidencePage(own, queries[i], cursors[i])
+	}
+	return pages, nil
+}
+
+// occurrenceItemGroups reads the items of a page with their payloads and
+// newest samples. Without subjects it reads the one page q names; with
+// subjects it reads one page per subject in the same statement, each narrowed
+// to the subject's root and, when it has one, namespace.
+func occurrenceItemGroups(ctx context.Context, tx *sql.Tx, keys []string, q EvidenceQuery, c evidenceCursor, subjects []EvidenceSubject) ([][]EvidenceRecord, error) {
 	args := historySQLArgs{}
-	candidates := occurrenceCandidates(keys, q, c, q.Limit+1, true, &args)
+	var columns *occurrenceSubjectColumns
+	from, position := "", "0"
+	if subjects != nil {
+		roots, namespaces := make([]string, len(subjects)), make([]string, len(subjects))
+		for i, subject := range subjects {
+			roots[i], namespaces[i] = subject.RootUID, subject.Namespace
+		}
+		from = "unnest(" + args.add(roots) + "::text[]," + args.add(namespaces) + "::text[]) WITH ORDINALITY AS x(root_uid,namespace,position) CROSS JOIN LATERAL"
+		columns, position = &occurrenceSubjectColumns{root: "x.root_uid", namespace: "x.namespace"}, "x.position"
+	}
+	candidates := occurrenceCandidatesFor(keys, q, c, q.Limit+1, true, &args, columns)
+	if subjects != nil {
+		candidates = "SELECT " + position + " AS subject,c.* FROM " + from + "(" + candidates + ") c"
+	} else {
+		candidates = "SELECT 0::bigint AS subject,c.* FROM(" + candidates + ") c"
+	}
 	pin := "CASE m.scope_key"
 	for i, key := range keys {
 		pin += " WHEN " + args.add(key) + "::text THEN " + args.add(c.OccurrenceHighs[i]) + "::bigint"
@@ -237,18 +358,19 @@ func (p *postgresProvider) queryOccurrenceReadPage(ctx context.Context, tx *sql.
 	values := []any(args)
 	allowed, err := evidenceAuthoritySQL(q, &values, "m.authorization_kind", "m.namespace")
 	if err != nil {
-		return page, err
+		return nil, err
 	}
 	rows, err := tx.QueryContext(ctx, `WITH candidates AS MATERIALIZED(`+candidates+`)
- SELECT m.occurrence_id,m.first_seen,COALESCE(`+allowed+`,FALSE),
+ SELECT m.subject,m.occurrence_id,m.first_seen,COALESCE(`+allowed+`,FALSE),
  CASE WHEN `+allowed+` THEN v.payload ELSE '{}'::jsonb END,m.scope_key,m.payload_version,m.observed_at,`+pin+`
  FROM candidates m LEFT JOIN LATERAL(SELECT payload FROM kubernetes_evidence_occurrence_versions v
  WHERE v.scope_key=m.scope_key AND v.payload_version=m.payload_version LIMIT 1)v ON `+allowed+`
- ORDER BY m.first_seen DESC,m.occurrence_id DESC`, values...)
+ ORDER BY m.subject,m.first_seen DESC,m.occurrence_id DESC`, values...)
 	if err != nil {
-		return page, err
+		return nil, err
 	}
 	type listed struct {
+		group      int
 		id         string
 		first      time.Time
 		authorized bool
@@ -258,10 +380,15 @@ func (p *postgresProvider) queryOccurrenceReadPage(ctx context.Context, tx *sql.
 	items, wanted := []listed{}, []occurrenceSampleKey{}
 	for rows.Next() {
 		var item listed
+		var subject int64
 		var key occurrenceSampleKey
-		if err = rows.Scan(&item.id, &item.first, &item.authorized, &item.raw, &key.scope, &key.version, &key.opened, &key.pin); err != nil {
+		if err = rows.Scan(&subject, &item.id, &item.first, &item.authorized, &item.raw, &key.scope, &key.version, &key.opened, &key.pin); err != nil {
 			rows.Close()
-			return page, err
+			return nil, err
+		}
+		item.group = 0
+		if subjects != nil {
+			item.group = int(subject) - 1
 		}
 		item.sample = -1
 		if item.authorized {
@@ -273,35 +400,28 @@ func (p *postgresProvider) queryOccurrenceReadPage(ctx context.Context, tx *sql.
 	}
 	if err = rows.Err(); err != nil {
 		rows.Close()
-		return page, err
+		return nil, err
 	}
 	rows.Close()
 	samples, err := occurrenceSamples(ctx, tx, wanted, q.Until)
 	if err != nil {
-		return page, err
+		return nil, err
 	}
+	groups := make([][]EvidenceRecord, max(1, len(subjects)))
 	for _, item := range items {
 		record := EvidenceRecord{ID: item.id, At: item.first, ObservedAt: item.first}
 		if item.sample >= 0 && samples[item.sample].found {
 			sample := samples[item.sample]
 			var issue EvidenceIssue
 			if err = json.Unmarshal(item.raw, &issue); err != nil {
-				return page, err
+				return nil, err
 			}
 			record = occurrenceRecord(issue, occurrenceObservation{At: sample.observed, LastSeen: sample.lastSeen, Measurements: sample.measurements})
 			record.At = item.first
 		} else {
 			record = projectEvidenceAuthority(record, EvidenceQuery{EnforceAuthority: true})
 		}
-		page.Items = append(page.Items, record)
+		groups[item.group] = append(groups[item.group], record)
 	}
-	if err = tx.Commit(); err != nil {
-		return page, err
-	}
-	for i, record := range page.Items {
-		if q.Projection != nil {
-			page.Items[i] = q.Projection(record)
-		}
-	}
-	return finishEvidencePage(page, q, c), nil
+	return groups, nil
 }

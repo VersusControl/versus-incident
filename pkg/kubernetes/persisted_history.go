@@ -17,9 +17,13 @@ import (
 // finish within it fails as a history timeout instead of holding a request.
 var persistedHistoryReadTimeout = 2 * time.Second
 
-// openOccurrenceLookupTimeout bounds the persisted lookup that pins one live
-// broken root to its open occurrence while an issue list is built.
-var openOccurrenceLookupTimeout = 500 * time.Millisecond
+// openOccurrenceLookupTimeout bounds the one persisted read that pins every
+// live broken root of an issue list to its open occurrence. It covers the
+// whole read: waiting for a history connection, the checkpoint, the page of
+// every root, its samples and the authority recheck. One page read on a large
+// history takes up to about 165 ms, so the bound leaves room for a busy
+// connection pool while an issue list still answers within about a second.
+var openOccurrenceLookupTimeout = time.Second
 
 var errHistoryUnavailable = errors.New("kubernetes: persisted history store unavailable")
 var errHistoryTimeout = errors.New("kubernetes: persisted history store timed out")
@@ -253,6 +257,96 @@ func (service *Service) persistedHistoryQuery(ctx context.Context, query storage
 	if err != nil {
 		return storage.EvidencePage{}, err
 	}
+	query, authority, namespace, err := historyAuthorityQuery(checkpoint, query)
+	if err != nil {
+		return storage.EvidencePage{}, err
+	}
+	page, err := service.evidenceStore().QueryEvidence(ctx, scope, query)
+	if err != nil {
+		return page, historyStoreFailure(err)
+	}
+	if err = service.confirmHistoryAuthority(ctx, scope, checkpoint, []string{namespace}); err != nil {
+		return storage.EvidencePage{}, err
+	}
+	service.finishHistoryPage(&page, authority)
+	return page, nil
+}
+
+// persistedHistorySubjects reads the first page of query for each subject,
+// each answered as persistedHistoryQuery answers the query narrowed to that
+// subject's root and namespace (the namespace also deciding its authority).
+// Subjects that share an authority are read from the store together. An
+// error that concerns one subject is returned at its position; an error of
+// the whole read is returned alone.
+func (service *Service) persistedHistorySubjects(ctx context.Context, query storage.EvidenceQuery, subjects []storage.EvidenceSubject) ([]storage.EvidencePage, []error, error) {
+	ctx, cancel := context.WithTimeout(ctx, persistedHistoryReadTimeout)
+	defer cancel()
+	scope, checkpoint, err := service.persistedHistoryScope(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	pages, failures := make([]storage.EvidencePage, len(subjects)), make([]error, len(subjects))
+	authorities, namespaces := make([]string, len(subjects)), make([]string, len(subjects))
+	groups, order := map[string][]int{}, []string{}
+	queries := map[string]storage.EvidenceQuery{}
+	for i, subject := range subjects {
+		narrowed := query
+		narrowed.RootUID, narrowed.Namespace, narrowed.AuthorityNamespace = subject.RootUID, subject.Namespace, subject.Namespace
+		prepared, authority, namespace, err := historyAuthorityQuery(checkpoint, narrowed)
+		if err != nil {
+			failures[i] = err
+			continue
+		}
+		authorities[i], namespaces[i] = authority, namespace
+		prepared.RootUID, prepared.Namespace, prepared.AuthorityNamespace = "", "", ""
+		key := strings.Join(prepared.AllowedKinds, "\x00")
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+			queries[key] = prepared
+		}
+		groups[key] = append(groups[key], i)
+	}
+	read := 0
+	for _, key := range order {
+		members := groups[key]
+		group := make([]storage.EvidenceSubject, len(members))
+		for j, i := range members {
+			group[j] = subjects[i]
+		}
+		answered, err := storage.QueryEvidenceSubjects(ctx, service.evidenceStore(), scope, queries[key], group)
+		for j, i := range members {
+			if err != nil {
+				failures[i] = historyStoreFailure(err)
+				continue
+			}
+			pages[i] = answered[j]
+			read++
+		}
+	}
+	if read == 0 {
+		return pages, failures, nil
+	}
+	latest, err := service.latestHistoryAuthority(ctx, scope, checkpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range subjects {
+		if failures[i] != nil {
+			continue
+		}
+		if historyAuthorityNarrowed(checkpoint.Authority, latest.Authority, namespaces[i]) {
+			pages[i], failures[i] = storage.EvidencePage{}, errHistoryAuthority
+			continue
+		}
+		service.finishHistoryPage(&pages[i], authorities[i])
+	}
+	return pages, failures, nil
+}
+
+// historyAuthorityQuery applies the authority a read of namespace (the
+// query's authority namespace, else its namespace) has under checkpoint: the
+// proofs, the kinds that may be read, and whether that authority is stale.
+func historyAuthorityQuery(checkpoint storage.EvidenceCheckpoint, query storage.EvidenceQuery) (storage.EvidenceQuery, string, string, error) {
 	authority := "current"
 	query.EnforceAuthority = true
 	namespace := query.Namespace
@@ -293,37 +387,62 @@ func (service *Service) persistedHistoryQuery(ctx context.Context, query storage
 	if len(query.AllowedKinds) == 0 {
 		for _, proof := range checkpoint.Authority {
 			if proof.State == "denied" {
-				return storage.EvidencePage{}, errHistoryAuthority
+				return query, authority, namespace, errHistoryAuthority
 			}
 		}
-		return storage.EvidencePage{}, errHistoryNotEstablished
+		return query, authority, namespace, errHistoryNotEstablished
 	}
-	page, err := service.evidenceStore().QueryEvidence(ctx, scope, query)
+	return query, authority, namespace, nil
+}
+
+// historyStoreFailure names a failed history store read for the caller.
+func historyStoreFailure(err error) error {
 	if errors.Is(err, storage.ErrEvidenceCursorExpired) {
-		return page, errors.Join(ErrCursorExpired, err)
+		return errors.Join(ErrCursorExpired, err)
 	}
 	if errors.Is(err, storage.ErrInvalidEvidence) || errors.Is(err, storage.ErrEvidenceConflict) {
-		return page, errors.Join(ErrInvalidArguments, err)
+		return errors.Join(ErrInvalidArguments, err)
 	}
+	return historyReadError(err)
+}
+
+// confirmHistoryAuthority checks, after a read, that the principal the read
+// was authorized under still holds the history and that its authority over
+// each namespace read did not narrow meanwhile.
+func (service *Service) confirmHistoryAuthority(ctx context.Context, scope storage.EvidenceScope, checkpoint storage.EvidenceCheckpoint, namespaces []string) error {
+	latest, err := service.latestHistoryAuthority(ctx, scope, checkpoint)
 	if err != nil {
-		return page, historyReadError(err)
+		return err
 	}
-	// A principal may retire during a database read. No old-principal payload
-	// escapes that race; transient refresh failures do not retire an epoch.
+	for _, namespace := range namespaces {
+		if historyAuthorityNarrowed(checkpoint.Authority, latest.Authority, namespace) {
+			return errHistoryAuthority
+		}
+	}
+	return nil
+}
+
+// latestHistoryAuthority rereads the checkpoint after a read. A principal may
+// retire during a database read. No old-principal payload escapes that race;
+// transient refresh failures do not retire an epoch.
+func (service *Service) latestHistoryAuthority(ctx context.Context, scope storage.EvidenceScope, checkpoint storage.EvidenceCheckpoint) (storage.EvidenceCheckpoint, error) {
 	if service.historyPrincipal() != checkpoint.Principal {
-		return storage.EvidencePage{}, errHistoryAuthority
+		return storage.EvidenceCheckpoint{}, errHistoryAuthority
 	}
 	latest, err := service.evidenceStore().EvidenceCheckpoint(storage.EvidenceReadContext(ctx), scope)
 	if err != nil {
-		return storage.EvidencePage{}, historyReadError(err)
+		return storage.EvidenceCheckpoint{}, historyReadError(err)
 	}
 	if latest.Principal != checkpoint.Principal {
-		return storage.EvidencePage{}, errHistoryAuthority
+		return storage.EvidenceCheckpoint{}, errHistoryAuthority
 	}
 	service.overlayHistoryDenials(scope, checkpoint.Principal, &latest)
-	if historyAuthorityNarrowed(checkpoint.Authority, latest.Authority, namespace) {
-		return storage.EvidencePage{}, errHistoryAuthority
-	}
+	return latest, nil
+}
+
+// finishHistoryPage projects a read page for the caller and names the
+// authority it was read under.
+func (service *Service) finishHistoryPage(page *storage.EvidencePage, authority string) {
 	for i, record := range page.Items {
 		page.Items[i] = service.projectEvidence(record)
 	}
@@ -331,7 +450,6 @@ func (service *Service) persistedHistoryQuery(ctx context.Context, query storage
 		page.Gaps[i] = service.projectEvidence(record)
 	}
 	page.Authority = authority
-	return page, nil
 }
 
 // SubscribeCommitNotifications is a bounded, process-local wakeup lane.

@@ -140,6 +140,17 @@ func issueObservationBounds(view kubeindex.Snapshot) (time.Time, time.Time, bool
 	return oldest, latest, complete
 }
 
+// historyCaptureInterval is the longest production cadence of the kinds that
+// bound a capture's coverage: an issue absent for longer than a few of these
+// was resolved well before the capture that records it.
+func historyCaptureInterval() time.Duration {
+	interval := time.Duration(0)
+	for _, kind := range []string{"Pod", "ReplicaSet", "Deployment", "StatefulSet", "DaemonSet", "Job", "Node", "Event"} {
+		interval = max(interval, captureCadences[kind])
+	}
+	return interval
+}
+
 // captureMoment is the time a capture of view is saved under: the newest
 // complete listing among its ready kinds. A LIST starts at ObservedAt, but
 // returned objects can change while the request is in flight, so their
@@ -210,6 +221,7 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 
 	if complete {
 		batch.CoveredThrough = oldest
+		batch.CaptureInterval = historyCaptureInterval()
 	}
 	page, err := service.issuesSnapshot(pinInventory(ctx, *generation), IssueOptions{unpaged: true, captureOnly: true})
 	if err != nil {
@@ -220,7 +232,9 @@ func (service *Service) prepareEvidence(ctx context.Context, generation *invento
 	}
 	for _, issue := range page.Items {
 		if issue.Partial {
-			batch.CoveredThrough = time.Time{}
+			// A root whose evidence is partial keeps its own issues open;
+			// the rest of the cluster still resolves.
+			batch.HoldOpen = append(batch.HoldOpen, issue.Root.UID)
 		}
 		key := logIdentity(issue.Root.Namespace + "\x00" + issue.Root.Kind + "\x00" + issue.Root.UID + "\x00" + issue.Rule)
 		raw, err := json.Marshal(issue)
@@ -557,7 +571,7 @@ func (service *Service) projectEvidence(record storage.EvidenceRecord) storage.E
 			}
 		case "change":
 			// Typed change identity and source were checked before projection.
-		case "issue_opened", "issue_observed", "issue_resolved":
+		case "issue_opened", "issue_observed", "issue_resolved", storage.EvidenceIssueCaughtUp:
 			var value storage.EvidenceIssue
 			err = json.Unmarshal(record.Payload, &value)
 			if err == nil {
@@ -801,6 +815,56 @@ func (service *Service) historicalIssues(ctx context.Context, options IssueOptio
 	if err != nil {
 		return page, evidenceReadFailure(evidenceStoreQuery, err)
 	}
+	return service.historicalIssuePage(options, source)
+}
+
+// historicalOpenIssues reads, for each root, the stored occurrences of the
+// last window that historicalIssues reads for that root and its namespace,
+// without totals, in one history read. Page i belongs to roots[i]; an error
+// of one root is returned at its position, and an error of the whole read
+// alone.
+func (service *Service) historicalOpenIssues(ctx context.Context, roots []storage.EvidenceSubject, since, until time.Time, limit int) ([]IssuePage, []error, error) {
+	pages, failures := make([]IssuePage, len(roots)), make([]error, len(roots))
+	if service.evidenceStore() == nil {
+		return nil, nil, evidenceReadFailure(evidenceStoreQuery, evidenceReadFailure(evidenceStoreSelection, storage.ErrUnsupported))
+	}
+	if !since.IsZero() && !until.IsZero() && since.After(until) {
+		return nil, nil, evidenceReadFailure(evidenceStoreQuery, ErrInvalidArguments)
+	}
+	valid, positions := []storage.EvidenceSubject{}, []int{}
+	for i, root := range roots {
+		bad := false
+		for _, value := range []string{root.Namespace, root.RootUID} {
+			bad = bad || value != "" && (!safeSegment(value) || len(value) > 256)
+		}
+		if bad {
+			failures[i] = evidenceReadFailure(evidenceStoreQuery, ErrInvalidArguments)
+			continue
+		}
+		valid, positions = append(valid, root), append(positions, i)
+	}
+	if len(valid) == 0 {
+		return pages, failures, nil
+	}
+	sources, sourceFailures, err := service.persistedHistorySubjects(ctx, storage.EvidenceQuery{Since: since, Until: until, Type: "occurrence", Limit: normalizePageLimit(limit), ItemsOnly: true}, valid)
+	if err != nil {
+		return nil, nil, evidenceReadFailure(evidenceStoreQuery, err)
+	}
+	for j, i := range positions {
+		if sourceFailures[j] != nil {
+			failures[i] = evidenceReadFailure(evidenceStoreQuery, sourceFailures[j])
+			continue
+		}
+		pages[i], failures[i] = service.historicalIssuePage(IssueOptions{RootUID: roots[i].RootUID, Namespace: roots[i].Namespace, Since: since, Until: until, Limit: limit, itemsOnly: true}, sources[j])
+	}
+	return pages, failures, nil
+}
+
+// historicalIssuePage turns one stored occurrence page into the issue page a
+// read with options answers.
+func (service *Service) historicalIssuePage(options IssueOptions, source storage.EvidencePage) (IssuePage, error) {
+	page := IssuePage{Items: []Issue{}, Totals: map[string]int{}, Broken: BrokenTotals{BySeverity: map[string]int{}}, Sync: SyncStatus{State: "ready"}}
+	var err error
 	page.Authority, page.CountCapped = source.Authority, source.CountCapped
 	page.Total, page.Limit = source.Total, normalizePageLimit(options.Limit)
 	page.Capture = service.historyCapture(source.Checkpoint)
