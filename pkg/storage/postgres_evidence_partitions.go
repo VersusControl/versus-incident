@@ -259,45 +259,18 @@ func (p *postgresProvider) compactEvidenceBatch(ctx context.Context) (bool, erro
 	}
 	// Preserve the opening observation of every payload version and one actual
 	// observation per hour. Historical reads report the retained sample itself,
-	// never a synthetic interpolated freshness value. The opening observation's
-	// revision is read from the version's read model, so a candidate never
-	// searches every monthly partition for an older sample. The later sample
-	// of the same hour is looked up once per candidate (OFFSET 0 keeps it from
-	// becoming a join), so only the candidate hour's month is searched rather
-	// than every sample the occurrence has in every month. Every statement
-	// names the expiry bound itself, so it is planned for the old months only.
+	// never a synthetic interpolated freshness value.
 	expired := time.Now().UTC().Add(-p.evidenceRetention)
 	if sevenDays := time.Now().UTC().Add(-7 * 24 * time.Hour); expired.After(sevenDays) {
 		expired = sevenDays
 	}
-	result, err := tx.QueryContext(ctx, `WITH candidates AS (
-		 SELECT o.tableoid AS relation,o.ctid AS tuple FROM kubernetes_evidence_occurrence_observations o
-		 WHERE o.observed_at < $1
-		 AND EXISTS(SELECT 1 FROM kubernetes_evidence_occurrence_observations n WHERE n.scope_key=o.scope_key AND n.occurrence_id=o.occurrence_id AND n.payload_version=o.payload_version AND n.observed_at>=date_trunc('hour',o.observed_at) AND n.observed_at<date_trunc('hour',o.observed_at)+INTERVAL '1 hour' AND n.observed_at<$2 AND n.revision>o.revision OFFSET 0)
-		 AND EXISTS(SELECT 1 FROM kubernetes_evidence_occurrence_read_versions opening WHERE opening.scope_key=o.scope_key AND opening.payload_version=o.payload_version AND opening.occurrence_id=o.occurrence_id AND opening.revision<o.revision)
-		 LIMIT 256 FOR UPDATE OF o SKIP LOCKED)
-		 DELETE FROM kubernetes_evidence_occurrence_observations o USING candidates c WHERE o.tableoid=c.relation AND o.ctid=c.tuple AND o.observed_at<$1
-		 RETURNING o.scope_key`, expired, expired.Add(time.Hour))
-	if err != nil {
-		return false, err
-	}
 	// Thinning removes samples only. It is counted apart from pruning, so lists
 	// that never read samples keep their page links, and an issue list ends
 	// its links only when its read reaches the thinned samples.
-	compacted := map[string]bool{}
-	for result.Next() {
-		var scope string
-		if err = result.Scan(&scope); err != nil {
-			result.Close()
-			return false, err
-		}
-		compacted[scope] = true
-	}
-	if err = result.Err(); err != nil {
-		result.Close()
+	compacted, walking, err := p.thinObservations(ctx, tx, expired)
+	if err != nil {
 		return false, err
 	}
-	result.Close()
 	if len(compacted) > 0 {
 		scopes := make([]string, 0, len(compacted))
 		for scope := range compacted {
@@ -312,7 +285,7 @@ func (p *postgresProvider) compactEvidenceBatch(ctx context.Context) (bool, erro
 	}
 	// No month was past the cutoff, so retention has caught up.
 	p.noteRetentionLag(0)
-	return len(compacted) > 0, nil
+	return len(compacted) > 0 || walking, nil
 }
 
 // evidenceScopesIn lists the scopes holding rows in one month partition. A

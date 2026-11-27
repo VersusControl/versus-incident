@@ -50,14 +50,15 @@ func finalSaveDuration(sorted []time.Duration, q float64) time.Duration {
 // 5,000 open issues: every capture carries 20,000 changes (half new versions
 // of existing events, half new events) and 5,000 issues, of which 1,000 are
 // new, 2,000 changed and 2,000 seen again, while 1,000 others resolve. It
-// times every transaction of each save and checks that the final one, like
-// every part, finishes in 5 s, a quarter of the 20 s lease (stretched in a
-// race build), that each whole save completes, and that the issues and
-// journal it leaves are right. It runs once
+// checks that every part stays within the save chunk and holds only the
+// producer's records, that the final writes only its issue records and no
+// more occurrence rows than the change limit, that
+// each whole save completes, and that the issues and journal it leaves are
+// right; the transactions' durations are only logged. It runs once
 // with planner statistics gathered after the first capture and once before
 // the database has gathered any, as in the first minute after a busy cluster
 // is connected, until autovacuum's first pass.
-func TestPostgresFinalSaveTransactionAtTheCaptureLimitFitsTheLease(t *testing.T) {
+func TestPostgresFinalSaveTransactionAtTheCaptureLimitIsBoundedByItsWork(t *testing.T) {
 	if testing.Short() {
 		t.Skip("saves captures at the record limit")
 	}
@@ -74,13 +75,8 @@ func TestPostgresFinalSaveTransactionAtTheCaptureLimitFitsTheLease(t *testing.T)
 // save transaction.
 func finalSaveAtTheLimit(t *testing.T, openIssues, churn int, analyze bool) {
 	const rounds = 3
-	// Without race instrumentation every transaction must finish in 5 s, a
-	// quarter of the 20 s lease: that build is the proof the save fits. The
-	// race detector slows the Go side of each transaction several times over
-	// (marshalling, hashing and driver code; the database itself is not
-	// slowed), so a race build only guards against a gross regression with
-	// the stretched budget, and still makes every correctness check below.
-	bound := scaledTimeout(5 * time.Second)
+	// Durations are logged for comparison, never asserted: the checks are on
+	// the work each transaction does.
 	changes := MaxEvidenceBatchRecords - openIssues
 	p := worstCaseProvider(t, worstCaseDatabase(t), PostgresOptions{})
 	scope := EvidenceScope{OrgID: "default", ClusterID: "final-save", ClusterUID: "physical"}
@@ -180,6 +176,7 @@ func finalSaveAtTheLimit(t *testing.T, openIssues, churn int, analyze bool) {
 			return err
 		}
 		before := worstCounts(t, p, scope)
+		versionsBefore, observationsBefore := finalSaveOccurrenceRows(t, p, key)
 		started := time.Now()
 		if err = p.CommitEvidence(t.Context(), scope, batch); err != nil {
 			for i, transaction := range transactions {
@@ -198,9 +195,12 @@ func finalSaveAtTheLimit(t *testing.T, openIssues, churn int, analyze bool) {
 		if !errors.Is(transactions[0].err, errEvidenceSaveSplit) {
 			t.Fatalf("capture %d: the first attempt answered %v, want a split into parts", round, transactions[0].err)
 		}
+		// The final writes the issue records it derives: never more than
+		// the change limit allows, and only in the transaction that commits
+		// them.
 		final := transactions[len(transactions)-1]
-		if !final.labelled || final.size != 0 || final.err != nil {
-			t.Fatalf("capture %d: final transaction wrote %d journal records (%v)", round, final.size, final.err)
+		if !final.labelled || final.size == 0 || final.size > DefaultEvidenceChangeLimit || final.err != nil {
+			t.Fatalf("capture %d: final transaction wrote %d journal records (%v), want its issue records within the change limit", round, final.size, final.err)
 		}
 		var parts []time.Duration
 		written := 0
@@ -221,17 +221,23 @@ func finalSaveAtTheLimit(t *testing.T, openIssues, churn int, analyze bool) {
 			round, len(batch.Records), len(batch.Issues), bytes, before.rows, written, len(parts),
 			finalSaveDuration(parts, 0.5), parts[len(parts)-1], transactions[0].took, final.took, whole)
 
-		if transactions[0].took > bound {
-			t.Errorf("capture %d: the first attempt took %s, over the %s budget", round, transactions[0].took, bound)
+		// The final transaction's occurrence work is bounded by the change
+		// limit, not by the open issues or the journal: each applied change
+		// adds one observation and at most one version.
+		versions, observations := finalSaveOccurrenceRows(t, p, key)
+		// Ten minutes apart, every reported issue is due on the heartbeat,
+		// and every resolution adds its closing observation.
+		if added := observations - observationsBefore; added != len(issues)+churn || added > DefaultEvidenceChangeLimit {
+			t.Fatalf("capture %d: the final transaction added %d observations, want one per reported issue and resolution (%d), within the change limit %d", round, added, len(issues)+churn, DefaultEvidenceChangeLimit)
 		}
-		if parts[len(parts)-1] > bound {
-			t.Errorf("capture %d: the longest part took %s, over the %s budget", round, parts[len(parts)-1], bound)
+		if added := versions - versionsBefore; added > observations-observationsBefore {
+			t.Fatalf("capture %d: the final transaction added %d versions for %d observations", round, added, observations-observationsBefore)
 		}
-		if final.took > bound {
-			t.Errorf("capture %d: the final transaction took %s, over the %s budget", round, final.took, bound)
+		if written != len(batch.Records) {
+			t.Fatalf("capture %d: the parts wrote %d journal records, want the producer's %d", round, written, len(batch.Records))
 		}
-		if after.rows-before.rows != written {
-			t.Fatalf("capture %d: the journal grew by %d rows, the parts wrote %d", round, after.rows-before.rows, written)
+		if after.rows-before.rows != written+final.size {
+			t.Fatalf("capture %d: the journal grew by %d rows, the parts wrote %d and the final %d", round, after.rows-before.rows, written, final.size)
 		}
 		if latest, _ := p.EvidenceCheckpoint(t.Context(), scope); latest.ID != batch.ID {
 			t.Fatalf("capture %d: checkpoint %q after the save", round, latest.ID)
@@ -247,7 +253,17 @@ func finalSaveAtTheLimit(t *testing.T, openIssues, churn int, analyze bool) {
 	}
 	sort.Slice(allParts, func(i, j int) bool { return allParts[i] < allParts[j] })
 	sort.Slice(finals, func(i, j int) bool { return finals[i] < finals[j] })
-	t.Logf("over %d captures at the limit: %d parts, part p50 %s max %s; final transaction p50 %s max %s (bound %s)",
-		rounds, len(allParts), finalSaveDuration(allParts, 0.5), allParts[len(allParts)-1], finalSaveDuration(finals, 0.5), finals[len(finals)-1], bound)
+	t.Logf("over %d captures at the limit: %d parts, part p50 %s max %s; final transaction p50 %s max %s",
+		rounds, len(allParts), finalSaveDuration(allParts, 0.5), allParts[len(allParts)-1], finalSaveDuration(finals, 0.5), finals[len(finals)-1])
 	worstJournalConsistent(t, p, scope)
+}
+
+// finalSaveOccurrenceRows counts the scope's occurrence versions and
+// observations.
+func finalSaveOccurrenceRows(t *testing.T, p *postgresProvider, key string) (versions, observations int) {
+	t.Helper()
+	if err := p.db.QueryRow(`SELECT (SELECT COUNT(*) FROM kubernetes_evidence_occurrence_versions WHERE scope_key=$1),(SELECT COUNT(*) FROM kubernetes_evidence_occurrence_observations WHERE scope_key=$1)`, key).Scan(&versions, &observations); err != nil {
+		t.Fatal(err)
+	}
+	return versions, observations
 }

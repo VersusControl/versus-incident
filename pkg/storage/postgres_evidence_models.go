@@ -319,13 +319,16 @@ func occurrencePayloadFacts(raw json.RawMessage) occurrenceFacts {
 // storedIssue is an issue row as a save read it, before the capture is
 // applied: the issue (its payload, with last_seen from its column), the
 // last_seen its payload was written with, its payload version, its last
-// observation time and whether its row is a complete read model.
+// observation time and whether its row is a complete read model. A
+// payloadless issue was read without its payload: its issue holds the row's
+// columns alone and must never be written.
 type storedIssue struct {
 	issue        EvidenceIssue
 	payloadSeen  time.Time
 	version      string
 	lastObserved time.Time
 	modelReady   bool
+	payloadless  bool
 }
 
 // writeOccurrenceReadModels writes the issue rows a save changes. With the
@@ -384,12 +387,15 @@ func writeOccurrenceReadModels(ctx context.Context, tx *sql.Tx, key string, stat
 // narrow last_seen and last_observed_at updates of the others that moved; see
 // writeOccurrenceReadModels.
 func occurrenceIssueRows(state evidenceState, heartbeat time.Duration) (rows, seen []map[string]any) {
-	if heartbeat <= 0 {
-		heartbeat = 5 * time.Minute
-	}
+	heartbeat = evidenceHeartbeat(heartbeat)
 	rows = make([]map[string]any, 0, len(state.Occurrences))
 	for id, issue := range state.Occurrences {
 		version, lastObserved := state.OccurrenceHeads[id], state.LastObservations[id]
+		if stored, found := state.storedIssues[id]; found && stored.payloadless {
+			// The capture left this issue as stored (the save checked it
+			// with payloadlessIssuesTouched), so its row stays as it is.
+			continue
+		}
 		if stored, found := state.storedIssues[id]; found && issuePayloadCurrent(stored, issue, version, heartbeat) {
 			if !issue.LastSeen.Truncate(time.Microsecond).Equal(stored.issue.LastSeen.Truncate(time.Microsecond)) || !lastObserved.Truncate(time.Microsecond).Equal(stored.lastObserved.Truncate(time.Microsecond)) {
 				seen = append(seen, map[string]any{"occurrence_id": id, "last_seen": issue.LastSeen, "last_observed_at": nullEvidenceTime(lastObserved)})
@@ -421,15 +427,19 @@ func occurrenceIssueRows(state evidenceState, heartbeat time.Duration) (rows, se
 // this capture's last_seen. Every other column of the row is derived from
 // the issue, so it is unchanged too.
 func issuePayloadCurrent(stored storedIssue, issue EvidenceIssue, version string, heartbeat time.Duration) bool {
-	if !stored.modelReady || stored.version != version {
-		return false
-	}
-	if issue.LastSeen.Sub(stored.payloadSeen) >= heartbeat {
+	if !storedPayloadFresh(stored, issue, version, heartbeat) {
 		return false
 	}
 	before, beforeOK := issueRowIdentity(stored.issue)
 	after, afterOK := issueRowIdentity(issue)
 	return beforeOK && afterOK && bytes.Equal(before, after)
+}
+
+// storedPayloadFresh reports whether a stored row is a complete read model
+// with the save's version whose payload was written less than a heartbeat
+// before the issue's last_seen.
+func storedPayloadFresh(stored storedIssue, issue EvidenceIssue, version string, heartbeat time.Duration) bool {
+	return stored.modelReady && stored.version == version && issue.LastSeen.Sub(stored.payloadSeen) < heartbeat
 }
 
 // issueRowIdentity encodes an issue without its last_seen and with only the

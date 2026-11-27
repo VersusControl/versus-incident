@@ -78,12 +78,17 @@ type postgresProvider struct {
 	writeMu              sync.Mutex
 	amplifiedWrites      int
 	evidenceRetention    time.Duration
+	// thinning tracks observation thinning passes that ran out of time.
+	thinning observationThinning
 	// evidenceSaveChunk and evidenceSaveTimeout bound each save transaction.
 	evidenceSaveChunk   int
 	evidenceSaveTimeout time.Duration
 	// evidenceChunkFault lets in-package tests act inside one save
 	// transaction, before it writes, for example to fail or delay it.
 	evidenceChunkFault func(ctx context.Context, tx *sql.Tx, part, size int) error
+	// fullIssueReads counts saves that read every open issue in full after
+	// the narrow read; guarded by writeMu.
+	fullIssueReads int
 	// sessionLocks counts the connections pinned by held session locks.
 	sessionLocks sessionLockPool
 }

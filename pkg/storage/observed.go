@@ -274,6 +274,17 @@ func (part observedEvidence) QueryEvidence(ctx context.Context, scope EvidenceSc
 	return page, part.base.classify(err)
 }
 
+// QueryEvidenceSubjects keeps the store's reading of several subjects
+// together, or reads them one by one where the store cannot.
+func (part observedEvidence) QueryEvidenceSubjects(ctx context.Context, scope EvidenceScope, query EvidenceQuery, subjects []EvidenceSubject) ([]EvidencePage, error) {
+	if err := ctx.Err(); err != nil {
+		// The caller stopped waiting before the call: not a store answer.
+		return nil, err
+	}
+	pages, err := QueryEvidenceSubjects(ctx, part.evidence, scope, query, subjects)
+	return pages, part.base.classify(err)
+}
+
 func (part observedEvidence) EvidenceCheckpoint(ctx context.Context, scope EvidenceScope) (EvidenceCheckpoint, error) {
 	if err := ctx.Err(); err != nil {
 		// The caller stopped waiting before the call: not a store answer.

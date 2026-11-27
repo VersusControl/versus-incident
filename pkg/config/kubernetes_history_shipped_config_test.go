@@ -73,12 +73,12 @@ func TestShippedConfigHistorySaveChunkResolution(t *testing.T) {
 // load either; a value set through ${VAR} expansion in the file is honoured.
 func TestHistorySaveChunkFileEdgeValues(t *testing.T) {
 	t.Setenv("KUBERNETES_EVIDENCE_SAVE_CHUNK", "")
-	t.Setenv("K31_QA_SAVE_CHUNK", "128")
+	t.Setenv("HISTORY_TEST_SAVE_CHUNK", "128")
 	for _, test := range []struct {
 		name, value string
 		want        int
 	}{
-		{"expanded from the environment", "${K31_QA_SAVE_CHUNK}", 128},
+		{"expanded from the environment", "${HISTORY_TEST_SAVE_CHUNK}", 128},
 		{"empty string", `""`, 500},
 		{"quoted number", `"256"`, 256},
 		{"list", "[1, 2]", 500},
