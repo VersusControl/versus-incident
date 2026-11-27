@@ -1,3 +1,4 @@
+import { notReadBadge } from "@/lib/awsEstate";
 import { format } from "date-fns";
 
 // AWS Changes (/api/admin/aws/changes): the wire types, field for field, and
@@ -199,6 +200,11 @@ export interface ChangesView {
   services?: ChangesService[];
   /** What this edition serves; absent on older servers, read as 24 h each. */
   limits?: ChangesLimits;
+  /**
+   * The coverage read every AWS page shares: Accounts n/m, the Regions read
+   * and each account's read state. Absent on older servers.
+   */
+  coverage?: ChangesCoverage | null;
   /**
    * The length of one bucket in seconds: 300 up to 1 h, 3 600 up to 24 h,
    * 21 600 beyond. Absent on older servers, which send hourly buckets.
@@ -529,6 +535,38 @@ export function multiRegion(view: Pick<ChangesView, "regions">): boolean {
 }
 
 /** True when Settings records the account as disconnected. */
+/**
+ * The first read is "pending" only because of accounts that cannot be read
+ * at all (the role was never assumed, say), while every other account has
+ * read its change history: the numbers of those others stand. Known only
+ * from the shared coverage block; without it the first read is pending.
+ */
+function onlyUnreadableAccountsPending(view: Pick<ChangesView, "accounts" | "coverage">): boolean {
+  if (!view.coverage) return false;
+  const waiting = view.accounts.filter((a) => !a.complete);
+  const read = view.accounts.filter((a) => a.complete);
+  return read.length > 0 && waiting.every((a) => neverReadReason(view, a.account) !== null && !STILL_FIRST_READ.has(coverageReason(view, a.account)));
+}
+
+const STILL_FIRST_READ = new Set(["not_read_yet", "first_read_in_progress"]);
+
+function coverageReason(view: Pick<ChangesView, "coverage">, account: string): string {
+  return view.coverage?.accounts.find((c) => c.account === account)?.reason ?? "";
+}
+
+/**
+ * Why an account that never read cannot be read, in plain words, from the
+ * shared coverage block; null when it read at some point or when only a
+ * disconnection is known.
+ */
+export function neverReadReason(view: Pick<ChangesView, "coverage" | "accounts">, account: string): string | null {
+  const covered = view.coverage?.accounts.find((c) => c.account === account);
+  const feed = view.accounts.find((a) => a.account === account);
+  if (covered?.read !== "not_read" || !covered.reason || covered.reason === "account_disconnected") return null;
+  if (feed?.disconnected_at) return null;
+  return notReadBadge(covered.reason);
+}
+
 export function isDisconnected(a: Pick<ChangesAccount, "reason"> | undefined): boolean {
   return a?.reason === "account_disconnected";
 }
@@ -782,6 +820,19 @@ export function equallyLikelyIds(view: Pick<ChangesView, "suspect">): Set<string
 }
 
 /** "1/2": accounts in scope read in full, out of all accounts in scope. */
+export interface ChangesCoverage {
+  accounts_read: number;
+  accounts_total: number;
+  regions: string[];
+  accounts: Array<{ account: string; read: "read" | "partial" | "not_read"; reason?: string }>;
+  warning: { not_read: number } | null;
+}
+
+/**
+ * Accounts n/m on Changes counts the accounts whose change history
+ * (CloudTrail) was read, so it is the feed's own count. The coverage block
+ * counts inventory reads, as Overview does; the two differ on purpose.
+ */
 export function accountsFraction(view: Pick<ChangesView, "accounts">): string {
   return `${view.accounts.filter((a) => a.complete).length}/${view.accounts.length}`;
 }
@@ -792,8 +843,8 @@ export function accountsFraction(view: Pick<ChangesView, "accounts">): string {
  * account and Region pair was read for any of it. The summary numbers and the
  * grid's row totals then show a dash, not a zero.
  */
-export function nothingRead(view: Pick<ChangesView, "buckets" | "sync">): boolean {
-  if (view.sync.first_read_pending) return true;
+export function nothingRead(view: Pick<ChangesView, "buckets" | "sync" | "accounts" | "coverage">): boolean {
+  if (view.sync.first_read_pending && !onlyUnreadableAccountsPending(view)) return true;
   return view.buckets.length > 0 && view.buckets.every((b) => b.state === "gap");
 }
 
@@ -957,9 +1008,14 @@ export function warningLine(view: ChangesView, window: ChangesWindow, custom = f
     if (!isDisconnected(a) && !own.some((g) => g.reason === "account_disconnected")) continue;
     disconnected.add(a.account);
     const asOf = a.as_of ?? own.reduce((m, g) => (Date.parse(g.from) < Date.parse(m) ? g.from : m), own[0]?.from ?? view.window.since);
+    // An account that never read was never disconnected: the shared
+    // coverage read names why it cannot be read.
+    const never = neverReadReason(view, a.account);
     causes.push({
-      when: whenText(view, asOf, view.window.until),
-      clause: `${accountName(view, a.account)} was disconnected at ${fmtClockOrDay(a.disconnected_at ?? asOf, view.window.until)}`,
+      when: never ? "" : whenText(view, asOf, view.window.until),
+      clause: never
+        ? `${accountName(view, a.account)} not read: ${never.charAt(0).toLowerCase()}${never.slice(1)}`
+        : `${accountName(view, a.account)} was disconnected at ${fmtClockOrDay(a.disconnected_at ?? asOf, view.window.until)}`,
       reconnect: true,
     });
   }

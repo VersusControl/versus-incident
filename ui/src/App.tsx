@@ -10,6 +10,7 @@ import { AgentRequiredRoute } from "./components/AgentRequiredRoute";
 import { LandingRedirect } from "./components/AccessDenied";
 import { SkCard } from "./components/Skeleton";
 import { loadLazyModule } from "./lib/lazyModule";
+import { AWS_REDIRECTS } from "./lib/awsEstate";
 // Hot paths (the 3am set) stay in the main chunk:
 import { NowPage } from "./pages/NowPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
@@ -63,6 +64,22 @@ const AwsSettingsPage = lazyPage(
 const AwsChangesPage = lazyPage(
   () => import("./pages/aws/changes/AwsChangesPage"),
   "AwsChangesPage",
+);
+const AwsOverviewPage = lazyPage(
+  () => import("./pages/aws/overview/AwsOverviewPage"),
+  "AwsOverviewPage",
+);
+const AwsTopologyPage = lazyPage(
+  () => import("./pages/aws/topology/AwsTopologyPage"),
+  "AwsTopologyPage",
+);
+const AwsCoveragePage = lazyPage(
+  () => import("./pages/aws/coverage/AwsCoveragePage"),
+  "AwsCoveragePage",
+);
+const AwsIssuesPage = lazyPage(
+  () => import("./pages/aws/issues/AwsIssuesPage"),
+  "AwsIssuesPage",
 );
 const AwsFinOpsPage = lazyPage(
   () => import("./pages/aws/finops/AwsFinOpsPage"),
@@ -152,7 +169,13 @@ export default function App() {
           <Route path="/aws/changes" element={<AwsChangesPage />} />
           <Route path="/aws/finops" element={<AwsFinOpsPage />} />
           <Route path="/aws/finops/increases/:id" element={<FinOpsIncreasePage />} />
-          <Route path="/aws" element={<Navigate to="/aws/settings" replace />} />
+          <Route path="/aws/overview" element={<AwsOverviewPage />} />
+          <Route path="/aws/issues" element={<AwsIssuesPage />} />
+          <Route path="/aws/topology" element={<AwsTopologyPage />} />
+          <Route path="/aws/coverage" element={<AwsCoveragePage />} />
+          {AWS_REDIRECTS.map(([from, to]) => (
+            <Route key={from} path={from} element={<Navigate to={to} replace />} />
+          ))}
           <Route path="/agent/logs" element={<AgentRequiredRoute title="Logs"><PatternsPage /></AgentRequiredRoute>} />
           <Route path="/agent/logs/:id" element={<AgentRequiredRoute title="Log Pattern"><PatternDetailPage /></AgentRequiredRoute>} />
           <Route path="/agent/patterns/:id" element={<AgentRequiredRoute title="Log Pattern"><PatternDetailPage /></AgentRequiredRoute>} />

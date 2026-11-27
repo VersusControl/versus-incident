@@ -225,7 +225,12 @@ type Service struct {
 	connectedMu  sync.Mutex
 	connectedKey string
 	connectedSet map[string]bool
-	rootCtx      context.Context
+	// storedRevision and storedAccounts keep the stored account listing
+	// the page reads share, until the account settings revision changes.
+	storedRevision uint64
+	storedAccounts []AccountRecord
+	storedKept     bool
+	rootCtx        context.Context
 }
 
 // NewService builds the connector service over a store.

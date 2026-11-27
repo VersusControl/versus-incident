@@ -393,6 +393,36 @@ func (conn *Service) ConnectedAccountSet(context.Context) (map[string]bool, bool
 	return set, true
 }
 
+// StoredAccounts is the stored account listing (ListAccounts) of the
+// write organization's read scope, kept until the account settings
+// revision changes, which every account save and removal raises. The
+// pages that read the connected accounts on every request (coverage,
+// issues, Overview, Topology, Changes) share it, so a request costs one
+// revision read rather than a listing. The records are shared and must
+// not be changed; merge them with the configured accounts per read.
+func (conn *Service) StoredAccounts(context.Context) ([]AccountRecord, error) {
+	org := conn.storageOrg()
+	revision, err := conn.store.AccountsRevision(org)
+	if err != nil {
+		return nil, err
+	}
+	conn.connectedMu.Lock()
+	if conn.storedKept && conn.storedRevision == revision {
+		accounts := conn.storedAccounts
+		conn.connectedMu.Unlock()
+		return accounts, nil
+	}
+	conn.connectedMu.Unlock()
+	accounts, err := conn.store.ListAccounts(org)
+	if err != nil {
+		return nil, err
+	}
+	conn.connectedMu.Lock()
+	conn.storedRevision, conn.storedAccounts, conn.storedKept = revision, accounts, true
+	conn.connectedMu.Unlock()
+	return accounts, nil
+}
+
 // syncView summarises the account's units in the snapshot store.
 func (conn *Service) syncView(accountID string) AccountSyncView {
 	view := AccountSyncView{State: SyncStateOff, Services: []ServiceSyncView{}}

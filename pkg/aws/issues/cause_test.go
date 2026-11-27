@@ -8,6 +8,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/aws/changes"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
 	"github.com/VersusControl/versus-incident/pkg/aws/snapshot"
+	"github.com/VersusControl/versus-incident/pkg/aws/suspect"
 	"github.com/VersusControl/versus-incident/pkg/storage"
 	"github.com/VersusControl/versus-incident/pkg/tenancy"
 )
@@ -69,5 +70,21 @@ func TestCauseFinderOverTheSnapshotStore(t *testing.T) {
 				t.Fatalf("found cause = %+v", cause)
 			}
 		})
+	}
+}
+
+// A found cause keeps the resource its change names, so a view can point
+// at it; a change that names none leaves it empty.
+func TestCauseOfKeepsTheChangedResource(t *testing.T) {
+	at := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	const taskDefinition = "arn:aws:ecs:eu-south-2:123400000001:task-definition/checkout:42"
+	found := CauseOf(suspect.Result{Status: suspect.StatusFound, Candidates: []suspect.Candidate{{
+		Change: model.Change{ID: "c1", Time: at, Resources: []string{taskDefinition}}}}}, at, at)
+	if found.Resource != taskDefinition || found.Change != "c1" {
+		t.Fatalf("cause = %+v; want the task definition the change named", found)
+	}
+	none := CauseOf(suspect.Result{Status: suspect.StatusFound, Candidates: []suspect.Candidate{{Change: model.Change{ID: "c2", Time: at}}}}, at, at)
+	if none.Resource != "" {
+		t.Fatalf("cause = %+v; want no resource", none)
 	}
 }

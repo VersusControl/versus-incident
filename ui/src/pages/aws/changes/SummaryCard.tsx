@@ -31,10 +31,11 @@ import {
   type ChangesWindowOption,
 } from "@/lib/awsChanges";
 import { Popover } from "./Popover";
+import { SummaryCard, SummaryNumber, WarningLine } from "../shared/SummaryCard";
 
-// The summary card: one row of plain numbers, the likely cause, the top
-// actors and, only when data in the window is missing, one warning line
-// whose popover lists every gap. It replaces the old answer sentence.
+// The Changes summary card: the shared card's row of plain numbers, the
+// likely cause, the top actors and, only when data in the window is
+// missing, one warning line whose popover lists every gap.
 
 /**
  * 1h, 24h and 7d. 7d opens when the edition's `limits` serve it; otherwise
@@ -84,15 +85,6 @@ export function WindowSwitch({
         7d
         <Lock size={10} aria-hidden="true" />
       </button>}
-    </div>
-  );
-}
-
-function Num({ k, label, value, bad = false }: { k: string; label: string; value: string; bad?: boolean }) {
-  return (
-    <div data-number={k} className="min-w-[4.5rem]">
-      <dt className="text-2xs text-ink-300">{label}</dt>
-      <dd className={clsx("mt-0.5 font-mono text-2xl font-semibold tabular-nums", bad ? "text-sev-critical" : "text-ink-50")}>{value}</dd>
     </div>
   );
 }
@@ -263,7 +255,7 @@ function WarningDetails({ view }: { view: ChangesView }) {
   );
 }
 
-export function SummaryCard({
+export function ChangesSummaryCard({
   view,
   window,
   custom,
@@ -303,7 +295,7 @@ export function SummaryCard({
   const noChanges = !warning && !blank && s.total === 0;
   const before = noChanges ? lastChangeBeforeText(view) : null;
   return (
-    <section className="card pb-3" aria-label="Summary" aria-busy={stale || undefined} data-summary-card data-loading={stale || undefined}>
+    <SummaryCard loading={stale}>
       <div className="flex flex-wrap items-start justify-between gap-3 px-4 pt-3">
         <div className="flex flex-wrap items-end gap-x-8 gap-y-3" data-numbers aria-live="polite">
           {noChanges && (
@@ -320,15 +312,15 @@ export function SummaryCard({
             {!noChanges && (
               <>
                 {/* Every figure in this row counts changes, as the grid's rows do. */}
-                <Num k="changes" label="Changes" value={n(s.total)} />
-                <Num k="people" label="By people" value={n(s.by_actor_class.person)} />
-                <Num k="pipeline" label={ACTOR_LABEL.pipeline} value={n(s.by_actor_class.pipeline)} />
-                <Num k="aws_service" label="AWS service" value={n(s.by_actor_class.aws_service)} />
-                {s.by_actor_class.unknown > 0 && <Num k="unknown" label="Unknown actor" value={n(s.by_actor_class.unknown)} />}
+                <SummaryNumber k="changes" label="Changes" value={n(s.total)} />
+                <SummaryNumber k="people" label="By people" value={n(s.by_actor_class.person)} />
+                <SummaryNumber k="pipeline" label={ACTOR_LABEL.pipeline} value={n(s.by_actor_class.pipeline)} />
+                <SummaryNumber k="aws_service" label="AWS service" value={n(s.by_actor_class.aws_service)} />
+                {s.by_actor_class.unknown > 0 && <SummaryNumber k="unknown" label="Unknown actor" value={n(s.by_actor_class.unknown)} />}
               </>
             )}
-            {(!noChanges || s.errors > 0) && <Num k="errors" label="Failed calls" value={n(s.errors)} bad={!blank && s.errors > 0} />}
-            {view.accounts.length > 0 && <Num k="accounts" label="Accounts" value={blank ? "—" : accountsFraction(view)} />}
+            {(!noChanges || s.errors > 0) && <SummaryNumber k="errors" label="Failed calls" value={n(s.errors)} bad={!blank && s.errors > 0} />}
+            {view.accounts.length > 0 && <SummaryNumber k="accounts" label="Accounts" value={blank ? "—" : accountsFraction(view)} />}
           </dl>
           {stale && (
             <p className="self-end pb-1 text-xs text-ink-300" data-loading-text>
@@ -348,7 +340,7 @@ export function SummaryCard({
       {!blank && <TopActors view={view} />}
       <SyncNotes view={view} />
       {warning && (
-        <div className="mx-4 mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-ink-500/40 pt-3 text-xs text-ink-100" data-warning-line>
+        <WarningLine>
           {warning.reading ? (
             <p className="inline-flex items-center gap-2" data-warning-text>
               <AlertTriangle size={14} aria-hidden="true" className="shrink-0 text-sev-warn" />
@@ -375,8 +367,14 @@ export function SummaryCard({
               Reconnect ›
             </Link>
           )}
-        </div>
+          {/* Every warning line opens the coverage view, as on the other AWS pages. */}
+          {!warning.reading && (
+            <Link to="/aws/coverage" className="ml-4 text-link hover:underline" data-details>
+              Details ›
+            </Link>
+          )}
+        </WarningLine>
       )}
-    </section>
+    </SummaryCard>
   );
 }

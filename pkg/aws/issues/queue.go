@@ -26,6 +26,8 @@ type Filter struct {
 	Account  string `json:"account,omitempty"`
 	State    string `json:"state,omitempty"`
 	Group    string `json:"group,omitempty"`
+	// Region keeps the issues in one Region and the account-wide ones.
+	Region string `json:"region,omitempty"`
 }
 
 // ErrInvalidFilter is a filter value that is not one the store knows.
@@ -48,6 +50,13 @@ func (coverage CoverageRead) Warning() *snapshot.WarningLine {
 	return &snapshot.WarningLine{NotRead: len(coverage.NotRead)}
 }
 
+// CoverageFromView is the coverage read of a stored coverage view: the
+// accounts read and every source not read. The Issues page, Overview and
+// Topology all read it this way, so their counts and warning agree.
+func CoverageFromView(view snapshot.CoverageView) CoverageRead {
+	return CoverageRead{AccountsRead: view.Summary.AccountsRead, AccountsTotal: view.Summary.AccountsTotal, NotRead: view.NotRead}
+}
+
 // Page is the Issues page: the summary every reader shows, the warning
 // line, the issues the filter lists and the rejected count.
 type Page struct {
@@ -61,7 +70,7 @@ type Page struct {
 // summary counts. The state filter then picks the listed rows from it, so
 // the page, the summary and the report count the same issues.
 func (a *Actions) Selected(ctx context.Context, filter Filter) ([]Issue, error) {
-	query, err := filterQuery(filter)
+	query, err := a.readQuery(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +86,30 @@ func filterQuery(filter Filter) (storage.AWSIssueQuery, error) {
 	if filter.State != "" && !validState(filter.State) {
 		return storage.AWSIssueQuery{}, ErrInvalidFilter
 	}
-	return storage.AWSIssueQuery{Kind: filter.Kind, Severity: filter.Severity, AccountID: filter.Account, GroupID: filter.Group}, nil
+	return storage.AWSIssueQuery{Kind: filter.Kind, Severity: filter.Severity, AccountID: filter.Account, GroupID: filter.Group, Region: filter.Region}, nil
+}
+
+// readQuery is the store query of a filter, its state aside, limited to
+// the accounts connected now when the Actions know them: an issue of an
+// account removed from settings is counted and listed nowhere, even before
+// the evaluator resolves it.
+func (a *Actions) readQuery(ctx context.Context, filter Filter) (storage.AWSIssueQuery, error) {
+	query, err := filterQuery(filter)
+	if err != nil || a.connected == nil {
+		return query, err
+	}
+	set, ok := a.connected(ctx)
+	if !ok {
+		return query, nil
+	}
+	query.Accounts = make([]string, 0, len(set))
+	for account, connected := range set {
+		if connected {
+			query.Accounts = append(query.Accounts, account)
+		}
+	}
+	sort.Strings(query.Accounts)
+	return query, nil
 }
 
 // ValidFilter refuses a filter value the store does not know, before
@@ -115,6 +147,49 @@ func (a *Actions) summaryOf(ctx context.Context, query storage.AWSIssueQuery, co
 	return SummarizeCounts(counts, Coverage{AccountsRead: coverage.AccountsRead, AccountsTotal: coverage.AccountsTotal}), nil
 }
 
+// Summary counts, in the store, the issues a filter selects, its state
+// aside: the same summary the Issues page shows for that filter.
+func (a *Actions) Summary(ctx context.Context, filter Filter, coverage CoverageRead) (Summary, error) {
+	query, err := a.readQuery(ctx, filter)
+	if err != nil {
+		return Summary{}, err
+	}
+	return a.summaryOf(ctx, query, coverage)
+}
+
+// Queue reads at most limit open issues (open, acknowledged, regressed) a
+// filter selects, in queue order, state aside. A limit of zero or less
+// reads every one.
+func (a *Actions) Queue(ctx context.Context, filter Filter, limit int) ([]Issue, error) {
+	return a.queueIn(ctx, filter, "", limit)
+}
+
+// Attention reads at most limit open issues a filter selects, Act now
+// first: every Act now issue in queue order, then Worth a look issues to
+// fill the rest. However many Worth a look issues rank above them by
+// severity, the Act now issues are never pushed out.
+func (a *Actions) Attention(ctx context.Context, filter Filter, limit int) ([]Issue, error) {
+	out, err := a.queueIn(ctx, filter, TierActNow, limit)
+	if err != nil || len(out) >= limit {
+		return out, err
+	}
+	rest, err := a.queueIn(ctx, filter, TierWorthALook, limit-len(out))
+	if err != nil {
+		return nil, err
+	}
+	return append(out, rest...), nil
+}
+
+// queueIn reads open issues in queue order, of one tier when tier is set.
+func (a *Actions) queueIn(ctx context.Context, filter Filter, tier Tier, limit int) ([]Issue, error) {
+	query, err := a.readQuery(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	query.States, query.Tier, query.Limit = listedStates(""), string(tier), max(limit, 0)
+	return a.queued(ctx, query)
+}
+
 // queued reads the issues a query selects in queue order.
 func (a *Actions) queued(ctx context.Context, query storage.AWSIssueQuery) ([]Issue, error) {
 	query.QueueOrder = true
@@ -140,7 +215,7 @@ func (a *Actions) queued(ctx context.Context, query storage.AWSIssueQuery) ([]Is
 // Page reads the Issues page: the summary is counted in the store, and
 // only the issues the state filter lists are read.
 func (a *Actions) Page(ctx context.Context, filter Filter, coverage CoverageRead) (Page, error) {
-	query, err := filterQuery(filter)
+	query, err := a.readQuery(ctx, filter)
 	if err != nil {
 		return Page{}, err
 	}
@@ -163,7 +238,7 @@ func (a *Actions) Report(ctx context.Context, filter Filter, coverage CoverageRe
 	if err := ValidReportFilter(filter); err != nil {
 		return IssueReport{}, err
 	}
-	query, err := filterQuery(filter)
+	query, err := a.readQuery(ctx, filter)
 	if err != nil {
 		return IssueReport{}, err
 	}

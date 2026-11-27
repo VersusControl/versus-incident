@@ -258,8 +258,27 @@ func TestStretchedCappedAndOptionalOff(t *testing.T) {
 	if !found || len(view.OptionalOff) < 5 {
 		t.Fatalf("optional off = %+v", view.OptionalOff)
 	}
+	// The stretched accounts are counted once each, whatever the sources
+	// stretched; the inventory budget that capped the lambda read is
+	// reached and names its coverage source, so its coverage row matches.
+	if view.StretchedAccounts != 1 {
+		t.Fatalf("stretched accounts = %d; want 1", view.StretchedAccounts)
+	}
+	for _, budget := range view.Budgets {
+		switch budget.Source {
+		case collect.SourceInventory:
+			if !budget.Reached || len(budget.CoverageSources) != 1 || budget.CoverageSources[0] != "lambda" {
+				t.Fatalf("inventory budget = %+v; want reached, naming lambda", budget)
+			}
+		case collect.SourcePolicies:
+			if budget.CoverageSources == nil || len(budget.CoverageSources) != 0 {
+				t.Fatalf("policies budget = %+v; want no coverage source, as an empty list", budget)
+			}
+		}
+	}
 	// An account no longer connected is left out.
-	if only := f.read(t, []string{quietAccount}, nil); only.Calls24h != 1000 || len(only.Stretched) != 0 || only.SourcesCapped != 0 {
+	if only := f.read(t, []string{quietAccount}, nil); only.Calls24h != 1000 || len(only.Stretched) != 0 || only.SourcesCapped != 0 ||
+		only.StretchedAccounts != 0 {
 		t.Fatalf("one account = %+v", only)
 	}
 }

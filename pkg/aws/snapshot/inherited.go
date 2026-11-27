@@ -40,6 +40,15 @@ func (store *Store) withInherited(ctx context.Context) (context.Context, inherit
 	return context.WithValue(ctx, inheritedFilterKey{store}, filter), filter
 }
 
+// ReadContext reads the connected accounts once and carries them in the
+// context it returns, so a page that reads the store several times (the
+// coverage, the resources, the change feed) filters inherited rows by one
+// answer and asks for it once.
+func (store *Store) ReadContext(ctx context.Context) context.Context {
+	ctx, _ = store.withInherited(ctx)
+	return ctx
+}
+
 // inherited is the read's filter: the one its context carries, else the
 // connected accounts read now.
 func (store *Store) inherited(ctx context.Context) inheritedFilter {

@@ -17,6 +17,7 @@ import (
 	"github.com/VersusControl/versus-incident/pkg/aws/callcost"
 	awscollect "github.com/VersusControl/versus-incident/pkg/aws/collect"
 	awscost "github.com/VersusControl/versus-incident/pkg/aws/cost"
+	"github.com/VersusControl/versus-incident/pkg/aws/estate"
 	"github.com/VersusControl/versus-incident/pkg/aws/issues"
 	awslimit "github.com/VersusControl/versus-incident/pkg/aws/limit"
 	"github.com/VersusControl/versus-incident/pkg/aws/model"
@@ -89,6 +90,9 @@ type Mounted struct {
 	Issues *issues.Evaluator
 	// IssueActions are the user's writes on issues; nil with Issues.
 	IssueActions *issues.Actions
+	// Estate answers Overview and Topology from the stores; the agent
+	// tools read the same service.
+	Estate *estate.Service
 	// HTTPClient is the AWS transport override every AWS caller shares.
 	HTTPClient aws.HTTPClient
 
@@ -141,6 +145,7 @@ func Mount(deps Deps) (*Mounted, error) {
 	mountGroupCorrections(deps, mounted)
 	mountCollectionCost(deps, mounted)
 	mountIssues(deps, mounted)
+	mountEstate(deps, mounted)
 	cost, backend, err := mountFinOps(deps, mounted)
 	if err != nil {
 		return nil, err
@@ -334,6 +339,17 @@ func mountConnector(deps Deps) *Mounted {
 		written: written, accountsChanged: accountsChanged}
 }
 
+// accounts is where the request-path scopes read the account list: the
+// settings service's listing, kept until the account revision changes.
+func (m *Mounted) accounts(store *awssettings.Store) accountSource {
+	source := accountSource{store: store}
+	if m != nil && m.Settings != nil {
+		settings := m.Settings
+		source.stored = func() ([]awssettings.AccountRecord, error) { return settings.StoredAccounts(context.Background()) }
+	}
+	return source
+}
+
 // CollectIntervals maps the collector block onto the scheduler's
 // cadences.
 func CollectIntervals(collect c.AWSCollectConfig) awscollect.Intervals {
@@ -368,7 +384,7 @@ func mountCollectionCost(deps Deps, mounted *Mounted) {
 		if !conn.Enable || mounted.Snapshots == nil {
 			return callcost.Inputs{}, false, nil
 		}
-		expected, _, err := coverageScope(settingsStore, deps.Scope.Write, conn, clock)
+		expected, _, err := coverageScope(mounted.accounts(settingsStore), deps.Scope.Write, conn, clock)
 		if err != nil {
 			return callcost.Inputs{}, true, err
 		}
@@ -400,7 +416,7 @@ func mountChanges(deps Deps, mounted *Mounted) *awssnapshot.ChangeFeed {
 			if !conn.Enable {
 				return nil, true, nil
 			}
-			return changeScope(settingsStore, scope.Write, conn)
+			return changeScope(mounted.accounts(settingsStore), scope.Write, conn)
 		}),
 		awssnapshot.WithFeedOptions(func() awssnapshot.FeedOptions {
 			collect := current().Collect
@@ -414,6 +430,16 @@ func mountChanges(deps Deps, mounted *Mounted) *awssnapshot.ChangeFeed {
 			}
 		}),
 		awssnapshot.WithChangesLimits(deps.ChangesLimits),
+		// The answer's coverage block reads the coverage page's scope, so
+		// Changes counts accounts and Regions as the other AWS pages do.
+		awssnapshot.WithCoverageScope(func(context.Context) ([]awssnapshot.ScopeAccount, bool, error) {
+			conn := current()
+			if !conn.Enable {
+				return nil, false, nil
+			}
+			expected, _, err := coverageScope(mounted.accounts(settingsStore), scope.Write, conn, time.Now)
+			return expected, true, err
+		}),
 	)
 	controllers.NewAWSChangesController(feed).WithPreferences(awssnapshot.NewChangePreferenceStore(deps.Store)).Register(deps.Router)
 	// The agent's get_aws_changes tool and the recent_changes feed answer
@@ -433,9 +459,37 @@ func mountCoverage(deps Deps, mounted *Mounted) {
 		if !conn.Enable {
 			return nil, false, nil
 		}
-		expected, _, err := coverageScope(settingsStore, deps.Scope.Write, conn, time.Now)
+		expected, _, err := coverageScope(mounted.accounts(settingsStore), deps.Scope.Write, conn, time.Now)
 		return expected, true, err
 	}).Register(deps.Router)
+}
+
+// mountEstate mounts the Overview and Topology routes over one estate
+// service. It reads the same coverage scope as the coverage page, the
+// issues the Issues page reads, and the Changes feed; nothing calls AWS.
+func mountEstate(deps Deps, mounted *Mounted) {
+	current := liveAWS(deps.Config)
+	settingsStore := awssettings.NewStore(deps.Store, deps.Scope)
+	clock := deps.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	options := []estate.Option{estate.WithIssues(mounted.IssueActions), estate.WithChangeFeed(mounted.Changes), estate.WithClock(clock)}
+	if labels, ok := storage.AWSAccountLabelsOf(deps.Store); ok {
+		options = append(options, estate.WithAccountLabels(labels))
+	}
+	if corrections, ok := storage.AWSGroupCorrectionsOf(deps.Store); ok {
+		options = append(options, estate.WithGroupCorrections(corrections))
+	}
+	mounted.Estate = estate.New(mounted.Snapshots, deps.Scope, func(context.Context) ([]awssnapshot.ScopeAccount, bool, error) {
+		conn := current()
+		if !conn.Enable {
+			return nil, false, nil
+		}
+		expected, _, err := coverageScope(mounted.accounts(settingsStore), deps.Scope.Write, conn, clock)
+		return expected, true, err
+	}, options...)
+	controllers.NewAWSEstateController(mounted.Estate).Register(deps.Router)
 }
 
 // mountAccountLabels mounts the account label routes over the provider's
@@ -464,7 +518,7 @@ func mountGroupCorrections(deps Deps, mounted *Mounted) {
 		if !conn.Enable || mounted.Snapshots == nil {
 			return nil, nil, false, nil
 		}
-		expected, _, err := coverageScope(settingsStore, deps.Scope.Write, conn, time.Now)
+		expected, _, err := coverageScope(mounted.accounts(settingsStore), deps.Scope.Write, conn, time.Now)
 		if err != nil {
 			return nil, nil, false, err
 		}

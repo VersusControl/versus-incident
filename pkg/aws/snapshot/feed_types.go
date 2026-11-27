@@ -249,6 +249,20 @@ type ChangesAnswer struct {
 	Services []FeedServiceCount `json:"services,omitzero"`
 	// Limits are the window and compare limits this request was held to.
 	Limits ChangesLimitsView `json:"limits"`
+	// Coverage is the scope's coverage read, the one Overview, Topology
+	// and Coverage show: accounts read of total, the Regions read and
+	// each account's read state. Nil when no coverage scope is wired.
+	Coverage *FeedCoverage `json:"coverage"`
+}
+
+// FeedCoverage is the coverage read a Changes answer shares with the
+// other AWS pages.
+type FeedCoverage struct {
+	AccountsRead  int               `json:"accounts_read"`
+	AccountsTotal int               `json:"accounts_total"`
+	Regions       []string          `json:"regions"`
+	Accounts      []CoverageAccount `json:"accounts"`
+	Warning       *WarningLine      `json:"warning"`
 }
 
 // GroupAnswer is the GET /api/admin/aws/changes/groups/{id} answer.

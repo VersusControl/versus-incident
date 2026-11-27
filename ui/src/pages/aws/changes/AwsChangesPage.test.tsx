@@ -2040,3 +2040,60 @@ describe("Changes page — banned wording guard", () => {
     }
   });
 });
+
+describe("AwsChangesPage — the shared coverage block", () => {
+  it("counts accounts whose change history was read, takes the Regions count from the coverage read, and names a never-read account's reason", async () => {
+    const base = usualView();
+    serve({
+      ...base,
+      coverage: {
+        // The coverage read counts inventory; Changes keeps its change-history count.
+        accounts_read: 2,
+        accounts_total: 3,
+        regions: ["eu-west-1", "us-east-1", "ap-south-1", "eu-central-1"],
+        accounts: base.accounts.map((a, i) => (i === 2 ? { account: a.account, read: "not_read", reason: "assume_role_failed" } : { account: a.account, read: "read" })),
+        warning: { not_read: 1 },
+      },
+    });
+    renderPage();
+    await summary();
+    expect(num("accounts")).toBe("3/3");
+    expect(screen.getByRole("button", { name: "Regions" }).textContent).toContain("4 regions");
+    fireEvent.click(screen.getByRole("button", { name: "Accounts" }));
+    const options = await screen.findAllByRole("option");
+    const third = options.find((o) => o.textContent?.includes(base.accounts[2].account)) as HTMLElement;
+    expect(third.textContent).toContain("Read role could not be assumed");
+    expect(third.textContent).not.toMatch(/assume_role_failed|disconnected/);
+  });
+
+  it("names a never-read account's reason in the warning line, never 'disconnected', and keeps the others' numbers", async () => {
+    const base = usualView();
+    const never = base.accounts[2].account;
+    serve({
+      ...base,
+      complete: false,
+      sync: { ...base.sync, first_read_pending: true },
+      accounts: base.accounts.map((a) => (a.account === never ? { ...a, complete: false, reason: "account_disconnected", as_of: null, disconnected_at: null } : a)),
+      coverage: {
+        accounts_read: 2,
+        accounts_total: 3,
+        regions: ["eu-west-1"],
+        accounts: base.accounts.map((a) => (a.account === never ? { account: a.account, read: "not_read", reason: "assume_role_failed" } : { account: a.account, read: "read" })),
+        warning: { not_read: 1 },
+      },
+    });
+    renderPage();
+    await summary();
+    expect(warningText()).toContain("not read: read role could not be assumed");
+    expect(warningText()).not.toMatch(/disconnected/i);
+    expect(num("accounts")).toBe("2/3");
+    expect(num("changes")).not.toBe("—");
+  });
+
+  it("keeps its own counts on a server without the coverage block", async () => {
+    serve(usualView());
+    renderPage();
+    await summary();
+    expect(num("accounts")).toBe("3/3");
+  });
+});

@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -83,7 +84,15 @@ type awsRequestRecorder struct {
 	next    http.RoundTripper
 	mu      sync.Mutex
 	records []awsRequestRecord
+	// closed refuses every later request, so the ledger and the fake stop
+	// counting at one cut; inflight holds the requests recorded but not
+	// yet answered by the fake.
+	closed   bool
+	inflight sync.WaitGroup
 }
+
+// errRecorderClosed answers a request sent after the recorder closed.
+var errRecorderClosed = errors.New("aws request recorder closed")
 
 func (recorder *awsRequestRecorder) RoundTrip(request *http.Request) (*http.Response, error) {
 	service, region := awsSigningScope(request.Header.Get("Authorization"))
@@ -92,9 +101,26 @@ func (recorder *awsRequestRecorder) RoundTrip(request *http.Request) (*http.Resp
 		account = "host"
 	}
 	recorder.mu.Lock()
+	if recorder.closed {
+		recorder.mu.Unlock()
+		return nil, errRecorderClosed
+	}
+	recorder.inflight.Add(1)
 	recorder.records = append(recorder.records, awsRequestRecord{at: time.Now(), account: account, region: region, service: service})
 	recorder.mu.Unlock()
+	defer recorder.inflight.Done()
 	return recorder.next.RoundTrip(request)
+}
+
+// quiesce stops the requests at one cut: no request is recorded or sent
+// after it, and it returns once every recorded request was answered, so
+// the ledger and the fake's count can be compared while the collector
+// keeps running.
+func (recorder *awsRequestRecorder) quiesce() {
+	recorder.mu.Lock()
+	recorder.closed = true
+	recorder.mu.Unlock()
+	recorder.inflight.Wait()
 }
 
 // count returns how many recorded requests one account sent to one Region,
@@ -976,6 +1002,10 @@ func budgetCollectGroup(t *testing.T) {
 		return stack.recorder.count(awsCollectAccount, awsCollectRegion) >= awsBudgetSample
 	})
 
+	// Stop requests at one cut before comparing: the recorder records a
+	// request before the fake handles it, so counting while the collector
+	// sends compares two moments.
+	stack.recorder.quiesce()
 	records := stack.recorder.snapshot()
 	if int64(len(records)) != stack.fake.TotalRequests() {
 		t.Errorf("ledger %d requests, fixture counted %d", len(records), stack.fake.TotalRequests())

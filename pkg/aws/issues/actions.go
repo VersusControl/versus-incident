@@ -45,13 +45,28 @@ type BulkResult struct {
 // under compare-and-swap, so it never silently overwrites another user or
 // the evaluator.
 type Actions struct {
-	store storage.AWSIssueStore
-	scope tenancy.OrgScope
-	now   func() time.Time
+	store     storage.AWSIssueStore
+	scope     tenancy.OrgScope
+	now       func() time.Time
+	connected ConnectedSetFunc
+}
+
+// ConnectedSetFunc answers the accounts connected now. ok is false when
+// the list cannot be read; reads then keep every account.
+type ConnectedSetFunc func(ctx context.Context) (accounts map[string]bool, ok bool)
+
+// ActionsOption configures Actions.
+type ActionsOption func(*Actions)
+
+// WithConnectedSet limits every summary and list the Actions read (the
+// Issues page, its report, Overview and the Topology cards) to the
+// accounts connected now.
+func WithConnectedSet(read ConnectedSetFunc) ActionsOption {
+	return func(a *Actions) { a.connected = read }
 }
 
 // NewActions returns the actions over provider's issue store.
-func NewActions(provider storage.Provider, scope tenancy.OrgScope, now func() time.Time) (*Actions, error) {
+func NewActions(provider storage.Provider, scope tenancy.OrgScope, now func() time.Time, options ...ActionsOption) (*Actions, error) {
 	store, ok := storage.AWSIssuesOf(provider)
 	if !ok {
 		return nil, ErrNoStore
@@ -59,7 +74,11 @@ func NewActions(provider storage.Provider, scope tenancy.OrgScope, now func() ti
 	if now == nil {
 		now = time.Now
 	}
-	return &Actions{store: store, scope: scope.Normalized(), now: now}, nil
+	actions := &Actions{store: store, scope: scope.Normalized(), now: now}
+	for _, option := range options {
+		option(actions)
+	}
+	return actions, nil
 }
 
 // Get reads one issue and its events.

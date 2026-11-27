@@ -72,6 +72,10 @@ type awsGroupCorrectionRequest struct {
 	MemberARN     string `json:"member_arn"`
 	TargetGroupID string `json:"target_group_id"`
 	Name          string `json:"name"`
+	// ExpectedCreatedAt is the created_at of the correction with this key
+	// the caller read; when set, the save fails with correction_conflict
+	// if that correction changed or is gone.
+	ExpectedCreatedAt *time.Time `json:"expected_created_at"`
 }
 
 func groupCorrectionStoreNotReady(ctx *fiber.Ctx) error {
@@ -166,7 +170,7 @@ func (c *AWSGroupCorrectionsController) create(ctx *fiber.Ctx) error {
 	}
 	request = awsGroupCorrectionRequest{AccountID: strings.Clone(request.AccountID), Kind: strings.Clone(request.Kind),
 		GroupID: strings.Clone(request.GroupID), MemberARN: strings.Clone(request.MemberARN),
-		TargetGroupID: strings.Clone(request.TargetGroupID), Name: strings.Clone(request.Name)}
+		TargetGroupID: strings.Clone(request.TargetGroupID), Name: strings.Clone(request.Name), ExpectedCreatedAt: request.ExpectedCreatedAt}
 	setAWSAuditTarget(ctx, correctionAuditTarget(request.AccountID, request.Kind, request.GroupID, request.MemberARN))
 	if message := validGroupCorrectionRequest(request); message != "" {
 		return badGroupCorrection(ctx, message)
@@ -174,12 +178,15 @@ func (c *AWSGroupCorrectionsController) create(ctx *fiber.Ctx) error {
 	correction, err := c.store.PutAWSGroupCorrection(ctx.UserContext(), c.scope, storage.AWSGroupCorrection{
 		AccountID: request.AccountID, Kind: request.Kind, GroupID: request.GroupID, MemberARN: request.MemberARN,
 		TargetGroupID: request.TargetGroupID, Name: request.Name,
-		CreatedBy: strings.Clone(middleware.RequestActor(ctx)), CreatedAt: c.now(),
+		CreatedBy: strings.Clone(middleware.RequestActor(ctx)), CreatedAt: c.now(), ExpectedCreatedAt: request.ExpectedCreatedAt,
 	})
 	switch {
 	case errors.Is(err, storage.ErrInvalidAWSGroupCorrection):
 		return badGroupCorrection(ctx, "a rename takes group_id and a name of at most 128 printable characters; a merge takes group_id and "+
 			"target_group_id; a move takes the member_arn of a resource in the account and target_group_id")
+	case errors.Is(err, storage.ErrAWSGroupCorrectionConflict):
+		return ctx.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "correction_conflict",
+			"error": "changed by someone else; reload"})
 	case errors.Is(err, storage.ErrAWSGroupCorrectionLimit):
 		return ctx.Status(fiber.StatusConflict).JSON(fiber.Map{"code": "correction_limit",
 			"error": "this account holds the most corrections allowed; delete one first"})

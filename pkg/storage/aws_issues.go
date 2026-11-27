@@ -135,6 +135,14 @@ type AWSIssueQuery struct {
 	States   []string
 	Severity string
 	Kind     string
+	// Tier matches an issue in one queue tier (act_now, worth_a_look).
+	Tier string
+	// Region matches an issue in that Region, and every issue with no
+	// Region or in the global one, which serve every Region.
+	Region string
+	// Accounts, when not nil, keeps only issues of these accounts; an
+	// empty, non-nil list keeps none.
+	Accounts []string
 	GroupID  string
 	IDs      []string
 	// QueueOrder orders the issues as the queue lists them: most severe
@@ -454,17 +462,31 @@ func inScope(scope tenancy.OrgScope, org string) bool {
 	return false
 }
 
+// maxAWSIssueAccounts bounds the accounts one issue query names.
+const maxAWSIssueAccounts = 1000
+
+// awsIssueGlobalRegion is the Region of an account-wide read.
+const awsIssueGlobalRegion = "global"
+
 // ValidAWSIssueQuery reports whether the store accepts a query's values.
 func ValidAWSIssueQuery(query AWSIssueQuery) bool { return validAWSIssueQuery(query) }
 
 func validAWSIssueQuery(query AWSIssueQuery) bool {
 	if query.AccountID != "" && !awsAccountIDPattern.MatchString(query.AccountID) ||
 		query.State != "" && !awsIssueStates[query.State] || query.Severity != "" && !awsIssueSeverities[query.Severity] ||
-		query.Kind != "" && !awsIssueKinds[query.Kind] || query.GroupID != "" && !validAWSGroupID(query.GroupID) || query.Limit < 0 {
+		query.Kind != "" && !awsIssueKinds[query.Kind] || query.Tier != "" && !awsIssueTiers[query.Tier] || len(query.Region) > 64 || query.GroupID != "" && !validAWSGroupID(query.GroupID) || query.Limit < 0 {
 		return false
 	}
 	for _, state := range query.States {
 		if !awsIssueStates[state] {
+			return false
+		}
+	}
+	if len(query.Accounts) > maxAWSIssueAccounts {
+		return false
+	}
+	for _, account := range query.Accounts {
+		if !awsAccountIDPattern.MatchString(account) {
 			return false
 		}
 	}
@@ -479,10 +501,14 @@ func validAWSIssueQuery(query AWSIssueQuery) bool {
 func (query AWSIssueQuery) matches(record AWSIssueRecord) bool {
 	if query.AccountID != "" && record.AccountID != query.AccountID || query.State != "" && record.State != query.State ||
 		query.Severity != "" && record.Severity != query.Severity || query.Kind != "" && record.Kind != query.Kind ||
-		query.GroupID != "" && record.GroupID != query.GroupID {
+		query.Tier != "" && record.Tier != query.Tier ||
+		query.Region != "" && record.Region != query.Region && record.Region != "" && record.Region != awsIssueGlobalRegion || query.GroupID != "" && record.GroupID != query.GroupID {
 		return false
 	}
 	if len(query.States) > 0 && !slices.Contains(query.States, record.State) {
+		return false
+	}
+	if query.Accounts != nil && !slices.Contains(query.Accounts, record.AccountID) {
 		return false
 	}
 	if len(query.IDs) == 0 {
@@ -685,6 +711,17 @@ func awsIssueWhere(scope tenancy.OrgScope, query AWSIssueQuery) sqlWhere {
 	where.in("i.state", query.States)
 	where.equal("i.severity", query.Severity)
 	where.equal("i.kind", query.Kind)
+	where.equal("i.tier", query.Tier)
+	switch {
+	case query.Accounts == nil:
+	case len(query.Accounts) == 0:
+		where.add("1 = 0")
+	default:
+		where.in("i.account_id", query.Accounts)
+	}
+	if query.Region != "" {
+		where.add("i.region IN (?, '', '"+awsIssueGlobalRegion+"')", query.Region)
+	}
 	where.equal("i.group_id", query.GroupID)
 	where.in("i.id", query.IDs)
 	return where

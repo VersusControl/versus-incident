@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -326,5 +327,22 @@ func TestCoverageAccountWithEveryRegionOffIsNotAGap(t *testing.T) {
 	alone := CoverageScope{ExpectedKnown: true, Expected: []ScopeAccount{{Account: off, NotEnabled: []string{"ap-east-1"}}}}
 	if warning, err := store.Warning(ctx, alone); err != nil || warning != nil {
 		t.Fatalf("warning = %+v, %v, want none", warning, err)
+	}
+}
+
+// The Regions a scope reads are its accounts' selected Regions, those AWS
+// reports off included, each once, within the Region filter; the global
+// Region is not one.
+func TestScopeRegionsCountsEachRegionOnce(t *testing.T) {
+	scope := CoverageScope{Expected: []ScopeAccount{
+		{Account: "123400000001", Regions: []string{"eu-west-1", model.GlobalRegion}, NotEnabled: []string{"ap-east-1"}},
+		{Account: "123400000002", Regions: []string{"eu-west-1", "us-east-1"}},
+	}}
+	if got := scopeRegions(scope); strings.Join(got, ",") != "ap-east-1,eu-west-1,us-east-1" {
+		t.Fatalf("regions = %v", got)
+	}
+	scope.Account, scope.Region = "123400000002", "us-east-1"
+	if got := scopeRegions(scope); strings.Join(got, ",") != "us-east-1" {
+		t.Fatalf("filtered regions = %v", got)
 	}
 }

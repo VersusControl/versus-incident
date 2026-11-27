@@ -89,7 +89,15 @@ func mountIssues(deps Deps, mounted *Mounted) {
 	if err != nil {
 		return
 	}
-	actions, err := issues.NewActions(deps.Store, deps.Scope, deps.Clock)
+	actions, err := issues.NewActions(deps.Store, deps.Scope, deps.Clock, issues.WithConnectedSet(func(ctx context.Context) (map[string]bool, bool) {
+		// The cached connected-account set: an issue of an account no
+		// longer connected stays out of every count until the evaluator
+		// resolves it.
+		if mounted.Settings == nil {
+			return nil, false
+		}
+		return mounted.Settings.ConnectedAccountSet(ctx)
+	}))
 	if err != nil {
 		return
 	}
@@ -148,7 +156,7 @@ func issueCoverage(deps Deps, mounted *Mounted, store *awssettings.Store, clock 
 		if !conn.Enable || mounted.Snapshots == nil {
 			return issues.CoverageRead{}, false, nil
 		}
-		expected, _, err := coverageScope(store, deps.Scope.Write, conn, clock)
+		expected, _, err := coverageScope(mounted.accounts(store), deps.Scope.Write, conn, clock)
 		if err != nil {
 			return issues.CoverageRead{}, true, err
 		}
@@ -156,7 +164,7 @@ func issueCoverage(deps Deps, mounted *Mounted, store *awssettings.Store, clock 
 		if err != nil {
 			return issues.CoverageRead{}, true, err
 		}
-		return issues.CoverageRead{AccountsRead: view.Summary.AccountsRead, AccountsTotal: view.Summary.AccountsTotal, NotRead: view.NotRead}, true, nil
+		return issues.CoverageFromView(view), true, nil
 	}
 }
 

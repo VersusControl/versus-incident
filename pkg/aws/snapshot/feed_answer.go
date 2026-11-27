@@ -133,6 +133,13 @@ func (feed *ChangeFeed) Answer(ctx context.Context, request FeedRequest) (Change
 		Sync:     view.sync,
 		Alarms:   []FeedAlarm{},
 	}
+	if feed.readScope != nil {
+		coverage, err := feed.coverageBlock(ctx, request)
+		if err != nil {
+			return ChangesAnswer{}, err
+		}
+		answer.Coverage = coverage
+	}
 	counts := stored.Counts
 	var failureRows []storage.AWSChange
 	if request.Resource != "" {
@@ -488,4 +495,23 @@ func containsItem(items []FeedItem, id string) bool {
 		}
 	}
 	return false
+}
+
+// coverageBlock reads the scope's coverage by the coverage page's rule,
+// within the request's account and Region.
+func (feed *ChangeFeed) coverageBlock(ctx context.Context, request FeedRequest) (*FeedCoverage, error) {
+	expected, ok, err := feed.readScope(ctx)
+	if err != nil || !ok {
+		return nil, err
+	}
+	view, err := feed.store.Coverage(ctx, CoverageScope{Account: request.Account, Region: request.Region, Expected: expected, ExpectedKnown: true})
+	if err != nil {
+		return nil, err
+	}
+	block := &FeedCoverage{AccountsRead: view.Summary.AccountsRead, AccountsTotal: view.Summary.AccountsTotal, Regions: view.Regions,
+		Accounts: view.Accounts}
+	if view.Summary.NotRead > 0 {
+		block.Warning = &WarningLine{NotRead: view.Summary.NotRead}
+	}
+	return block, nil
 }

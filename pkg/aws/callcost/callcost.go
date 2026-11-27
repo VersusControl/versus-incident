@@ -101,11 +101,19 @@ type AccountSource struct {
 // per-run budget and the largest run of the last 24 hours (pages for
 // findings); for the daily target it is the target of every connected
 // account and the calls of the last 24 hours.
+//
+// Reached is set when the budget stopped a read: the largest run used all
+// of it, or a stored read names a capped gap of this source.
+// CoverageSources are then the coverage page's sources (the unit
+// services) of those capped reads, so a row there can be matched to its
+// budget.
 type Budget struct {
-	Source string `json:"source"`
-	Limit  int64  `json:"limit"`
-	Used   int64  `json:"used"`
-	Unit   string `json:"unit"`
+	Source          string   `json:"source"`
+	Limit           int64    `json:"limit"`
+	Used            int64    `json:"used"`
+	Unit            string   `json:"unit"`
+	Reached         bool     `json:"reached"`
+	CoverageSources []string `json:"coverage_sources"`
 }
 
 // Optional is a billed feature Versus reads only once it is on, with AWS's
@@ -119,15 +127,18 @@ type Optional struct {
 
 // View is the cost answer.
 type View struct {
-	Calls24h        int64           `json:"calls_24h"`
-	Events24h       int64           `json:"events_24h"`
-	Metered24h      int64           `json:"metered_24h"`
-	EstimateMonth   Estimate        `json:"estimate_month"`
-	SourcesCapped   int             `json:"sources_capped"`
-	Stretched       []Stretched     `json:"stretched"`
-	ByAccountSource []AccountSource `json:"by_account_source"`
-	Budgets         []Budget        `json:"budgets"`
-	OptionalOff     []Optional      `json:"optional_off"`
+	Calls24h      int64       `json:"calls_24h"`
+	Events24h     int64       `json:"events_24h"`
+	Metered24h    int64       `json:"metered_24h"`
+	EstimateMonth Estimate    `json:"estimate_month"`
+	SourcesCapped int         `json:"sources_capped"`
+	Stretched     []Stretched `json:"stretched"`
+	// StretchedAccounts counts the accounts whose reads the daily target
+	// slowed down.
+	StretchedAccounts int             `json:"stretched_accounts"`
+	ByAccountSource   []AccountSource `json:"by_account_source"`
+	Budgets           []Budget        `json:"budgets"`
+	OptionalOff       []Optional      `json:"optional_off"`
 	// LedgerIncomplete is set when a ledger write failed in the last 24
 	// hours: the counts it kept are added on a later write, so the calls
 	// may read short until then.
@@ -277,13 +288,27 @@ func Read(ctx context.Context, in Inputs) (View, error) {
 		}
 	}
 
-	view.Budgets = append(view.Budgets, Budget{Source: callsPerDaySource, Limit: int64(target) * int64(len(accounts)), Used: view.Calls24h, Unit: "calls"})
+	stretchedAccounts := map[string]bool{}
+	for _, entry := range view.Stretched {
+		stretchedAccounts[entry.Account] = true
+	}
+	view.StretchedAccounts = len(stretchedAccounts)
+	daily := int64(target) * int64(len(accounts))
+	view.Budgets = append(view.Budgets, Budget{Source: callsPerDaySource, Limit: daily, Used: view.Calls24h, Unit: "calls",
+		Reached: daily > 0 && view.Calls24h >= daily, CoverageSources: []string{}})
+	cappedBy := cappedSources(statuses, accounts)
 	for _, source := range collect.Sources() {
 		unit := "calls"
 		if source == collect.SourceFindings {
 			unit = "pages"
 		}
-		view.Budgets = append(view.Budgets, Budget{Source: source, Limit: int64(in.Budgets[source]), Used: peak[source], Unit: unit})
+		limit := int64(in.Budgets[source])
+		covered := cappedBy[source]
+		if covered == nil {
+			covered = []string{}
+		}
+		view.Budgets = append(view.Budgets, Budget{Source: source, Limit: limit, Used: peak[source], Unit: unit,
+			Reached: limit > 0 && peak[source] >= limit || len(covered) > 0, CoverageSources: covered})
 	}
 	view.OptionalOff = optionalOff(statuses, accounts)
 	return view, nil
@@ -437,6 +462,35 @@ func sourcesCapped(statuses []snapshot.UnitStatus, accounts map[string]bool) int
 		}
 	}
 	return len(capped)
+}
+
+// cappedSources lists, per budget source, the unit services whose stored
+// reads name a capped gap: the coverage page's capped rows.
+func cappedSources(statuses []snapshot.UnitStatus, accounts map[string]bool) map[string][]string {
+	seen := map[string]map[string]bool{}
+	for _, status := range statuses {
+		if !accounts[status.Unit.Account] {
+			continue
+		}
+		for _, gap := range status.Sync.Gaps {
+			if gap.Reason != model.GapCapped {
+				continue
+			}
+			source := collect.SourceOf(status.Unit.Service)
+			if seen[source] == nil {
+				seen[source] = map[string]bool{}
+			}
+			seen[source][status.Unit.Service] = true
+		}
+	}
+	out := map[string][]string{}
+	for source, services := range seen {
+		for service := range services {
+			out[source] = append(out[source], service)
+		}
+		sort.Strings(out[source])
+	}
+	return out
 }
 
 // optionalOff lists the billed features, each with the accounts a stored

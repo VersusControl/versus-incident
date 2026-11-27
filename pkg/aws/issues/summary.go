@@ -23,6 +23,10 @@ type Summary struct {
 	RejectedCount int `json:"rejected_count"`
 }
 
+// ActNow counts the open issues in the act-now tier: every open issue
+// that is not worth a look.
+func (summary Summary) ActNow() int { return summary.Open - summary.WorthALook }
+
 // Summarize counts list. Callers pass every issue their filters select;
 // Summarize alone decides what counts.
 func Summarize(list []Issue, coverage Coverage) Summary {

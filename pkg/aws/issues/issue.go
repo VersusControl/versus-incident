@@ -132,12 +132,15 @@ type Step struct {
 type Cause struct {
 	// Status is the lookup's answer: found, none, start_unknown or
 	// incomplete.
-	Status  string    `json:"status"`
-	Text    string    `json:"text,omitempty"`
-	Change  string    `json:"change,omitempty"`
-	Actor   string    `json:"actor,omitempty"`
-	At      time.Time `json:"at,omitzero"`
-	Checked time.Time `json:"checked,omitzero"`
+	Status string `json:"status"`
+	Text   string `json:"text,omitempty"`
+	Change string `json:"change,omitempty"`
+	// Resource is the resource the likely cause changed, when the change
+	// names one.
+	Resource string    `json:"resource,omitempty"`
+	Actor    string    `json:"actor,omitempty"`
+	At       time.Time `json:"at,omitzero"`
+	Checked  time.Time `json:"checked,omitzero"`
 }
 
 // Rejection is a user's decision that an issue does not fit how the

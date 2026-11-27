@@ -75,6 +75,9 @@ func CauseOf(result suspect.Result, start, checked time.Time) *Cause {
 		if len(result.Candidates) > 0 {
 			best := result.Candidates[0].Change
 			cause.Change, cause.Actor, cause.At = best.ID, best.Actor.PrincipalARN, best.Time.UTC()
+			if len(best.Resources) > 0 {
+				cause.Resource = best.Resources[0]
+			}
 		}
 	case suspect.StatusStartUnknown, suspect.StatusIncomplete, suspect.StatusNone:
 	default:

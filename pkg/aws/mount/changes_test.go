@@ -47,7 +47,7 @@ func TestChangeScopeListsNotEnabledRegions(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn := c.AWSConnectorConfig{Enable: true, Accounts: []c.AWSAccountConfig{{AccountID: accountID, Regions: []string{"us-east-1", "af-south-1", "eu-west-1"}}}}
-	accounts, ok, err := changeScope(settings, scope.Write, conn)
+	accounts, ok, err := changeScope(accountSource{store: settings}, scope.Write, conn)
 	if err != nil || !ok || len(accounts) != 1 {
 		t.Fatalf("scope = %+v, %v, %v", accounts, ok, err)
 	}
@@ -90,7 +90,7 @@ func TestChangeScopeWithoutFreshRegionReadListsNoneOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn := c.AWSConnectorConfig{Enable: true, Accounts: []c.AWSAccountConfig{{AccountID: accountID, Regions: []string{"us-east-1", "af-south-1"}}}}
-	accounts, _, err := changeScope(settings, scope.Write, conn)
+	accounts, _, err := changeScope(accountSource{store: settings}, scope.Write, conn)
 	if err != nil || len(accounts) != 1 || len(accounts[0].NotEnabled) != 0 || len(accounts[0].Regions) != 2 {
 		t.Fatalf("scope without a fresh read = %+v, %v", accounts, err)
 	}
@@ -113,11 +113,11 @@ func TestCoverageScopeUsesTheCollectorRegionRule(t *testing.T) {
 	}
 	conn := c.AWSConnectorConfig{Enable: true, Accounts: []c.AWSAccountConfig{{AccountID: accountID}}}
 	at := func() time.Time { return now }
-	stale, ok, err := coverageScope(settings, scope.Write, conn, at)
+	stale, ok, err := coverageScope(accountSource{store: settings}, scope.Write, conn, at)
 	if err != nil || !ok || len(stale) != 1 || !slices.Equal(stale[0].Regions, []string{"af-south-1", "us-east-1"}) && !slices.Equal(stale[0].Regions, []string{"us-east-1", "af-south-1"}) || len(stale[0].NotEnabled) != 0 {
 		t.Fatalf("stale coverage scope = %+v, %v", stale, err)
 	}
-	changes, _, err := changeScope(settings, scope.Write, conn)
+	changes, _, err := changeScope(accountSource{store: settings}, scope.Write, conn)
 	if err != nil || len(changes) != 1 || !slices.Equal(changes[0].Regions, []string{"us-east-1"}) {
 		t.Fatalf("changes scope = %+v, %v, want its own rule unchanged", changes, err)
 	}
@@ -126,12 +126,12 @@ func TestCoverageScopeUsesTheCollectorRegionRule(t *testing.T) {
 		Regions: known, RegionsReadAt: now, RegionsFreshUntil: now.Add(time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
-	fresh, _, err := coverageScope(settings, scope.Write, conn, at)
+	fresh, _, err := coverageScope(accountSource{store: settings}, scope.Write, conn, at)
 	if err != nil || len(fresh) != 1 || !slices.Equal(fresh[0].Regions, []string{"us-east-1"}) || len(fresh[0].NotEnabled) != 0 {
 		t.Fatalf("fresh coverage scope = %+v, %v", fresh, err)
 	}
 	conn.Accounts[0].Regions = []string{"us-east-1", "af-south-1"}
-	selected, _, err := coverageScope(settings, scope.Write, conn, at)
+	selected, _, err := coverageScope(accountSource{store: settings}, scope.Write, conn, at)
 	if err != nil || len(selected) != 1 || !slices.Equal(selected[0].Regions, []string{"us-east-1"}) || !slices.Equal(selected[0].NotEnabled, []string{"af-south-1"}) {
 		t.Fatalf("selected coverage scope = %+v, %v", selected, err)
 	}

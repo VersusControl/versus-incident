@@ -50,6 +50,10 @@ type awsCoverageResponse struct {
 	Capped   []snapshot.CoverageRow   `json:"capped"`
 	OffInAWS []snapshot.CoverageRow   `json:"off_in_aws"`
 	NotGaps  snapshot.CoverageNotGaps `json:"not_gaps"`
+	// Accounts are the read states and Regions the Regions the scope
+	// reads, the same as Overview, Topology and Changes give.
+	Accounts []snapshot.CoverageAccount `json:"accounts"`
+	Regions  []string                   `json:"regions"`
 }
 
 func (c *AWSCoverageController) coverage(ctx *fiber.Ctx) error {
@@ -85,5 +89,6 @@ func (c *AWSCoverageController) coverage(ctx *fiber.Ctx) error {
 	}
 	return ctx.JSON(awsCoverageResponse{
 		Enabled: true, Summary: view.Summary, NotRead: view.NotRead, Capped: view.Capped, OffInAWS: view.OffInAWS, NotGaps: view.NotGaps,
+		Accounts: view.Accounts, Regions: view.Regions,
 	})
 }
